@@ -1,0 +1,17 @@
+syntax = "proto2";
+
+package com.qcloud.cos.goosefs.proto.security;
+
+message Capability {
+  required bytes content = 1;
+  required bytes authenticator = 2;
+  required int64 keyId = 3;
+}
+
+message Content {
+  required int64 fileId = 1;
+  required int32 accessMode = 2;
+  required string user = 3;
+  optional int64 keyId = 4;
+  required int64 expirationTimeMs = 5;
+}

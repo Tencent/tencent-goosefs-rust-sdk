@@ -1,0 +1,30 @@
+[package]
+name = "goosefs-client-rs"
+version = "0.1.0"
+edition = "2021"
+description = "GooseFS Rust gRPC Client - Direct gRPC client for GooseFS Master/Worker"
+license = "Apache-2.0"
+authors = ["GooseFS Team"]
+
+[lib]
+name = "goosefs_client"
+
+[dependencies]
+tonic = { version = "0.12", features = ["tls"] }
+prost = "0.13"
+prost-types = "0.13"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+bytes = "1"
+thiserror = "2"
+tracing = "0.1"
+dashmap = "6"
+serde = { version = "1", features = ["derive"] }
+async-trait = "0.1"
+rand = "0.8"
+
+[build-dependencies]
+tonic-build = { version = "0.12", features = ["prost"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

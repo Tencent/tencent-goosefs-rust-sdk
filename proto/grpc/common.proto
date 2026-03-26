@@ -1,0 +1,131 @@
+syntax = "proto2";
+
+option java_multiple_files = true;
+option java_package = "com.qcloud.cos.goosefs.grpc";
+option java_outer_classname = "CommonProto";
+
+package com.qcloud.cos.goosefs.grpc;
+
+enum Bits {
+  NONE = 1;
+  EXECUTE = 2;
+  WRITE = 3;
+  WRITE_EXECUTE = 4;
+  READ = 5;
+  READ_EXECUTE = 6;
+  READ_WRITE = 7;
+  ALL = 8;
+}
+
+message PMode {
+  required Bits ownerBits = 1;
+  required Bits groupBits = 2;
+  required Bits otherBits = 3;
+}
+
+message BlockInfo {
+  optional int64 blockId = 1;
+  optional int64 length = 2;
+  optional int32 maxReplicas = 3;
+}
+
+message BlockLocation {
+  optional int64 workerId = 1;
+  optional WorkerNetAddress workerAddress = 2;
+}
+
+message Metric {
+  optional string instance = 1;
+  optional string source = 2;
+  optional string name = 3;
+  optional double value = 4;
+  required MetricType metricType = 5;
+  map<string,string> tags = 6;
+}
+
+enum MetricType {
+  GAUGE = 0;
+  COUNTER = 1;
+  METER = 2;
+  TIMER = 3;
+  HISTOGRAM = 4;
+}
+
+enum CommandType {
+  Unknown = 0;
+  Nothing = 1;
+  Register = 2;
+  Free = 3;
+}
+
+message ConfigProperty {
+  optional string name = 1;
+  optional string source = 2;
+  optional string value = 3;
+}
+
+message Command {
+  optional CommandType commandType = 1;
+  repeated int64 data = 2;
+}
+
+message LocalityTier {
+  optional string tierName = 1;
+  optional string value = 2;
+}
+
+message TieredIdentity {
+  repeated LocalityTier tiers = 1;
+}
+
+message NetAddress {
+  optional string host = 1;
+  optional int32 rpcPort = 2;
+  optional string tencentCloudVPCMappingHost = 3;
+  optional int32 tencentCloudVPCMappingPort = 4;
+}
+
+message WorkerNetAddress {
+  optional string host = 1;
+  optional int32 rpcPort = 2;
+  optional int32 dataPort = 3;
+  optional int32 webPort = 4;
+  optional string domainSocketPath = 5;
+  optional TieredIdentity tieredIdentity = 6;
+  optional string containerHost = 7;
+  optional int32 secureRpcPort = 8;
+  optional string tencentCloudVPCMappingHost = 9;
+  optional int32 tencentCloudVPCMappingPort = 10;
+  optional int32 tencentCloudVPCMappingDataPort = 11;
+}
+
+message RetryInfo {
+  optional bool isRetryable = 1;
+}
+
+enum ErrorType {
+  User = 0;
+  Internal = 1;
+  External = 2;
+}
+
+message ErrorInfo {
+  optional ErrorType errorType = 1;
+}
+
+enum WorkerStatus {
+  INIT = 0;
+  ACTIVE = 1;
+  INACTIVE = 2;
+}
+
+enum ManageWorkerAction {
+  REGISTER = 0;
+  DELETE = 1;
+  ISOLATE = 2;
+  ACTIVATE = 3;
+}
+
+message WorkerRateLimit {
+  optional double rateLimit = 1;
+}

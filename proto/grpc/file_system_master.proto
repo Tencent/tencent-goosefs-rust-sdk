@@ -1,0 +1,624 @@
+syntax = "proto2";
+
+option java_multiple_files = true;
+option java_package = "com.qcloud.cos.goosefs.grpc";
+option java_outer_classname = "FileSystemMasterProto";
+
+package com.qcloud.cos.goosefs.grpc.file;
+
+import "grpc/common.proto";
+import "grpc/fscommon.proto";
+import "proto/security/token.proto";
+import "proto/security/capability_token.proto";
+
+enum WritePType {
+  UNSPECIFIED_WRITE_TYPE = 0;
+  MUST_CACHE = 1;
+  TRY_CACHE = 2;
+  CACHE_THROUGH = 3;
+  THROUGH = 4;
+  ASYNC_THROUGH = 5;
+  NONE = 6;
+}
+
+enum ReadPType {
+  UNSPECIFIED_READ_TYPE = 0;
+  NO_CACHE = 1;
+  CACHE = 2;
+}
+
+enum LoadMetadataPType {
+  NEVER = 0;
+  ONCE = 1;
+  ALWAYS = 2;
+}
+
+message FsOpPId {
+  optional int64 mostSignificantBits = 1;
+  optional int64 leastSignificantBits = 2;
+}
+
+message FileSystemMasterCommonPOptions {
+  optional int64 syncIntervalMs = 1;
+  optional FsOpPId operationId = 4;
+}
+
+message CheckAccessPRequest {
+  optional string path = 1;
+  optional CheckAccessPOptions options = 2;
+}
+message CheckAccessPResponse {}
+message CheckAccessPOptions {
+  optional Bits bits = 1;
+  optional FileSystemMasterCommonPOptions commonOptions = 2;
+}
+
+message CheckConsistencyPResponse {
+  repeated string inconsistentPaths = 1;
+}
+message CheckConsistencyPOptions {
+  optional FileSystemMasterCommonPOptions commonOptions = 1;
+}
+message CheckConsistencyPRequest {
+  optional string path = 1;
+  optional CheckConsistencyPOptions options = 2;
+}
+
+message CompleteFilePResponse {}
+message CompleteFilePOptions {
+  optional int64 ufsLength = 1;
+  optional ScheduleAsyncPersistencePOptions asyncPersistOptions = 2;
+  optional FileSystemMasterCommonPOptions commonOptions = 3;
+}
+message CompleteFilePRequest {
+  optional string path = 1;
+  optional CompleteFilePOptions options = 2;
+  optional int64 inodeId = 3;
+}
+
+message OpenFilePOptions {
+  optional ReadPType readType = 1;
+  optional int32 maxUfsReadConcurrency = 2;
+  optional FileSystemMasterCommonPOptions commonOptions = 3;
+  optional bool updateLastAccessTime = 4 [default = true];
+}
+
+message CreateDirectoryPResponse {}
+message CreateDirectoryPOptions {
+  optional bool recursive = 1;
+  optional bool allowExists = 2;
+  optional PMode mode = 3;
+  optional WritePType writeType = 4;
+  optional FileSystemMasterCommonPOptions commonOptions = 5;
+  optional WritePType defaultWriteType = 6;
+}
+message CreateDirectoryPRequest {
+  optional string path = 1;
+  optional CreateDirectoryPOptions options = 2;
+}
+
+message CreateFilePResponse {
+  optional FileInfo fileInfo = 1;
+}
+message CreateFilePOptions {
+  optional int64 blockSizeBytes = 1;
+  optional bool recursive = 2;
+  optional PMode mode = 3;
+  optional WritePType writeType = 4;
+  optional FileSystemMasterCommonPOptions commonOptions = 5;
+  optional int64 persistenceWaitTime = 6;
+  optional WritePType defaultWriteType = 7;
+}
+message CreateFilePRequest {
+  optional string path = 1;
+  optional CreateFilePOptions options = 2;
+}
+
+message DeletePResponse {}
+message DeletePOptions {
+  optional bool recursive = 1;
+  optional bool goosefsOnly = 2;
+  optional bool unchecked = 3;
+  optional FileSystemMasterCommonPOptions commonOptions = 4;
+  optional bool ttl = 5 [default = false];
+}
+message DeletePRequest {
+  optional string path = 1;
+  optional DeletePOptions options = 2;
+}
+
+message FreePResponse {}
+message FreePOptions {
+  optional bool recursive = 1;
+  optional bool forced = 2;
+  optional FileSystemMasterCommonPOptions commonOptions = 3;
+}
+message FreePRequest {
+  optional string path = 1;
+  optional FreePOptions options = 2;
+}
+
+message GetStatusPResponse {
+  optional FileInfo fileInfo = 1;
+}
+message GetStatusPOptions {
+  optional LoadMetadataPType loadMetadataType = 1;
+  optional FileSystemMasterCommonPOptions commonOptions = 2;
+  optional Bits accessMode = 3;
+  optional bool updateTimestamps = 4 [default = true];
+  optional LoadMetadataPType defaultLoadMetadataType = 5;
+  optional bool resolveLink = 6 [default = false];
+  optional int32 checkBlockReplicas = 7 [default = 0];
+}
+message GetStatusPRequest {
+  optional string path = 1;
+  optional GetStatusPOptions options = 2;
+  optional string request_id = 3;
+}
+
+message ExistsPOptions {
+  optional LoadMetadataPType loadMetadataType = 1;
+  optional FileSystemMasterCommonPOptions commonOptions = 2;
+  optional LoadMetadataPType defaultLoadMetadataType = 3;
+}
+
+enum SyncPointStatus {
+  Not_Initially_Synced = 0;
+  Syncing = 1;
+  Initially_Synced = 2;
+}
+
+message SyncPointInfo {
+  optional string syncPointUri = 1;
+  optional SyncPointStatus syncStatus = 2;
+}
+
+message GetSyncPathListPResponse {
+  repeated SyncPointInfo syncPaths = 1;
+}
+message GetSyncPathListPRequest {}
+
+message ListStatusPResponse {
+  repeated FileInfo fileInfos = 1;
+}
+message ListStatusPOptions {
+  optional bool loadDirectChildren = 1;
+  optional LoadMetadataPType loadMetadataType = 2;
+  optional FileSystemMasterCommonPOptions commonOptions = 3;
+  optional bool recursive = 4;
+  optional bool loadMetadataOnly = 5;
+  optional LoadMetadataPType defaultLoadMetadataType = 6;
+  optional bool isLoadMetadata = 7 [default = false];
+  optional int32 checkBlockReplicas = 8 [default = 0];
+}
+message ListStatusPRequest {
+  optional string path = 1;
+  optional ListStatusPOptions options = 2;
+  optional string request_id = 3;
+}
+
+message ListNamespacePResponse {
+  repeated FileInfo fileInfo = 1;
+}
+message ListNamespacePOptions {
+  optional FileSystemMasterCommonPOptions commonOptions = 1;
+}
+message ListNamespacePRequest {
+  optional ListNamespacePOptions options = 1;
+}
+
+message StatNamespacePResponse {
+  optional FileInfo fileInfo = 1;
+}
+message StatNamespacePOptions {
+  optional FileSystemMasterCommonPOptions commonOptions = 1;
+}
+message StatNamespacePRequest {
+  optional string namespace = 1;
+  optional StatNamespacePOptions options = 2;
+}
+
+message LoadMetadataPOptions {
+  optional bool recursive = 1;
+  optional bool createAncestors = 2;
+  optional fscommon.LoadDescendantPType loadDescendantType = 3;
+  optional FileSystemMasterCommonPOptions commonOptions = 4;
+}
+
+enum PAclEntryType {
+  Owner = 0;
+  NamedUser = 1;
+  OwningGroup = 2;
+  NamedGroup = 3;
+  Mask = 4;
+  Other = 5;
+}
+
+enum PAclAction {
+  Read = 0;
+  Write = 1;
+  Execute = 2;
+}
+
+message PAclEntry {
+  optional PAclEntryType type = 1;
+  optional string subject = 2;
+  repeated PAclAction actions = 3;
+  optional bool isDefault = 4;
+}
+
+message PAcl {
+  optional string owner = 1;
+  optional string owningGroup = 2;
+  repeated PAclEntry entries = 3;
+  optional int32 mode = 4;
+  optional bool isDefault = 5;
+  optional bool isDefaultEmpty = 6;
+}
+
+message FileBlockInfo {
+  optional grpc.BlockInfo blockInfo = 1;
+  optional int64 offset = 2;
+  repeated grpc.WorkerNetAddress ufsLocations = 3;
+  repeated string ufsStringLocations = 4;
+}
+
+message FileInfo {
+  optional int64 fileId = 1;
+  optional string name = 2;
+  optional string path = 3;
+  optional string ufsPath = 4;
+  optional int64 length = 5;
+  optional int64 blockSizeBytes = 6;
+  optional int64 creationTimeMs = 7;
+  optional bool completed = 8;
+  optional bool folder = 9;
+  optional bool cacheable = 10;
+  optional bool persisted = 11;
+  repeated int64 blockIds = 12;
+  optional int64 lastModificationTimeMs = 13;
+  optional string owner = 14;
+  optional string group = 15;
+  optional int32 mode = 16;
+  optional string persistenceState = 17;
+  optional bool mountPoint = 18;
+  repeated FileBlockInfo fileBlockInfos = 19;
+  optional int64 mountId = 20;
+  optional int32 inGooseFSPercentage = 21;
+  optional int32 inMemoryPercentage = 22;
+  optional string ufsFingerprint = 23;
+  optional PAcl acl = 24;
+  optional PAcl defaultAcl = 25;
+  optional int64 lastAccessTimeMs = 26;
+  map<string, bytes> xattr = 27;
+  optional com.qcloud.cos.goosefs.proto.security.Capability capability = 28;
+  optional string symlink = 29;
+}
+
+message GetFilePathPResponse {
+  optional string path = 1;
+}
+message GetFilePathPRequest {
+  optional int64 fileId = 1;
+}
+
+message MountPResponse {}
+message MountPOptions {
+  optional bool readOnly = 1;
+  map<string, string> properties = 2;
+  optional bool shared = 3;
+  optional FileSystemMasterCommonPOptions commonOptions = 4;
+}
+message MountPRequest {
+  optional string goosefsPath = 1;
+  optional string ufsPath = 2;
+  optional MountPOptions options = 3;
+}
+
+message CreateNamespacePResponse {}
+message CreateNamespacePOptions {
+  optional bool readOnly = 1;
+  map<string, string> properties = 2;
+  optional bool shared = 3;
+  optional FileSystemMasterCommonPOptions commonOptions = 4;
+  optional ReadPType readPType = 5;
+  optional WritePType writePType = 6;
+}
+message CreateNamespacePRequest {
+  optional string namespace = 1;
+  optional string ufsPath = 2;
+  optional CreateNamespacePOptions options = 3;
+}
+
+message UpdateNamespacePResponse {}
+message UpdateNamespacePOptions {
+  optional bool readOnly = 1;
+  map<string, string> properties = 2;
+  optional bool shared = 3;
+  optional FileSystemMasterCommonPOptions commonOptions = 4;
+}
+message UpdateNamespacePRequest {
+  optional string namespace = 1;
+  optional UpdateNamespacePOptions options = 2;
+}
+
+message GetMountPointPResponse {
+  required MountPointInfo mountPointInfo = 1;
+}
+message GetMountPointPRequest {
+  required string path = 1;
+}
+
+message GetMountTablePResponse {
+  map<string, MountPointInfo> mountPoints = 1;
+}
+message GetMountTablePRequest {}
+
+message MountPointInfo {
+  optional string ufsUri = 1;
+  optional string ufsType = 2;
+  optional int64 ufsCapacityBytes = 3 [default = -1];
+  optional int64 ufsUsedBytes = 4 [default = -1];
+  optional bool readOnly = 5;
+  map<string, string> properties = 6;
+  optional bool shared = 7;
+  optional int64 mountId = 8;
+}
+
+message FileSystemCommandOptions {
+  optional PersistCommandOptions persistOptions = 1;
+}
+
+message PersistCommandOptions {
+  repeated PersistFile persistFiles = 1;
+}
+
+message PersistFile {
+  optional int64 fileId = 1;
+  repeated int64 blockIds = 2;
+}
+
+message FileSystemCommand {
+  optional grpc.CommandType commandType = 1;
+  optional FileSystemCommandOptions commandOptions = 2;
+}
+
+message RenamePResponse {}
+message RenamePOptions {
+  optional FileSystemMasterCommonPOptions commonOptions = 1;
+  optional bool persist = 2;
+}
+message RenamePRequest {
+  optional string path = 1;
+  optional string dstPath = 2;
+  optional RenamePOptions options = 3;
+}
+
+message ReverseResolvePRequest {
+  optional string ufsUri = 1;
+}
+message ReverseResolvePResponse {
+  optional string goosefsPath = 1;
+}
+
+message SetAttributePResponse {}
+message SetAttributePOptions {
+  optional bool persisted = 1;
+  optional string owner = 2;
+  optional string group = 3;
+  optional PMode mode = 4;
+  optional bool recursive = 5;
+  optional FileSystemMasterCommonPOptions commonOptions = 8;
+  optional ReadPType readPType = 9;
+  optional WritePType writePType = 10;
+  optional bool directChildrenLoad = 11;
+}
+message SetAttributePRequest {
+  optional string path = 1;
+  optional SetAttributePOptions options = 2;
+}
+
+enum SetAclAction {
+  REPLACE = 0;
+  MODIFY = 1;
+  REMOVE = 2;
+  REMOVE_ALL = 3;
+  REMOVE_DEFAULT = 4;
+}
+
+message SetAclPResponse {}
+message SetAclPOptions {
+  optional FileSystemMasterCommonPOptions commonOptions = 1;
+  optional bool recursive = 2;
+}
+message SetAclPRequest {
+  optional string path = 1;
+  optional SetAclAction action = 2;
+  repeated PAclEntry entries = 3;
+  optional SetAclPOptions options = 4;
+}
+
+message ScheduleAsyncPersistencePResponse {}
+message ScheduleAsyncPersistencePOptions {
+  optional FileSystemMasterCommonPOptions commonOptions = 1;
+  optional int64 persistenceWaitTime = 2;
+}
+message ScheduleAsyncPersistencePRequest {
+  optional string path = 1;
+  optional ScheduleAsyncPersistencePOptions options = 2;
+}
+
+message StartSyncPResponse {}
+message StartSyncPOptions {
+  optional FileSystemMasterCommonPOptions commonOptions = 1;
+}
+message StartSyncPRequest {
+  optional string path = 1;
+  optional StartSyncPOptions options = 2;
+}
+
+message StopSyncPResponse {}
+message StopSyncPOptions {
+  optional FileSystemMasterCommonPOptions commonOptions = 1;
+}
+message StopSyncPRequest {
+  optional string path = 1;
+  optional StopSyncPOptions options = 2;
+}
+
+message UnmountPResponse {}
+message UnmountPOptions {
+  optional FileSystemMasterCommonPOptions commonOptions = 1;
+}
+message UnmountPRequest {
+  optional string goosefsPath = 1;
+  optional UnmountPOptions options = 2;
+}
+
+message DeleteNamespacePResponse {}
+message DeleteNamespacePOptions {
+  optional FileSystemMasterCommonPOptions commonOptions = 1;
+}
+message DeleteNamespacePRequest {
+  optional string namespace = 1;
+  optional DeleteNamespacePOptions options = 2;
+}
+
+message SetNamespaceAttributePResponse {}
+message SetNamespaceAttributePOptions {
+  optional bool persisted = 1;
+  optional string owner = 2;
+  optional string group = 3;
+  optional PMode mode = 4;
+  optional FileSystemMasterCommonPOptions commonOptions = 5;
+  optional ReadPType readPType = 6;
+  optional WritePType writePType = 7;
+  optional bool directChildrenLoad = 8;
+}
+message SetNamespaceAttributePRequest {
+  optional string namespace = 1;
+  optional SetNamespaceAttributePOptions options = 2;
+}
+
+message UfsInfo {
+  optional string uri = 1;
+  optional MountPOptions properties = 2;
+}
+
+enum UfsPMode {
+  NO_ACCESS = 1;
+  READ_ONLY = 2;
+  READ_WRITE = 3;
+}
+
+message UpdateMountPRequest {
+  optional string goosefsPath = 1;
+  optional MountPOptions options = 3;
+}
+message UpdateMountPResponse {}
+
+message UpdateUfsModePResponse {}
+message UpdateUfsModePOptions {
+  optional UfsPMode ufsMode = 1;
+}
+message UpdateUfsModePRequest {
+  optional string ufsPath = 1;
+  optional UpdateUfsModePOptions options = 2;
+}
+
+message GetStateLockHoldersPResponse {
+  repeated string threads = 1;
+}
+message GetStateLockHoldersPOptions {}
+message GetStateLockHoldersPRequest {
+  optional GetStateLockHoldersPOptions options = 1;
+}
+
+message CommonCacheRestrictPRequest {
+  optional string namespace = 1;
+}
+
+message RemoveBlocksPRequest {
+  repeated int64 blockIds = 1;
+}
+message RemoveBlocksPResponse {}
+
+message GetDelegationTokenPRequest {
+  required string renewer = 1;
+}
+message GetDelegationTokenPResponse {
+  required com.qcloud.cos.goosefs.proto.security.DelegationToken token = 1;
+}
+
+message RenewDelegationTokenPRequest {
+  required com.qcloud.cos.goosefs.proto.security.DelegationToken token = 1;
+}
+message RenewDelegationTokenPResponse {
+  required com.qcloud.cos.goosefs.proto.security.DelegationToken token = 1;
+}
+
+message CancelDelegationTokenPRequest {
+  required com.qcloud.cos.goosefs.proto.security.DelegationToken token = 1;
+}
+message CancelDelegationTokenPResponse {}
+
+message CreateSymlinkPOptions {
+  optional string target = 1;
+  optional FileSystemMasterCommonPOptions commonOptions = 2;
+  optional PMode mode = 4;
+  optional WritePType writeType = 5;
+  optional WritePType defaultWriteType = 6;
+  optional bool createParent = 7 [default = false];
+}
+message CreateSymlinkPRequest {
+  optional string link = 1;
+  optional CreateSymlinkPOptions options = 2;
+}
+message CreateSymlinkPResponse {}
+
+message GetLinkTargetPRequest {
+  optional string link = 1;
+}
+message GetLinkTargetPResponse {
+  optional string target = 1;
+}
+
+service FileSystemMasterClientService {
+  rpc CheckAccess(CheckAccessPRequest) returns (CheckAccessPResponse);
+  rpc CheckConsistency(CheckConsistencyPRequest) returns (CheckConsistencyPResponse);
+  rpc CompleteFile(CompleteFilePRequest) returns (CompleteFilePResponse);
+  rpc CreateDirectory(CreateDirectoryPRequest) returns (CreateDirectoryPResponse);
+  rpc CreateFile(CreateFilePRequest) returns (CreateFilePResponse);
+  rpc Free(FreePRequest) returns (FreePResponse);
+  rpc GetFilePath(GetFilePathPRequest) returns (GetFilePathPResponse);
+  rpc GetMountPoint(GetMountPointPRequest) returns (GetMountPointPResponse);
+  rpc GetMountTable(GetMountTablePRequest) returns (GetMountTablePResponse);
+  rpc GetSyncPathList(GetSyncPathListPRequest) returns (GetSyncPathListPResponse);
+  rpc GetStatus(GetStatusPRequest) returns (GetStatusPResponse);
+  rpc ListStatus(ListStatusPRequest) returns (stream ListStatusPResponse);
+  rpc Mount(MountPRequest) returns (MountPResponse);
+  rpc Remove(DeletePRequest) returns (DeletePResponse);
+  rpc Rename(RenamePRequest) returns (RenamePResponse);
+  rpc ReverseResolve(ReverseResolvePRequest) returns (ReverseResolvePResponse);
+  rpc ScheduleAsyncPersistence(ScheduleAsyncPersistencePRequest) returns (ScheduleAsyncPersistencePResponse);
+  rpc SetAcl(SetAclPRequest) returns (SetAclPResponse);
+  rpc SetAttribute(SetAttributePRequest) returns (SetAttributePResponse);
+  rpc StartSync(StartSyncPRequest) returns (StartSyncPResponse);
+  rpc StopSync(StopSyncPRequest) returns (StopSyncPResponse);
+  rpc Unmount(UnmountPRequest) returns (UnmountPResponse);
+  rpc UpdateMount(UpdateMountPRequest) returns (UpdateMountPResponse);
+  rpc UpdateUfsMode(UpdateUfsModePRequest) returns (UpdateUfsModePResponse);
+  rpc GetStateLockHolders(GetStateLockHoldersPRequest) returns (GetStateLockHoldersPResponse);
+  rpc CreateNamespace(CreateNamespacePRequest) returns (CreateNamespacePResponse);
+  rpc UpdateNamespace(UpdateNamespacePRequest) returns (UpdateNamespacePResponse);
+  rpc DeleteNamespace(DeleteNamespacePRequest) returns (DeleteNamespacePResponse);
+  rpc ListNamespace(ListNamespacePRequest) returns (stream ListNamespacePResponse);
+  rpc StatNamespace(StatNamespacePRequest) returns (StatNamespacePResponse);
+  rpc SetNamespaceAttribute(SetNamespaceAttributePRequest) returns (SetNamespaceAttributePResponse);
+  rpc RemoveBlocks(RemoveBlocksPRequest) returns (RemoveBlocksPResponse);
+  rpc GetDelegationToken(GetDelegationTokenPRequest) returns (GetDelegationTokenPResponse);
+  rpc RenewDelegationToken(RenewDelegationTokenPRequest) returns (RenewDelegationTokenPResponse);
+  rpc CancelDelegationToken(CancelDelegationTokenPRequest) returns (CancelDelegationTokenPResponse);
+  rpc CreateSymlink(CreateSymlinkPRequest) returns (CreateSymlinkPResponse);
+  rpc GetLinkTarget(GetLinkTargetPRequest) returns (GetLinkTargetPResponse);
+}
