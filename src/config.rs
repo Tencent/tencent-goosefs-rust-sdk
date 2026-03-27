@@ -160,6 +160,23 @@ impl GooseFsConfig {
         }
     }
 
+    /// Create a config from one or more master addresses.
+    ///
+    /// Automatically selects the right mode:
+    /// - 1 address  → single-master (same as [`new`]).
+    /// - 2+ addresses → multi-master (same as [`new_ha`]).
+    ///
+    /// # Panics
+    /// Panics if `addrs` is empty.
+    pub fn from_addresses(addrs: Vec<String>) -> Self {
+        assert!(!addrs.is_empty(), "master addresses must not be empty");
+        if addrs.len() == 1 {
+            Self::new(&addrs[0])
+        } else {
+            Self::new_ha(addrs)
+        }
+    }
+
     /// Return the effective list of master addresses.
     ///
     /// If [`master_addrs`] is non-empty, returns it directly.

@@ -32,10 +32,10 @@ InetSocketAddress primaryAddr = inquireClient.getPrimaryRpcAddress();
 
 | 特性 | 状态 |
 |------|------|
-| Master 地址配置 | ⚠️ 仅支持单地址 `String` (`master_addr`) |
-| Leader 发现 | ❌ 未实现 |
-| 连接重试 | ❌ 未实现（仅定义了 `is_retriable()` 但未使用） |
-| Master 故障转移 | ❌ 未实现 |
+| Master 地址配置 | ✅ 支持单地址 `new()` + 多地址 `new_ha()` + 统一 `from_addresses()` |
+| Leader 发现 | ✅ `PollingMasterInquireClient` 已实现 |
+| 连接重试 | ✅ `ExponentialTimeBoundedRetry` 已实现 |
+| Master 故障转移 | ✅ 已实现（缓存 Primary + 自动重发现） |
 | `getServiceVersion` proto | ✅ 已有 `version.proto` 定义 |
 
 ---
@@ -48,13 +48,14 @@ InetSocketAddress primaryAddr = inquireClient.getPrimaryRpcAddress();
 
 1. **新增字段** `master_addrs: Vec<String>` — 多 Master 地址列表
 2. **保持向后兼容**：`master_addr` 保留为首选单地址（内部转为 `master_addrs` 的第一个元素）
-3. **新增构造方法** `GooseFsConfig::new_ha(addrs: Vec<String>)` — HA 模式创建
-4. **新增重试配置字段**：
+3. **新增构造方法** `GooseFsConfig::new_ha(addrs: Vec<String>)` — 多 Master 模式创建
+4. **新增统一构造方法** `GooseFsConfig::from_addresses(addrs: Vec<String>)` — 自动选择单/多 Master 模式
+5. **新增重试配置字段**：
    - `master_inquire_retry_max_duration: Duration` — 最大重试总时长（默认 2 分钟）
    - `master_inquire_initial_sleep: Duration` — 初始退避时间（默认 50ms）
    - `master_inquire_max_sleep: Duration` — 最大退避时间（默认 3s）
    - `master_polling_timeout: Duration` — 单次 ping 超时（默认 30s）
-5. **新增辅助方法** `is_multi_master() -> bool` — 判断是否多 Master 模式
+6. **新增辅助方法** `is_multi_master() -> bool` — 判断是否多 Master 模式
 
 ### Phase 2: 重试策略 — 指数退避
 

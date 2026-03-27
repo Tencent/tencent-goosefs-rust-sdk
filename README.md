@@ -135,6 +135,34 @@ async fn main() -> goosefs_client::error::Result<()> {
 }
 ```
 
+### Example: Multi-Master Connection
+
+```rust
+use goosefs_client::config::GooseFsConfig;
+use goosefs_client::client::MasterClient;
+
+#[tokio::main]
+async fn main() -> goosefs_client::error::Result<()> {
+    // Unified constructor: automatically selects single or multi-master mode.
+    // 1 address  → single-master
+    // 2+ addresses → multi-master (polls all to discover Primary)
+    let addrs = vec![
+        "10.0.0.1:9200".to_string(),
+        "10.0.0.2:9200".to_string(),
+        "10.0.0.3:9200".to_string(),
+    ];
+    let config = GooseFsConfig::from_addresses(addrs);
+    println!("is_multi_master = {}", config.is_multi_master());
+
+    let master = MasterClient::connect(&config).await?;
+    let entries = master.list_status("/", false).await?;
+    for e in &entries {
+        println!("  {:?}", e.path);
+    }
+    Ok(())
+}
+```
+
 ### Example: High-Level File Write (Recommended)
 
 ```rust
@@ -278,7 +306,7 @@ async fn main() -> goosefs_client::error::Result<()> {
 | `block::WorkerRouter` | Consistent-hash routing of block IDs to workers with failure tracking |
 | `io::GrpcBlockReader` | Low-level streaming block reader with flow-control ACK |
 | `io::GrpcBlockWriter` | Low-level streaming block writer with chunk splitting and flush |
-| `config::GooseFsConfig` | Connection configuration — timeouts, block size, chunk size, root path, **`write_type`** (WritePType), HA multi-master settings (`master_addrs`, `master_polling_timeout`, retry params) |
+| `config::GooseFsConfig` | Connection configuration — timeouts, block size, chunk size, root path, **`write_type`** (WritePType), multi-master settings (`master_addrs`, `master_polling_timeout`, retry params), unified constructor `from_addresses()` |
 | `WritePType` | Write type enum — `MustCache`, `TryCache`, `CacheThrough`, `Through`, `AsyncThrough`, `None` |
 | `error::Error` | Unified error type with gRPC status code mapping and retriable detection |
 
@@ -322,6 +350,7 @@ goosefs-client-rust/
 ├── examples/
 │   ├── highlevel_file_rw.rs     # ★ High-level file read/write (recommended)
 │   ├── write_types.rs           # ★ WriteType comparison (MUST_CACHE/CACHE_THROUGH/THROUGH/ASYNC_THROUGH)
+│   ├── ha_multi_master.rs       # ★ Multi-master mode (auto single/multi via from_addresses)
 │   ├── lowlevel_block_read.rs   # Low-level block streaming read
 │   ├── lowlevel_create_file.rs  # Low-level file creation (metadata only)
 │   ├── metadata_crud.rs         # File/directory metadata CRUD

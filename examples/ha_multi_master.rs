@@ -31,27 +31,23 @@ async fn main() -> goosefs_client::error::Result<()> {
         std::process::exit(1);
     }
 
-    // Create config — single or HA depending on number of addresses.
-    let config = if args.len() == 1 {
-        println!("▸ Single-master mode: {}", args[0]);
-        GooseFsConfig::new(&args[0])
+    // Create config — automatically selects single or multi-master mode.
+    let mut config = GooseFsConfig::from_addresses(args.clone());
+
+    // Tune timeouts for faster Primary discovery on local networks.
+    if config.is_multi_master() {
+        config.master_polling_timeout = Duration::from_secs(3);
+        config.master_inquire_retry_max_duration = Duration::from_secs(15);
+        config.master_inquire_initial_sleep = Duration::from_millis(100);
+        config.master_inquire_max_sleep = Duration::from_secs(2);
+    }
+
+    let mode = if config.is_multi_master() {
+        format!("Multi-master ({} masters)", args.len())
     } else {
-        println!(
-            "▸ Multi-master mode with {} masters: {:?}",
-            args.len(),
-            args
-        );
-        let mut cfg = GooseFsConfig::new_ha(args.clone());
-        // Tune timeouts for faster Primary discovery on local networks.
-        // polling_timeout: per-address connect+RPC deadline for each ping.
-        cfg.master_polling_timeout = Duration::from_secs(3);
-        // Limit total retry budget so we don't block for 2 minutes
-        // when no Primary is reachable.
-        cfg.master_inquire_retry_max_duration = Duration::from_secs(15);
-        cfg.master_inquire_initial_sleep = Duration::from_millis(100);
-        cfg.master_inquire_max_sleep = Duration::from_secs(2);
-        cfg
+        format!("Single-master: {}", args[0])
     };
+    println!("▸ {}", mode);
 
     println!("  is_multi_master = {}", config.is_multi_master());
     println!("  master_addresses = {:?}", config.master_addresses());

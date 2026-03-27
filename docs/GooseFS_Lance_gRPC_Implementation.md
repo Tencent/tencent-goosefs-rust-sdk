@@ -280,7 +280,7 @@ impl GooseFsMasterClient {
 ```
 
 **关键难点**：
-- Master HA：需实现 Leader 发现
+- Master HA：✅ 已实现 `PollingMasterInquireClient` Leader 发现（`from_addresses()` 统一入口）
 - `ListStatus` 是 server-streaming RPC，用 tonic `Streaming<T>` 处理
 - 认证：Kerberos/LDAP 需实现 gRPC 拦截器
 
