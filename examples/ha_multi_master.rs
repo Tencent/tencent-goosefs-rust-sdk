@@ -36,7 +36,11 @@ async fn main() -> goosefs_client::error::Result<()> {
         println!("▸ Single-master mode: {}", args[0]);
         GooseFsConfig::new(&args[0])
     } else {
-        println!("▸ HA mode with {} masters: {:?}", args.len(), args);
+        println!(
+            "▸ Multi-master mode with {} masters: {:?}",
+            args.len(),
+            args
+        );
         let mut cfg = GooseFsConfig::new_ha(args.clone());
         // Tune timeouts for faster Primary discovery on local networks.
         // polling_timeout: per-address connect+RPC deadline for each ping.
@@ -49,7 +53,7 @@ async fn main() -> goosefs_client::error::Result<()> {
         cfg
     };
 
-    println!("  is_ha_mode = {}", config.is_ha_mode());
+    println!("  is_multi_master = {}", config.is_multi_master());
     println!("  master_addresses = {:?}", config.master_addresses());
     println!(
         "  master_polling_timeout = {:?}",

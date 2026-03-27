@@ -172,8 +172,8 @@ impl GooseFsConfig {
         }
     }
 
-    /// Returns `true` if the client is configured for HA mode (multiple masters).
-    pub fn is_ha_mode(&self) -> bool {
+    /// Returns `true` if the client is configured with multiple masters.
+    pub fn is_multi_master(&self) -> bool {
         self.master_addrs.len() > 1
     }
 
@@ -269,7 +269,7 @@ mod tests {
         assert!(config.master_addrs.is_empty());
         assert_eq!(config.block_size, 64 * 1024 * 1024);
         assert_eq!(config.chunk_size, 1024 * 1024);
-        assert!(!config.is_ha_mode());
+        assert!(!config.is_multi_master());
         assert!(config.validate().is_ok());
     }
 
@@ -282,7 +282,7 @@ mod tests {
         ]);
         assert_eq!(config.master_addr, "10.0.0.1:9200");
         assert_eq!(config.master_addrs.len(), 3);
-        assert!(config.is_ha_mode());
+        assert!(config.is_multi_master());
         assert!(config.validate().is_ok());
     }
 
@@ -291,7 +291,7 @@ mod tests {
         let config = GooseFsConfig::new("10.0.0.1:9200");
         let addrs = config.master_addresses();
         assert_eq!(addrs, vec!["10.0.0.1:9200"]);
-        assert!(!config.is_ha_mode());
+        assert!(!config.is_multi_master());
     }
 
     #[test]
@@ -302,7 +302,7 @@ mod tests {
         ]);
         let addrs = config.master_addresses();
         assert_eq!(addrs.len(), 2);
-        assert!(config.is_ha_mode());
+        assert!(config.is_multi_master());
     }
 
     #[test]

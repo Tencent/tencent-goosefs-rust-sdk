@@ -54,7 +54,7 @@ InetSocketAddress primaryAddr = inquireClient.getPrimaryRpcAddress();
    - `master_inquire_initial_sleep: Duration` — 初始退避时间（默认 50ms）
    - `master_inquire_max_sleep: Duration` — 最大退避时间（默认 3s）
    - `master_polling_timeout: Duration` — 单次 ping 超时（默认 30s）
-5. **新增辅助方法** `is_ha_mode() -> bool` — 判断是否 HA 模式
+5. **新增辅助方法** `is_multi_master() -> bool` — 判断是否多 Master 模式
 
 ### Phase 2: 重试策略 — 指数退避
 
@@ -177,7 +177,7 @@ InetSocketAddress primaryAddr = inquireClient.getPrimaryRpcAddress();
 |------|------|------|
 | `Cargo.toml` | 修改 | 添加 `async-trait`、`rand` 依赖 |
 | `src/lib.rs` | 修改 | 新增 `pub mod retry;` |
-| `src/config.rs` | 修改 | 新增 `master_addrs`、重试参数、`is_ha_mode()` |
+| `src/config.rs` | 修改 | 新增 `master_addrs`、重试参数、`is_multi_master()` |
 | `src/retry.rs` | **新增** | `RetryPolicy` trait + 两种指数退避实现 |
 | `src/client/master_inquire.rs` | **新增** | `MasterInquireClient` trait + Single/Polling 实现 |
 | `src/client/mod.rs` | 修改 | 导出 `master_inquire` 模块 |
