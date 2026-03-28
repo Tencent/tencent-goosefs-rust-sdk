@@ -70,6 +70,11 @@ pub mod io;
 pub mod retry;
 
 // Re-export commonly used types for convenience.
+pub use crate::config::WriteType;
+pub use crate::config::{
+    ENV_BLOCK_SIZE, ENV_CHUNK_SIZE, ENV_MASTER_ADDR, ENV_WRITE_TYPE, STORAGE_OPT_BLOCK_SIZE,
+    STORAGE_OPT_CHUNK_SIZE, STORAGE_OPT_MASTER_ADDR, STORAGE_OPT_WRITE_TYPE,
+};
 pub use crate::proto::grpc::file::WritePType;
 
 /// Generated protobuf / gRPC types from GooseFS `.proto` definitions.

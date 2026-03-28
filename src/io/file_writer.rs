@@ -169,6 +169,8 @@ impl GooseFsFileWriter {
                 block_size_bytes: Some(config.block_size as i64),
                 // Default file mode: 0644 (rw-r--r--)
                 mode: Some(default_file_mode()),
+                // Automatically create parent directories (e.g. for Lance Dataset sub-dirs)
+                recursive: Some(true),
                 ..Default::default()
             };
             // Apply config-level write_type if set
@@ -177,6 +179,12 @@ impl GooseFsFileWriter {
             }
             opts
         });
+
+        // Ensure recursive is set so parent directories are created automatically
+        let mut create_options = create_options;
+        if create_options.recursive.is_none() {
+            create_options.recursive = Some(true);
+        }
 
         let file_info = master.create_file(path, create_options.clone()).await?;
         debug!(
