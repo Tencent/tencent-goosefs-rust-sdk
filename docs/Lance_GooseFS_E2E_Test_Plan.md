@@ -567,6 +567,11 @@ async fn test_lance_dataset_with_storage_options() {
 
 > **目的**：验证通过 `goosefs_write_type=cache_through` 写入的数据同时存在于缓存和 UFS，
 > 文件状态为 `PERSISTED`。
+>
+> **实现机制**（v1.1.1 修正）：CACHE_THROUGH 使用 `RequestType::UfsFile` 模式，
+> Worker 直接写入 UFS（如 COS），同时在 Worker 侧缓存数据块。
+> 原设计依赖 Master 在 CompleteFile 时同步持久化，但实际验证发现 Master 只标记
+> 元数据为 PERSISTED 不做数据拷贝。
 
 ```rust
 #[ignore = "Requires GooseFS cluster"]

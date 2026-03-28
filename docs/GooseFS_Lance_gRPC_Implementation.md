@@ -439,8 +439,8 @@ GooseFsFileWriter::write(data)           可多次调用
       → WorkerRouter.select_worker()     一致性哈希路由
       → WorkerClient.connect()           连接 Worker
       → GrpcBlockWriter.open(WriteBlockOptions)  按策略启动双向流
-        ├─ MUST_CACHE/CACHE_THROUGH/ASYNC_THROUGH: GoosefsBlock
-        └─ THROUGH: UfsFile + CreateUfsFileOptions
+        ├─ MUST_CACHE/ASYNC_THROUGH: GoosefsBlock
+        └─ CACHE_THROUGH/THROUGH: UfsFile + CreateUfsFileOptions
       → GrpcBlockWriter.write_all()      分 chunk 发送数据
       → GrpcBlockWriter.flush()          发送 flush 并等待 ACK
       → GrpcBlockWriter.close()          关闭写入流
@@ -585,17 +585,19 @@ GooseFS 支持 6 种 `WritePType`，其中 4 种在线上活跃使用：
 
 ### 4.2 现状分析 vs 目标状态
 
-| WriteType | v1.0 现状 | v1.1 目标 | 所需改动 |
-|-----------|----------|----------|---------|
-| **MUST_CACHE** | ✅ 可用（当前默认行为） | ✅ 保持不变 | 无 |
-| **THROUGH** | ❌ 不可用 | ✅ 完整支持 | 🔴 **重大改动** |
-| **CACHE_THROUGH** | ⚠️ 部分可用（config 已传 writeType） | ✅ 完整支持 | 🟡 中度改动 |
-| **ASYNC_THROUGH** | ⚠️ 部分可用 | ✅ 完整支持 | 🟡 中度改动 |
+| WriteType | v1.0 现状 | v1.1 目标 | v1.1.1 最终状态 | 所需改动 |
+|-----------|----------|----------|----------------|---------|
+| **MUST_CACHE** | ✅ 可用（当前默认行为） | ✅ 保持不变 | ✅ 已完成 | 无 |
+| **THROUGH** | ❌ 不可用 | ✅ 完整支持 | ✅ 已完成 | 🔴 **重大改动** |
+| **CACHE_THROUGH** | ⚠️ 部分可用（config 已传 writeType） | ✅ 完整支持 | ✅ 已完成（v1.1.1 修正为 UfsFile） | 🟡→🔴 改为 UfsFile 模式 |
+| **ASYNC_THROUGH** | ⚠️ 部分可用 | ✅ 完整支持 | ✅ 已完成 | 🟡 中度改动 |
 
 **核心差异**：
-- **MUST_CACHE / CACHE_THROUGH**：Worker 端使用 `RequestType::GoosefsBlock`，数据写入缓存
-- **THROUGH**：Worker 端使用 `RequestType::UfsFile`，需传入 `CreateUfsFileOptions`（含 `ufs_path`、`owner`、`group`、`mode`、`mount_id`），数据直接写入 UFS
+- **MUST_CACHE**：Worker 端使用 `RequestType::GoosefsBlock`，数据仅写入缓存
+- **CACHE_THROUGH / THROUGH**：Worker 端使用 `RequestType::UfsFile`，需传入 `CreateUfsFileOptions`（含 `ufs_path`、`owner`、`group`、`mode`、`mount_id`），数据直接写入 UFS（CACHE_THROUGH 时 Worker 同时缓存数据）
 - **ASYNC_THROUGH**：数据写入缓存（同 MUST_CACHE），但 `close()` 后需调用 `scheduleAsyncPersistence` RPC
+
+> ⚠️ **v1.1.1 修正**：原设计中 CACHE_THROUGH 使用 `GoosefsBlock` 写入缓存，依赖 Master 在 `CompleteFile` 时同步持久化到 UFS。经实际验证发现 **Master 在 `CompleteFile` 时只标记元数据为 `PERSISTED`，并不会实际拷贝数据到 UFS**。因此 CACHE_THROUGH 必须和 THROUGH 一样使用 `UfsFile` 模式，由 Worker 直接写入 UFS，Worker 侧同时缓存数据块。
 
 ### 4.3 修改架构全景图
 
@@ -620,12 +622,12 @@ use crate::proto::proto::dataserver::CreateUfsFileOptions;
 /// Block 写入请求参数，封装 RequestType 和可选的 UFS 文件创建选项。
 pub struct WriteBlockOptions {
     /// 请求类型:
-    /// - GoosefsBlock(0) — 写入 GooseFS 缓存块（MUST_CACHE/CACHE_THROUGH/ASYNC_THROUGH）
-    /// - UfsFile(1) — 直接写入 UFS 文件（THROUGH）
+    /// - GoosefsBlock(0) — 写入 GooseFS 缓存块（MUST_CACHE/ASYNC_THROUGH）
+    /// - UfsFile(1) — 直接写入 UFS 文件（CACHE_THROUGH/THROUGH）
     /// - UfsFallbackBlock(2) — 缓存满时降级写 UFS（TRY_CACHE fallback）
     pub request_type: RequestType,
 
-    /// THROUGH 模式下需要传入 UFS 文件创建参数。
+    /// CACHE_THROUGH / THROUGH 模式下需要传入 UFS 文件创建参数。
     /// 包含：ufs_path, owner, group, mode, mount_id, acl。
     /// 从 Master.CreateFile 返回的 FileInfo 中提取。
     pub create_ufs_file_options: Option<CreateUfsFileOptions>,
@@ -657,7 +659,7 @@ struct WriteStrategy {
 }
 ```
 
-**决策逻辑**：
+**决策逻辑**（v1.1.1 修正）：
 
 ```rust
 fn resolve_write_strategy(
@@ -665,22 +667,14 @@ fn resolve_write_strategy(
     file_info: &FileInfo,
 ) -> WriteStrategy {
     match write_type {
-        // MUST_CACHE / TRY_CACHE / 未设置: 只写缓存，不涉及 UFS
-        Some(1) | Some(2) | None => WriteStrategy {
-            request_type: RequestType::GoosefsBlock,
-            create_ufs_file_options: None,
-            need_async_persist: false,
-        },
-
-        // CACHE_THROUGH: 写缓存，Master 端 CompleteFile 时自动同步持久化
-        Some(3) => WriteStrategy {
-            request_type: RequestType::GoosefsBlock,
-            create_ufs_file_options: None,
-            need_async_persist: false,  // Master 端自动处理
-        },
-
-        // THROUGH: 直接写 UFS，跳过缓存
-        Some(4) => WriteStrategy {
+        // CACHE_THROUGH (3) / THROUGH (4): 写 UFS via Worker。
+        // CACHE_THROUGH: Worker 写 UFS 同时缓存数据块；
+        // THROUGH: Worker 直接写 UFS，不缓存。
+        //
+        // ⚠️ v1.1.1 修正：原设计中 CACHE_THROUGH 使用 GoosefsBlock 写缓存，
+        // 依赖 Master 在 CompleteFile 时同步持久化。经验证 Master 只标记
+        // 元数据为 PERSISTED，不实际拷贝数据。故改为 UfsFile 模式。
+        Some(3) | Some(4) => WriteStrategy {
             request_type: RequestType::UfsFile,
             create_ufs_file_options: Some(CreateUfsFileOptions {
                 ufs_path: file_info.ufs_path.clone(),
@@ -700,6 +694,8 @@ fn resolve_write_strategy(
             need_async_persist: true,
         },
 
+        // MUST_CACHE (1), TRY_CACHE (2), NONE (6), 未设置:
+        // 只写 GooseFS 缓存块，不涉及 UFS 持久化。
         _ => WriteStrategy {
             request_type: RequestType::GoosefsBlock,
             create_ufs_file_options: None,
@@ -720,13 +716,13 @@ fn resolve_write_strategy(
 │                              Worker 缓存层 ✅                           │
 │                              UFS ❌                                      │
 ├─────────────────────────────────────────────────────────────────────────┤
-│ CACHE_THROUGH (3)                                                        │
+│ CACHE_THROUGH (3)    ← v1.1.1 修正：改用 UfsFile                       │
 │                                                                         │
-│ CreateFile(writeType=3) → Worker[GoosefsBlock] → CompleteFile           │
+│ CreateFile(writeType=3) → Worker[UfsFile + CreateUfsFileOptions]        │
 │                                     ↓                                   │
-│                              Worker 缓存层 ✅                           │
-│                              ↓ Master 在 CompleteFile 时同步持久化       │
-│                              UFS(COS/S3/HDFS) ✅                        │
+│                              Worker 缓存层 ✅ (Worker 同时缓存)         │
+│                              UFS(COS/S3/HDFS) ✅ (Worker 直接写入)      │
+│                          → CompleteFile                                  │
 ├─────────────────────────────────────────────────────────────────────────┤
 │ THROUGH (4)                                                              │
 │                                                                         │
@@ -870,7 +866,7 @@ pub async fn close(&mut self) -> Result<()> {
 | 决策点 | 选择 | 理由 |
 |--------|------|------|
 | THROUGH 时 `ufs_path` 从哪获取？ | 从 `FileInfo.ufs_path` | Master `CreateFile` 返回的 `FileInfo` 中包含 UFS 映射路径 |
-| CACHE_THROUGH 客户端需额外操作？ | **不需要** | Master 在 `CompleteFile` 时根据 `writeType=3` 自动同步持久化 |
+| CACHE_THROUGH 客户端需额外操作？ | **使用 UfsFile 模式**（v1.1.1 修正） | 原以为 Master 在 CompleteFile 时自动同步持久化，实际验证发现 Master 只标记元数据 PERSISTED 不拷贝数据，必须由 Worker 通过 UfsFile 直接写 UFS |
 | ASYNC_THROUGH 何时调度持久化？ | `close()` 中 `CompleteFile` 之后 | 遵循 Java `GooseFSFileOutStream.close()` 行为 |
 | `WriteBlockOptions` 用结构体还是参数展开？ | **结构体** | 避免参数过多，便于未来扩展 |
 | 向后兼容性 | `WriteBlockOptions::default()` = 当前行为 | 不设置 `write_type` 时完全等价于现有 MUST_CACHE |

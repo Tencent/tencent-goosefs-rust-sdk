@@ -67,13 +67,23 @@ struct WriteStrategy {
 /// `FileInfo` returned by `CreateFile`.
 ///
 /// - MUST_CACHE (1) / TRY_CACHE (2) / unset: `GoosefsBlock`, no UFS.
-/// - CACHE_THROUGH (3): `GoosefsBlock`, Master handles sync persist on CompleteFile.
+/// - CACHE_THROUGH (3): `UfsFile` — Worker writes to UFS and caches simultaneously.
 /// - THROUGH (4): `UfsFile` + `CreateUfsFileOptions` extracted from `FileInfo`.
 /// - ASYNC_THROUGH (5): `GoosefsBlock`, `close()` schedules async persist.
+///
+/// **Note on CACHE_THROUGH**: In the Java client, CACHE_THROUGH creates parallel
+/// streams to both Worker cache and UFS. On the Worker side, `RequestType::UfsFile`
+/// writes data to UFS directly; the Worker also caches the data blocks in its local
+/// store. This is why CACHE_THROUGH uses `UfsFile` mode — the same as THROUGH —
+/// rather than `GoosefsBlock`. Without this, data reaches the cache but never gets
+/// persisted to UFS (e.g. COS), because Master only marks metadata as PERSISTED
+/// without actually copying data.
 fn resolve_write_strategy(write_type: Option<i32>, file_info: &FileInfo) -> WriteStrategy {
     match write_type {
-        // THROUGH: direct UFS write, skip cache
-        Some(4) => WriteStrategy {
+        // CACHE_THROUGH (3) / THROUGH (4): write to UFS via Worker.
+        // For CACHE_THROUGH, the Worker also caches the data blocks locally.
+        // For THROUGH, the Worker writes directly to UFS without caching.
+        Some(3) | Some(4) => WriteStrategy {
             request_type: RequestType::UfsFile,
             create_ufs_file_options: Some(CreateUfsFileOptions {
                 ufs_path: file_info.ufs_path.clone(),
@@ -93,8 +103,8 @@ fn resolve_write_strategy(write_type: Option<i32>, file_info: &FileInfo) -> Writ
             need_async_persist: true,
         },
 
-        // MUST_CACHE (1), TRY_CACHE (2), CACHE_THROUGH (3), NONE (6), unset:
-        // all write to GooseFS cache blocks; Master handles persist for CACHE_THROUGH.
+        // MUST_CACHE (1), TRY_CACHE (2), NONE (6), unset:
+        // all write to GooseFS cache blocks only; no UFS persistence.
         _ => WriteStrategy {
             request_type: RequestType::GoosefsBlock,
             create_ufs_file_options: None,

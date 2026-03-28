@@ -296,12 +296,12 @@ async fn main() -> goosefs_client::error::Result<()> {
 
 | Module | Description |
 |--------|-------------|
-| **`io::GooseFsFileWriter`** | **High-level file writer** — one-shot `write_file()` or builder pattern `create()` → `write()` → `close()`. Supports all 4 WriteTypes (MUST_CACHE / CACHE_THROUGH / THROUGH / ASYNC_THROUGH). Orchestrates `CreateFile` → `WriteStrategy` → `BlockMapper` → `WorkerRouter` → `GrpcBlockWriter` → `CompleteFile` [→ `ScheduleAsyncPersistence`] |
+| **`io::GooseFsFileWriter`** | **High-level file writer** — one-shot `write_file()` or builder pattern `create()` → `write()` → `close()`. Supports all 4 WriteTypes (MUST_CACHE / CACHE_THROUGH / THROUGH / ASYNC_THROUGH). Orchestrates `CreateFile` → `WriteStrategy` → `BlockMapper` → `WorkerRouter` → `GrpcBlockWriter` → `CompleteFile` [→ `ScheduleAsyncPersistence`]. **Note**: CACHE_THROUGH and THROUGH both use `UfsFile` mode — Worker writes directly to UFS (CACHE_THROUGH also caches data locally). |
 | **`io::GooseFsFileReader`** | **High-level file reader** — one-shot `read_file()` / `read_range()` or streaming `open()` → `read_next_block()`. Orchestrates `GetStatus` → `BlockMapper` → `WorkerRouter` → `GrpcBlockReader` |
 | `client::MasterClient` | File system metadata CRUD — `get_status`, `list_status`, `create_file`, `complete_file`, `delete`, `rename`, `create_directory`, `schedule_async_persistence` |
 | `client::WorkerManagerClient` | Worker discovery — `get_worker_info_list` |
 | `client::WorkerClient` | Bidirectional streaming block read/write — `read_block`, `write_block(options: WriteBlockOptions)` |
-| `client::WriteBlockOptions` | Controls `RequestType` (GoosefsBlock / UfsFile) and optional `CreateUfsFileOptions` for THROUGH-mode writes |
+| `client::WriteBlockOptions` | Controls `RequestType` (GoosefsBlock / UfsFile) and optional `CreateUfsFileOptions` for CACHE_THROUGH and THROUGH-mode writes |
 | `block::BlockMapper` | Converts file-level byte ranges into block-level read/write plans |
 | `block::WorkerRouter` | Consistent-hash routing of block IDs to workers with failure tracking |
 | `io::GrpcBlockReader` | Low-level streaming block reader with flow-control ACK |
