@@ -24,7 +24,7 @@ use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 use tracing::{debug, instrument, warn};
 
-use crate::auth::{ChannelAuthenticator, ChannelIdInterceptor};
+use crate::auth::{ChannelAuthenticator, ChannelIdInterceptor, SaslStreamGuard};
 use crate::client::master_inquire::{create_master_inquire_client, MasterInquireClient};
 use crate::config::GooseFsConfig;
 use crate::error::{Error, Result};
@@ -81,6 +81,9 @@ pub struct MasterClient {
     inner: Arc<RwLock<AuthenticatedFsClient>>,
     config: GooseFsConfig,
     inquire_client: Arc<dyn MasterInquireClient>,
+    /// Keeps the SASL authentication stream alive for the channel's lifetime.
+    /// In SIMPLE mode, dropping this would cause the server to unregister the channel.
+    _sasl_guard: Arc<RwLock<Option<SaslStreamGuard>>>,
 }
 
 impl MasterClient {
@@ -105,13 +108,14 @@ impl MasterClient {
         inquire_client: Arc<dyn MasterInquireClient>,
     ) -> Result<Self> {
         let primary_addr = inquire_client.get_primary_rpc_address().await?;
-        let client = Self::build_authenticated_client(config, &primary_addr).await?;
+        let (client, sasl_guard) = Self::build_authenticated_client(config, &primary_addr).await?;
         debug!(addr = %primary_addr, auth_type = %config.auth_type, "connected to GooseFS Master");
 
         Ok(Self {
             inner: Arc::new(RwLock::new(client)),
             config: config.clone(),
             inquire_client,
+            _sasl_guard: Arc::new(RwLock::new(sasl_guard)),
         })
     }
 
@@ -129,14 +133,16 @@ impl MasterClient {
             ))),
             config,
             inquire_client,
+            _sasl_guard: Arc::new(RwLock::new(None)),
         }
     }
 
-    /// Build a gRPC channel and perform authentication, returning an authenticated client.
+    /// Build a gRPC channel and perform authentication, returning an authenticated client
+    /// and the SASL stream guard that must be kept alive.
     async fn build_authenticated_client(
         config: &GooseFsConfig,
         addr: &str,
-    ) -> Result<AuthenticatedFsClient> {
+    ) -> Result<(AuthenticatedFsClient, Option<SaslStreamGuard>)> {
         let channel = Self::build_raw_channel(config, addr).await?;
 
         // Perform SASL authentication based on the configured auth type
@@ -147,10 +153,12 @@ impl MasterClient {
         )
         .with_auth_timeout(config.auth_timeout);
 
-        let auth_channel = authenticator.authenticate(channel).await?;
+        let mut auth_channel = authenticator.authenticate(channel).await?;
+        let sasl_guard = auth_channel.take_sasl_guard();
 
-        Ok(FileSystemMasterClientServiceClient::new(
-            auth_channel.channel,
+        Ok((
+            FileSystemMasterClientServiceClient::new(auth_channel.channel),
+            sasl_guard,
         ))
     }
 
@@ -177,9 +185,13 @@ impl MasterClient {
         self.inquire_client.reset_cached_primary().await;
 
         let primary_addr = self.inquire_client.get_primary_rpc_address().await?;
-        let client = Self::build_authenticated_client(&self.config, &primary_addr).await?;
+        let (client, sasl_guard) =
+            Self::build_authenticated_client(&self.config, &primary_addr).await?;
         let mut inner = self.inner.write().await;
         *inner = client;
+        // Replace the old SASL guard (dropping the old one closes the old stream)
+        let mut guard = self._sasl_guard.write().await;
+        *guard = sasl_guard;
         debug!(addr = %primary_addr, "reconnected to GooseFS Master after failover");
         Ok(())
     }

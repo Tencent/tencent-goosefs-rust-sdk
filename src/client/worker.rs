@@ -26,7 +26,7 @@ use tonic::transport::Channel;
 use tonic::Streaming;
 use tracing::{debug, instrument, warn};
 
-use crate::auth::{ChannelAuthenticator, ChannelIdInterceptor};
+use crate::auth::{ChannelAuthenticator, ChannelIdInterceptor, SaslStreamGuard};
 use crate::config::GooseFsConfig;
 use crate::error::{Error, Result};
 use crate::proto::grpc::block::{
@@ -116,6 +116,8 @@ type AuthenticatedBlockWorkerClient =
 pub struct WorkerClient {
     inner: AuthenticatedBlockWorkerClient,
     addr: String,
+    /// Keeps the SASL authentication stream alive for the channel's lifetime.
+    _sasl_guard: std::sync::Arc<Option<SaslStreamGuard>>,
 }
 
 impl WorkerClient {
@@ -136,12 +138,14 @@ impl WorkerClient {
             ChannelAuthenticator::new(config.auth_type, config.auth_username.clone(), None)
                 .with_auth_timeout(config.auth_timeout);
 
-        let auth_channel = authenticator.authenticate(channel).await?;
+        let mut auth_channel = authenticator.authenticate(channel).await?;
+        let sasl_guard = auth_channel.take_sasl_guard();
         debug!(addr = %addr, auth_type = %config.auth_type, "connected to GooseFS Worker");
 
         Ok(Self {
             inner: BlockWorkerClient::new(auth_channel.channel),
             addr: addr.to_string(),
+            _sasl_guard: std::sync::Arc::new(sasl_guard),
         })
     }
 
@@ -163,6 +167,7 @@ impl WorkerClient {
         Ok(Self {
             inner: BlockWorkerClient::new(intercepted),
             addr: addr.to_string(),
+            _sasl_guard: std::sync::Arc::new(None),
         })
     }
 
@@ -175,6 +180,7 @@ impl WorkerClient {
         Self {
             inner: BlockWorkerClient::new(intercepted),
             addr,
+            _sasl_guard: std::sync::Arc::new(None),
         }
     }
 

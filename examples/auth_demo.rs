@@ -20,6 +20,10 @@ use goosefs_client::auth::{AuthType, ChannelAuthenticator};
 use goosefs_client::client::MasterClient;
 use goosefs_client::config::GooseFsConfig;
 use goosefs_client::error::Result;
+use goosefs_client::proto::grpc::file::{
+    file_system_master_client_service_client::FileSystemMasterClientServiceClient,
+    GetStatusPOptions, GetStatusPRequest,
+};
 use tonic::transport::Channel;
 
 /// Resolve the master address from environment or use default.
@@ -91,6 +95,29 @@ async fn demo_simple_low_level(addr: &str) -> Result<()> {
     println!("  ✅ SIMPLE (PLAIN SASL) authentication succeeded!");
     println!("     channel-id: {}", auth_channel.channel_id);
     println!("     username:   {}", username);
+
+    // Verify the authenticated channel works by performing an actual RPC
+    println!("  Verifying: performing GetStatus RPC on authenticated channel...");
+    let mut fs_client = FileSystemMasterClientServiceClient::new(auth_channel.channel);
+    let request = GetStatusPRequest {
+        path: Some("/".to_string()),
+        options: Some(GetStatusPOptions {
+            ..Default::default()
+        }),
+        request_id: None,
+    };
+    match fs_client.get_status(request).await {
+        Ok(resp) => {
+            let info = resp.into_inner().file_info;
+            println!(
+                "  ✅ RPC succeeded! Root path owner: {:?}",
+                info.as_ref().and_then(|f| f.owner.clone())
+            );
+        }
+        Err(e) => {
+            println!("  ❌ RPC failed after successful auth: {}", e);
+        }
+    }
 
     Ok(())
 }

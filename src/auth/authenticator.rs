@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
-use tonic::{Request, Status};
+use tonic::{Request, Status, Streaming};
 use tracing::debug;
 use uuid::Uuid;
 
@@ -172,11 +172,52 @@ pub struct ChannelAuthenticator {
 }
 
 /// Authenticated channel — wraps the original Channel with a channel-id interceptor.
+///
+/// **Important**: In SIMPLE mode, the SASL bidirectional stream must remain open
+/// for the entire lifetime of the authenticated channel. The server uses the stream
+/// as a long-poll on authentication state:
+/// - Client closing the stream → server unregisters the channel-id (unauthenticated)
+/// - Server closing the stream → client is no longer authenticated
+///
+/// The `_sasl_guard` field holds the stream handles to keep them alive.
+/// Corresponds to Java's `AuthenticatedChannelClientDriver` which also keeps
+/// the `StreamObserver` open after the handshake completes.
 pub struct AuthenticatedChannel {
     /// gRPC service with channel-id interceptor.
     pub channel: InterceptedService<Channel, ChannelIdInterceptor>,
     /// The channel-id assigned during authentication.
     pub channel_id: String,
+    /// Guard that keeps the SASL authentication stream alive.
+    ///
+    /// In SIMPLE mode, dropping this will close the bidirectional SASL stream,
+    /// causing the server to unregister the channel-id and reject subsequent RPCs.
+    /// In NOSASL mode, this is `None`.
+    _sasl_guard: Option<SaslStreamGuard>,
+}
+
+impl AuthenticatedChannel {
+    /// Take ownership of the SASL stream guard.
+    ///
+    /// The caller **must** keep the returned guard alive for as long as the
+    /// authenticated channel is in use. Dropping the guard will close the
+    /// SASL stream, causing the server to revoke authentication.
+    pub fn take_sasl_guard(&mut self) -> Option<SaslStreamGuard> {
+        self._sasl_guard.take()
+    }
+}
+
+/// Holds the SASL stream handles to prevent them from being dropped.
+///
+/// When this guard is dropped, the mpsc sender is dropped, which closes the
+/// client→server half of the bidirectional stream. The server's `onCompleted()`
+/// handler then calls `unregisterChannel()`, invalidating the authentication.
+///
+/// This type is intentionally opaque — callers only need to hold it, not interact with it.
+pub struct SaslStreamGuard {
+    /// Sender side of the SASL message channel — keeps the client→server stream open.
+    _tx: mpsc::Sender<SaslMessage>,
+    /// Server→client response stream — keeps the server→client stream open.
+    _response_stream: Streaming<SaslMessage>,
 }
 
 impl ChannelAuthenticator {
@@ -238,6 +279,7 @@ impl ChannelAuthenticator {
         Ok(AuthenticatedChannel {
             channel: InterceptedService::new(channel, interceptor),
             channel_id,
+            _sasl_guard: None,
         })
     }
 
@@ -350,11 +392,21 @@ impl ChannelAuthenticator {
 
         auth_result?;
 
-        // 6. Authentication succeeded, create channel with channel-id interceptor
+        // 6. Authentication succeeded, create channel with channel-id interceptor.
+        //    IMPORTANT: Keep the SASL stream alive! The server uses the bidirectional
+        //    stream as a long-poll on authentication state. If the client closes the
+        //    stream (by dropping tx), the server calls onCompleted() → unregisterChannel(),
+        //    which invalidates the channel-id and causes subsequent RPCs to fail with
+        //    "Channel is not authenticated".
+        //    See Java's AuthenticatedChannelClientDriver which also keeps the stream open.
         let interceptor = ChannelIdInterceptor::new(channel_id.clone());
         Ok(AuthenticatedChannel {
             channel: InterceptedService::new(channel, interceptor),
             channel_id,
+            _sasl_guard: Some(SaslStreamGuard {
+                _tx: tx,
+                _response_stream: response_stream,
+            }),
         })
     }
 }

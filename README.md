@@ -268,6 +268,78 @@ async fn main() -> goosefs_client::error::Result<()> {
 }
 ```
 
+#### Authentication Guide
+
+GooseFS supports two authentication modes. The Rust client must use the mode that matches the server-side configuration, otherwise RPCs will be rejected with `Unauthenticated`.
+
+**Authentication Modes**
+
+| Mode | Server Config | Description |
+|------|--------------|-------------|
+| **NOSASL** | `goosefs.security.authentication.type=NOSASL` | No SASL handshake. The client generates a local channel-id for API consistency, but the server does not verify any credentials. Suitable for development/testing environments. |
+| **SIMPLE** | `goosefs.security.authentication.type=SIMPLE` | PLAIN SASL handshake. The client sends a username via a bidirectional gRPC stream (`SaslAuthenticationService/Authenticate`), and the server returns a channel-id upon success. All subsequent RPCs carry this channel-id in gRPC metadata. This is the **default and recommended** mode. |
+
+**Server-Side Configuration**
+
+Set the authentication type in `conf/goosefs-site.properties` on the GooseFS Master/Worker:
+
+```properties
+# Option 1: SIMPLE authentication (recommended, default)
+goosefs.security.authentication.type=SIMPLE
+
+# Option 2: No authentication (development only)
+# goosefs.security.authentication.type=NOSASL
+```
+
+> **Important:** After changing the authentication type, you must restart the GooseFS cluster for the change to take effect.
+
+**Client-Side Configuration**
+
+```rust
+use goosefs_client::auth::AuthType;
+use goosefs_client::config::GooseFsConfig;
+use std::time::Duration;
+
+// ── SIMPLE mode (default) ──
+// GooseFsConfig::new() defaults to SIMPLE + current OS username.
+// No extra configuration needed in most cases.
+let config = GooseFsConfig::new("127.0.0.1:9200");
+
+// ── SIMPLE mode with explicit username ──
+let config = GooseFsConfig::new("127.0.0.1:9200")
+    .with_auth_type(AuthType::Simple)
+    .with_auth_username("myuser");
+
+// ── SIMPLE mode with custom auth timeout ──
+let config = GooseFsConfig::new("127.0.0.1:9200")
+    .with_auth_type(AuthType::Simple)
+    .with_auth_username("myuser")
+    .with_auth_timeout(Duration::from_secs(30));
+
+// ── NOSASL mode ──
+// Use only when the server is configured with NOSASL.
+let config = GooseFsConfig::new("127.0.0.1:9200")
+    .with_auth_type(AuthType::NoSasl);
+```
+
+**Default Behavior**
+
+| Config Field | Default Value | Description |
+|-------------|---------------|-------------|
+| `auth_type` | `AuthType::Simple` | Authentication mode |
+| `auth_username` | Current OS username (`$USER` / `$USERNAME`) | Username sent during SASL handshake |
+| `auth_timeout` | 10 seconds | Timeout for the SASL authentication handshake |
+
+**Common Errors**
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `Channel: xxx is not authenticated` | Client uses NOSASL but server requires SIMPLE | Change client to `.with_auth_type(AuthType::Simple)` |
+| `SASL authentication failed` | Server uses NOSASL but client sends SASL handshake | Change client to `.with_auth_type(AuthType::NoSasl)` |
+| `Connection timeout during auth` | Network issue or server not responding | Check server status; increase `auth_timeout` |
+
+> **Tip:** Run `cargo run --example auth_demo` for a comprehensive authentication demo that tests both modes.
+
 ### Example: Block-Level Streaming Read
 
 ```rust

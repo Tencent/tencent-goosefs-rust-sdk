@@ -22,6 +22,6 @@ mod authenticator;
 mod sasl_client;
 
 pub use authenticator::{
-    AuthType, AuthenticatedChannel, ChannelAuthenticator, ChannelIdInterceptor,
+    AuthType, AuthenticatedChannel, ChannelAuthenticator, ChannelIdInterceptor, SaslStreamGuard,
 };
 pub use sasl_client::SaslClientHandler;

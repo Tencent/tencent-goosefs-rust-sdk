@@ -14,7 +14,7 @@ use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 use tracing::{debug, instrument};
 
-use crate::auth::{ChannelAuthenticator, ChannelIdInterceptor};
+use crate::auth::{ChannelAuthenticator, ChannelIdInterceptor, SaslStreamGuard};
 use crate::client::master_inquire::{create_master_inquire_client, MasterInquireClient};
 use crate::config::GooseFsConfig;
 use crate::error::{Error, Result};
@@ -33,6 +33,8 @@ type AuthenticatedWorkerMgrClient =
 #[derive(Clone)]
 pub struct WorkerManagerClient {
     inner: AuthenticatedWorkerMgrClient,
+    /// Keeps the SASL authentication stream alive for the channel's lifetime.
+    _sasl_guard: Arc<Option<SaslStreamGuard>>,
 }
 
 impl WorkerManagerClient {
@@ -69,11 +71,13 @@ impl WorkerManagerClient {
             ChannelAuthenticator::new(config.auth_type, config.auth_username.clone(), None)
                 .with_auth_timeout(config.auth_timeout);
 
-        let auth_channel = authenticator.authenticate(channel).await?;
+        let mut auth_channel = authenticator.authenticate(channel).await?;
+        let sasl_guard = auth_channel.take_sasl_guard();
         debug!(addr = %primary_addr, auth_type = %config.auth_type, "connected to WorkerManagerMasterClientService");
 
         Ok(Self {
             inner: WorkerManagerMasterClientServiceClient::new(auth_channel.channel),
+            _sasl_guard: Arc::new(sasl_guard),
         })
     }
 
@@ -85,6 +89,7 @@ impl WorkerManagerClient {
         let intercepted = InterceptedService::new(channel, interceptor);
         Self {
             inner: WorkerManagerMasterClientServiceClient::new(intercepted),
+            _sasl_guard: Arc::new(None),
         }
     }
 
