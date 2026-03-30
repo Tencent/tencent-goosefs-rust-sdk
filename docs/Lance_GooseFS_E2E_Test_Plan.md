@@ -659,7 +659,78 @@ async fn test_lance_dataset_write_through() {
 }
 ```
 
-### 测试 4.9：持久化 + Append + 版本管理
+### 测试 4.9：认证支持 — SIMPLE 模式 ⭐（新增）
+
+> **目的**：验证通过 `goosefs_auth_type=simple` + `goosefs_auth_username=<user>` 配置认证信息后，
+> Dataset 的写入和读取能正常工作。
+>
+> **实现机制**：`auth_type` 和 `auth_username` 通过 `storage_options` 传递到 OpenDAL GooseFs Service，
+> 再透传到 goosefs-client-rs 的认证模块，在 gRPC 请求中携带认证信息。
+
+```rust
+#[ignore = "Requires GooseFS cluster"]
+#[tokio::test]
+async fn test_lance_dataset_with_auth() {
+    use lance::dataset::builder::DatasetBuilder;
+    use lance_io::object_store::ObjectStoreParams;
+    use lance_io::object_store::StorageOptionsAccessor;
+    use std::collections::HashMap;
+
+    let uri = "goosefs://127.0.0.1:9200/lance-test/datasets/auth.lance";
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("name", DataType::Utf8, false),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 2, 3])),
+            Arc::new(StringArray::from(vec!["alice", "bob", "charlie"])),
+        ],
+    )
+    .unwrap();
+
+    // Build storage_options with auth_type = simple and auth_username
+    let mut options = HashMap::new();
+    options.insert(STORAGE_OPT_AUTH_TYPE.to_string(), "simple".to_string());
+    options.insert(
+        STORAGE_OPT_AUTH_USERNAME.to_string(),
+        "testuser".to_string(),
+    );
+    let accessor = Arc::new(StorageOptionsAccessor::with_static_options(options));
+    let store_params = ObjectStoreParams {
+        storage_options_accessor: Some(accessor),
+        ..Default::default()
+    };
+
+    // Write with SIMPLE authentication
+    let batches = RecordBatchIterator::new([Ok(batch.clone())], schema.clone());
+    Dataset::write(
+        batches,
+        uri,
+        Some(WriteParams {
+            mode: WriteMode::Overwrite,
+            store_params: Some(store_params.clone()),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+
+    // Read with auth storage_options
+    let dataset = DatasetBuilder::from_uri(uri)
+        .with_storage_option(STORAGE_OPT_AUTH_TYPE, "simple")
+        .with_storage_option(STORAGE_OPT_AUTH_USERNAME, "testuser")
+        .load()
+        .await
+        .unwrap();
+    assert_eq!(dataset.count_rows(None).await.unwrap(), 3);
+}
+```
+
+### 测试 4.10：持久化 + Append + 版本管理
 
 > **目的**：验证 `CACHE_THROUGH` 模式下的 append 和版本回退仍然正确工作。
 
@@ -703,6 +774,8 @@ async fn test_lance_dataset_persisted_append_versioning() {
 |------------------|---|------|
 | `STORAGE_OPT_MASTER_ADDR` | `"goosefs_master_addr"` | Master 地址 key |
 | `STORAGE_OPT_WRITE_TYPE` | `"goosefs_write_type"` | 写入类型 key |
+| `STORAGE_OPT_AUTH_TYPE` | `"goosefs_auth_type"` | 认证类型 key（如 `"simple"`） |
+| `STORAGE_OPT_AUTH_USERNAME` | `"goosefs_auth_username"` | 认证用户名 key |
 | `STORAGE_OPT_BLOCK_SIZE` | `"goosefs_block_size"` | Block 大小 key |
 | `STORAGE_OPT_CHUNK_SIZE` | `"goosefs_chunk_size"` | Chunk 大小 key |
 | `WriteType::MustCache` | `"must_cache"` (i32=1) | 仅缓存，`NOT_PERSISTED` |
@@ -748,7 +821,8 @@ cd /opt/sourcecode/lance && cargo test -p lance --features goosefs --test goosef
 | 4.6 | Dataset storage_options | ✅ 3 rows | | |
 | 4.7 | Dataset CACHE_THROUGH 持久化 | ✅ 5 rows, PERSISTED | | |
 | 4.8 | Dataset THROUGH 直写 UFS | ✅ 3 rows, PERSISTED | | |
-| 4.9 | 持久化 + append + 版本管理 | ✅ v1=3, v2=5, PERSISTED | | |
+| 4.9 | Dataset SIMPLE 认证 | ✅ 3 rows, auth=simple | | |
+| 4.10 | 持久化 + append + 版本管理 | ✅ v1=3, v2=5, PERSISTED | | |
 
 ---
 

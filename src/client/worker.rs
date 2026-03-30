@@ -93,7 +93,7 @@ impl WriteBlockHandle {
 
     /// Close the write stream by dropping the request sender and wait for
     /// any final response from the server.
-    pub async fn close(self) -> Result<()> {
+    pub async fn close(mut self) -> Result<()> {
         // Drop the request sender to close the client→server half of the stream.
         // The server will then call onCompleted → commitBlock → replySuccess.
         drop(self.request_tx);
@@ -101,8 +101,28 @@ impl WriteBlockHandle {
             block_id = self.block_id,
             "closed write stream, waiting for server finalize"
         );
-        // The background task will finish when it has forwarded all server responses.
-        // We don't need to explicitly wait; the task will clean up on its own.
+        // Wait for the server's final response (or stream close).
+        // This ensures the background task finishes before we return,
+        // preventing the Channel from being dropped while the task is still running.
+        while let Some(result) = self.response_rx.recv().await {
+            match result {
+                Ok(_resp) => {
+                    debug!(
+                        block_id = self.block_id,
+                        "received final response from server"
+                    );
+                }
+                Err(status) => {
+                    return Err(Error::GrpcError {
+                        message: format!(
+                            "WriteBlock server error for block_id={}: {}",
+                            self.block_id, status
+                        ),
+                        source: status,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 }

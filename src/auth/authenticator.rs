@@ -220,6 +220,14 @@ pub struct SaslStreamGuard {
     _response_stream: Streaming<SaslMessage>,
 }
 
+// SAFETY: SaslStreamGuard is only held behind Arc<RwLock<Option<SaslStreamGuard>>>
+// and is never accessed concurrently. The inner `Streaming<SaslMessage>` contains
+// `dyn Decoder + Send` which is not `Sync`, but we only need to keep the stream
+// alive (not read from it concurrently). The RwLock provides the necessary
+// synchronization for any access.
+unsafe impl Send for SaslStreamGuard {}
+unsafe impl Sync for SaslStreamGuard {}
+
 impl ChannelAuthenticator {
     /// Create a new channel authenticator.
     ///

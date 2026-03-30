@@ -313,6 +313,48 @@ impl GooseFsFileWriter {
         block_size: u64,
         chunk_size: usize,
     ) -> Result<()> {
+        const MAX_RETRIES: usize = 3;
+        let mut last_err = None;
+
+        for attempt in 0..MAX_RETRIES {
+            match self
+                .write_block_inner(plan, data, block_size, chunk_size)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    let err_msg = format!("{:?}", e);
+                    if err_msg.contains("transport error") || err_msg.contains("ConnectionReset") {
+                        warn!(
+                            attempt = attempt + 1,
+                            max_retries = MAX_RETRIES,
+                            error = %e,
+                            "write_block transport error, retrying..."
+                        );
+                        last_err = Some(e);
+                        // Small delay before retry
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            100 * (attempt as u64 + 1),
+                        ))
+                        .await;
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        Err(last_err.unwrap())
+    }
+
+    /// Inner implementation of write_block (no retry).
+    async fn write_block_inner(
+        &self,
+        plan: &BlockWritePlan,
+        data: &[u8],
+        block_size: u64,
+        chunk_size: usize,
+    ) -> Result<()> {
         // Generate a block ID for new blocks.
         // In GooseFS, block IDs are typically assigned as:
         //   file_id * MAX_BLOCKS_PER_FILE + block_index
