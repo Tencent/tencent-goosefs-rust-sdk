@@ -11,6 +11,7 @@ pub use master_inquire::{
     SingleMasterInquireClient,
 };
 pub use worker::WorkerClient;
+pub use worker::WorkerClientPool;
 pub use worker::WriteBlockHandle;
 pub use worker::WriteBlockOptions;
 pub use worker_manager::WorkerManagerClient;

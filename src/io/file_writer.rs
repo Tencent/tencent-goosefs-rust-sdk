@@ -35,13 +35,15 @@
 //! # }
 //! ```
 
+use std::sync::Arc;
+
+use bytes::Bytes;
 use tracing::{debug, info, warn};
 
-use crate::block::mapper::BlockWritePlan;
 use crate::block::router::WorkerRouter;
 use crate::client::master::default_file_mode;
-use crate::client::worker::WriteBlockOptions;
-use crate::client::{MasterClient, WorkerClient, WorkerManagerClient};
+use crate::client::worker::{WriteBlockOptions, WorkerClientPool};
+use crate::client::{MasterClient, WorkerManagerClient};
 use crate::config::GooseFsConfig;
 use crate::error::{Error, Result};
 use crate::io::writer::GrpcBlockWriter;
@@ -128,21 +130,28 @@ pub struct GooseFsFileWriter {
     path: String,
     /// Master client for metadata operations.
     master: MasterClient,
-    /// Worker router for block → worker mapping.
+    /// Worker router for block → worker mapping (with failed-worker exclusion).
     router: WorkerRouter,
+    /// Connection pool for reusing authenticated worker gRPC channels.
+    /// Matches Java's `FileSystemContext.acquireBlockWorkerClient()`.
+    worker_pool: Arc<WorkerClientPool>,
     /// File info returned by CreateFile.
     file_info: FileInfo,
-    /// Total bytes written so far across all blocks (includes flushed + buffered).
+    /// Total bytes written so far across all blocks (committed only).
     total_bytes_written: u64,
-    /// Whether the file has been completed (closed).
+    /// Whether the file has been completed (closed) or cancelled.
     completed: bool,
+    /// Whether the file write has been cancelled.
+    cancelled: bool,
     /// Write strategy derived from config.write_type + FileInfo.
     write_strategy: WriteStrategy,
-    /// Internal buffer for accumulating data before flushing a full block.
-    /// This is needed because each block can only be written once — the Worker
-    /// commits the block on flush/close and subsequent writes to the same
-    /// block_id will fail with AlreadyExists.
-    buffer: Vec<u8>,
+    /// Block IDs that have been successfully committed to workers.
+    /// Used for cancel/rollback — matches Java's `mPreviousCommittedBlockIds`.
+    committed_block_ids: Vec<i64>,
+    /// Current in-progress block writer (chunk-level streaming).
+    /// Data is streamed chunk-by-chunk as it arrives, matching Java's
+    /// `BlockOutStream` + `DataWriter.writeChunk()` pattern.
+    current_block_writer: Option<ActiveBlockWriter>,
 }
 
 impl GooseFsFileWriter {
@@ -229,30 +238,37 @@ impl GooseFsFileWriter {
         let router = WorkerRouter::new();
         router.update_workers(workers).await;
 
+        // Create connection pool for worker client reuse
+        let worker_pool = WorkerClientPool::new_shared(config.clone());
+
         Ok(Self {
             config: config.clone(),
             path: path.to_string(),
             master,
             router,
+            worker_pool,
             file_info,
             total_bytes_written: 0,
             completed: false,
+            cancelled: false,
             write_strategy,
-            buffer: Vec::new(),
+            committed_block_ids: Vec::new(),
+            current_block_writer: None,
         })
     }
 
-    /// Write data to the file.
+    /// Write data to the file using chunk-level streaming.
     ///
-    /// Data is accumulated in an internal buffer and flushed to Workers
-    /// automatically when a full block is ready. Call `close()` to flush
-    /// any remaining buffered data and finalize the file.
+    /// Data is streamed to workers chunk-by-chunk as it arrives, matching
+    /// Java's `BlockOutStream.write()` → `updateCurrentChunk()` → `DataWriter.writeChunk()`
+    /// pattern. When a block boundary is reached, the current block is flushed
+    /// and closed, and a new block writer is opened for the next block.
     ///
     /// Can be called multiple times for streaming writes.
     pub async fn write(&mut self, data: &[u8]) -> Result<()> {
-        if self.completed {
+        if self.completed || self.cancelled {
             return Err(Error::BlockIoError {
-                message: "cannot write to a completed file".to_string(),
+                message: "cannot write to a completed or cancelled file".to_string(),
             });
         }
 
@@ -263,108 +279,72 @@ impl GooseFsFileWriter {
         let block_size = self
             .file_info
             .block_size_bytes
-            .unwrap_or(self.config.block_size as i64) as usize;
-
-        // Append data to buffer, flushing full blocks as they accumulate.
-        let mut remaining = data;
-        while !remaining.is_empty() {
-            let space_in_block = block_size - (self.buffer.len() % block_size);
-            let to_copy = std::cmp::min(remaining.len(), space_in_block);
-            self.buffer.extend_from_slice(&remaining[..to_copy]);
-            remaining = &remaining[to_copy..];
-
-            // If buffer has a full block, flush it.
-            if self.buffer.len() >= block_size {
-                self.flush_buffer(block_size).await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Flush complete blocks from the internal buffer to Workers.
-    async fn flush_buffer(&mut self, block_size: usize) -> Result<()> {
+            .unwrap_or(self.config.block_size as i64) as u64;
         let chunk_size = self.config.chunk_size as usize;
 
-        while self.buffer.len() >= block_size {
-            // Take the first block_size bytes from the buffer.
-            let block_data: Vec<u8> = self.buffer.drain(..block_size).collect();
+        let mut offset = 0usize;
+        while offset < data.len() {
+            // Ensure we have an active block writer
+            if self.current_block_writer.is_none()
+                || self.current_block_writer.as_ref().unwrap().remaining() == 0
+            {
+                self.open_next_block(block_size).await?;
+            }
 
-            let block_index = self.total_bytes_written / block_size as u64;
-            let plan = BlockWritePlan {
-                block_index,
-                offset_in_block: 0,
-                length: block_data.len() as u64,
-            };
+            let writer = self.current_block_writer.as_mut().unwrap();
+            let remaining_in_block = writer.remaining() as usize;
+            let remaining_data = data.len() - offset;
+            let to_write = std::cmp::min(remaining_in_block, remaining_data);
 
-            self.write_block(&plan, &block_data, block_size as u64, chunk_size)
-                .await?;
-            self.total_bytes_written += block_data.len() as u64;
+            // Stream data chunk-by-chunk (matching Java's chunk-level granularity)
+            let end = offset + to_write;
+            let mut chunk_offset = offset;
+            while chunk_offset < end {
+                let chunk_end = std::cmp::min(chunk_offset + chunk_size, end);
+                let chunk = Bytes::copy_from_slice(&data[chunk_offset..chunk_end]);
+                let chunk_len = chunk.len() as u64;
+
+                match writer.writer.write_chunk(chunk).await {
+                    Ok(()) => {
+                        writer.bytes_written += chunk_len;
+                    }
+                    Err(e) => {
+                        return self.handle_cache_write_exception(e).await;
+                    }
+                }
+                chunk_offset = chunk_end;
+            }
+
+            offset = end;
+
+            // If block is full, flush and close it
+            if writer.remaining() == 0 {
+                self.close_current_block().await?;
+            }
         }
 
         Ok(())
     }
 
-    /// Write a single block's worth of data to a worker.
-    async fn write_block(
-        &self,
-        plan: &BlockWritePlan,
-        data: &[u8],
-        block_size: u64,
-        chunk_size: usize,
-    ) -> Result<()> {
-        const MAX_RETRIES: usize = 3;
-        let mut last_err = None;
-
-        for attempt in 0..MAX_RETRIES {
-            match self
-                .write_block_inner(plan, data, block_size, chunk_size)
-                .await
-            {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    let err_msg = format!("{:?}", e);
-                    if err_msg.contains("transport error") || err_msg.contains("ConnectionReset") {
-                        warn!(
-                            attempt = attempt + 1,
-                            max_retries = MAX_RETRIES,
-                            error = %e,
-                            "write_block transport error, retrying..."
-                        );
-                        last_err = Some(e);
-                        // Small delay before retry
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            100 * (attempt as u64 + 1),
-                        ))
-                        .await;
-                        continue;
-                    }
-                    return Err(e);
-                }
-            }
+    /// Open the next block writer for streaming writes.
+    ///
+    /// Matches Java's `GooseFSFileOutStream.getNextBlock()`:
+    /// - Close the current block if any
+    /// - Compute the next block ID
+    /// - Select a worker (excluding failed workers)
+    /// - Open a new `GrpcBlockWriter` via the connection pool
+    async fn open_next_block(&mut self, block_size: u64) -> Result<()> {
+        // Close current block if it exists
+        if self.current_block_writer.is_some() {
+            self.close_current_block().await?;
         }
 
-        Err(last_err.unwrap())
-    }
-
-    /// Inner implementation of write_block (no retry).
-    async fn write_block_inner(
-        &self,
-        plan: &BlockWritePlan,
-        data: &[u8],
-        block_size: u64,
-        chunk_size: usize,
-    ) -> Result<()> {
-        // Generate a block ID for new blocks.
-        // In GooseFS, block IDs are typically assigned as:
-        //   file_id * MAX_BLOCKS_PER_FILE + block_index
-        // We use a simplified scheme here; the actual block ID assignment
-        // depends on GooseFS server-side logic. For writing new blocks,
-        // we use a deterministic ID based on file_id and block_index.
         let file_id = self.file_info.file_id.unwrap_or(0);
-        let block_id = compute_block_id(file_id, plan.block_index);
+        let block_index = self.committed_block_ids.len() as u64;
+        let block_id = compute_block_id(file_id, block_index);
 
-        // Select a worker for this block
+        // Select a worker for this block (failed workers are automatically excluded
+        // by WorkerRouter's consistent hashing with failure tracking)
         let worker_info = self.router.select_worker(block_id).await?;
         let addr = worker_info
             .address
@@ -382,14 +362,21 @@ impl GooseFsFileWriter {
 
         debug!(
             block_id = block_id,
-            block_index = plan.block_index,
-            data_len = data.len(),
+            block_index = block_index,
             worker = %worker_addr,
-            "writing block"
+            "opening new block writer"
         );
 
-        // Connect to the worker
-        let worker = WorkerClient::connect(&worker_addr, &self.config).await?;
+        // Acquire worker client from connection pool (reuses existing channel)
+        let worker = match self.worker_pool.acquire(&worker_addr).await {
+            Ok(w) => w,
+            Err(e) => {
+                // Mark worker as failed for future exclusion
+                self.router.mark_failed(addr);
+                self.worker_pool.invalidate(&worker_addr).await;
+                return Err(e);
+            }
+        };
 
         // Build write options from the resolved strategy
         let write_opts = WriteBlockOptions {
@@ -398,56 +385,165 @@ impl GooseFsFileWriter {
         };
 
         // Open block writer with space reservation = block size
-        let mut block_writer =
-            GrpcBlockWriter::open(&worker, block_id, block_size as i64, write_opts).await?;
+        let block_writer = match GrpcBlockWriter::open(&worker, block_id, block_size as i64, write_opts).await {
+            Ok(w) => w,
+            Err(e) => {
+                // Mark worker as failed on open failure
+                self.router.mark_failed(addr);
+                self.worker_pool.invalidate(&worker_addr).await;
+                return Err(e);
+            }
+        };
 
-        // Write all data in chunks
-        block_writer.write_all(data, chunk_size).await?;
+        self.current_block_writer = Some(ActiveBlockWriter {
+            writer: block_writer,
+            block_id,
+            block_size,
+            bytes_written: 0,
+            worker_addr,
+        });
 
-        // Flush to ensure data is persisted on the worker
-        let ack_offset = block_writer.flush().await?;
-        debug!(
-            block_id = block_id,
-            ack_offset = ack_offset,
-            "block flushed"
+        Ok(())
+    }
+
+    /// Close the current block writer: flush, close, and record the committed block ID.
+    ///
+    /// Matches Java's block close in `getNextBlock()` and `close()`.
+    async fn close_current_block(&mut self) -> Result<()> {
+        if let Some(active) = self.current_block_writer.take() {
+            let block_id = active.block_id;
+            let bytes_written = active.bytes_written;
+            let mut writer = active.writer;
+
+            if bytes_written > 0 {
+                // Flush to ensure data is persisted on the worker
+                let ack_offset = writer.flush().await?;
+                debug!(
+                    block_id = block_id,
+                    ack_offset = ack_offset,
+                    bytes_written = bytes_written,
+                    "block flushed"
+                );
+
+                // Close the writer (triggers server-side commitBlock)
+                writer.close().await?;
+
+                // Track committed block for cancel/rollback
+                self.committed_block_ids.push(block_id);
+                self.total_bytes_written += bytes_written;
+            } else {
+                // No data written, just cancel the empty block
+                writer.cancel().await;
+            }
+        }
+        Ok(())
+    }
+
+    /// Handle a cache write exception.
+    ///
+    /// Matches Java's `GooseFSFileOutStream.handleCacheWriteException()`:
+    /// - Cancel the current block stream
+    /// - Mark the worker as failed
+    /// - Return the error (caller decides whether to retry or propagate)
+    async fn handle_cache_write_exception(&mut self, err: Error) -> Result<()> {
+        warn!(
+            path = %self.path,
+            error = %err,
+            "failed to write to GooseFS cache, cancelling block"
         );
 
-        // Close the writer
-        block_writer.close().await?;
+        // Cancel the current block writer
+        if let Some(active) = self.current_block_writer.take() {
+            // Mark the worker as failed for future exclusion
+            self.router.mark_failed(
+                &crate::proto::grpc::WorkerNetAddress {
+                    host: Some(active.worker_addr.split(':').next().unwrap_or("unknown").to_string()),
+                    rpc_port: active.worker_addr.split(':').nth(1).and_then(|p| p.parse().ok()),
+                    ..Default::default()
+                },
+            );
+            self.worker_pool.invalidate(&active.worker_addr).await;
+            active.writer.cancel().await;
+        }
+
+        Err(err)
+    }
+
+    /// Cancel the file write, cleaning up all committed blocks.
+    ///
+    /// Matches Java's `GooseFSFileOutStream.cancel()`:
+    /// 1. Cancel the current in-progress block stream
+    /// 2. Request Master to remove all previously committed blocks
+    /// 3. Mark the file as cancelled
+    ///
+    /// After cancellation, the incomplete file should be deleted by the caller.
+    pub async fn cancel(&mut self) -> Result<()> {
+        if self.completed || self.cancelled {
+            return Ok(());
+        }
+
+        self.cancelled = true;
+
+        // 1. Cancel the current block writer if any
+        if let Some(active) = self.current_block_writer.take() {
+            active.writer.cancel().await;
+        }
+
+        // 2. Request Master to remove committed blocks
+        // Note: Java uses `fileSystemMasterClient.removeBlocks(mPreviousCommittedBlockIds)`
+        // Since our MasterClient doesn't have removeBlocks yet, we delete the incomplete file
+        // which will trigger block cleanup on the Master side.
+        if !self.committed_block_ids.is_empty() {
+            warn!(
+                path = %self.path,
+                committed_blocks = self.committed_block_ids.len(),
+                "cancelling file write, requesting cleanup of committed blocks"
+            );
+            // Delete the incomplete file — Master will clean up associated blocks
+            if let Err(e) = self.master.delete(&self.path, false).await {
+                warn!(
+                    path = %self.path,
+                    error = %e,
+                    "failed to delete incomplete file during cancel — blocks may need manual cleanup"
+                );
+            }
+        }
+
+        info!(
+            path = %self.path,
+            committed_blocks = self.committed_block_ids.len(),
+            "file write cancelled"
+        );
 
         Ok(())
     }
 
     /// Close the file writer, finalizing the file on the Master.
     ///
-    /// This flushes any remaining buffered data, then calls `CompleteFile`
-    /// to mark the file as fully written. After calling `close()`, the
-    /// writer cannot be used again.
+    /// This flushes the current in-progress block (if any), then calls
+    /// `CompleteFile` to mark the file as fully written. After calling
+    /// `close()`, the writer cannot be used again.
+    ///
+    /// Matches Java's `GooseFSFileOutStream.close()`.
     pub async fn close(&mut self) -> Result<()> {
         if self.completed {
             warn!(path = %self.path, "close() called on already-completed file");
             return Ok(());
         }
 
-        // Flush any remaining buffered data as the final (possibly partial) block.
-        if !self.buffer.is_empty() {
-            let block_size = self
-                .file_info
-                .block_size_bytes
-                .unwrap_or(self.config.block_size as i64) as usize;
-            let chunk_size = self.config.chunk_size as usize;
+        if self.cancelled {
+            return Ok(());
+        }
 
-            let remaining_data = std::mem::take(&mut self.buffer);
-            let block_index = self.total_bytes_written / block_size as u64;
-            let plan = BlockWritePlan {
-                block_index,
-                offset_in_block: 0,
-                length: remaining_data.len() as u64,
-            };
-
-            self.write_block(&plan, &remaining_data, block_size as u64, chunk_size)
-                .await?;
-            self.total_bytes_written += remaining_data.len() as u64;
+        // Close the current in-progress block (flush + commitBlock)
+        if let Err(e) = self.close_current_block().await {
+            warn!(
+                path = %self.path,
+                error = %e,
+                "failed to close current block during file close, cancelling"
+            );
+            self.cancel().await?;
+            return Err(e);
         }
 
         // Complete the file with the total bytes written
@@ -479,6 +575,7 @@ impl GooseFsFileWriter {
         info!(
             path = %self.path,
             total_bytes = self.total_bytes_written,
+            blocks = self.committed_block_ids.len(),
             "file write completed"
         );
 
@@ -569,13 +666,39 @@ fn compute_block_id(file_id: i64, block_index: u64) -> i64 {
     (container_id << SEQUENCE_NUMBER_BITS) | seq
 }
 
+/// State for the currently active block being written.
+///
+/// Holds the `GrpcBlockWriter` and tracks how many bytes have been
+/// streamed to it. This enables chunk-level streaming (matching Java's
+/// `BlockOutStream` pattern) instead of whole-block buffering.
+struct ActiveBlockWriter {
+    /// The underlying gRPC streaming writer.
+    writer: GrpcBlockWriter,
+    /// Block ID being written.
+    block_id: i64,
+    /// Total block capacity.
+    block_size: u64,
+    /// Bytes written to this block so far.
+    bytes_written: u64,
+    /// Worker address (for failure tracking).
+    worker_addr: String,
+}
+
+impl ActiveBlockWriter {
+    /// Remaining bytes that can be written to this block.
+    fn remaining(&self) -> u64 {
+        self.block_size - self.bytes_written
+    }
+}
+
 impl Drop for GooseFsFileWriter {
     fn drop(&mut self) {
-        if !self.completed && self.total_bytes_written > 0 {
+        if !self.completed && !self.cancelled && self.total_bytes_written > 0 {
             warn!(
                 path = %self.path,
                 bytes_written = self.total_bytes_written,
-                "GooseFsFileWriter dropped without calling close() — file may be incomplete"
+                committed_blocks = self.committed_block_ids.len(),
+                "GooseFsFileWriter dropped without calling close() or cancel() — file may be incomplete"
             );
         }
     }
@@ -640,8 +763,8 @@ mod tests {
     fn test_strategy_cache_through() {
         let fi = make_test_file_info();
         let s = resolve_write_strategy(Some(3), &fi); // CACHE_THROUGH
-        assert_eq!(s.request_type, RequestType::GoosefsBlock);
-        assert!(s.create_ufs_file_options.is_none());
+        assert_eq!(s.request_type, RequestType::UfsFile);
+        assert!(s.create_ufs_file_options.is_some());
         assert!(!s.need_async_persist);
     }
 

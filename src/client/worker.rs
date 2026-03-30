@@ -16,9 +16,11 @@
 //! through the request sender, then calls `flush()` or `close()` on the handle
 //! to receive server responses.
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tonic::service::interceptor::InterceptedService;
@@ -124,6 +126,20 @@ impl WriteBlockHandle {
             }
         }
         Ok(())
+    }
+
+    /// Cancel the write stream without waiting for server finalization.
+    ///
+    /// Drops the request sender and response receiver immediately.
+    /// The server will detect the stream cancellation and clean up.
+    /// Matches Java's `GrpcBlockingStream.cancel()`.
+    pub async fn cancel(self) {
+        drop(self.request_tx);
+        drop(self.response_rx);
+        debug!(
+            block_id = self.block_id,
+            "cancelled write stream"
+        );
     }
 }
 
@@ -358,5 +374,72 @@ impl WorkerClient {
     /// The worker address this client is connected to.
     pub fn addr(&self) -> &str {
         &self.addr
+    }
+}
+
+/// Connection pool for `WorkerClient` instances.
+///
+/// Caches authenticated gRPC channels by worker address, avoiding the overhead
+/// of re-establishing connections and re-authenticating for every block write.
+/// Matches Java's `FileSystemContext.acquireBlockWorkerClient()` pattern.
+///
+/// The pool is thread-safe and can be shared across concurrent writers.
+pub struct WorkerClientPool {
+    /// Cached worker clients keyed by `"host:port"` address.
+    clients: RwLock<HashMap<String, WorkerClient>>,
+    /// Config used to create new connections.
+    config: GooseFsConfig,
+}
+
+impl WorkerClientPool {
+    /// Create a new empty connection pool.
+    pub fn new(config: GooseFsConfig) -> Self {
+        Self {
+            clients: RwLock::new(HashMap::new()),
+            config,
+        }
+    }
+
+    /// Acquire a `WorkerClient` for the given address.
+    ///
+    /// Returns a cached client if one exists, otherwise creates a new connection.
+    /// The tonic `Channel` supports multiplexing, so a single cached client can
+    /// handle multiple concurrent RPCs.
+    pub async fn acquire(&self, addr: &str) -> Result<WorkerClient> {
+        // Fast path: check read lock first
+        {
+            let cache = self.clients.read().await;
+            if let Some(client) = cache.get(addr) {
+                debug!(addr = %addr, "reusing cached WorkerClient");
+                return Ok(client.clone());
+            }
+        }
+
+        // Slow path: create new connection under write lock
+        let mut cache = self.clients.write().await;
+        // Double-check after acquiring write lock (another task may have inserted)
+        if let Some(client) = cache.get(addr) {
+            return Ok(client.clone());
+        }
+
+        debug!(addr = %addr, "creating new WorkerClient for pool");
+        let client = WorkerClient::connect(addr, &self.config).await?;
+        cache.insert(addr.to_string(), client.clone());
+        Ok(client)
+    }
+
+    /// Remove a worker from the pool (e.g., after a connection failure).
+    ///
+    /// The next `acquire()` call for this address will create a fresh connection.
+    pub async fn invalidate(&self, addr: &str) {
+        let mut cache = self.clients.write().await;
+        if cache.remove(addr).is_some() {
+            debug!(addr = %addr, "invalidated WorkerClient from pool");
+        }
+    }
+
+    /// Create a new pool wrapped in `Arc` for shared ownership.
+    pub fn new_shared(config: GooseFsConfig) -> Arc<Self> {
+        Arc::new(Self::new(config))
     }
 }

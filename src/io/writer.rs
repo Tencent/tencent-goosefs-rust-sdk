@@ -182,6 +182,20 @@ impl GrpcBlockWriter {
         Ok(())
     }
 
+    /// Cancel the write without committing the block.
+    ///
+    /// This aborts the gRPC stream without waiting for server finalization.
+    /// The server will clean up the temporary block data.
+    /// Matches Java's `GrpcDataWriter.cancel()`.
+    pub async fn cancel(self) {
+        let block_id = self.block_id;
+        self.handle.cancel().await;
+        debug!(
+            block_id = block_id,
+            "cancelled GrpcBlockWriter"
+        );
+    }
+
     /// The block ID being written.
     pub fn block_id(&self) -> i64 {
         self.block_id

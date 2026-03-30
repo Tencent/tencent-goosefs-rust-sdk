@@ -1,7 +1,7 @@
 # GooseFS gRPC 集成实现方案
 
 > **技术路线**：Lance ObjectStore → OpenDAL → GooseFS Rust Client (gRPC) → GooseFS gRPC Service  
-> **版本**: v1.3 | **日期**: 2026-03-28
+> **版本**: v1.5 | **日期**: 2026-03-30
 
 ---
 
@@ -20,6 +20,8 @@
 11. [实施路线图](#11-实施路线图)
 12. [OpenDAL GooseFS Service 实现方案](#12-opendal-goosefs-service-实现方案) ← **v1.2 新增**
 13. [Lance GooseFS Provider 详细设计](#13-lance-goosefs-provider-详细设计phase-2c) ← **v1.3 更新：含实际落地代码**
+14. [认证支持设计](#14-认证支持设计) ← **v1.4 新增**
+15. [写入管道重构：对齐 Java GooseFSFileOutStream](#15-写入管道重构对齐-java-goosefsfileoutstream) ← **v1.5 新增**
 
 ---
 
@@ -424,6 +426,8 @@ impl GrpcBlockReader {
 
 #### 3.10.1 GooseFsFileWriter — 端到端写入管道
 
+> **v1.5 重构**：对齐 Java `GooseFSFileOutStream`，改为 chunk 级流式写入 + 连接池复用 + 失败 Worker 排除 + cancel/回滚。
+
 ```text
 写入流程:
 GooseFsFileWriter::create(path)
@@ -431,24 +435,31 @@ GooseFsFileWriter::create(path)
   → resolve_write_strategy()             根据 writeType + FileInfo 推导写入策略
   → WorkerManagerClient.get_worker_info_list()  发现 Worker
   → WorkerRouter.update_workers()        构建一致性哈希环
+  → WorkerClientPool::new_shared()       创建连接池（复用 gRPC channel）
 
-GooseFsFileWriter::write(data)           可多次调用
-  → BlockMapper.plan_write()             拆分数据为 Block 段
-  → for each block:
-      → compute_block_id(file_id, block_index)  计算 Block ID
-      → WorkerRouter.select_worker()     一致性哈希路由
-      → WorkerClient.connect()           连接 Worker
-      → GrpcBlockWriter.open(WriteBlockOptions)  按策略启动双向流
-        ├─ MUST_CACHE/ASYNC_THROUGH: GoosefsBlock
-        └─ CACHE_THROUGH/THROUGH: UfsFile + CreateUfsFileOptions
-      → GrpcBlockWriter.write_all()      分 chunk 发送数据
-      → GrpcBlockWriter.flush()          发送 flush 并等待 ACK
-      → GrpcBlockWriter.close()          关闭写入流
+GooseFsFileWriter::write(data)           可多次调用，chunk 级流式发送
+  → if current_block_writer is None or full:
+      → open_next_block(block_size)      打开下一个 Block
+        → compute_block_id(file_id, block_index)  计算 Block ID
+        → WorkerRouter.select_worker()   一致性哈希路由（自动排除失败 Worker）
+        → WorkerClientPool.acquire()     从连接池获取/复用 Worker 连接
+        → GrpcBlockWriter.open(WriteBlockOptions)  按策略启动双向流
+          ├─ MUST_CACHE/ASYNC_THROUGH: GoosefsBlock
+          └─ CACHE_THROUGH/THROUGH: UfsFile + CreateUfsFileOptions
+  → for each chunk (chunk_size bytes):
+      → GrpcBlockWriter.write_chunk()    流式发送单个 chunk（不缓冲整 block）
+  → if block full:
+      → close_current_block()            flush + close + 记录 committed_block_id
 
 GooseFsFileWriter::close()
+  → close_current_block()               flush 最后一个 block
   → MasterClient.complete_file()         标记文件写入完成
   → if ASYNC_THROUGH:
       → MasterClient.schedule_async_persistence()  调度异步持久化
+
+GooseFsFileWriter::cancel()              取消写入 + 回滚
+  → cancel current_block_writer          取消当前 block stream
+  → MasterClient.delete(path)            删除 incomplete 文件（触发 block 清理）
 ```
 
 **使用方式**：
@@ -524,10 +535,11 @@ while let Some(chunk) = reader.read_next_block().await? {
 │  MasterClient        ← 文件元数据 CRUD                              │
 │  WorkerManagerClient ← Worker 发现                                  │
 │  WorkerClient        ← Block 级双向流 RPC                           │
+│  WorkerClientPool    ← Worker 连接池（复用 gRPC channel）  ← v1.5   │
 │  BlockMapper         ← 文件范围 → Block 计划                        │
-│  WorkerRouter        ← 一致性哈希路由                                │
+│  WorkerRouter        ← 一致性哈希路由（含失败 Worker 排除）           │
 │  GrpcBlockReader     ← 单 Block 流式读（带流控 ACK）                 │
-│  GrpcBlockWriter     ← 单 Block 流式写（带 flush/close）             │
+│  GrpcBlockWriter     ← 单 Block 流式写（带 flush/close/cancel）      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -606,10 +618,12 @@ GooseFS 支持 6 种 `WritePType`，其中 4 种在线上活跃使用：
 
 Layer 1 — WorkerClient::write_block()      ← 新增 WriteBlockOptions（RequestType + CreateUfsFileOptions）
   ↑
-Layer 2 — GrpcBlockWriter::open()           ← 透传 WriteBlockOptions
+Layer 2 — GrpcBlockWriter::open()           ← 透传 WriteBlockOptions，新增 cancel() 支持
   ↑
-Layer 3 — GooseFsFileWriter::write_block()  ← 根据 WriteStrategy 决策 RequestType
+Layer 3 — GooseFsFileWriter::write()        ← chunk 级流式写入（不再缓冲整 block）
+  ↑                         ::open_next_block()  ← 连接池复用 + 失败 Worker 排除
   ↑                         ::close()       ← ASYNC_THROUGH 时调用 schedule_async_persistence
+  ↑                         ::cancel()      ← 取消写入 + 回滚已提交 block
 Layer 4 — MasterClient::complete_file()     ← 增加可选 async_persist_options 参数
 ```
 
@@ -799,13 +813,32 @@ pub async fn open(
 
 #### 4.7.3 Layer 3: `GooseFsFileWriter` — 核心决策逻辑
 
-**新增字段**：
+> **v1.5 重构**：对齐 Java `GooseFSFileOutStream`，增加连接池、失败 Worker 排除、cancel/回滚、chunk 级流式写入。
+
+**新增/修改字段**：
 
 ```rust
 pub struct GooseFsFileWriter {
     // ... 现有字段 ...
     /// 从 config.write_type + CreateFilePOptions 推导的写入策略
     write_strategy: WriteStrategy,
+    /// Worker 连接池，复用已认证的 gRPC channel（匹配 Java FileSystemContext.acquireBlockWorkerClient）
+    worker_pool: Arc<WorkerClientPool>,
+    /// 已提交的 Block ID 列表，用于 cancel/回滚（匹配 Java mPreviousCommittedBlockIds）
+    committed_block_ids: Vec<i64>,
+    /// 当前正在写入的 Block（chunk 级流式，不再缓冲整 block）
+    current_block_writer: Option<ActiveBlockWriter>,
+    /// 文件写入是否已取消
+    cancelled: bool,
+}
+
+/// 当前活跃的 Block 写入器状态
+struct ActiveBlockWriter {
+    writer: GrpcBlockWriter,
+    block_id: i64,
+    block_size: u64,
+    bytes_written: u64,
+    worker_addr: String,
 }
 ```
 
@@ -817,31 +850,118 @@ let effective_write_type = create_options.write_type.or(config.write_type);
 let write_strategy = resolve_write_strategy(effective_write_type, &file_info);
 ```
 
-**`write_block` 中使用策略**：
+**`open_next_block` 中使用连接池 + 失败 Worker 排除**：
 
 ```rust
-let write_opts = WriteBlockOptions {
-    request_type: self.write_strategy.request_type,
-    create_ufs_file_options: self.write_strategy.create_ufs_file_options.clone(),
-};
-let mut block_writer =
-    GrpcBlockWriter::open(&worker, block_id, block_size as i64, write_opts).await?;
+async fn open_next_block(&mut self, block_size: u64) -> Result<()> {
+    // Close current block if it exists
+    if self.current_block_writer.is_some() {
+        self.close_current_block().await?;
+    }
+
+    let block_id = compute_block_id(file_id, block_index);
+
+    // Select worker (failed workers automatically excluded by WorkerRouter)
+    let worker_info = self.router.select_worker(block_id).await?;
+
+    // Acquire from connection pool (reuses existing channel)
+    let worker = match self.worker_pool.acquire(&worker_addr).await {
+        Ok(w) => w,
+        Err(e) => {
+            self.router.mark_failed(addr);       // Mark worker as failed
+            self.worker_pool.invalidate(&worker_addr).await;  // Remove from pool
+            return Err(e);
+        }
+    };
+
+    let write_opts = WriteBlockOptions {
+        request_type: self.write_strategy.request_type,
+        create_ufs_file_options: self.write_strategy.create_ufs_file_options.clone(),
+    };
+    let block_writer = GrpcBlockWriter::open(&worker, block_id, block_size as i64, write_opts).await?;
+    self.current_block_writer = Some(ActiveBlockWriter { writer: block_writer, ... });
+    Ok(())
+}
 ```
 
-**`close()` 中处理 ASYNC_THROUGH**：
+**`write` 中 chunk 级流式发送（不再缓冲整 block）**：
+
+```rust
+pub async fn write(&mut self, data: &[u8]) -> Result<()> {
+    while offset < data.len() {
+        // Ensure active block writer exists
+        if self.current_block_writer.is_none() || writer.remaining() == 0 {
+            self.open_next_block(block_size).await?;
+        }
+        // Stream data chunk-by-chunk (matching Java's chunk-level granularity)
+        let chunk = Bytes::copy_from_slice(&data[chunk_offset..chunk_end]);
+        match writer.writer.write_chunk(chunk).await {
+            Ok(()) => { writer.bytes_written += chunk_len; }
+            Err(e) => { return self.handle_cache_write_exception(e).await; }
+        }
+        // If block is full, flush and close it
+        if writer.remaining() == 0 {
+            self.close_current_block().await?;
+        }
+    }
+    Ok(())
+}
+```
+
+**`close()` 中处理 ASYNC_THROUGH + 失败回滚**：
 
 ```rust
 pub async fn close(&mut self) -> Result<()> {
+    // Close the current in-progress block (flush + commitBlock)
+    if let Err(e) = self.close_current_block().await {
+        // On failure, cancel the entire file write
+        self.cancel().await?;
+        return Err(e);
+    }
+
     // ... CompleteFile ...
     self.master.complete_file(&self.path, ufs_length).await?;
     self.completed = true;
 
-    // ASYNC_THROUGH: 调度异步持久化
+    // ASYNC_THROUGH: schedule async persistence
     if self.write_strategy.need_async_persist {
         debug!(path = %self.path, "scheduling async persistence for ASYNC_THROUGH");
         self.master.schedule_async_persistence(&self.path, None).await?;
     }
     // ...
+}
+```
+
+**`cancel()` — 取消写入 + 回滚（匹配 Java `GooseFSFileOutStream.cancel()`）**：
+
+```rust
+pub async fn cancel(&mut self) -> Result<()> {
+    if self.completed || self.cancelled { return Ok(()); }
+    self.cancelled = true;
+
+    // 1. Cancel the current block writer
+    if let Some(active) = self.current_block_writer.take() {
+        active.writer.cancel().await;
+    }
+
+    // 2. Delete incomplete file (triggers Master-side block cleanup)
+    if !self.committed_block_ids.is_empty() {
+        self.master.delete(&self.path, false).await?;
+    }
+    Ok(())
+}
+```
+
+**`handle_cache_write_exception()` — 写入异常处理（匹配 Java 同名方法）**：
+
+```rust
+async fn handle_cache_write_exception(&mut self, err: Error) -> Result<()> {
+    if let Some(active) = self.current_block_writer.take() {
+        self.router.mark_failed(&addr);              // Exclude failed worker
+        self.worker_pool.invalidate(&active.worker_addr).await;  // Remove from pool
+        active.writer.cancel().await;                // Cancel the block stream
+    }
+    Err(err)
 }
 ```
 
@@ -854,12 +974,13 @@ pub async fn close(&mut self) -> Result<()> {
 
 | # | 文件 | 改动类型 | 改动量 | 说明 |
 |---|------|---------|--------|------|
-| 1 | `src/client/worker.rs` | **重大修改** | ~30 行 | `write_block()` 新增 `WriteBlockOptions` 参数 |
-| 2 | `src/io/writer.rs` | **中度修改** | ~10 行 | `GrpcBlockWriter::open()` 透传 `WriteBlockOptions` |
-| 3 | `src/io/file_writer.rs` | **重大修改** | ~80 行 | 新增 `WriteStrategy` + `resolve_write_strategy()`，修改 `write_block()` 和 `close()` |
-| 4 | `src/config.rs` | ✅ **已完成** | — | `write_type` 字段已添加 |
-| 5 | `src/lib.rs` | ✅ **已完成** | — | `WritePType` 已重新导出 |
-| **总计** | | | **~120 行** | |
+| 1 | `src/client/worker.rs` | **重大修改** | ~100 行 | `write_block()` 新增 `WriteBlockOptions`；新增 `WorkerClientPool` 连接池；`WriteBlockHandle` 新增 `cancel()` |
+| 2 | `src/io/writer.rs` | **中度修改** | ~20 行 | `GrpcBlockWriter::open()` 透传 `WriteBlockOptions`；新增 `cancel()` 方法 |
+| 3 | `src/io/file_writer.rs` | **重大重构** | ~200 行 | chunk 级流式写入、连接池复用、失败 Worker 排除、cancel/回滚、去除 transport 重试 |
+| 4 | `src/client/mod.rs` | **小修改** | ~1 行 | 导出 `WorkerClientPool` |
+| 5 | `src/config.rs` | ✅ **已完成** | — | `write_type` 字段已添加 |
+| 6 | `src/lib.rs` | ✅ **已完成** | — | `WritePType` 已重新导出 |
+| **总计** | | | **~320 行** | |
 
 ### 4.9 关键设计决策
 
@@ -870,6 +991,10 @@ pub async fn close(&mut self) -> Result<()> {
 | ASYNC_THROUGH 何时调度持久化？ | `close()` 中 `CompleteFile` 之后 | 遵循 Java `GooseFSFileOutStream.close()` 行为 |
 | `WriteBlockOptions` 用结构体还是参数展开？ | **结构体** | 避免参数过多，便于未来扩展 |
 | 向后兼容性 | `WriteBlockOptions::default()` = 当前行为 | 不设置 `write_type` 时完全等价于现有 MUST_CACHE |
+| 缓冲策略（v1.5） | **chunk 级流式** | 对齐 Java `BlockOutStream.write()` → `writeChunk()`，内存占用从 64MB 降至 1MB |
+| 连接池（v1.5） | **`WorkerClientPool`** | 对齐 Java `FileSystemContext.acquireBlockWorkerClient()`，避免每次新建连接 |
+| transport 重试（v1.5） | **移除** | Java 不在 write 层做 transport 重试，由上层（如 OpenDAL retry layer）处理 |
+| cancel/回滚（v1.5） | **`cancel()` + delete file** | 对齐 Java `GooseFSFileOutStream.cancel()`，清理已提交 blocks |
 
 ### 4.10 使用示例
 
@@ -1350,7 +1475,7 @@ impl ObjectStoreProvider for GooseFsStoreProvider {
 |------|----------|------|
 | `goosefs-client-rs` | ~1,800 | 独立 crate，gRPC 客户端 + 高层 API |
 | ↳ 低层模块 | ~1,200 | MasterClient, WorkerClient, BlockMapper, WorkerRouter, GrpcBlockReader/Writer |
-| ↳ **高层封装** | **~600** | **GooseFsFileReader (~300行) + GooseFsFileWriter (~300行)** |
+| ↳ **高层封装** | **~700** | **GooseFsFileReader (~300行) + GooseFsFileWriter (~400行)** |
 | OpenDAL `services-goosefs` | ~710 | OpenDAL service 适配层 |
 | Lance `goosefs.rs` | ~150 | Lance provider 适配 + 8 个单元测试（✅ 已完成） |
 | Proto 定义 | ~500 | GooseFS gRPC protobuf |
@@ -1486,8 +1611,10 @@ services:
 |--------|------|
 | Block Size 对齐 | Lance block_size = GooseFS page_size 整数倍 |
 | 元数据缓存 | GooseFsBackend 缓存 FileInfo（含 blockIds） |
-| gRPC Channel 复用 | 连接池管理 Worker 连接 |
+| gRPC Channel 复用 | `WorkerClientPool` 连接池管理 Worker 连接，复用已认证的 channel（v1.5） |
 | 客户端侧缓存 | 可选叠加 OpenDAL FoyerLayer |
+| chunk 级流式写入 | 数据到达即按 chunk_size 发送，不缓冲整 block，内存占用从 64MB 降至 1MB（v1.5） |
+| 失败 Worker 排除 | 连接失败的 Worker 自动排除 60s，避免重复尝试失败节点（v1.5） |
 
 ### 10.2 缓存一致性
 
@@ -1552,6 +1679,15 @@ Phase 2d — 认证支持 ✅ 已完成 (2026-03-30)
 ├── MasterClient / WorkerClient / WorkerManagerClient 集成认证
 ├── GooseFsConfig 新增 auth_type / auth_username / auth_timeout
 └── TODO: CUSTOM / KERBEROS / DELEGATION_TOKEN / CAPABILITY_TOKEN
+
+Phase 2e — 写入管道重构（对齐 Java） ✅ 已完成 (2026-03-30)
+├── 去除 transport 级别重试（Java 不在 write 层重试）
+├── 新增 WorkerClientPool 连接池（复用已认证 gRPC channel）
+├── 新增失败 Worker 排除（mark_failed + 60s TTL 自动恢复）
+├── 新增 cancel()/回滚支持（cancel stream + delete incomplete file）
+├── 缓冲策略从整 block 缓冲改为 chunk 级流式写入（内存 -98.4%）
+├── 新增 handle_cache_write_exception() 写入异常处理
+└── TODO: 短路写（LocalFileDataWriter）、双流写入（CACHE_THROUGH 客户端侧）
 ```
 
 ---
@@ -1572,7 +1708,7 @@ Phase 2d — 认证支持 ✅ 已完成 (2026-03-30)
 | 读取实现 | `open_file()` → stream_id → REST read（**实际标记为 `read: false`**） | `GooseFsFileReader` 端到端流式读取（**完全可用**） |
 | 写入实现 | `create_file()` → stream_id → REST write → close | `GooseFsFileWriter` 端到端 Block 级流式写入 |
 | Worker 路由 | 无（REST API 由 Alluxio Proxy 处理） | 一致性哈希 Worker 路由（`WorkerRouter`） |
-| 连接管理 | HTTP 连接池（由 OpenDAL HttpClient 管理） | gRPC Channel（由 tonic 管理，GooseFsCore 内部持有） |
+| 连接管理 | HTTP 连接池（由 OpenDAL HttpClient 管理） | gRPC Channel + `WorkerClientPool` 连接池（复用已认证 channel） |
 | Reader 类型 | `HttpBody`（OpenDAL 内置） | `GooseFsReader`（自定义 `oio::Read` 实现） |
 | HA 支持 | 无 | `PollingMasterInquireClient` 自动发现 Primary Master |
 | 依赖 | `http`, `serde_json`（轻量） | `goosefs-client-rs`（含 tonic/prost/tokio，重量级） |
@@ -2447,9 +2583,11 @@ impl oio::Write for GooseFsWriter {
     }
 
     async fn abort(&mut self) -> Result<()> {
-        // GooseFsFileWriter doesn't support abort natively.
-        // Drop the writer — incomplete writes won't be committed
-        // since complete_file() won't be called.
+        // v1.5: GooseFsFileWriter now supports cancel() natively.
+        // Cancel the write, cleaning up committed blocks and in-progress streams.
+        if let Some(ref mut writer) = self.writer {
+            writer.cancel().await.map_err(parse_error)?;
+        }
         self.writer.take();
         Ok(())
     }
@@ -3754,7 +3892,196 @@ let config = GooseFsConfig::new("goosefs-master:9200")
 - [ ] **DELEGATION_TOKEN**：Kerberos 模式下自动降级，使用 DIGEST-MD5 SASL 机制
 - [ ] **CAPABILITY_TOKEN**：Client→Worker 的令牌认证
 - [ ] **腾讯云 Token**：gRPC Metadata 注入 `tencent-cloud-access-token`
-- [ ] **连接池认证**：当前每次连接都进行 SASL 握手，后续可缓存已认证的 channel
+- [ ] **短路写**：当客户端与 Worker 部署在同一节点时，绕过 gRPC 直接写本地文件（参考 Java `LocalFileDataWriter`）
+
+---
+
+## 15. 写入管道重构：对齐 Java GooseFSFileOutStream
+
+> **v1.5 新增**：对 Rust 写入管道进行全面重构，消除与 Java `GooseFSFileOutStream` 的关键差异。
+
+### 15.1 重构背景与动机
+
+对比 Java `GooseFSFileOutStream` 和 Rust `GooseFsFileWriter` 的原有实现，存在以下差异：
+
+| 差异点 | Java 实现 | Rust 原实现 (v1.4) | Rust 重构后 (v1.5) |
+|--------|----------|-------------------|-------------------|
+| **缓冲策略** | chunk 级流式（`BlockOutStream.write()` → `updateCurrentChunk()` → `DataWriter.writeChunk()`） | 整 block 缓冲（`buffer: Vec<u8>`，满 block 才 flush） | ✅ chunk 级流式（`ActiveBlockWriter` + `write_chunk()`） |
+| **连接池** | `FileSystemContext.acquireBlockWorkerClient()` 缓存已认证 channel | 每次 `WorkerClient::connect()` 新建连接 | ✅ `WorkerClientPool` 缓存复用 |
+| **失败 Worker 排除** | `mFailedWorkers` + `handleFailedWorkers()` | 无 | ✅ `WorkerRouter.mark_failed()` + 60s TTL |
+| **cancel/回滚** | `cancel()` → `removeBlocks()` + 删除 incomplete 文件 | 无（drop 即丢弃） | ✅ `cancel()` → cancel stream + delete file |
+| **transport 重试** | 无（不在 write 层重试） | 3 次 transport 重试 + 指数退避 | ✅ 已移除 |
+| **写入异常处理** | `handleCacheWriteException()` — cancel block + mark failed | 直接返回错误 | ✅ `handle_cache_write_exception()` |
+
+### 15.2 架构变更全景图
+
+```text
+v1.4 写入流程（旧）:
+  write(data) → buffer.extend(data)
+    → if buffer.len() >= block_size:
+        → flush_buffer() → write_block() → write_block_inner()
+          → WorkerClient::connect()     ← 每次新建连接
+          → GrpcBlockWriter.write_all() ← 整 block 一次性发送
+          → 失败时 transport 重试 3 次
+
+v1.5 写入流程（新，对齐 Java）:
+  write(data) → chunk-by-chunk streaming
+    → if no active block writer:
+        → open_next_block()
+          → WorkerRouter.select_worker()     ← 自动排除失败 Worker
+          → WorkerClientPool.acquire()       ← 连接池复用
+          → GrpcBlockWriter.open()
+    → for each chunk:
+        → GrpcBlockWriter.write_chunk()      ← 流式发送单个 chunk
+        → on error: handle_cache_write_exception()  ← cancel + mark failed
+    → if block full:
+        → close_current_block()              ← flush + close + 记录 committed_block_id
+```
+
+### 15.3 WorkerClientPool — 连接池设计
+
+```rust
+/// Connection pool for WorkerClient instances.
+///
+/// Caches authenticated gRPC channels by worker address, avoiding the overhead
+/// of re-establishing connections and re-authenticating for every block write.
+/// Matches Java's FileSystemContext.acquireBlockWorkerClient() pattern.
+pub struct WorkerClientPool {
+    clients: RwLock<HashMap<String, WorkerClient>>,
+    config: GooseFsConfig,
+}
+
+impl WorkerClientPool {
+    pub async fn acquire(&self, addr: &str) -> Result<WorkerClient>;   // Get or create
+    pub async fn invalidate(&self, addr: &str);                         // Remove on failure
+    pub fn new_shared(config: GooseFsConfig) -> Arc<Self>;             // Arc wrapper
+}
+```
+
+**设计要点**：
+- 使用 `RwLock<HashMap>` + double-check locking 模式，读多写少场景高效
+- tonic `Channel` 支持 HTTP/2 多路复用，单个缓存 client 可处理多个并发 RPC
+- 连接失败时调用 `invalidate()` 移除，下次 `acquire()` 自动重建
+- 生命周期与 `GooseFsFileWriter` 绑定，文件写完后 pool 自动释放
+
+### 15.4 失败 Worker 排除机制
+
+```text
+写入失败处理流程:
+
+  GrpcBlockWriter.write_chunk() → Error
+    ↓
+  handle_cache_write_exception()
+    ├── router.mark_failed(addr)           ← 标记 Worker 失败（DashMap<String, Instant>）
+    ├── worker_pool.invalidate(addr)       ← 从连接池移除
+    └── active.writer.cancel()             ← 取消当前 block stream
+    ↓
+  下次 open_next_block()
+    └── router.select_worker()             ← 一致性哈希自动跳过失败 Worker
+        └── 失败标记 60s 后自动过期恢复
+```
+
+**与 Java 对比**：
+| 机制 | Java | Rust |
+|------|------|------|
+| 失败记录 | `mFailedWorkers: Map<WorkerNetAddress, Long>` | `WorkerRouter.failed_workers: DashMap<String, Instant>` |
+| 排除逻辑 | `handleFailedWorkers()` 过滤候选列表 | `select_worker()` 内部跳过失败节点 |
+| 恢复策略 | 无自动恢复（文件级别） | 60s TTL 自动过期恢复 |
+
+### 15.5 cancel/回滚设计
+
+```text
+cancel() 流程（匹配 Java GooseFSFileOutStream.cancel()）:
+
+  1. 设置 cancelled = true
+  2. if current_block_writer exists:
+       → active.writer.cancel()            ← drop gRPC stream，不等待 server finalize
+  3. if committed_block_ids not empty:
+       → master.delete(path, false)         ← 删除 incomplete 文件，触发 Master 清理 blocks
+```
+
+**GrpcBlockWriter.cancel() 实现**：
+```rust
+pub async fn cancel(self) {
+    drop(self.handle.request_tx);    // Close client→server stream
+    drop(self.handle.response_rx);   // Drop server→client stream
+    // Server detects stream cancellation and cleans up temporary block data
+}
+```
+
+**close() 失败自动回滚**：
+```rust
+pub async fn close(&mut self) -> Result<()> {
+    if let Err(e) = self.close_current_block().await {
+        // On failure, cancel the entire file write
+        self.cancel().await?;
+        return Err(e);
+    }
+    // ... CompleteFile ...
+}
+```
+
+### 15.6 chunk 级流式写入 vs 整 block 缓冲
+
+**v1.4（旧）— 整 block 缓冲**：
+```text
+write(64MB data)
+  → buffer.extend(64MB)          ← 内存占用 64MB
+  → flush_buffer()
+    → write_block_inner()
+      → GrpcBlockWriter.write_all(64MB)  ← 一次性发送
+```
+
+**v1.5（新）— chunk 级流式**：
+```text
+write(64MB data)
+  → open_next_block()
+  → for chunk in data.chunks(1MB):
+      → GrpcBlockWriter.write_chunk(1MB)  ← 流式发送，内存仅占 1MB
+  → close_current_block()
+```
+
+**内存对比**：
+| 场景 | v1.4 内存占用 | v1.5 内存占用 | 改善 |
+|------|-------------|-------------|------|
+| 写入 64MB block | 64MB（整 block 缓冲） | ~1MB（单 chunk） | **-98.4%** |
+| 写入 256MB 文件（4 blocks） | 64MB（单 block 缓冲） | ~1MB（单 chunk） | **-98.4%** |
+| 并发写入 10 个文件 | 640MB | ~10MB | **-98.4%** |
+
+### 15.7 与 Java 实现的对齐对照表
+
+| Java 类/方法 | Rust 对应 | 状态 |
+|-------------|----------|------|
+| `GooseFSFileOutStream` | `GooseFsFileWriter` | ✅ 已对齐 |
+| `GooseFSFileOutStream.write()` | `GooseFsFileWriter::write()` | ✅ chunk 级流式 |
+| `GooseFSFileOutStream.getNextBlock()` | `GooseFsFileWriter::open_next_block()` | ✅ 连接池 + 失败排除 |
+| `GooseFSFileOutStream.cancel()` | `GooseFsFileWriter::cancel()` | ✅ 已实现 |
+| `GooseFSFileOutStream.close()` | `GooseFsFileWriter::close()` | ✅ 失败自动回滚 |
+| `GooseFSFileOutStream.handleCacheWriteException()` | `GooseFsFileWriter::handle_cache_write_exception()` | ✅ 已实现 |
+| `GooseFSFileOutStream.mPreviousCommittedBlockIds` | `GooseFsFileWriter.committed_block_ids` | ✅ 已实现 |
+| `GooseFSFileOutStream.mFailedWorkers` | `WorkerRouter.failed_workers` | ✅ 已实现 |
+| `FileSystemContext.acquireBlockWorkerClient()` | `WorkerClientPool.acquire()` | ✅ 已实现 |
+| `BlockOutStream` + `DataWriter.writeChunk()` | `ActiveBlockWriter` + `GrpcBlockWriter.write_chunk()` | ✅ 已实现 |
+| `GrpcDataWriter.cancel()` | `GrpcBlockWriter::cancel()` | ✅ 已实现 |
+| `GrpcBlockingStream.cancel()` | `WriteBlockHandle::cancel()` | ✅ 已实现 |
+| `DataWriter.Factory.create()` 短路写判断 | — | ❌ 暂未实现（见 15.8） |
+
+### 15.8 暂未实现的功能
+
+| 功能 | Java 实现 | 说明 |
+|------|----------|------|
+| **短路写** | `LocalFileDataWriter`（当 `CommonUtils.isLocalHost()` 时绕过 gRPC 直接写本地文件） | Rust 客户端目前主要用于远程访问场景（如 Lance Dataset），客户端通常不与 Worker 部署在同一节点。如有本地部署需求可后续添加 |
+| **双流写入（CACHE_THROUGH 客户端侧）** | Java 客户端同时写缓存 + UFS 两个流 | 当前由 Worker 侧处理（`RequestType::UfsFile` 时 Worker 同时缓存 + 写 UFS），客户端无需双流 |
+
+### 15.9 涉及修改的文件清单
+
+| # | 文件 | 改动类型 | 改动量 | 说明 |
+|---|------|---------|--------|------|
+| 1 | `src/client/worker.rs` | **重大修改** | +80 行 | 新增 `WorkerClientPool`（连接池）、`WriteBlockHandle::cancel()` |
+| 2 | `src/client/mod.rs` | **小修改** | +1 行 | 导出 `WorkerClientPool` |
+| 3 | `src/io/writer.rs` | **中度修改** | +15 行 | 新增 `GrpcBlockWriter::cancel()` |
+| 4 | `src/io/file_writer.rs` | **重大重构** | +220/-150 行 | chunk 级流式写入、连接池复用、失败 Worker 排除、cancel/回滚、去除 transport 重试 |
+| **总计** | | | **+316/-150 行** | |
 
 ---
 
@@ -3767,6 +4094,7 @@ let config = GooseFsConfig::new("goosefs-master:9200")
 | v1.2 | 2026-03-27 | OpenDAL GooseFS Service 实现方案（第 12 节） |
 | v1.3 | 2026-03-28 | Lance GooseFS Provider **实际落地**（第 13 节）：基于 Lance 5.0.0-beta.1 / snafu 0.9 / Rust edition 2024 完成实现，参考 COS PR #5740 补齐 feature 传递 + commit handler + examples，全部 8 个单元测试通过 |
 | v1.4 | 2026-03-30 | **认证支持**（第 14 节）：实现 NOSASL + SIMPLE 两种认证模式，通过 SASL PLAIN 双向流式 gRPC 握手 + channel-id 注入。MasterClient / WorkerClient / WorkerManagerClient 全部集成认证。新增 `auth_type` / `auth_username` / `auth_timeout` 配置项。CUSTOM / Kerberos 等高级认证留 TODO |
+| v1.5 | 2026-03-30 | **写入管道重构**（第 15 节）：对齐 Java `GooseFSFileOutStream`。去除 transport 级重试；新增 `WorkerClientPool` 连接池复用；新增失败 Worker 排除（`mark_failed` + 60s TTL）；新增 `cancel()`/回滚支持；缓冲策略从整 block 缓冲改为 chunk 级流式写入（内存占用从 64MB 降至 1MB） |
 
 ---
 
