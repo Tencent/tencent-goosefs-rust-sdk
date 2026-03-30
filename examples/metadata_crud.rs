@@ -27,88 +27,94 @@ use goosefs_client::proto::grpc::file::CreateFilePOptions;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 连接到GooseFS Master
-    println!("正在连接到GooseFS Master...");
+    // Connect to GooseFS Master
+    println!("Connecting to GooseFS Master...");
     let config = GooseFsConfig::new("127.0.0.1:9200");
     let master = MasterClient::connect(&config).await?;
-    println!("连接成功!");
+    println!("Connected!");
 
-    // 先清理已存在的测试目录
-    println!("\n1. 清理已存在的测试目录...");
+    // Clean up existing test directory
+    println!("\n1. Cleaning up existing test directory...");
     match master.delete("/test-demo", true).await {
-        Ok(_) => println!("已删除已存在的测试目录"),
-        Err(e) => println!("删除测试目录失败或目录不存在: {:?}", e),
+        Ok(_) => println!("Deleted existing test directory"),
+        Err(e) => println!(
+            "Failed to delete test directory or it does not exist: {:?}",
+            e
+        ),
     }
 
-    // 创建测试目录
-    println!("\n2. 创建测试目录...");
+    // Create test directory
+    println!("\n2. Creating test directory...");
     master.create_directory("/test-demo", true).await?;
-    println!("目录 /test-demo 创建成功");
+    println!("Directory /test-demo created");
 
-    // 创建测试文件
-    println!("\n2. 创建测试文件...");
+    // Create test file
+    println!("\n2. Creating test file...");
     let mut create_options = CreateFilePOptions::default();
     create_options.block_size_bytes = Some(64 * 1024 * 1024); // 64MB block size
     master
         .create_file("/test-demo/hello.txt", create_options)
         .await?;
-    println!("文件 /test-demo/hello.txt 创建成功");
+    println!("File /test-demo/hello.txt created");
 
-    // 写入文件内容
-    println!("\n3. 写入文件内容...");
-    let content = "Hello, GooseFS! 这是一个测试文件内容。\n欢迎使用GooseFS Rust客户端！\n当前时间: 2026-03-26 18:06:32";
-    // 这里需要实现文件写入逻辑，但当前API可能不支持直接写入
-    println!("写入内容: {}", content);
-    println!("注意: 当前API可能需要通过其他方式写入内容，比如使用worker客户端");
+    // Write file content
+    println!("\n3. Writing file content...");
+    let content = "Hello, GooseFS! This is a test file.\nWelcome to GooseFS Rust Client!\nTimestamp: 2026-03-26 18:06:32";
+    // File write logic needs to be implemented; the current API may not support direct writes
+    println!("Content: {}", content);
+    println!("Note: the current API may require writing via the Worker client");
 
-    // 标记文件完成（模拟写入完成）
-    println!("\n4. 标记文件完成...");
+    // Mark file as complete (simulating write completion)
+    println!("\n4. Marking file as complete...");
     master
         .complete_file("/test-demo/hello.txt", Some(content.len() as i64))
         .await?;
-    println!("文件标记完成，内容长度: {} 字节", content.len());
+    println!(
+        "File marked complete, content length: {} bytes",
+        content.len()
+    );
 
-    // 获取文件状态
-    println!("\n4. 获取文件状态...");
+    // Get file status
+    println!("\n4. Getting file status...");
     let file_info = master.get_status("/test-demo/hello.txt").await?;
-    println!("文件信息: {:?}", file_info);
-    println!("路径: {:?}", file_info.path);
-    println!("长度: {:?} 字节", file_info.length);
-    println!("是否为目录: {:?}", file_info.folder);
+    println!("File info: {:?}", file_info);
+    println!("Path: {:?}", file_info.path);
+    println!("Length: {:?} bytes", file_info.length);
+    println!("Is directory: {:?}", file_info.folder);
 
-    // 列出目录内容
-    println!("\n5. 列出目录内容...");
+    // List directory contents
+    println!("\n5. Listing directory contents...");
     let entries = master.list_status("/test-demo", false).await?;
-    println!("目录 /test-demo 包含 {} 个条目:", entries.len());
+    println!("Directory /test-demo contains {} entries:", entries.len());
     for entry in &entries {
         println!(
-            "  - {} ({}, {} 字节)",
+            "  - {} ({}, {} bytes)",
             entry.path.as_deref().unwrap_or("unknown"),
             if entry.folder.unwrap_or(false) {
-                "目录"
+                "dir"
             } else {
-                "文件"
+                "file"
             },
             entry.length.unwrap_or(0)
         );
     }
 
-    // 先删除已存在的world.txt文件
-    println!("\n6. 删除已存在的world.txt文件...");
+    // Delete existing world.txt file
+    println!("\n6. Deleting existing world.txt...");
     match master.delete("/test-demo/world.txt", false).await {
-        Ok(_) => println!("已删除已存在的world.txt文件"),
-        Err(e) => println!("删除world.txt文件失败或文件不存在: {:?}", e),
+        Ok(_) => println!("Deleted existing world.txt"),
+        Err(e) => println!("Failed to delete world.txt or file does not exist: {:?}", e),
     }
 
-    // 重命名文件
-    println!("\n7. 重命名文件...");
+    // Rename file
+    println!("\n7. Renaming file...");
     master
         .rename("/test-demo/hello.txt", "/test-demo/world.txt")
         .await?;
-    println!("文件重命名为 /test-demo/world.txt");
+    println!("File renamed to /test-demo/world.txt");
 
-    // 验证重命名
-    println!("\n7. 验证重命名...");
+    // Verify rename
+    println!("\n7. Verifying rename...");
     let entries = master.list_status("/test-demo", false).await?;
     for entry in &entries {
         println!("  - {}", entry.path.as_deref().unwrap_or("unknown"));
@@ -124,6 +130,6 @@ async fn main() -> Result<()> {
     // master.delete("/test-demo", true).await?;
     // println!("目录删除成功");
 
-    println!("\n✅ 所有文件操作测试完成!");
+    println!("\n✅ All file operation tests complete!");
     Ok(())
 }

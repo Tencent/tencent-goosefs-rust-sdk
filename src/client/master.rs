@@ -20,9 +20,11 @@
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 use tracing::{debug, instrument, warn};
 
+use crate::auth::{ChannelAuthenticator, ChannelIdInterceptor};
 use crate::client::master_inquire::{create_master_inquire_client, MasterInquireClient};
 use crate::config::GooseFsConfig;
 use crate::error::{Error, Result};
@@ -37,6 +39,13 @@ use crate::proto::grpc::{Bits, PMode};
 
 /// Maximum number of RPC-level retries on retriable errors before giving up.
 const MAX_RPC_RETRIES: u32 = 2;
+
+/// Type alias for the authenticated gRPC client.
+///
+/// Both NOSASL and SIMPLE modes use `InterceptedService` wrapping;
+/// the difference is that NOSASL skips the SASL handshake but still injects a channel-id.
+type AuthenticatedFsClient =
+    FileSystemMasterClientServiceClient<InterceptedService<Channel, ChannelIdInterceptor>>;
 
 /// Default mode for directories: 0755 (rwxr-xr-x)
 pub fn default_dir_mode() -> PMode {
@@ -60,9 +69,16 @@ pub fn default_file_mode() -> PMode {
 ///
 /// In HA mode, the client holds a reference to the [`MasterInquireClient`]
 /// and can automatically re-discover the Primary Master when RPCs fail.
+///
+/// ## Authentication
+///
+/// The client supports NOSASL and SIMPLE authentication modes.
+/// When `config.auth_type` is `Simple`, the client performs a SASL PLAIN
+/// handshake after establishing the gRPC channel, then injects a `channel-id`
+/// metadata header into all subsequent RPCs.
 #[derive(Clone)]
 pub struct MasterClient {
-    inner: Arc<RwLock<FileSystemMasterClientServiceClient<Channel>>>,
+    inner: Arc<RwLock<AuthenticatedFsClient>>,
     config: GooseFsConfig,
     inquire_client: Arc<dyn MasterInquireClient>,
 }
@@ -73,6 +89,8 @@ impl MasterClient {
     /// In single-master mode, connects directly to `config.master_addr`.
     /// In HA mode (multiple addresses in `config.master_addrs`), uses
     /// [`PollingMasterInquireClient`] to discover the Primary first.
+    ///
+    /// Authentication is performed according to `config.auth_type`.
     pub async fn connect(config: &GooseFsConfig) -> Result<Self> {
         let inquire_client = create_master_inquire_client(config);
         Self::connect_with_inquire(config, inquire_client).await
@@ -87,32 +105,57 @@ impl MasterClient {
         inquire_client: Arc<dyn MasterInquireClient>,
     ) -> Result<Self> {
         let primary_addr = inquire_client.get_primary_rpc_address().await?;
-        let channel = Self::build_channel(config, &primary_addr).await?;
-        debug!(addr = %primary_addr, "connected to GooseFS Master");
+        let client = Self::build_authenticated_client(config, &primary_addr).await?;
+        debug!(addr = %primary_addr, auth_type = %config.auth_type, "connected to GooseFS Master");
 
         Ok(Self {
-            inner: Arc::new(RwLock::new(FileSystemMasterClientServiceClient::new(
-                channel,
-            ))),
+            inner: Arc::new(RwLock::new(client)),
             config: config.clone(),
             inquire_client,
         })
     }
 
     /// Create from an existing tonic channel (useful for testing / channel sharing).
+    ///
+    /// **Note**: This bypasses authentication. The channel is wrapped with a
+    /// no-op channel-id interceptor for API compatibility.
     pub fn from_channel(channel: Channel, config: GooseFsConfig) -> Self {
         let inquire_client = create_master_inquire_client(&config);
+        let interceptor = ChannelIdInterceptor::new("test-no-auth".to_string());
+        let intercepted = InterceptedService::new(channel, interceptor);
         Self {
             inner: Arc::new(RwLock::new(FileSystemMasterClientServiceClient::new(
-                channel,
+                intercepted,
             ))),
             config,
             inquire_client,
         }
     }
 
-    /// Build a gRPC channel to a specific master address.
-    async fn build_channel(config: &GooseFsConfig, addr: &str) -> Result<Channel> {
+    /// Build a gRPC channel and perform authentication, returning an authenticated client.
+    async fn build_authenticated_client(
+        config: &GooseFsConfig,
+        addr: &str,
+    ) -> Result<AuthenticatedFsClient> {
+        let channel = Self::build_raw_channel(config, addr).await?;
+
+        // Perform SASL authentication based on the configured auth type
+        let authenticator = ChannelAuthenticator::new(
+            config.auth_type,
+            config.auth_username.clone(),
+            None, // impersonation_user: not yet supported
+        )
+        .with_auth_timeout(config.auth_timeout);
+
+        let auth_channel = authenticator.authenticate(channel).await?;
+
+        Ok(FileSystemMasterClientServiceClient::new(
+            auth_channel.channel,
+        ))
+    }
+
+    /// Build a raw gRPC channel to a specific master address (without authentication).
+    async fn build_raw_channel(config: &GooseFsConfig, addr: &str) -> Result<Channel> {
         let endpoint_uri = format!("http://{}", addr);
         let endpoint = Channel::from_shared(endpoint_uri)
             .map_err(|e| Error::ConfigError {
@@ -128,15 +171,15 @@ impl MasterClient {
     /// Reconnect to the Primary Master after a failover.
     ///
     /// Resets the cached Primary in the inquire client, re-discovers the
-    /// new Primary, and rebuilds the gRPC channel.
+    /// new Primary, rebuilds the gRPC channel, and re-authenticates.
     async fn reconnect(&self) -> Result<()> {
         // Reset cached primary so the inquire client re-polls all addresses.
         self.inquire_client.reset_cached_primary().await;
 
         let primary_addr = self.inquire_client.get_primary_rpc_address().await?;
-        let channel = Self::build_channel(&self.config, &primary_addr).await?;
+        let client = Self::build_authenticated_client(&self.config, &primary_addr).await?;
         let mut inner = self.inner.write().await;
-        *inner = FileSystemMasterClientServiceClient::new(channel);
+        *inner = client;
         debug!(addr = %primary_addr, "reconnected to GooseFS Master after failover");
         Ok(())
     }
@@ -147,13 +190,13 @@ impl MasterClient {
     /// Primary Master and retries up to [`MAX_RPC_RETRIES`] times.
     async fn with_retry<F, Fut, T>(&self, op_name: &str, f: F) -> Result<T>
     where
-        F: Fn(FileSystemMasterClientServiceClient<Channel>) -> Fut,
+        F: Fn(AuthenticatedFsClient) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
         let mut last_err: Option<Error> = None;
 
         for attempt in 0..=MAX_RPC_RETRIES {
-            let client = {
+            let client: AuthenticatedFsClient = {
                 let inner = self.inner.read().await;
                 inner.clone()
             };

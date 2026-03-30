@@ -10,9 +10,11 @@
 
 use std::sync::Arc;
 
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 use tracing::{debug, instrument};
 
+use crate::auth::{ChannelAuthenticator, ChannelIdInterceptor};
 use crate::client::master_inquire::{create_master_inquire_client, MasterInquireClient};
 use crate::config::GooseFsConfig;
 use crate::error::{Error, Result};
@@ -21,12 +23,16 @@ use crate::proto::grpc::block::{
     GetWorkerInfoListPOptions, WorkerInfo,
 };
 
+/// Type alias for the authenticated WorkerManager gRPC client.
+type AuthenticatedWorkerMgrClient =
+    WorkerManagerMasterClientServiceClient<InterceptedService<Channel, ChannelIdInterceptor>>;
+
 /// Client for `WorkerManagerMasterClientService` (Master:9200).
 ///
 /// Used to discover the live worker list for block routing.
 #[derive(Clone)]
 pub struct WorkerManagerClient {
-    inner: WorkerManagerMasterClientServiceClient<Channel>,
+    inner: AuthenticatedWorkerMgrClient,
 }
 
 impl WorkerManagerClient {
@@ -57,17 +63,28 @@ impl WorkerManagerClient {
             .timeout(config.request_timeout);
 
         let channel = endpoint.connect().await?;
-        debug!(addr = %primary_addr, "connected to WorkerManagerMasterClientService");
+
+        // Perform SASL authentication based on the configured auth type
+        let authenticator =
+            ChannelAuthenticator::new(config.auth_type, config.auth_username.clone(), None)
+                .with_auth_timeout(config.auth_timeout);
+
+        let auth_channel = authenticator.authenticate(channel).await?;
+        debug!(addr = %primary_addr, auth_type = %config.auth_type, "connected to WorkerManagerMasterClientService");
 
         Ok(Self {
-            inner: WorkerManagerMasterClientServiceClient::new(channel),
+            inner: WorkerManagerMasterClientServiceClient::new(auth_channel.channel),
         })
     }
 
     /// Create from an existing tonic channel.
+    ///
+    /// **Note**: This bypasses authentication.
     pub fn from_channel(channel: Channel) -> Self {
+        let interceptor = ChannelIdInterceptor::new("test-no-auth".to_string());
+        let intercepted = InterceptedService::new(channel, interceptor);
         Self {
-            inner: WorkerManagerMasterClientServiceClient::new(channel),
+            inner: WorkerManagerMasterClientServiceClient::new(intercepted),
         }
     }
 

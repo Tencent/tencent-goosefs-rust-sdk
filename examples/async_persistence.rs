@@ -30,24 +30,24 @@ use goosefs_client::WritePType;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("GooseFS 异步持久化演示");
-    println!("======================");
+    println!("GooseFS Async Persistence Demo");
+    println!("===============================");
 
     let base_config = GooseFsConfig::new("127.0.0.1:9200");
 
     // ── Step 0: Cleanup & create directory ────────────────────────
-    println!("\n0. 清理已存在的测试目录...");
+    println!("\n0. Cleaning up existing test directory...");
     let master = MasterClient::connect(&base_config).await?;
     match master.delete("/persisted-demo", true).await {
-        Ok(_) => println!("  已删除旧的测试目录"),
-        Err(_) => println!("  旧目录不存在，跳过"),
+        Ok(_) => println!("  Deleted old test directory"),
+        Err(_) => println!("  Old directory does not exist, skipping"),
     }
     master.create_directory("/persisted-demo", true).await?;
-    println!("  目录 /persisted-demo 创建成功");
+    println!("  Directory /persisted-demo created");
 
     // ── Step 1: ASYNC_THROUGH mode ───────────────────────────────
-    println!("\n━━━ 1. ASYNC_THROUGH 模式（自动异步持久化）━━━");
-    println!("  数据先写入 Worker 缓存，close() 时自动调度异步持久化到 UFS。");
+    println!("\n━━━ 1. ASYNC_THROUGH mode (automatic async persistence) ━━━");
+    println!("  Data is written to Worker cache first; close() automatically schedules async persistence to UFS.");
     {
         let config = GooseFsConfig::new("127.0.0.1:9200").with_write_type(WritePType::AsyncThrough);
 
@@ -58,20 +58,20 @@ async fn main() -> Result<()> {
         let bytes_written =
             GooseFsFileWriter::write_file(&config, "/persisted-demo/async_through.txt", content)
                 .await?;
-        println!("  ✅ 写入完成: {} 字节", bytes_written);
+        println!("  ✅ Write complete: {} bytes", bytes_written);
 
         // Check initial status
         let info = master
             .get_status("/persisted-demo/async_through.txt")
             .await?;
-        println!("  初始状态:");
-        println!("    持久化: {:?}", info.persisted.unwrap_or(false));
-        println!("    持久化状态: {:?}", info.persistence_state);
+        println!("  Initial status:");
+        println!("    Persisted: {:?}", info.persisted.unwrap_or(false));
+        println!("    Persistence state: {:?}", info.persistence_state);
     }
 
     // ── Step 2: MUST_CACHE + manual schedule ─────────────────────
-    println!("\n━━━ 2. MUST_CACHE + 手动调度持久化 ━━━");
-    println!("  数据仅写入 Worker 缓存，然后手动调度异步持久化。");
+    println!("\n━━━ 2. MUST_CACHE + manual persistence scheduling ━━━");
+    println!("  Data is written to Worker cache only, then manually schedule async persistence.");
     {
         let config = GooseFsConfig::new("127.0.0.1:9200").with_write_type(WritePType::MustCache);
 
@@ -82,27 +82,30 @@ async fn main() -> Result<()> {
         let bytes_written =
             GooseFsFileWriter::write_file(&config, "/persisted-demo/manual_persist.txt", content)
                 .await?;
-        println!("  ✅ 写入完成: {} 字节", bytes_written);
+        println!("  ✅ Write complete: {} bytes", bytes_written);
 
         // Check status before scheduling
         let info_before = master
             .get_status("/persisted-demo/manual_persist.txt")
             .await?;
-        println!("  持久化前状态:");
-        println!("    持久化: {:?}", info_before.persisted.unwrap_or(false));
-        println!("    持久化状态: {:?}", info_before.persistence_state);
+        println!("  Status before persistence:");
+        println!(
+            "    Persisted: {:?}",
+            info_before.persisted.unwrap_or(false)
+        );
+        println!("    Persistence state: {:?}", info_before.persistence_state);
 
         // Manually schedule async persistence
-        println!("  调度异步持久化...");
+        println!("  Scheduling async persistence...");
         master
             .schedule_async_persistence("/persisted-demo/manual_persist.txt", None)
             .await?;
-        println!("  ✅ 持久化已调度");
+        println!("  ✅ Persistence scheduled");
     }
 
     // ── Step 3: Wait and check final status ──────────────────────
-    println!("\n━━━ 3. 等待持久化完成 ━━━");
-    println!("  等待 15 秒让 JobWorker 完成持久化...");
+    println!("\n━━━ 3. Waiting for persistence to complete ━━━");
+    println!("  Waiting 15 seconds for JobWorker to finish persistence...");
     tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
 
     // Check final status for both files
@@ -123,26 +126,26 @@ async fn main() -> Result<()> {
     }
 
     if all_persisted {
-        println!("\n✅ 所有文件已成功持久化到 UFS!");
+        println!("\n✅ All files have been successfully persisted to UFS!");
     } else {
-        println!("\n⚠️  部分文件尚未持久化，可能需要更多时间。");
-        println!("  请使用以下命令检查状态:");
+        println!("\n⚠️  Some files are not yet persisted; they may need more time.");
+        println!("  Check status with:");
         println!("  ./bin/goosefs fs ls /persisted-demo");
     }
 
     // ── Step 4: List directory contents ──────────────────────────
-    println!("\n━━━ 4. 目录内容 ━━━");
+    println!("\n━━━ 4. Directory contents ━━━");
     let entries = master.list_status("/persisted-demo", false).await?;
-    println!("  /persisted-demo 包含 {} 个条目:", entries.len());
+    println!("  /persisted-demo contains {} entries:", entries.len());
     for entry in &entries {
         println!(
-            "  - {} ({} 字节, persisted={})",
+            "  - {} ({} bytes, persisted={})",
             entry.path.as_deref().unwrap_or("unknown"),
             entry.length.unwrap_or(0),
             entry.persisted.unwrap_or(false),
         );
     }
 
-    println!("\n✅ 异步持久化演示完成!");
+    println!("\n✅ Async persistence demo complete!");
     Ok(())
 }

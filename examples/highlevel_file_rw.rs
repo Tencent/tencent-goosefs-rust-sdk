@@ -28,40 +28,40 @@ use goosefs_client::WritePType;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("GooseFS 端到端文件读写演示 (高层 API)");
-    println!("======================================");
+    println!("GooseFS End-to-End File Read/Write Demo (High-level API)");
+    println!("========================================================");
 
     let config = GooseFsConfig::new("127.0.0.1:9200");
 
     // ── Step 0: Cleanup ──────────────────────────────────────────
-    println!("\n0. 清理已有的测试文件...");
+    println!("\n0. Cleaning up existing test files...");
     let master = MasterClient::connect(&config).await?;
     match master.delete("/e2e-test/hello.txt", false).await {
-        Ok(_) => println!("  已删除旧文件"),
-        Err(_) => println!("  旧文件不存在，跳过"),
+        Ok(_) => println!("  Deleted old file"),
+        Err(_) => println!("  Old file does not exist, skipping"),
     }
     match master.create_directory("/e2e-test", true).await {
-        Ok(_) => println!("  目录 /e2e-test 已创建"),
-        Err(_) => println!("  目录已存在，跳过"),
+        Ok(_) => println!("  Directory /e2e-test created"),
+        Err(_) => println!("  Directory already exists, skipping"),
     }
 
     // ── Step 1: Write a file ─────────────────────────────────────
-    println!("\n1. 写入文件 /e2e-test/hello.txt ...");
-    let content = "Hello, GooseFS! 这是通过高层 API 写入的文件内容。\n\
-                   Line 2: GooseFS Rust Client 端到端测试。\n\
-                   Line 3: 支持自动分块、一致性哈希路由、gRPC 流式写入。\n\
-                   Line 4: 写入完成后自动调用 CompleteFile 收尾。";
+    println!("\n1. Writing file /e2e-test/hello.txt ...");
+    let content = "Hello, GooseFS! This file was written via the high-level API.\n\
+                   Line 2: GooseFS Rust Client end-to-end test.\n\
+                   Line 3: Supports auto-chunking, consistent-hash routing, gRPC streaming write.\n\
+                   Line 4: CompleteFile is called automatically after writing.";
 
     let bytes_written =
         GooseFsFileWriter::write_file(&config, "/e2e-test/hello.txt", content.as_bytes()).await?;
-    println!("  ✅ 写入完成: {} 字节", bytes_written);
+    println!("  ✅ Write complete: {} bytes", bytes_written);
 
     // ── Step 2: Read the file back ───────────────────────────────
-    println!("\n2. 读取文件 /e2e-test/hello.txt ...");
+    println!("\n2. Reading file /e2e-test/hello.txt ...");
     let data = GooseFsFileReader::read_file(&config, "/e2e-test/hello.txt").await?;
     let read_content = String::from_utf8_lossy(&data);
-    println!("  ✅ 读取完成: {} 字节", data.len());
-    println!("  内容:\n  ---");
+    println!("  ✅ Read complete: {} bytes", data.len());
+    println!("  Content:\n  ---");
     for line in read_content.lines() {
         println!("  {}", line);
     }
@@ -69,40 +69,44 @@ async fn main() -> Result<()> {
 
     // Verify content matches
     if read_content == content {
-        println!("  ✅ 内容验证通过: 写入与读取一致!");
+        println!("  ✅ Content verification passed: write and read match!");
     } else {
-        println!("  ❌ 内容不一致!");
-        println!("  写入长度: {}, 读取长度: {}", content.len(), data.len());
+        println!("  ❌ Content mismatch!");
+        println!(
+            "  Written length: {}, Read length: {}",
+            content.len(),
+            data.len()
+        );
     }
 
     // ── Step 3: Range read ───────────────────────────────────────
-    println!("\n3. 范围读取 (offset=0, length=20) ...");
+    println!("\n3. Range read (offset=0, length=20) ...");
     let range_data = GooseFsFileReader::read_range(&config, "/e2e-test/hello.txt", 0, 20).await?;
-    println!("  ✅ 范围读取完成: {} 字节", range_data.len());
-    println!("  内容: {:?}", String::from_utf8_lossy(&range_data));
+    println!("  ✅ Range read complete: {} bytes", range_data.len());
+    println!("  Content: {:?}", String::from_utf8_lossy(&range_data));
 
     // ── Step 4: Streaming read ───────────────────────────────────
-    println!("\n4. 流式逐块读取...");
+    println!("\n4. Streaming block-by-block read...");
     let mut reader = GooseFsFileReader::open(&config, "/e2e-test/hello.txt").await?;
     println!(
-        "  文件长度: {} 字节, 块数: {}",
+        "  File length: {} bytes, blocks: {}",
         reader.file_length(),
         reader.block_count()
     );
 
     let mut block_idx = 0;
     while let Some(chunk) = reader.read_next_block().await? {
-        println!("  Block {}: {} 字节", block_idx, chunk.len());
+        println!("  Block {}: {} bytes", block_idx, chunk.len());
         block_idx += 1;
     }
     println!(
-        "  ✅ 流式读取完成: 共 {} 块, {} 字节",
+        "  ✅ Streaming read complete: {} blocks, {} bytes",
         block_idx,
         reader.bytes_read()
     );
 
     // ── Step 5: Write with builder pattern ───────────────────────
-    println!("\n5. 使用 builder 模式写入多段数据...");
+    println!("\n5. Writing multi-chunk data with builder pattern...");
     match master.delete("/e2e-test/multi.txt", false).await {
         Ok(_) => {}
         Err(_) => {}
@@ -113,14 +117,17 @@ async fn main() -> Result<()> {
     writer.write(b"Second chunk of data. ").await?;
     writer.write(b"Third and final chunk.").await?;
     writer.close().await?;
-    println!("  ✅ 多段写入完成: {} 字节", writer.bytes_written());
+    println!(
+        "  ✅ Multi-chunk write complete: {} bytes",
+        writer.bytes_written()
+    );
 
     // Verify
     let multi_data = GooseFsFileReader::read_file(&config, "/e2e-test/multi.txt").await?;
-    println!("  验证: {:?}", String::from_utf8_lossy(&multi_data));
+    println!("  Verify: {:?}", String::from_utf8_lossy(&multi_data));
 
     // ── Step 6: Write with CACHE_THROUGH mode ────────────────
-    println!("\n6. 使用 CACHE_THROUGH 模式写入（缓存 + 同步持久化到 UFS）...");
+    println!("\n6. Writing with CACHE_THROUGH mode (cache + sync persist to UFS)...");
     match master.delete("/e2e-test/durable.txt", false).await {
         Ok(_) => {}
         Err(_) => {}
@@ -131,16 +138,16 @@ async fn main() -> Result<()> {
     let durable_bytes =
         GooseFsFileWriter::write_file(&durable_config, "/e2e-test/durable.txt", durable_content)
             .await?;
-    println!("  ✅ CACHE_THROUGH 写入完成: {} 字节", durable_bytes);
+    println!("  ✅ CACHE_THROUGH write complete: {} bytes", durable_bytes);
 
-    // 验证持久化状态
+    // Verify persistence status
     let durable_info = master.get_status("/e2e-test/durable.txt").await?;
     println!(
-        "  持久化状态: persisted={:?}",
+        "  Persistence status: persisted={:?}",
         durable_info.persisted.unwrap_or(false)
     );
 
-    println!("\n======================================");
-    println!("✅ 高级api测试完成!");
+    println!("\n========================================================");
+    println!("✅ High-level API test complete!");
     Ok(())
 }

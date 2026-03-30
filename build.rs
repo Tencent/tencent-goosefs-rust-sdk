@@ -25,6 +25,7 @@ fn main() -> Result<()> {
                 "proto/proto/security/capability_token.proto",
                 "proto/proto/security/token.proto",
                 "proto/proto/shared/acl.proto",
+                "proto/grpc/sasl/sasl_server.proto",
             ],
             &[proto_root],
         )?;

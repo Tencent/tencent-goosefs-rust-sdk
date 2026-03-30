@@ -21,10 +21,13 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 use tonic::Streaming;
 use tracing::{debug, instrument, warn};
 
+use crate::auth::{ChannelAuthenticator, ChannelIdInterceptor};
+use crate::config::GooseFsConfig;
 use crate::error::{Error, Result};
 use crate::proto::grpc::block::{
     block_worker_client::BlockWorkerClient, write_request, ReadRequest, ReadResponse, RequestType,
@@ -104,16 +107,48 @@ impl WriteBlockHandle {
     }
 }
 
+/// Type alias for the authenticated Worker gRPC client.
+type AuthenticatedBlockWorkerClient =
+    BlockWorkerClient<InterceptedService<Channel, ChannelIdInterceptor>>;
+
 /// Client for `BlockWorker` service on a single worker node.
 #[derive(Clone)]
 pub struct WorkerClient {
-    inner: BlockWorkerClient<Channel>,
+    inner: AuthenticatedBlockWorkerClient,
     addr: String,
 }
 
 impl WorkerClient {
-    /// Connect to a GooseFS Worker at the given address.
-    pub async fn connect(addr: &str, connect_timeout: Duration) -> Result<Self> {
+    /// Connect to a GooseFS Worker at the given address with authentication.
+    ///
+    /// Authentication is performed according to `config.auth_type`.
+    pub async fn connect(addr: &str, config: &GooseFsConfig) -> Result<Self> {
+        let endpoint = Channel::from_shared(format!("http://{}", addr))
+            .map_err(|e| Error::ConfigError {
+                message: format!("invalid worker endpoint: {}", e),
+            })?
+            .connect_timeout(config.connect_timeout);
+
+        let channel = endpoint.connect().await?;
+
+        // Perform SASL authentication based on the configured auth type
+        let authenticator =
+            ChannelAuthenticator::new(config.auth_type, config.auth_username.clone(), None)
+                .with_auth_timeout(config.auth_timeout);
+
+        let auth_channel = authenticator.authenticate(channel).await?;
+        debug!(addr = %addr, auth_type = %config.auth_type, "connected to GooseFS Worker");
+
+        Ok(Self {
+            inner: BlockWorkerClient::new(auth_channel.channel),
+            addr: addr.to_string(),
+        })
+    }
+
+    /// Connect to a GooseFS Worker with only connect_timeout (backward compatible, NOSASL).
+    ///
+    /// **Deprecated**: Use `connect(addr, config)` instead for proper authentication.
+    pub async fn connect_simple(addr: &str, connect_timeout: Duration) -> Result<Self> {
         let endpoint = Channel::from_shared(format!("http://{}", addr))
             .map_err(|e| Error::ConfigError {
                 message: format!("invalid worker endpoint: {}", e),
@@ -121,18 +156,24 @@ impl WorkerClient {
             .connect_timeout(connect_timeout);
 
         let channel = endpoint.connect().await?;
-        debug!(addr = %addr, "connected to GooseFS Worker");
+        let interceptor = ChannelIdInterceptor::new(uuid::Uuid::new_v4().to_string());
+        let intercepted = InterceptedService::new(channel, interceptor);
+        debug!(addr = %addr, "connected to GooseFS Worker (no auth)");
 
         Ok(Self {
-            inner: BlockWorkerClient::new(channel),
+            inner: BlockWorkerClient::new(intercepted),
             addr: addr.to_string(),
         })
     }
 
-    /// Create from an existing tonic channel.
+    /// Create from an existing tonic channel (useful for testing / channel sharing).
+    ///
+    /// **Note**: This bypasses authentication.
     pub fn from_channel(channel: Channel, addr: String) -> Self {
+        let interceptor = ChannelIdInterceptor::new("test-no-auth".to_string());
+        let intercepted = InterceptedService::new(channel, interceptor);
         Self {
-            inner: BlockWorkerClient::new(channel),
+            inner: BlockWorkerClient::new(intercepted),
             addr,
         }
     }

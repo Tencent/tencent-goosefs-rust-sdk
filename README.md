@@ -36,6 +36,9 @@ This is a standalone Rust gRPC client crate (Layer 3) in the **Lance → OpenDAL
 │  │  VersionClient   — Service handshake     (Master:9200)   │  │
 │  │  WorkerClient    — Block streaming       (Worker:9203)   │  │
 │  ├──────────────────────────────────────────────────────────┤  │
+│  │  ChannelAuthenticator — SASL auth (NOSASL / SIMPLE)      │  │
+│  │  SaslClientHandler    — PLAIN SASL handshake             │  │
+│  ├──────────────────────────────────────────────────────────┤  │
 │  │  BlockMapper     — file range → block read plans         │  │
 │  │  WorkerRouter    — consistent hash block → worker        │  │
 │  ├──────────────────────────────────────────────────────────┤  │
@@ -235,6 +238,36 @@ async fn main() -> goosefs_client::error::Result<()> {
 }
 ```
 
+### Example: Authentication
+
+```rust
+use goosefs_client::auth::AuthType;
+use goosefs_client::client::MasterClient;
+use goosefs_client::config::GooseFsConfig;
+
+#[tokio::main]
+async fn main() -> goosefs_client::error::Result<()> {
+    // Default: SIMPLE mode with current OS username
+    let config = GooseFsConfig::new("127.0.0.1:9200");
+    let master = MasterClient::connect(&config).await?;
+    let entries = master.list_status("/", false).await?;
+    println!("root has {} entries", entries.len());
+
+    // Explicit NOSASL mode (no SASL handshake)
+    let config = GooseFsConfig::new("127.0.0.1:9200")
+        .with_auth_type(AuthType::NoSasl);
+    let master = MasterClient::connect(&config).await?;
+
+    // Explicit SIMPLE mode with custom username
+    let config = GooseFsConfig::new("127.0.0.1:9200")
+        .with_auth_type(AuthType::Simple)
+        .with_auth_username("myuser");
+    let master = MasterClient::connect(&config).await?;
+
+    Ok(())
+}
+```
+
 ### Example: Block-Level Streaming Read
 
 ```rust
@@ -298,6 +331,9 @@ async fn main() -> goosefs_client::error::Result<()> {
 |--------|-------------|
 | **`io::GooseFsFileWriter`** | **High-level file writer** — one-shot `write_file()` or builder pattern `create()` → `write()` → `close()`. Supports all 4 WriteTypes (MUST_CACHE / CACHE_THROUGH / THROUGH / ASYNC_THROUGH). Orchestrates `CreateFile` → `WriteStrategy` → `BlockMapper` → `WorkerRouter` → `GrpcBlockWriter` → `CompleteFile` [→ `ScheduleAsyncPersistence`]. **Note**: CACHE_THROUGH and THROUGH both use `UfsFile` mode — Worker writes directly to UFS (CACHE_THROUGH also caches data locally). |
 | **`io::GooseFsFileReader`** | **High-level file reader** — one-shot `read_file()` / `read_range()` or streaming `open()` → `read_next_block()`. Orchestrates `GetStatus` → `BlockMapper` → `WorkerRouter` → `GrpcBlockReader` |
+| `auth::ChannelAuthenticator` | SASL authentication for gRPC channels — supports `NOSASL` (no handshake) and `SIMPLE` (PLAIN SASL). `MasterClient::connect` uses this internally based on `GooseFsConfig.auth_type` |
+| `auth::AuthType` | Authentication type enum — `NoSasl`, `Simple` (default). Corresponds to Java's `goosefs.security.authentication.type` |
+| `auth::SaslClientHandler` | Low-level PLAIN SASL handshake handler — generates initial messages and processes server responses |
 | `client::MasterClient` | File system metadata CRUD — `get_status`, `list_status`, `create_file`, `complete_file`, `delete`, `rename`, `create_directory`, `schedule_async_persistence` |
 | `client::WorkerManagerClient` | Worker discovery — `get_worker_info_list` |
 | `client::WorkerClient` | Bidirectional streaming block read/write — `read_block`, `write_block(options: WriteBlockOptions)` |
@@ -306,13 +342,13 @@ async fn main() -> goosefs_client::error::Result<()> {
 | `block::WorkerRouter` | Consistent-hash routing of block IDs to workers with failure tracking |
 | `io::GrpcBlockReader` | Low-level streaming block reader with flow-control ACK |
 | `io::GrpcBlockWriter` | Low-level streaming block writer with chunk splitting and flush |
-| `config::GooseFsConfig` | Connection configuration — timeouts, block size, chunk size, root path, **`write_type`** (WritePType), multi-master settings (`master_addrs`, `master_polling_timeout`, retry params), unified constructor `from_addresses()` |
+| `config::GooseFsConfig` | Connection configuration — timeouts, block size, chunk size, root path, **`write_type`** (WritePType), **`auth_type`** / **`auth_username`** / **`auth_timeout`**, multi-master settings (`master_addrs`, `master_polling_timeout`, retry params), unified constructor `from_addresses()` |
 | `WritePType` | Write type enum — `MustCache`, `TryCache`, `CacheThrough`, `Through`, `AsyncThrough`, `None` |
 | `error::Error` | Unified error type with gRPC status code mapping and retriable detection |
 
 ## gRPC Services
 
-This client wraps **4 GooseFS gRPC services** defined in 11 proto files:
+This client wraps **5 GooseFS gRPC services** defined in 12 proto files:
 
 | Service | Port | Proto | Key RPCs |
 |---------|------|-------|----------|
@@ -320,6 +356,7 @@ This client wraps **4 GooseFS gRPC services** defined in 11 proto files:
 | `BlockWorker` | Worker:9203 | `block_worker.proto` | ReadBlock *(bidi-stream)*, WriteBlock *(bidi-stream)*, AsyncCache, RemoveBlock … (12 RPCs) |
 | `WorkerManagerMasterClientService` | Master:9200 | `worker_manager_master.proto` | GetWorkerInfoList, GetCapacityBytes, GetUsedBytes … (9 RPCs) |
 | `ServiceVersionClientService` | Master:9200 | `version.proto` | GetServiceVersion |
+| `SaslAuthenticationService` | Master:9200 / Worker:9203 | `sasl_server.proto` | Authenticate *(bidi-stream)* — SASL handshake for channel authentication |
 
 ## Project Structure
 
@@ -334,6 +371,10 @@ goosefs-client-rust/
 │   ├── lib.rs              # crate root & proto module tree
 │   ├── config.rs           # GooseFsConfig
 │   ├── error.rs            # Error enum + From impls
+│   ├── auth/
+│   │   ├── mod.rs          # Auth module root
+│   │   ├── authenticator.rs # ChannelAuthenticator + AuthType
+│   │   └── sasl_client.rs  # PLAIN SASL handshake handler
 │   ├── client/
 │   │   ├── master.rs       # MasterClient
 │   │   ├── worker.rs       # WorkerClient
@@ -351,6 +392,7 @@ goosefs-client-rust/
 │   ├── highlevel_file_rw.rs     # ★ High-level file read/write (recommended)
 │   ├── write_types.rs           # ★ WriteType comparison (MUST_CACHE/CACHE_THROUGH/THROUGH/ASYNC_THROUGH)
 │   ├── ha_multi_master.rs       # ★ Multi-master mode (auto single/multi via from_addresses)
+│   ├── auth_demo.rs             # ★ Authentication demo (NOSASL / SIMPLE)
 │   ├── lowlevel_block_read.rs   # Low-level block streaming read
 │   ├── lowlevel_create_file.rs  # Low-level file creation (metadata only)
 │   ├── metadata_crud.rs         # File/directory metadata CRUD
@@ -400,6 +442,7 @@ cargo build
 | `dashmap` | 6.x | Concurrent hash map (failure tracking) |
 | `tracing` | 0.1 | Structured logging |
 | `serde` | 1.x | Config serialization |
+| `uuid` | 1.x | Channel-id generation for SASL authentication |
 
 ## GooseFS Compatibility
 

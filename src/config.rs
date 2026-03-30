@@ -5,6 +5,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
+use crate::auth::AuthType;
 use crate::proto::grpc::file::WritePType;
 
 // ── Default constants ────────────────────────────────────────
@@ -24,6 +25,9 @@ const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 300_000;
 /// Default master polling timeout: 30 seconds (mirrors Java `USER_MASTER_POLLING_TIMEOUT`).
 const DEFAULT_MASTER_POLLING_TIMEOUT_MS: u64 = 30_000;
+
+/// Default authentication timeout: 30 seconds.
+const DEFAULT_AUTH_TIMEOUT_MS: u64 = 30_000;
 
 /// Default max duration for master inquire retry: 2 minutes.
 const DEFAULT_MASTER_INQUIRE_MAX_DURATION_MS: u64 = 120_000;
@@ -64,6 +68,18 @@ pub const STORAGE_OPT_BLOCK_SIZE: &str = "goosefs_block_size";
 /// Corresponding environment variable: `GOOSEFS_CHUNK_SIZE`.
 pub const STORAGE_OPT_CHUNK_SIZE: &str = "goosefs_chunk_size";
 
+/// Storage option key for authentication type.
+///
+/// Accepted values: `"nosasl"`, `"simple"` (case-insensitive).
+///
+/// Corresponding environment variable: `GOOSEFS_AUTH_TYPE`.
+pub const STORAGE_OPT_AUTH_TYPE: &str = "goosefs_auth_type";
+
+/// Storage option key for authentication username.
+///
+/// Corresponding environment variable: `GOOSEFS_AUTH_USERNAME`.
+pub const STORAGE_OPT_AUTH_USERNAME: &str = "goosefs_auth_username";
+
 /// Environment variable: GooseFS master address(es).
 pub const ENV_MASTER_ADDR: &str = "GOOSEFS_MASTER_ADDR";
 
@@ -75,6 +91,12 @@ pub const ENV_BLOCK_SIZE: &str = "GOOSEFS_BLOCK_SIZE";
 
 /// Environment variable: chunk size.
 pub const ENV_CHUNK_SIZE: &str = "GOOSEFS_CHUNK_SIZE";
+
+/// Environment variable: authentication type.
+pub const ENV_AUTH_TYPE: &str = "GOOSEFS_AUTH_TYPE";
+
+/// Environment variable: authentication username.
+pub const ENV_AUTH_USERNAME: &str = "GOOSEFS_AUTH_USERNAME";
 
 // ── WriteType: ergonomic Rust enum wrapping WritePType ───────
 
@@ -299,6 +321,34 @@ pub struct GooseFsConfig {
     /// Mirrors Java's `goosefs.user.master.polling.timeout`.
     #[serde(default = "default_master_polling_timeout")]
     pub master_polling_timeout: Duration,
+
+    // ── Authentication configuration ─────────────────────────
+    /// Authentication type (default: `Simple`).
+    ///
+    /// Controls how the client authenticates with GooseFS Master/Worker.
+    /// Mirrors Java's `goosefs.security.authentication.type`.
+    ///
+    /// Currently supported:
+    /// - `NoSasl` — no authentication
+    /// - `Simple` — PLAIN SASL with username (default)
+    ///
+    /// TODO: `Custom`, `Kerberos`, `DelegationToken`, `CapabilityToken`
+    #[serde(default)]
+    pub auth_type: AuthType,
+
+    /// Username for authentication (default: current OS user).
+    ///
+    /// Used in SIMPLE mode as the login identity.
+    /// Mirrors Java's `goosefs.security.login.username`.
+    #[serde(default = "default_auth_username")]
+    pub auth_username: String,
+
+    /// Authentication timeout (default: 30 s).
+    ///
+    /// Maximum time to wait for SASL handshake completion.
+    /// Mirrors Java's `goosefs.network.connection.auth.timeout`.
+    #[serde(default = "default_auth_timeout")]
+    pub auth_timeout: Duration,
 }
 
 fn default_master_inquire_max_duration() -> Duration {
@@ -312,6 +362,14 @@ fn default_master_inquire_max_sleep() -> Duration {
 }
 fn default_master_polling_timeout() -> Duration {
     Duration::from_millis(DEFAULT_MASTER_POLLING_TIMEOUT_MS)
+}
+fn default_auth_username() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+fn default_auth_timeout() -> Duration {
+    Duration::from_millis(DEFAULT_AUTH_TIMEOUT_MS)
 }
 
 impl Default for GooseFsConfig {
@@ -330,6 +388,9 @@ impl Default for GooseFsConfig {
             master_inquire_initial_sleep: default_master_inquire_initial_sleep(),
             master_inquire_max_sleep: default_master_inquire_max_sleep(),
             master_polling_timeout: default_master_polling_timeout(),
+            auth_type: AuthType::default(),
+            auth_username: default_auth_username(),
+            auth_timeout: default_auth_timeout(),
         }
     }
 }
@@ -417,6 +478,35 @@ impl GooseFsConfig {
         } else {
             format!("http://{}:{}", host, rpc_port)
         }
+    }
+
+    /// Set the authentication type.
+    ///
+    /// # Example
+    /// ```
+    /// use goosefs_client::config::GooseFsConfig;
+    /// use goosefs_client::auth::AuthType;
+    ///
+    /// let config = GooseFsConfig::new("127.0.0.1:9200")
+    ///     .with_auth_type(AuthType::NoSasl);
+    /// ```
+    pub fn with_auth_type(mut self, auth_type: AuthType) -> Self {
+        self.auth_type = auth_type;
+        self
+    }
+
+    /// Set the authentication type from a string (case-insensitive).
+    ///
+    /// Accepted values: `"nosasl"`, `"simple"`.
+    pub fn with_auth_type_str(self, auth_type: &str) -> Result<Self, String> {
+        let at: AuthType = auth_type.parse()?;
+        Ok(self.with_auth_type(at))
+    }
+
+    /// Set the authentication username.
+    pub fn with_auth_username(mut self, username: impl Into<String>) -> Self {
+        self.auth_username = username.into();
+        self
     }
 
     /// Set the default write type using the protobuf `WritePType` enum.

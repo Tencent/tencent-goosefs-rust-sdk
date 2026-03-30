@@ -1425,6 +1425,8 @@ ds = lance.dataset(
 | `goosefs_write_type` | `GOOSEFS_WRITE_TYPE` | `String` | `must_cache` | 写入类型（见下表） |
 | `goosefs_block_size` | `GOOSEFS_BLOCK_SIZE` | `u64` | `67108864` (64MB) | Block 大小（bytes） |
 | `goosefs_chunk_size` | `GOOSEFS_CHUNK_SIZE` | `u64` | `1048576` (1MB) | Chunk 大小（bytes） |
+| `goosefs_auth_type` | `GOOSEFS_AUTH_TYPE` | `String` | `simple` | 认证类型：`nosasl` / `simple` |
+| `goosefs_auth_username` | `GOOSEFS_AUTH_USERNAME` | `String` | OS 用户名 | 认证用户名 |
 
 **优先级**（高 → 低）：`storage_options` > 环境变量 > URL authority > 默认值
 
@@ -1509,7 +1511,7 @@ alluxio.user.file.metadata.sync.interval=0s
 |------|------|------|
 | gRPC 流控复杂度高 | 高 | 先实现简化版（无流控 ACK），再迭代优化 |
 | GooseFS 协议变更 | 中 | Proto 版本锁定 + 兼容性测试 |
-| Kerberos 认证 | 中 | 初期跳过，使用无认证模式 |
+| Kerberos 认证 | 中 | ✅ 已实现 NOSASL + SIMPLE；CUSTOM/Kerberos 留 TODO 按需实现 |
 | 缓存一致性 | 中 | manifest 路径 TTL=0 |
 
 ---
@@ -1541,6 +1543,15 @@ Week 5:
 ├── Day 3: 单元测试通过（8/8）+ cargo check 编译通过
 ├── Day 4: Python/Java bindings 适配（待做）
 └── Day 5: 端到端测试 + 性能基准（待做）
+
+Phase 2d — 认证支持 ✅ 已完成 (2026-03-30)
+├── SASL proto 编译 + sasl 模块生成
+├── AuthType 枚举 + ChannelAuthenticator 实现
+├── NOSASL 模式：跳过 SASL 握手，直接使用 channel
+├── SIMPLE 模式：PLAIN SASL 双向流式握手 + channel-id 注入
+├── MasterClient / WorkerClient / WorkerManagerClient 集成认证
+├── GooseFsConfig 新增 auth_type / auth_username / auth_timeout
+└── TODO: CUSTOM / KERBEROS / DELEGATION_TOKEN / CAPABILITY_TOKEN
 ```
 
 ---
@@ -3539,6 +3550,214 @@ Changes:
 
 ---
 
+## 14. 认证支持（Phase 2d）— ✅ NOSASL + SIMPLE 已完成
+
+> **v1.4 新增**：基于 GooseFS Java Client 的 SASL 认证体系，为 Rust Client 实现 NOSASL 和 SIMPLE 两种认证模式。
+
+### 14.1 GooseFS 认证体系概述
+
+GooseFS 服务端支持多种认证方式，通过 `goosefs.security.authentication.type` 配置：
+
+| 层级 | 认证方式 | 配置值 | Rust Client 状态 |
+|------|---------|--------|-----------------|
+| 无认证 | NOSASL | `goosefs.security.authentication.type=NOSASL` | ✅ 已实现 |
+| 简单认证 | SIMPLE | `goosefs.security.authentication.type=SIMPLE`（默认） | ✅ 已实现 |
+| 自定义认证 | CUSTOM | `goosefs.security.authentication.type=CUSTOM` | ⏳ TODO |
+| Kerberos 认证 | KERBEROS | `goosefs.security.authentication.type=KERBEROS` | ⏳ TODO |
+| 委托令牌 | DELEGATION_TOKEN | Kerberos 模式下自动降级 | ⏳ TODO |
+| 能力令牌 | CAPABILITY_TOKEN | Kerberos 模式下 Client→Worker 自动使用 | ⏳ TODO |
+
+### 14.2 认证流程
+
+```
+NOSASL 模式：
+  Client ──── 直接使用 Channel，无 SASL 握手 ────→ Server
+  （仍注入 channel-id metadata 保持接口一致性）
+
+SIMPLE 模式（PLAIN SASL）：
+  1. Client 生成 UUID 作为 channel-id
+  2. Client 通过 SaslAuthenticationService.authenticate 双向流式 RPC 发起握手
+  3. Client 发送 SaslMessage:
+     - messageType: CHALLENGE
+     - message: PLAIN 编码 "\0<username>\0noPassword" (RFC 4616)
+     - clientId: <channel-id UUID>
+     - authenticationScheme: SIMPLE
+     - channelRef: "rust-client-<uuid前8位>"
+  4. Server 验证后返回 SaslMessage(messageType: SUCCESS)
+  5. Client 后续所有 RPC 在 metadata 中携带 "channel-id" header
+```
+
+```mermaid
+sequenceDiagram
+    participant C as Rust Client
+    participant S as GooseFS Server
+
+    Note over C,S: SIMPLE 认证流程
+    C->>S: gRPC Channel 建立 (TCP/HTTP2)
+    C->>S: SaslAuthenticationService.authenticate (双向流)
+    C-->>S: SaslMessage(CHALLENGE, PLAIN初始响应, clientId, SIMPLE)
+    S-->>C: SaslMessage(SUCCESS)
+    Note over C: 认证成功，注入 ChannelIdInterceptor
+    C->>S: 后续 RPC (metadata: channel-id=<uuid>)
+```
+
+### 14.3 模块结构
+
+```
+src/auth/
+├── mod.rs              # 模块声明 + pub re-exports
+├── authenticator.rs    # AuthType 枚举 + ChannelAuthenticator + ChannelIdInterceptor
+└── sasl_client.rs      # SaslClientHandler trait + PlainSaslClientHandler
+
+proto/grpc/sasl/
+└── sasl_server.proto   # SaslAuthenticationService + SaslMessage + ChannelAuthenticationScheme
+```
+
+### 14.4 核心类型
+
+#### AuthType 枚举
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AuthType {
+    /// 无认证 — 不进行 SASL 握手
+    NoSasl,
+    /// 简单认证（默认）— PLAIN SASL 传输用户名
+    Simple,
+    // TODO: Custom, Kerberos
+}
+```
+
+#### ChannelAuthenticator
+
+```rust
+pub struct ChannelAuthenticator {
+    auth_type: AuthType,
+    username: String,
+    password: String,
+    impersonation_user: Option<String>,
+    auth_timeout: Duration,
+}
+
+impl ChannelAuthenticator {
+    /// 对 gRPC 通道执行认证，返回认证后的通道
+    pub async fn authenticate(&self, channel: Channel) -> Result<AuthenticatedChannel>;
+}
+```
+
+#### ChannelIdInterceptor
+
+```rust
+/// 在每个 RPC 请求的 metadata 中注入 channel-id
+/// 对应 Java 端的 ChannelIdInjector
+pub struct ChannelIdInterceptor {
+    channel_id: String,
+}
+impl tonic::service::Interceptor for ChannelIdInterceptor { ... }
+```
+
+#### PlainSaslClientHandler
+
+```rust
+/// PLAIN SASL 客户端处理器 — 用于 SIMPLE 认证
+/// 对应 Java 端的 SaslClientHandlerPlain
+pub struct PlainSaslClientHandler {
+    auth_scheme: ChannelAuthenticationScheme,
+    initial_response: Vec<u8>,  // "\0<username>\0<password>" (RFC 4616)
+}
+```
+
+### 14.5 配置项
+
+| 配置字段 | Storage Option Key | 环境变量 | 类型 | 默认值 | 说明 |
+|---------|-------------------|---------|------|--------|------|
+| `auth_type` | `goosefs_auth_type` | `GOOSEFS_AUTH_TYPE` | `AuthType` | `Simple` | 认证类型 |
+| `auth_username` | `goosefs_auth_username` | `GOOSEFS_AUTH_USERNAME` | `String` | OS 用户名 | 登录用户名 |
+| `auth_timeout` | — | — | `Duration` | 30s | SASL 握手超时 |
+
+### 14.6 使用示例
+
+```rust
+use goosefs_client::config::GooseFsConfig;
+use goosefs_client::auth::AuthType;
+use goosefs_client::client::MasterClient;
+
+// 方式 1: NOSASL（无认证，适用于开发/测试环境）
+let config = GooseFsConfig::new("127.0.0.1:9200")
+    .with_auth_type(AuthType::NoSasl);
+let master = MasterClient::connect(&config).await?;
+
+// 方式 2: SIMPLE（默认，适用于生产环境）
+let config = GooseFsConfig::new("goosefs-master:9200")
+    .with_auth_type(AuthType::Simple)
+    .with_auth_username("hadoop");
+let master = MasterClient::connect(&config).await?;
+
+// 方式 3: 从字符串配置
+let config = GooseFsConfig::new("goosefs-master:9200")
+    .with_auth_type_str("simple").unwrap()
+    .with_auth_username("hadoop");
+```
+
+### 14.7 与 Java Client 的对应关系
+
+| Java 类 | Rust 对应 | 说明 |
+|---------|----------|------|
+| `AuthType` | `auth::AuthType` | 认证类型枚举 |
+| `ChannelAuthenticator` | `auth::ChannelAuthenticator` | 通道认证器 |
+| `AuthenticatedChannelClientDriver` | `ChannelAuthenticator::authenticate_simple()` | 认证驱动（内联实现） |
+| `SaslClientHandler` | `auth::SaslClientHandler` trait | SASL 客户端处理器接口 |
+| `SaslClientHandlerPlain` | `auth::PlainSaslClientHandler` | PLAIN SASL 处理器 |
+| `ChannelIdInjector` | `auth::ChannelIdInterceptor` | channel-id 注入拦截器 |
+| `PlainSaslClientCallbackHandler` | 内联在 `PlainSaslClientHandler::new()` | PLAIN 初始响应生成 |
+| `UserStateFactory` | `GooseFsConfig.auth_type` + `auth_username` | 用户状态由配置驱动 |
+
+### 14.8 代码变更清单
+
+| 文件 | 变更类型 | 说明 |
+|------|---------|------|
+| `proto/grpc/sasl/sasl_server.proto` | 新增 | SASL 认证 proto 定义 |
+| `build.rs` | 修改 | 添加 sasl proto 编译 |
+| `Cargo.toml` | 修改 | 添加 `uuid` 依赖 |
+| `src/auth/mod.rs` | 新增 | 认证模块声明 |
+| `src/auth/authenticator.rs` | 新增 | AuthType + ChannelAuthenticator + ChannelIdInterceptor |
+| `src/auth/sasl_client.rs` | 新增 | SaslClientHandler + PlainSaslClientHandler |
+| `src/lib.rs` | 修改 | 添加 `auth` 模块 + sasl proto 模块 + re-exports |
+| `src/config.rs` | 修改 | 添加 `auth_type` / `auth_username` / `auth_timeout` 配置 |
+| `src/client/master.rs` | 修改 | 集成认证：`AuthenticatedFsClient` 类型别名 + SASL 握手 |
+| `src/client/worker.rs` | 修改 | 集成认证：`AuthenticatedBlockWorkerClient` + `connect(addr, config)` |
+| `src/client/worker_manager.rs` | 修改 | 集成认证：`AuthenticatedWorkerMgrClient` + SASL 握手 |
+| `src/io/file_reader.rs` | 修改 | 适配 `WorkerClient::connect` 新签名 |
+| `src/io/file_writer.rs` | 修改 | 适配 `WorkerClient::connect` 新签名 |
+| `examples/lowlevel_block_read.rs` | 修改 | 适配 `WorkerClient::connect` 新签名 |
+
+### 14.9 测试覆盖
+
+新增 9 个单元测试，全部通过：
+
+| 测试 | 说明 |
+|------|------|
+| `test_auth_type_from_str` | AuthType 字符串解析（nosasl/simple/大小写） |
+| `test_auth_type_from_str_unsupported` | 不支持的认证类型报错（custom/kerberos） |
+| `test_auth_type_default` | 默认认证类型为 Simple |
+| `test_auth_type_display` | AuthType Display trait |
+| `test_channel_id_interceptor` | ChannelIdInterceptor metadata 注入 |
+| `test_plain_sasl_initial_response_format` | PLAIN SASL 初始响应格式 |
+| `test_plain_sasl_with_impersonation_user` | 带代理用户的 PLAIN 响应 |
+| `test_plain_sasl_initial_message` | 完整初始 SaslMessage 构造 |
+| `test_plain_sasl_handle_success` | 处理 SUCCESS 消息 |
+
+### 14.10 后续 TODO
+
+- [ ] **CUSTOM 认证**：复用 `PlainSaslClientHandler`，服务端使用自定义 `AuthenticationProvider` 验证
+- [ ] **KERBEROS 认证**：需要 Rust GSSAPI 库（如 `libgssapi` crate），实现 `SaslClientHandlerKerberos`
+- [ ] **DELEGATION_TOKEN**：Kerberos 模式下自动降级，使用 DIGEST-MD5 SASL 机制
+- [ ] **CAPABILITY_TOKEN**：Client→Worker 的令牌认证
+- [ ] **腾讯云 Token**：gRPC Metadata 注入 `tencent-cloud-access-token`
+- [ ] **连接池认证**：当前每次连接都进行 SASL 握手，后续可缓存已认证的 channel
+
+---
+
 ## 版本变更日志
 
 | 版本 | 日期 | 变更内容 |
@@ -3547,6 +3766,7 @@ Changes:
 | v1.1 | — | WriteType 完整支持设计（第 4 节） |
 | v1.2 | 2026-03-27 | OpenDAL GooseFS Service 实现方案（第 12 节） |
 | v1.3 | 2026-03-28 | Lance GooseFS Provider **实际落地**（第 13 节）：基于 Lance 5.0.0-beta.1 / snafu 0.9 / Rust edition 2024 完成实现，参考 COS PR #5740 补齐 feature 传递 + commit handler + examples，全部 8 个单元测试通过 |
+| v1.4 | 2026-03-30 | **认证支持**（第 14 节）：实现 NOSASL + SIMPLE 两种认证模式，通过 SASL PLAIN 双向流式 gRPC 握手 + channel-id 注入。MasterClient / WorkerClient / WorkerManagerClient 全部集成认证。新增 `auth_type` / `auth_username` / `auth_timeout` 配置项。CUSTOM / Kerberos 等高级认证留 TODO |
 
 ---
 

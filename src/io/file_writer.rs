@@ -347,7 +347,7 @@ impl GooseFsFileWriter {
         );
 
         // Connect to the worker
-        let worker = WorkerClient::connect(&worker_addr, self.config.connect_timeout).await?;
+        let worker = WorkerClient::connect(&worker_addr, &self.config).await?;
 
         // Build write options from the resolved strategy
         let write_opts = WriteBlockOptions {

@@ -233,9 +233,7 @@ impl GooseFsFileReader {
             );
 
             // Connect to the worker (with one retry on a different worker)
-            let worker = match WorkerClient::connect(&worker_addr, self.config.connect_timeout)
-                .await
-            {
+            let worker = match WorkerClient::connect(&worker_addr, &self.config).await {
                 Ok(w) => w,
                 Err(e) => {
                     // Mark worker as failed for future routing
@@ -264,8 +262,7 @@ impl GooseFsFileReader {
                                 retry_addr_info.rpc_port.unwrap_or(9203)
                             );
                             debug!(retry_worker = %retry_worker_addr, "retrying with different worker");
-                            WorkerClient::connect(&retry_worker_addr, self.config.connect_timeout)
-                                .await?
+                            WorkerClient::connect(&retry_worker_addr, &self.config).await?
                         }
                         Err(_) => return Err(e), // No other worker available, propagate original error
                     }

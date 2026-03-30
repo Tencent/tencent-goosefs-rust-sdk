@@ -23,64 +23,71 @@ use goosefs_client::proto::grpc::file::CreateFilePOptions;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 连接到GooseFS Master
-    println!("正在连接到GooseFS Master...");
+    // Connect to GooseFS Master
+    println!("Connecting to GooseFS Master...");
     let config = GooseFsConfig::new("127.0.0.1:9200");
     let master = MasterClient::connect(&config).await?;
-    println!("连接成功!");
+    println!("Connected!");
 
-    // 先创建test-demo目录
-    println!("\n创建test-demo目录...");
+    // Create test-demo directory first
+    println!("\nCreating test-demo directory...");
     match master.create_directory("/test-demo", true).await {
-        Ok(_) => println!("目录 /test-demo 创建成功"),
-        Err(e) => println!("创建目录失败或目录已存在: {:?}", e),
+        Ok(_) => println!("Directory /test-demo created"),
+        Err(e) => println!("Failed to create directory or it already exists: {:?}", e),
     }
 
-    // 清理已存在的文件
-    println!("\n清理已存在的文件...");
+    // Clean up existing files
+    println!("\nCleaning up existing files...");
     match master.delete("/test-demo/world.txt", false).await {
-        Ok(_) => println!("已删除已存在的world.txt文件"),
-        Err(e) => println!("删除world.txt文件失败或文件不存在: {:?}", e),
+        Ok(_) => println!("Deleted existing world.txt"),
+        Err(e) => println!("Failed to delete world.txt or file does not exist: {:?}", e),
     }
 
-    // 创建文件
-    println!("\n创建world.txt文件...");
+    // Create file
+    println!("\nCreating world.txt...");
     let mut create_options = CreateFilePOptions::default();
     create_options.block_size_bytes = Some(64 * 1024 * 1024); // 64MB block size
     master
         .create_file("/test-demo/world.txt", create_options)
         .await?;
-    println!("文件 /test-demo/world.txt 创建成功");
+    println!("File /test-demo/world.txt created");
 
-    // ⚠️ 注意：这里只是设置元数据长度，并没有真正写入数据块到 Worker。
-    // 真正的写入流程需要：
-    //   1. 通过一致性哈希选择目标 Worker
-    //   2. 与 Worker 建立 gRPC 双向流连接
-    //   3. 将数据块通过流式传输写入 Worker 缓存
-    //   4. Worker 侧 commitBlock
-    // 如需真正写入数据，请参考 highlevel_file_rw 示例。
-    let fake_length = 169i64; // 模拟一个文件长度（实际 Worker 上不存在对应的数据块）
+    // ⚠️ Note: this only sets the metadata length; no actual data blocks are written to Workers.
+    // A real write flow requires:
+    //   1. Select target Worker via consistent hashing
+    //   2. Establish a gRPC bidirectional stream with the Worker
+    //   3. Stream data blocks to the Worker cache
+    //   4. Worker-side commitBlock
+    // For actual data writing, see the highlevel_file_rw example.
+    let fake_length = 169i64; // Simulated file length (no actual data blocks on Workers)
 
-    // 标记文件完成（仅在 Master 侧设置 completed=true + length）
-    println!("\n标记文件完成（仅元数据）...");
+    // Mark file as complete (only sets completed=true + length on Master side)
+    println!("\nMarking file as complete (metadata only)...");
     master
         .complete_file("/test-demo/world.txt", Some(fake_length))
         .await?;
-    println!("文件元数据标记完成，设置长度为 {} 字节", fake_length);
+    println!(
+        "File metadata marked complete, length set to {} bytes",
+        fake_length
+    );
 
-    // 获取文件状态
-    println!("\n获取文件状态...");
+    // Get file status
+    println!("\nGetting file status...");
     let file_info = master.get_status("/test-demo/world.txt").await?;
     println!(
-        "文件长度: {:?} 字节（注意：这只是元数据长度，Worker 上没有实际数据块）",
+        "File length: {:?} bytes (note: this is metadata-only length, no actual data blocks on Workers)",
         file_info.length
     );
 
-    println!("\n✅ world.txt 文件元数据已创建!");
-    println!("⚠️  注意：此示例仅演示 CreateFile + CompleteFile 元数据操作。");
-    println!("   文件在 Master 命名空间中存在，但 Worker 上没有实际数据块。");
-    println!("   执行 `goosefs fs cat /test-demo/world.txt` 会卡住，因为无法读取到数据块。");
-    println!("   如需创建可读写的文件，请使用 highlevel_file_rw 示例：");
+    println!("\n✅ world.txt file metadata created!");
+    println!(
+        "⚠️  Note: this example only demonstrates CreateFile + CompleteFile metadata operations."
+    );
+    println!(
+        "   The file exists in the Master namespace, but has no actual data blocks on Workers."
+    );
+    println!("   Running `goosefs fs cat /test-demo/world.txt` will hang because no data blocks can be read.");
+    println!("   To create a readable/writable file, use the highlevel_file_rw example:");
     println!("   cargo run --example highlevel_file_rw");
 
     Ok(())
