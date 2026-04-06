@@ -2,3 +2,4 @@
 src/generated/
 .idea
 .codebuddy
+/goosefs-client-rust.code-workspace
