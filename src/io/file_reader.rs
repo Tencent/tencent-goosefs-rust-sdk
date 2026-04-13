@@ -19,10 +19,10 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use goosefs_client::io::GooseFsFileReader;
-//! use goosefs_client::config::GooseFsConfig;
+//! use goosefs_sdk::io::GooseFsFileReader;
+//! use goosefs_sdk::config::GooseFsConfig;
 //!
-//! # async fn example() -> goosefs_client::error::Result<()> {
+//! # async fn example() -> goosefs_sdk::error::Result<()> {
 //! let config = GooseFsConfig::new("127.0.0.1:9200");
 //!
 //! // Read entire file
@@ -375,9 +375,9 @@ impl GooseFsFileReader {
     /// One-shot convenience: read an entire file and return its contents.
     ///
     /// ```rust,no_run
-    /// # async fn example() -> goosefs_client::error::Result<()> {
-    /// use goosefs_client::io::GooseFsFileReader;
-    /// use goosefs_client::config::GooseFsConfig;
+    /// # async fn example() -> goosefs_sdk::error::Result<()> {
+    /// use goosefs_sdk::io::GooseFsFileReader;
+    /// use goosefs_sdk::config::GooseFsConfig;
     ///
     /// let config = GooseFsConfig::new("127.0.0.1:9200");
     /// let data = GooseFsFileReader::read_file(&config, "/my-file.txt").await?;
@@ -393,9 +393,9 @@ impl GooseFsFileReader {
     /// One-shot convenience: read a byte range from a file.
     ///
     /// ```rust,no_run
-    /// # async fn example() -> goosefs_client::error::Result<()> {
-    /// use goosefs_client::io::GooseFsFileReader;
-    /// use goosefs_client::config::GooseFsConfig;
+    /// # async fn example() -> goosefs_sdk::error::Result<()> {
+    /// use goosefs_sdk::io::GooseFsFileReader;
+    /// use goosefs_sdk::config::GooseFsConfig;
     ///
     /// let config = GooseFsConfig::new("127.0.0.1:9200");
     /// let data = GooseFsFileReader::read_range(&config, "/my-file.txt", 100, 500).await?;

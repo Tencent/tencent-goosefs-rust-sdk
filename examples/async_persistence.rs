@@ -22,11 +22,11 @@
 //! Usage:
 //!   cargo run --example async_persistence
 
-use goosefs_client::client::MasterClient;
-use goosefs_client::config::GooseFsConfig;
-use goosefs_client::error::Result;
-use goosefs_client::io::GooseFsFileWriter;
-use goosefs_client::WritePType;
+use goosefs_sdk::client::MasterClient;
+use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::error::Result;
+use goosefs_sdk::io::GooseFsFileWriter;
+use goosefs_sdk::WritePType;
 
 #[tokio::main]
 async fn main() -> Result<()> {

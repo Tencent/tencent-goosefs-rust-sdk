@@ -8,7 +8,7 @@ use thiserror::Error;
 /// Convenience type alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Top-level error type for goosefs-client-rs.
+/// Top-level error type for goosefs-sdk.
 #[derive(Debug, Error)]
 pub enum Error {
     /// gRPC transport or protocol error (from tonic).

@@ -16,11 +16,11 @@
 
 use std::time::Duration;
 
-use goosefs_client::auth::{AuthType, ChannelAuthenticator};
-use goosefs_client::client::MasterClient;
-use goosefs_client::config::GooseFsConfig;
-use goosefs_client::error::Result;
-use goosefs_client::proto::grpc::file::{
+use goosefs_sdk::auth::{AuthType, ChannelAuthenticator};
+use goosefs_sdk::client::MasterClient;
+use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::error::Result;
+use goosefs_sdk::proto::grpc::file::{
     file_system_master_client_service_client::FileSystemMasterClientServiceClient,
     GetStatusPOptions, GetStatusPRequest,
 };
@@ -34,7 +34,7 @@ fn master_addr() -> String {
 /// Build a raw (unauthenticated) gRPC channel to the master.
 async fn build_raw_channel(addr: &str) -> Result<Channel> {
     let endpoint = Channel::from_shared(format!("http://{}", addr))
-        .map_err(|e| goosefs_client::error::Error::ConfigError {
+        .map_err(|e| goosefs_sdk::error::Error::ConfigError {
             message: format!("invalid endpoint: {}", e),
         })?
         .connect_timeout(Duration::from_secs(10))

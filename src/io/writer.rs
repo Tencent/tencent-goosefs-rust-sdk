@@ -190,10 +190,7 @@ impl GrpcBlockWriter {
     pub async fn cancel(self) {
         let block_id = self.block_id;
         self.handle.cancel().await;
-        debug!(
-            block_id = block_id,
-            "cancelled GrpcBlockWriter"
-        );
+        debug!(block_id = block_id, "cancelled GrpcBlockWriter");
     }
 
     /// The block ID being written.

@@ -28,11 +28,11 @@
 //! # Quick Start — High-Level API
 //!
 //! ```rust,no_run
-//! use goosefs_client::io::{GooseFsFileWriter, GooseFsFileReader};
-//! use goosefs_client::config::GooseFsConfig;
+//! use goosefs_sdk::io::{GooseFsFileWriter, GooseFsFileReader};
+//! use goosefs_sdk::config::GooseFsConfig;
 //!
 //! #[tokio::main]
-//! async fn main() -> goosefs_client::error::Result<()> {
+//! async fn main() -> goosefs_sdk::error::Result<()> {
 //!     let config = GooseFsConfig::new("127.0.0.1:9200");
 //!
 //!     // Write a file
@@ -49,11 +49,11 @@
 //! # Low-Level API
 //!
 //! ```rust,no_run
-//! use goosefs_client::client::MasterClient;
-//! use goosefs_client::config::GooseFsConfig;
+//! use goosefs_sdk::client::MasterClient;
+//! use goosefs_sdk::config::GooseFsConfig;
 //!
 //! #[tokio::main]
-//! async fn main() -> goosefs_client::error::Result<()> {
+//! async fn main() -> goosefs_sdk::error::Result<()> {
 //!     let config = GooseFsConfig::default();
 //!     let master = MasterClient::connect(&config).await?;
 //!     let file_info = master.get_status("/my-file.txt").await?;

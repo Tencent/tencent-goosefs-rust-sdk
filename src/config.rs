@@ -118,7 +118,7 @@ pub const ENV_AUTH_USERNAME: &str = "GOOSEFS_AUTH_USERNAME";
 ///
 /// # Examples
 /// ```
-/// use goosefs_client::config::WriteType;
+/// use goosefs_sdk::config::WriteType;
 ///
 /// // Parse from string (case-insensitive)
 /// let wt: WriteType = "cache_through".parse().unwrap();
@@ -129,7 +129,7 @@ pub const ENV_AUTH_USERNAME: &str = "GOOSEFS_AUTH_USERNAME";
 /// assert_eq!(wt.as_str(), "cache_through");
 ///
 /// // Convert to protobuf WritePType
-/// use goosefs_client::WritePType;
+/// use goosefs_sdk::WritePType;
 /// assert_eq!(WritePType::from(wt), WritePType::CacheThrough);
 ///
 /// // Convert from protobuf WritePType
@@ -484,8 +484,8 @@ impl GooseFsConfig {
     ///
     /// # Example
     /// ```
-    /// use goosefs_client::config::GooseFsConfig;
-    /// use goosefs_client::auth::AuthType;
+    /// use goosefs_sdk::config::GooseFsConfig;
+    /// use goosefs_sdk::auth::AuthType;
     ///
     /// let config = GooseFsConfig::new("127.0.0.1:9200")
     ///     .with_auth_type(AuthType::NoSasl);
@@ -513,8 +513,8 @@ impl GooseFsConfig {
     ///
     /// # Example
     /// ```
-    /// use goosefs_client::config::GooseFsConfig;
-    /// use goosefs_client::WritePType;
+    /// use goosefs_sdk::config::GooseFsConfig;
+    /// use goosefs_sdk::WritePType;
     ///
     /// let config = GooseFsConfig::new("127.0.0.1:9200")
     ///     .with_write_type(WritePType::CacheThrough);
@@ -528,7 +528,7 @@ impl GooseFsConfig {
     ///
     /// # Example
     /// ```
-    /// use goosefs_client::config::{GooseFsConfig, WriteType};
+    /// use goosefs_sdk::config::{GooseFsConfig, WriteType};
     ///
     /// let config = GooseFsConfig::new("127.0.0.1:9200")
     ///     .with_write_type_enum(WriteType::CacheThrough);
@@ -545,7 +545,7 @@ impl GooseFsConfig {
     ///
     /// # Example
     /// ```
-    /// use goosefs_client::config::GooseFsConfig;
+    /// use goosefs_sdk::config::GooseFsConfig;
     ///
     /// let config = GooseFsConfig::new("127.0.0.1:9200")
     ///     .with_write_type_str("cache_through")

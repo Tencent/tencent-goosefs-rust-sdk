@@ -20,10 +20,10 @@
 //! Usage:
 //!   cargo run --example metadata_crud
 
-use goosefs_client::client::MasterClient;
-use goosefs_client::config::GooseFsConfig;
-use goosefs_client::error::Result;
-use goosefs_client::proto::grpc::file::CreateFilePOptions;
+use goosefs_sdk::client::MasterClient;
+use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::error::Result;
+use goosefs_sdk::proto::grpc::file::CreateFilePOptions;
 
 #[tokio::main]
 async fn main() -> Result<()> {

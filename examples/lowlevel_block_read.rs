@@ -12,11 +12,11 @@
 //! Usage:
 //!   cargo run --example lowlevel_block_read
 
-use goosefs_client::block::WorkerRouter;
-use goosefs_client::client::{MasterClient, WorkerClient, WorkerManagerClient};
-use goosefs_client::config::GooseFsConfig;
-use goosefs_client::error::Result;
-use goosefs_client::io::GrpcBlockReader;
+use goosefs_sdk::block::WorkerRouter;
+use goosefs_sdk::client::{MasterClient, WorkerClient, WorkerManagerClient};
+use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::error::Result;
+use goosefs_sdk::io::GrpcBlockReader;
 
 #[tokio::main]
 async fn main() -> Result<()> {

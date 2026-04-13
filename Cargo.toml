@@ -1,5 +1,5 @@
 [package]
-name = "goosefs-client-rs"
+name = "goosefs-sdk"
 version = "0.1.0"
 edition = "2021"
 description = "GooseFS Rust gRPC Client - Direct gRPC client for GooseFS Master/Worker"
@@ -7,7 +7,7 @@ license = "Apache-2.0"
 authors = ["GooseFS Team"]
 
 [lib]
-name = "goosefs_client"
+name = "goosefs_sdk"
 
 [dependencies]
 tonic = { version = "0.12", features = ["tls"] }

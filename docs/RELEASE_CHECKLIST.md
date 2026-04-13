@@ -1,12 +1,12 @@
 # 发布 Checklist
 
-`goosefs-client-rs` 发布前需要完成的事项清单。
+`goosefs-sdk` 发布前需要完成的事项清单。
 
 ## 一、Crate 元数据
 
 | 事项 | 当前状态 | 操作 |
 |------|---------|------|
-| 包名 | `goosefs-client-rs` | TODO: 确认最终包名（`goosefs-rs` 或 `goosefs-client-rs`） |
+| 包名 | `goosefs-sdk` | ✅ 最终包名已确认为 `goosefs-sdk` |
 | 版本号 | `0.1.0` | ✅ 首次发布保持 `0.1.0` |
 | description | 已有 | ✅ |
 | license | `Apache-2.0` | ✅ |
@@ -81,7 +81,7 @@ cargo publish --token <token>
 
 # 4. 验证
 # 等待几分钟后
-cargo add goosefs-client-rs  # 或最终确定的包名
+cargo add goosefs-sdk  # 或最终确定的包名
 ```
 
 ## 九、发布后

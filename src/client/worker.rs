@@ -136,10 +136,7 @@ impl WriteBlockHandle {
     pub async fn cancel(self) {
         drop(self.request_tx);
         drop(self.response_rx);
-        debug!(
-            block_id = self.block_id,
-            "cancelled write stream"
-        );
+        debug!(block_id = self.block_id, "cancelled write stream");
     }
 }
 

@@ -143,10 +143,10 @@ impl tonic::service::Interceptor for ChannelIdInterceptor {
 /// ## Usage
 ///
 /// ```rust,no_run
-/// use goosefs_client::auth::{AuthType, ChannelAuthenticator};
+/// use goosefs_sdk::auth::{AuthType, ChannelAuthenticator};
 /// use tonic::transport::Channel;
 ///
-/// # async fn example() -> goosefs_client::error::Result<()> {
+/// # async fn example() -> goosefs_sdk::error::Result<()> {
 /// let channel = Channel::from_static("http://127.0.0.1:9200").connect().await?;
 /// let authenticator = ChannelAuthenticator::new(
 ///     AuthType::Simple,

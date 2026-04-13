@@ -1,6 +1,6 @@
 # Release Guide
 
-本文档描述如何打包并发布 `goosefs-client-rs` 到 Cargo 仓库（crates.io 或腾讯内部 Cargo Registry）。
+本文档描述如何打包并发布 `goosefs-sdk` 到 Cargo 仓库（crates.io 或腾讯内部 Cargo Registry）。
 
 ## 前置条件
 
@@ -45,12 +45,12 @@ cargo publish --token <your-crates-io-token>
 ### 安装验证
 
 ```bash
-cargo add goosefs-client-rs
+cargo add goosefs-sdk
 ```
 
 ### 项目地址
 
-- https://crates.io/crates/goosefs-client-rs
+- https://crates.io/crates/goosefs-sdk
 
 ---
 
@@ -77,14 +77,14 @@ cargo publish --registry tencent --token <your-token>
 
 ```toml
 [dependencies]
-goosefs-client-rs = { version = "0.1", registry = "tencent" }
+goosefs-sdk = { version = "0.1", registry = "tencent" }
 ```
 
 或通过 `.cargo/config.toml` 全局配置默认 registry 后直接使用：
 
 ```toml
 [dependencies]
-goosefs-client-rs = "0.1"
+goosefs-sdk = "0.1"
 ```
 
 ---

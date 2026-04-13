@@ -17,10 +17,10 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use goosefs_client::io::GooseFsFileWriter;
-//! use goosefs_client::config::GooseFsConfig;
+//! use goosefs_sdk::io::GooseFsFileWriter;
+//! use goosefs_sdk::config::GooseFsConfig;
 //!
-//! # async fn example() -> goosefs_client::error::Result<()> {
+//! # async fn example() -> goosefs_sdk::error::Result<()> {
 //! let config = GooseFsConfig::new("127.0.0.1:9200");
 //! let data = b"Hello, GooseFS!";
 //!
@@ -42,7 +42,7 @@ use tracing::{debug, info, warn};
 
 use crate::block::router::WorkerRouter;
 use crate::client::master::default_file_mode;
-use crate::client::worker::{WriteBlockOptions, WorkerClientPool};
+use crate::client::worker::{WorkerClientPool, WriteBlockOptions};
 use crate::client::{MasterClient, WorkerManagerClient};
 use crate::config::GooseFsConfig;
 use crate::error::{Error, Result};
@@ -385,15 +385,16 @@ impl GooseFsFileWriter {
         };
 
         // Open block writer with space reservation = block size
-        let block_writer = match GrpcBlockWriter::open(&worker, block_id, block_size as i64, write_opts).await {
-            Ok(w) => w,
-            Err(e) => {
-                // Mark worker as failed on open failure
-                self.router.mark_failed(addr);
-                self.worker_pool.invalidate(&worker_addr).await;
-                return Err(e);
-            }
-        };
+        let block_writer =
+            match GrpcBlockWriter::open(&worker, block_id, block_size as i64, write_opts).await {
+                Ok(w) => w,
+                Err(e) => {
+                    // Mark worker as failed on open failure
+                    self.router.mark_failed(addr);
+                    self.worker_pool.invalidate(&worker_addr).await;
+                    return Err(e);
+                }
+            };
 
         self.current_block_writer = Some(ActiveBlockWriter {
             writer: block_writer,
@@ -455,13 +456,23 @@ impl GooseFsFileWriter {
         // Cancel the current block writer
         if let Some(active) = self.current_block_writer.take() {
             // Mark the worker as failed for future exclusion
-            self.router.mark_failed(
-                &crate::proto::grpc::WorkerNetAddress {
-                    host: Some(active.worker_addr.split(':').next().unwrap_or("unknown").to_string()),
-                    rpc_port: active.worker_addr.split(':').nth(1).and_then(|p| p.parse().ok()),
+            self.router
+                .mark_failed(&crate::proto::grpc::WorkerNetAddress {
+                    host: Some(
+                        active
+                            .worker_addr
+                            .split(':')
+                            .next()
+                            .unwrap_or("unknown")
+                            .to_string(),
+                    ),
+                    rpc_port: active
+                        .worker_addr
+                        .split(':')
+                        .nth(1)
+                        .and_then(|p| p.parse().ok()),
                     ..Default::default()
-                },
-            );
+                });
             self.worker_pool.invalidate(&active.worker_addr).await;
             active.writer.cancel().await;
         }
@@ -587,9 +598,9 @@ impl GooseFsFileWriter {
     /// This is the simplest way to write a file to GooseFS:
     ///
     /// ```rust,no_run
-    /// # async fn example() -> goosefs_client::error::Result<()> {
-    /// use goosefs_client::io::GooseFsFileWriter;
-    /// use goosefs_client::config::GooseFsConfig;
+    /// # async fn example() -> goosefs_sdk::error::Result<()> {
+    /// use goosefs_sdk::io::GooseFsFileWriter;
+    /// use goosefs_sdk::config::GooseFsConfig;
     ///
     /// let config = GooseFsConfig::new("127.0.0.1:9200");
     /// GooseFsFileWriter::write_file(&config, "/my-file.txt", b"Hello!").await?;

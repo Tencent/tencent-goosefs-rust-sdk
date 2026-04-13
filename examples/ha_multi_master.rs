@@ -14,12 +14,12 @@
 //! cargo run --example ha_multi_master -- 10.0.0.1:9200
 //! ```
 
-use goosefs_client::client::MasterClient;
-use goosefs_client::config::GooseFsConfig;
+use goosefs_sdk::client::MasterClient;
+use goosefs_sdk::config::GooseFsConfig;
 use std::time::Duration;
 
 #[tokio::main]
-async fn main() -> goosefs_client::error::Result<()> {
+async fn main() -> goosefs_sdk::error::Result<()> {
     // Parse master addresses from command-line arguments.
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {

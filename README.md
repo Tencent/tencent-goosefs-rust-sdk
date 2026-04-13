@@ -99,18 +99,18 @@ Add to your project's `Cargo.toml`:
 
 ```toml
 [dependencies]
-goosefs-client-rs = { path = "../goosefs-client-rust" }
+goosefs-sdk = { path = "../goosefs-client-rust" }
 tokio = { version = "1", features = ["full"] }
 ```
 
 ### Example: File Metadata Operations
 
 ```rust
-use goosefs_client::client::MasterClient;
-use goosefs_client::config::GooseFsConfig;
+use goosefs_sdk::client::MasterClient;
+use goosefs_sdk::config::GooseFsConfig;
 
 #[tokio::main]
-async fn main() -> goosefs_client::error::Result<()> {
+async fn main() -> goosefs_sdk::error::Result<()> {
     // 1. Connect to GooseFS Master
     let config = GooseFsConfig::new("127.0.0.1:9200");
     let master = MasterClient::connect(&config).await?;
@@ -141,11 +141,11 @@ async fn main() -> goosefs_client::error::Result<()> {
 ### Example: Multi-Master Connection
 
 ```rust
-use goosefs_client::config::GooseFsConfig;
-use goosefs_client::client::MasterClient;
+use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::client::MasterClient;
 
 #[tokio::main]
-async fn main() -> goosefs_client::error::Result<()> {
+async fn main() -> goosefs_sdk::error::Result<()> {
     // Unified constructor: automatically selects single or multi-master mode.
     // 1 address  → single-master
     // 2+ addresses → multi-master (polls all to discover Primary)
@@ -169,12 +169,12 @@ async fn main() -> goosefs_client::error::Result<()> {
 ### Example: High-Level File Write (Recommended)
 
 ```rust
-use goosefs_client::io::GooseFsFileWriter;
-use goosefs_client::config::GooseFsConfig;
-use goosefs_client::WritePType;
+use goosefs_sdk::io::GooseFsFileWriter;
+use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::WritePType;
 
 #[tokio::main]
-async fn main() -> goosefs_client::error::Result<()> {
+async fn main() -> goosefs_sdk::error::Result<()> {
     let config = GooseFsConfig::new("127.0.0.1:9200");
 
     // One-shot write: creates file, writes data, completes file in one call
@@ -214,11 +214,11 @@ async fn main() -> goosefs_client::error::Result<()> {
 ### Example: High-Level File Read (Recommended)
 
 ```rust
-use goosefs_client::io::GooseFsFileReader;
-use goosefs_client::config::GooseFsConfig;
+use goosefs_sdk::io::GooseFsFileReader;
+use goosefs_sdk::config::GooseFsConfig;
 
 #[tokio::main]
-async fn main() -> goosefs_client::error::Result<()> {
+async fn main() -> goosefs_sdk::error::Result<()> {
     let config = GooseFsConfig::new("127.0.0.1:9200");
 
     // One-shot: read entire file
@@ -241,12 +241,12 @@ async fn main() -> goosefs_client::error::Result<()> {
 ### Example: Authentication
 
 ```rust
-use goosefs_client::auth::AuthType;
-use goosefs_client::client::MasterClient;
-use goosefs_client::config::GooseFsConfig;
+use goosefs_sdk::auth::AuthType;
+use goosefs_sdk::client::MasterClient;
+use goosefs_sdk::config::GooseFsConfig;
 
 #[tokio::main]
-async fn main() -> goosefs_client::error::Result<()> {
+async fn main() -> goosefs_sdk::error::Result<()> {
     // Default: SIMPLE mode with current OS username
     let config = GooseFsConfig::new("127.0.0.1:9200");
     let master = MasterClient::connect(&config).await?;
@@ -296,8 +296,8 @@ goosefs.security.authentication.type=SIMPLE
 **Client-Side Configuration**
 
 ```rust
-use goosefs_client::auth::AuthType;
-use goosefs_client::config::GooseFsConfig;
+use goosefs_sdk::auth::AuthType;
+use goosefs_sdk::config::GooseFsConfig;
 use std::time::Duration;
 
 // ── SIMPLE mode (default) ──
@@ -343,13 +343,13 @@ let config = GooseFsConfig::new("127.0.0.1:9200")
 ### Example: Block-Level Streaming Read
 
 ```rust
-use goosefs_client::client::{MasterClient, WorkerClient, WorkerManagerClient};
-use goosefs_client::block::{BlockMapper, WorkerRouter};
-use goosefs_client::io::GrpcBlockReader;
-use goosefs_client::config::GooseFsConfig;
+use goosefs_sdk::client::{MasterClient, WorkerClient, WorkerManagerClient};
+use goosefs_sdk::block::{BlockMapper, WorkerRouter};
+use goosefs_sdk::io::GrpcBlockReader;
+use goosefs_sdk::config::GooseFsConfig;
 
 #[tokio::main]
-async fn main() -> goosefs_client::error::Result<()> {
+async fn main() -> goosefs_sdk::error::Result<()> {
     let config = GooseFsConfig::new("127.0.0.1:9200");
 
     // 1. Get file metadata
