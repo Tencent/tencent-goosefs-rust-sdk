@@ -115,6 +115,65 @@ impl WorkerRouter {
         self.failed_workers.insert(key, Instant::now());
     }
 
+    /// Pick any eligible worker (random selection, not tied to a block ID).
+    ///
+    /// Matches Java `UnderFileSystemFileOutStream`:
+    /// ```java
+    /// Collections.shuffle(workerNetAddresses);
+    /// WorkerNetAddress address = workerNetAddresses.get(0);
+    /// ```
+    ///
+    /// Used for opening the single long UFS stream in `CACHE_THROUGH` / `THROUGH`
+    /// mode, where the UFS stream must be independent of the per-block cache
+    /// routing.
+    ///
+    /// Excludes recently-failed workers; falls back to all workers if every
+    /// worker is marked failed.
+    pub async fn pick_any_worker(&self) -> Result<WorkerInfo> {
+        let workers = self.workers.read().await.clone();
+
+        if workers.is_empty() {
+            return Err(Error::NoWorkerAvailable {
+                message: "no workers registered".to_string(),
+            });
+        }
+
+        self.cleanup_expired_failures();
+
+        let eligible: Vec<WorkerInfo> = workers
+            .iter()
+            .filter(|w| {
+                if let Some(addr) = w.address.as_ref() {
+                    let key = worker_addr_key(addr);
+                    !self.is_failed(&key)
+                } else {
+                    false
+                }
+            })
+            .cloned()
+            .collect();
+
+        let pool = if eligible.is_empty() {
+            (*workers).clone()
+        } else {
+            eligible
+        };
+
+        if pool.is_empty() {
+            return Err(Error::NoWorkerAvailable {
+                message: "no eligible workers".to_string(),
+            });
+        }
+
+        // Simple random pick using nanosecond jitter — no external RNG dep needed.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as usize)
+            .unwrap_or(0);
+        let idx = nanos % pool.len();
+        Ok(pool[idx].clone())
+    }
+
     /// Check if a worker address is currently in the failed set.
     fn is_failed(&self, key: &str) -> bool {
         if let Some(entry) = self.failed_workers.get(key) {
@@ -234,5 +293,43 @@ mod tests {
         // Should select w2
         let selected = router.select_worker(42).await.unwrap();
         assert_eq!(selected.id, Some(2));
+    }
+
+    #[tokio::test]
+    async fn test_pick_any_worker_empty() {
+        let router = WorkerRouter::new();
+        assert!(router.pick_any_worker().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_pick_any_worker_returns_eligible() {
+        let router = WorkerRouter::with_failure_ttl(Duration::from_secs(3600));
+        let workers = vec![
+            make_worker(1, "w1", 9203),
+            make_worker(2, "w2", 9203),
+            make_worker(3, "w3", 9203),
+        ];
+        router.update_workers(workers.clone()).await;
+        // Mark w1 + w2 as failed, only w3 eligible.
+        router.mark_failed(workers[0].address.as_ref().unwrap());
+        router.mark_failed(workers[1].address.as_ref().unwrap());
+
+        for _ in 0..10 {
+            let picked = router.pick_any_worker().await.unwrap();
+            assert_eq!(picked.id, Some(3));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pick_any_worker_fallback_when_all_failed() {
+        let router = WorkerRouter::with_failure_ttl(Duration::from_secs(3600));
+        let workers = vec![make_worker(1, "w1", 9203), make_worker(2, "w2", 9203)];
+        router.update_workers(workers.clone()).await;
+        router.mark_failed(workers[0].address.as_ref().unwrap());
+        router.mark_failed(workers[1].address.as_ref().unwrap());
+
+        // Should fall back to all workers instead of erroring out.
+        let picked = router.pick_any_worker().await.unwrap();
+        assert!(picked.id == Some(1) || picked.id == Some(2));
     }
 }

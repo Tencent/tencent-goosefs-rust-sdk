@@ -53,13 +53,23 @@ use crate::proto::proto::dataserver::CreateUfsFileOptions;
 
 /// Write strategy derived from the effective `WritePType`.
 ///
-/// Determines the Worker-side `RequestType`, optional UFS options, and
-/// whether `schedule_async_persistence` should be called after `close()`.
+/// Unlike the old single-stream design, CACHE_THROUGH must drive **two
+/// independent streams in parallel** (matching Java `GooseFSFileOutStream`):
+/// - a cache stream, sliced by block boundaries (`RequestType::GoosefsBlock`);
+/// - a UFS stream, a single long-lived stream for the entire file
+///   (`RequestType::UfsFile`, `block_id = -1`, `length = i64::MAX`).
+///
+/// Using `RequestType::UfsFile` with per-block RPCs (the old buggy behavior)
+/// makes the Worker call `ufs.createNonexistingFile(path)` for every new block,
+/// which truncates-and-rewrites the UFS file so only the last block survives.
 #[derive(Clone, Debug)]
 struct WriteStrategy {
-    /// Worker `RequestType`: `GoosefsBlock` for cache writes, `UfsFile` for THROUGH.
-    request_type: RequestType,
-    /// UFS file creation options — only set when `request_type == UfsFile`.
+    /// Open a per-block cache stream (`RequestType::GoosefsBlock`).
+    cache_stream: bool,
+    /// Open a single long-lived UFS stream (`RequestType::UfsFile`,
+    /// `block_id = -1`, `length = i64::MAX`).
+    ufs_stream: bool,
+    /// UFS file creation options — used on the UFS stream's initial command.
     create_ufs_file_options: Option<CreateUfsFileOptions>,
     /// Whether `close()` should call `schedule_async_persistence` (ASYNC_THROUGH).
     need_async_persist: bool,
@@ -68,47 +78,49 @@ struct WriteStrategy {
 /// Derive the write strategy from `write_type` (i32 enum value) and the
 /// `FileInfo` returned by `CreateFile`.
 ///
-/// - MUST_CACHE (1) / TRY_CACHE (2) / unset: `GoosefsBlock`, no UFS.
-/// - CACHE_THROUGH (3): `UfsFile` — Worker writes to UFS and caches simultaneously.
-/// - THROUGH (4): `UfsFile` + `CreateUfsFileOptions` extracted from `FileInfo`.
-/// - ASYNC_THROUGH (5): `GoosefsBlock`, `close()` schedules async persist.
-///
-/// **Note on CACHE_THROUGH**: In the Java client, CACHE_THROUGH creates parallel
-/// streams to both Worker cache and UFS. On the Worker side, `RequestType::UfsFile`
-/// writes data to UFS directly; the Worker also caches the data blocks in its local
-/// store. This is why CACHE_THROUGH uses `UfsFile` mode — the same as THROUGH —
-/// rather than `GoosefsBlock`. Without this, data reaches the cache but never gets
-/// persisted to UFS (e.g. COS), because Master only marks metadata as PERSISTED
-/// without actually copying data.
+/// | write_type             | cache_stream | ufs_stream | async_persist |
+/// |------------------------|:------------:|:----------:|:-------------:|
+/// | MUST_CACHE (1)         | yes          | no         | no            |
+/// | TRY_CACHE  (2)         | yes          | no         | no            |
+/// | **CACHE_THROUGH (3)**  | **yes**      | **yes**    | **no**        |
+/// | THROUGH (4)            | no           | yes        | no            |
+/// | ASYNC_THROUGH (5)      | yes          | no         | yes           |
+/// | NONE / unset           | yes          | no         | no            |
 fn resolve_write_strategy(write_type: Option<i32>, file_info: &FileInfo) -> WriteStrategy {
+    let build_ufs_opts = || CreateUfsFileOptions {
+        ufs_path: file_info.ufs_path.clone(),
+        owner: file_info.owner.clone(),
+        group: file_info.group.clone(),
+        mode: file_info.mode,
+        mount_id: file_info.mount_id,
+        acl: None,
+    };
     match write_type {
-        // CACHE_THROUGH (3) / THROUGH (4): write to UFS via Worker.
-        // For CACHE_THROUGH, the Worker also caches the data blocks locally.
-        // For THROUGH, the Worker writes directly to UFS without caching.
-        Some(3) | Some(4) => WriteStrategy {
-            request_type: RequestType::UfsFile,
-            create_ufs_file_options: Some(CreateUfsFileOptions {
-                ufs_path: file_info.ufs_path.clone(),
-                owner: file_info.owner.clone(),
-                group: file_info.group.clone(),
-                mode: file_info.mode,
-                mount_id: file_info.mount_id,
-                acl: None,
-            }),
+        // CACHE_THROUGH: dual stream (cache blocks + single UFS stream)
+        Some(3) => WriteStrategy {
+            cache_stream: true,
+            ufs_stream: true,
+            create_ufs_file_options: Some(build_ufs_opts()),
             need_async_persist: false,
         },
-
-        // ASYNC_THROUGH: write to cache, schedule async persist after close
+        // THROUGH: UFS only
+        Some(4) => WriteStrategy {
+            cache_stream: false,
+            ufs_stream: true,
+            create_ufs_file_options: Some(build_ufs_opts()),
+            need_async_persist: false,
+        },
+        // ASYNC_THROUGH: cache only, schedule async persist after close
         Some(5) => WriteStrategy {
-            request_type: RequestType::GoosefsBlock,
+            cache_stream: true,
+            ufs_stream: false,
             create_ufs_file_options: None,
             need_async_persist: true,
         },
-
-        // MUST_CACHE (1), TRY_CACHE (2), NONE (6), unset:
-        // all write to GooseFS cache blocks only; no UFS persistence.
+        // MUST_CACHE (1), TRY_CACHE (2), NONE (6), unset: cache only
         _ => WriteStrategy {
-            request_type: RequestType::GoosefsBlock,
+            cache_stream: true,
+            ufs_stream: false,
             create_ufs_file_options: None,
             need_async_persist: false,
         },
@@ -152,6 +164,18 @@ pub struct GooseFsFileWriter {
     /// Data is streamed chunk-by-chunk as it arrives, matching Java's
     /// `BlockOutStream` + `DataWriter.writeChunk()` pattern.
     current_block_writer: Option<ActiveBlockWriter>,
+    /// Single long-lived UFS stream used by `CACHE_THROUGH` / `THROUGH` modes.
+    ///
+    /// Matches Java `UnderFileSystemFileOutStream`: the entire file is written
+    /// to the UFS as **one** continuous `WriteBlock(UFS_FILE)` stream with
+    /// `block_id = -1` and `space_to_reserve = i64::MAX`. The Worker calls
+    /// `createNonexistingFile` exactly once (on the first chunk) and then
+    /// appends every subsequent chunk to the same `OutputStream`.
+    ///
+    /// Opened lazily on the first `write()` that needs UFS persistence.
+    ufs_stream: Option<GrpcBlockWriter>,
+    /// Worker address hosting the UFS stream (for failure tracking).
+    ufs_worker_addr: Option<String>,
 }
 
 impl GooseFsFileWriter {
@@ -219,7 +243,8 @@ impl GooseFsFileWriter {
         let write_strategy = resolve_write_strategy(effective_write_type, &file_info);
         debug!(
             write_type = ?effective_write_type,
-            request_type = ?write_strategy.request_type,
+            cache_stream = write_strategy.cache_stream,
+            ufs_stream = write_strategy.ufs_stream,
             need_async_persist = write_strategy.need_async_persist,
             "resolved write strategy"
         );
@@ -254,15 +279,23 @@ impl GooseFsFileWriter {
             write_strategy,
             committed_block_ids: Vec::new(),
             current_block_writer: None,
+            ufs_stream: None,
+            ufs_worker_addr: None,
         })
     }
 
-    /// Write data to the file using chunk-level streaming.
+    /// Write data to the file.
     ///
-    /// Data is streamed to workers chunk-by-chunk as it arrives, matching
-    /// Java's `BlockOutStream.write()` → `updateCurrentChunk()` → `DataWriter.writeChunk()`
-    /// pattern. When a block boundary is reached, the current block is flushed
-    /// and closed, and a new block writer is opened for the next block.
+    /// Depending on the resolved [`WriteStrategy`], data is fanned out to one or
+    /// both of the following streams — matching Java `GooseFSFileOutStream.writeInternal`:
+    ///
+    /// - **cache stream** (`cache_stream = true`): chunk-level streaming, sliced
+    ///   by block boundaries. Matches Java's `BlockOutStream.write()` →
+    ///   `updateCurrentChunk()` → `DataWriter.writeChunk()`.
+    /// - **UFS stream** (`ufs_stream = true`): a single long-lived stream for
+    ///   the entire file (`block_id = -1`, `length = i64::MAX`). Every chunk is
+    ///   appended to the same `OutputStream` on the Worker. Opened lazily on
+    ///   the first write that needs UFS persistence.
     ///
     /// Can be called multiple times for streaming writes.
     pub async fn write(&mut self, data: &[u8]) -> Result<()> {
@@ -276,6 +309,22 @@ impl GooseFsFileWriter {
             return Ok(());
         }
 
+        // 1) Feed the cache stream (sliced by block boundaries).
+        if self.write_strategy.cache_stream {
+            self.write_to_cache_stream(data).await?;
+        }
+
+        // 2) Feed the UFS stream (single long stream, no block boundaries —
+        //    only sliced by chunk_size).
+        if self.write_strategy.ufs_stream {
+            self.write_to_ufs_stream(data).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Append data to the per-block cache stream, slicing at block boundaries.
+    async fn write_to_cache_stream(&mut self, data: &[u8]) -> Result<()> {
         let block_size = self
             .file_info
             .block_size_bytes
@@ -326,13 +375,40 @@ impl GooseFsFileWriter {
         Ok(())
     }
 
-    /// Open the next block writer for streaming writes.
+    /// Append data to the single long-lived UFS stream (`RequestType::UfsFile`,
+    /// `block_id = -1`, `length = i64::MAX`). Opens the stream lazily on the
+    /// first call.
+    async fn write_to_ufs_stream(&mut self, data: &[u8]) -> Result<()> {
+        if self.ufs_stream.is_none() {
+            self.open_ufs_stream().await?;
+        }
+        let chunk_size = self.config.chunk_size as usize;
+        let ufs = self
+            .ufs_stream
+            .as_mut()
+            .expect("ufs_stream just opened above");
+
+        let total = data.len();
+        match ufs.write_all(data, chunk_size).await {
+            Ok(()) => {
+                // Track total UFS bytes written (for completeFile's ufsLength).
+                self.total_bytes_written += total as u64;
+                Ok(())
+            }
+            Err(e) => self.handle_ufs_write_exception(e).await,
+        }
+    }
+
+    /// Open the next **cache** block writer.
     ///
     /// Matches Java's `GooseFSFileOutStream.getNextBlock()`:
     /// - Close the current block if any
     /// - Compute the next block ID
-    /// - Select a worker (excluding failed workers)
-    /// - Open a new `GrpcBlockWriter` via the connection pool
+    /// - Select a worker via consistent hashing (excluding failed workers)
+    /// - Open a new `GrpcBlockWriter` with `RequestType::GoosefsBlock`
+    ///
+    /// UFS persistence is handled by a separate long-lived stream
+    /// (`open_ufs_stream`), not by this per-block RPC.
     async fn open_next_block(&mut self, block_size: u64) -> Result<()> {
         // Close current block if it exists
         if self.current_block_writer.is_some() {
@@ -364,7 +440,7 @@ impl GooseFsFileWriter {
             block_id = block_id,
             block_index = block_index,
             worker = %worker_addr,
-            "opening new block writer"
+            "opening new cache block writer"
         );
 
         // Acquire worker client from connection pool (reuses existing channel)
@@ -378,10 +454,11 @@ impl GooseFsFileWriter {
             }
         };
 
-        // Build write options from the resolved strategy
+        // Cache blocks always use GoosefsBlock — UFS persistence is on a
+        // separate long-lived stream opened by `open_ufs_stream()`.
         let write_opts = WriteBlockOptions {
-            request_type: self.write_strategy.request_type,
-            create_ufs_file_options: self.write_strategy.create_ufs_file_options.clone(),
+            request_type: RequestType::GoosefsBlock,
+            create_ufs_file_options: None,
         };
 
         // Open block writer with space reservation = block size
@@ -423,7 +500,7 @@ impl GooseFsFileWriter {
                     block_id = block_id,
                     ack_offset = ack_offset,
                     bytes_written = bytes_written,
-                    "block flushed"
+                    "cache block flushed"
                 );
 
                 // Close the writer (triggers server-side commitBlock)
@@ -431,12 +508,79 @@ impl GooseFsFileWriter {
 
                 // Track committed block for cancel/rollback
                 self.committed_block_ids.push(block_id);
-                self.total_bytes_written += bytes_written;
+                // Only accumulate here when there is no UFS stream; otherwise the UFS
+                // stream is the authoritative byte counter (see `write_to_ufs_stream`).
+                if !self.write_strategy.ufs_stream {
+                    self.total_bytes_written += bytes_written;
+                }
             } else {
                 // No data written, just cancel the empty block
                 writer.cancel().await;
             }
         }
+        Ok(())
+    }
+
+    /// Open the single long-lived UFS stream used by CACHE_THROUGH / THROUGH.
+    ///
+    /// Matches Java `UnderFileSystemFileOutStream`:
+    /// - picks a worker at random (independent of cache routing);
+    /// - opens one `WriteBlock` RPC with `block_id = -1`, `length = i64::MAX`,
+    ///   `RequestType::UfsFile`, and the resolved `CreateUfsFileOptions`;
+    /// - the Worker calls `createNonexistingFile` exactly once and appends every
+    ///   subsequent chunk to the same `OutputStream`.
+    async fn open_ufs_stream(&mut self) -> Result<()> {
+        const UFS_BLOCK_ID: i64 = -1; // ID_UNUSED in Java
+        const UFS_STREAM_LENGTH: i64 = i64::MAX; // Long.MAX_VALUE in Java
+
+        let worker_info = self.router.pick_any_worker().await?;
+        let addr = worker_info
+            .address
+            .as_ref()
+            .ok_or_else(|| Error::Internal {
+                message: "ufs-stream worker has no address".to_string(),
+                source: None,
+            })?;
+
+        let worker_addr = format!(
+            "{}:{}",
+            addr.host.as_deref().unwrap_or("127.0.0.1"),
+            addr.rpc_port.unwrap_or(9203)
+        );
+
+        debug!(
+            worker = %worker_addr,
+            path = %self.path,
+            "opening UFS stream for CACHE_THROUGH/THROUGH"
+        );
+
+        let worker = match self.worker_pool.acquire(&worker_addr).await {
+            Ok(w) => w,
+            Err(e) => {
+                self.router.mark_failed(addr);
+                self.worker_pool.invalidate(&worker_addr).await;
+                return Err(e);
+            }
+        };
+
+        let write_opts = WriteBlockOptions {
+            request_type: RequestType::UfsFile,
+            create_ufs_file_options: self.write_strategy.create_ufs_file_options.clone(),
+        };
+
+        let writer =
+            match GrpcBlockWriter::open(&worker, UFS_BLOCK_ID, UFS_STREAM_LENGTH, write_opts).await
+            {
+                Ok(w) => w,
+                Err(e) => {
+                    self.router.mark_failed(addr);
+                    self.worker_pool.invalidate(&worker_addr).await;
+                    return Err(e);
+                }
+            };
+
+        self.ufs_stream = Some(writer);
+        self.ufs_worker_addr = Some(worker_addr);
         Ok(())
     }
 
@@ -480,6 +624,37 @@ impl GooseFsFileWriter {
         Err(err)
     }
 
+    /// Handle a UFS-stream write exception.
+    ///
+    /// Unlike the cache stream (which can be sliced into fresh blocks on the
+    /// next write), the UFS stream is a single long-lived connection for the
+    /// whole file — if it fails mid-write, the file cannot be recovered on the
+    /// UFS side. We tear it down, mark the worker failed, and surface the error.
+    async fn handle_ufs_write_exception(&mut self, err: Error) -> Result<()> {
+        warn!(
+            path = %self.path,
+            error = %err,
+            "failed to write to UFS stream"
+        );
+
+        if let Some(writer) = self.ufs_stream.take() {
+            writer.cancel().await;
+        }
+        if let Some(worker_addr) = self.ufs_worker_addr.take() {
+            let host = worker_addr.split(':').next().unwrap_or("unknown").to_string();
+            let port = worker_addr.split(':').nth(1).and_then(|p| p.parse().ok());
+            self.router
+                .mark_failed(&crate::proto::grpc::WorkerNetAddress {
+                    host: Some(host),
+                    rpc_port: port,
+                    ..Default::default()
+                });
+            self.worker_pool.invalidate(&worker_addr).await;
+        }
+
+        Err(err)
+    }
+
     /// Cancel the file write, cleaning up all committed blocks.
     ///
     /// Matches Java's `GooseFSFileOutStream.cancel()`:
@@ -495,16 +670,22 @@ impl GooseFsFileWriter {
 
         self.cancelled = true;
 
-        // 1. Cancel the current block writer if any
+        // 1. Cancel the UFS stream first (no commit, Worker will clean up temp file).
+        if let Some(writer) = self.ufs_stream.take() {
+            writer.cancel().await;
+        }
+        self.ufs_worker_addr = None;
+
+        // 2. Cancel the current cache block writer if any
         if let Some(active) = self.current_block_writer.take() {
             active.writer.cancel().await;
         }
 
-        // 2. Request Master to remove committed blocks
+        // 3. Request Master to remove committed blocks
         // Note: Java uses `fileSystemMasterClient.removeBlocks(mPreviousCommittedBlockIds)`
         // Since our MasterClient doesn't have removeBlocks yet, we delete the incomplete file
         // which will trigger block cleanup on the Master side.
-        if !self.committed_block_ids.is_empty() {
+        if !self.committed_block_ids.is_empty() || self.write_strategy.ufs_stream {
             warn!(
                 path = %self.path,
                 committed_blocks = self.committed_block_ids.len(),
@@ -531,11 +712,15 @@ impl GooseFsFileWriter {
 
     /// Close the file writer, finalizing the file on the Master.
     ///
-    /// This flushes the current in-progress block (if any), then calls
-    /// `CompleteFile` to mark the file as fully written. After calling
-    /// `close()`, the writer cannot be used again.
+    /// This flushes both streams (if any), then calls `CompleteFile` to mark
+    /// the file as fully written. After calling `close()`, the writer cannot
+    /// be used again.
     ///
-    /// Matches Java's `GooseFSFileOutStream.close()`.
+    /// Matches Java's `GooseFSFileOutStream.close()` — note the order:
+    /// 1. close UFS stream (flush + close, triggers Worker-side `OutputStream.close()`);
+    /// 2. close current cache block (flush + commitBlock);
+    /// 3. `completeFile(ufsLength)` on Master;
+    /// 4. ASYNC_THROUGH → `scheduleAsyncPersistence`.
     pub async fn close(&mut self) -> Result<()> {
         if self.completed {
             warn!(path = %self.path, "close() called on already-completed file");
@@ -546,7 +731,33 @@ impl GooseFsFileWriter {
             return Ok(());
         }
 
-        // Close the current in-progress block (flush + commitBlock)
+        // 1) Close the single long-lived UFS stream first.
+        //    Dropping the request channel signals Worker-side onCompleted,
+        //    which in turn flushes and closes the UFS OutputStream.
+        if let Some(mut ufs) = self.ufs_stream.take() {
+            if let Err(e) = ufs.flush().await {
+                warn!(
+                    path = %self.path,
+                    error = %e,
+                    "failed to flush UFS stream during close, cancelling"
+                );
+                ufs.cancel().await;
+                self.cancel().await?;
+                return Err(e);
+            }
+            if let Err(e) = ufs.close().await {
+                warn!(
+                    path = %self.path,
+                    error = %e,
+                    "failed to close UFS stream during close, cancelling"
+                );
+                self.cancel().await?;
+                return Err(e);
+            }
+            self.ufs_worker_addr = None;
+        }
+
+        // 2) Close the current in-progress cache block (flush + commitBlock)
         if let Err(e) = self.close_current_block().await {
             warn!(
                 path = %self.path,
@@ -557,8 +768,11 @@ impl GooseFsFileWriter {
             return Err(e);
         }
 
-        // Complete the file with the total bytes written
-        let ufs_length = if self.total_bytes_written > 0 {
+        // 3) Complete the file. Always pass ufs_length for CACHE_THROUGH/THROUGH so
+        //    Master knows exactly how many bytes ended up in UFS.
+        let ufs_length = if self.write_strategy.ufs_stream {
+            Some(self.total_bytes_written as i64)
+        } else if self.total_bytes_written > 0 {
             Some(self.total_bytes_written as i64)
         } else {
             None
@@ -567,7 +781,7 @@ impl GooseFsFileWriter {
         self.master.complete_file(&self.path, ufs_length).await?;
         self.completed = true;
 
-        // ASYNC_THROUGH: schedule asynchronous persistence to UFS after file is complete.
+        // 4) ASYNC_THROUGH: schedule asynchronous persistence to UFS after file is complete.
         if self.write_strategy.need_async_persist {
             debug!(path = %self.path, "scheduling async persistence for ASYNC_THROUGH");
             if let Err(e) = self
@@ -586,7 +800,8 @@ impl GooseFsFileWriter {
         info!(
             path = %self.path,
             total_bytes = self.total_bytes_written,
-            blocks = self.committed_block_ids.len(),
+            cache_blocks = self.committed_block_ids.len(),
+            ufs_stream = self.write_strategy.ufs_stream,
             "file write completed"
         );
 
@@ -765,7 +980,8 @@ mod tests {
     fn test_strategy_must_cache() {
         let fi = make_test_file_info();
         let s = resolve_write_strategy(Some(1), &fi); // MUST_CACHE
-        assert_eq!(s.request_type, RequestType::GoosefsBlock);
+        assert!(s.cache_stream);
+        assert!(!s.ufs_stream);
         assert!(s.create_ufs_file_options.is_none());
         assert!(!s.need_async_persist);
     }
@@ -774,7 +990,9 @@ mod tests {
     fn test_strategy_cache_through() {
         let fi = make_test_file_info();
         let s = resolve_write_strategy(Some(3), &fi); // CACHE_THROUGH
-        assert_eq!(s.request_type, RequestType::UfsFile);
+        // CRITICAL: CACHE_THROUGH must drive BOTH streams in parallel.
+        assert!(s.cache_stream, "CACHE_THROUGH must enable cache stream");
+        assert!(s.ufs_stream, "CACHE_THROUGH must enable UFS stream");
         assert!(s.create_ufs_file_options.is_some());
         assert!(!s.need_async_persist);
     }
@@ -783,7 +1001,8 @@ mod tests {
     fn test_strategy_through() {
         let fi = make_test_file_info();
         let s = resolve_write_strategy(Some(4), &fi); // THROUGH
-        assert_eq!(s.request_type, RequestType::UfsFile);
+        assert!(!s.cache_stream, "THROUGH must NOT enable cache stream");
+        assert!(s.ufs_stream);
         let ufs_opts = s.create_ufs_file_options.as_ref().unwrap();
         assert_eq!(ufs_opts.ufs_path, Some("/ufs/data/test.txt".to_string()));
         assert_eq!(ufs_opts.owner, Some("hadoop".to_string()));
@@ -797,7 +1016,8 @@ mod tests {
     fn test_strategy_async_through() {
         let fi = make_test_file_info();
         let s = resolve_write_strategy(Some(5), &fi); // ASYNC_THROUGH
-        assert_eq!(s.request_type, RequestType::GoosefsBlock);
+        assert!(s.cache_stream);
+        assert!(!s.ufs_stream);
         assert!(s.create_ufs_file_options.is_none());
         assert!(s.need_async_persist);
     }
@@ -806,7 +1026,8 @@ mod tests {
     fn test_strategy_default_unset() {
         let fi = make_test_file_info();
         let s = resolve_write_strategy(None, &fi);
-        assert_eq!(s.request_type, RequestType::GoosefsBlock);
+        assert!(s.cache_stream);
+        assert!(!s.ufs_stream);
         assert!(s.create_ufs_file_options.is_none());
         assert!(!s.need_async_persist);
     }
@@ -815,7 +1036,8 @@ mod tests {
     fn test_strategy_try_cache() {
         let fi = make_test_file_info();
         let s = resolve_write_strategy(Some(2), &fi); // TRY_CACHE
-        assert_eq!(s.request_type, RequestType::GoosefsBlock);
+        assert!(s.cache_stream);
+        assert!(!s.ufs_stream);
         assert!(s.create_ufs_file_options.is_none());
         assert!(!s.need_async_persist);
     }
