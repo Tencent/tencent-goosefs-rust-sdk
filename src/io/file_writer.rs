@@ -641,7 +641,11 @@ impl GooseFsFileWriter {
             writer.cancel().await;
         }
         if let Some(worker_addr) = self.ufs_worker_addr.take() {
-            let host = worker_addr.split(':').next().unwrap_or("unknown").to_string();
+            let host = worker_addr
+                .split(':')
+                .next()
+                .unwrap_or("unknown")
+                .to_string();
             let port = worker_addr.split(':').nth(1).and_then(|p| p.parse().ok());
             self.router
                 .mark_failed(&crate::proto::grpc::WorkerNetAddress {
@@ -990,7 +994,7 @@ mod tests {
     fn test_strategy_cache_through() {
         let fi = make_test_file_info();
         let s = resolve_write_strategy(Some(3), &fi); // CACHE_THROUGH
-        // CRITICAL: CACHE_THROUGH must drive BOTH streams in parallel.
+                                                      // CRITICAL: CACHE_THROUGH must drive BOTH streams in parallel.
         assert!(s.cache_stream, "CACHE_THROUGH must enable cache stream");
         assert!(s.ufs_stream, "CACHE_THROUGH must enable UFS stream");
         assert!(s.create_ufs_file_options.is_some());
