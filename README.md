@@ -27,7 +27,12 @@ This is a standalone Rust gRPC client crate (Layer 3) in the **Lance → OpenDAL
 │  Layer 3 — GooseFS Rust gRPC Client  ← this crate             │
 │                                                                │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │  ★ High-Level API (recommended)                          │  │
+│  │  ★ FileSystem Abstraction (recommended entry point)      │  │
+│  │  FileSystem trait + BaseFileSystem                       │  │
+│  │  FileSystemContext — shared connection pool              │  │
+│  ├──────────────────────────────────────────────────────────┤  │
+│  │  ★ High-Level I/O                                        │  │
+│  │  GooseFsFileInStream — seekable dual-path read stream   │  │
 │  │  GooseFsFileWriter — end-to-end file write pipeline      │  │
 │  │  GooseFsFileReader — end-to-end file read pipeline       │  │
 │  ├──────────────────────────────────────────────────────────┤  │
@@ -40,9 +45,9 @@ This is a standalone Rust gRPC client crate (Layer 3) in the **Lance → OpenDAL
 │  │  SaslClientHandler    — PLAIN SASL handshake             │  │
 │  ├──────────────────────────────────────────────────────────┤  │
 │  │  BlockMapper     — file range → block read plans         │  │
-│  │  WorkerRouter    — consistent hash block → worker        │  │
+│  │  WorkerRouter    — consistent hash + local-first routing │  │
 │  ├──────────────────────────────────────────────────────────┤  │
-│  │  GrpcBlockReader — bidirectional streaming read          │  │
+│  │  GrpcBlockReader — streaming + positioned read           │  │
 │  │  GrpcBlockWriter — bidirectional streaming write         │  │
 │  └──────────────────────────────────────────────────────────┘  │
 └────────────────────────────────────────────────────────────────┘
@@ -162,6 +167,52 @@ async fn main() -> goosefs_sdk::error::Result<()> {
     for e in &entries {
         println!("  {:?}", e.path);
     }
+    Ok(())
+}
+```
+
+### Example: FileSystem API (Recommended)
+
+```rust
+use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::context::FileSystemContext;
+use goosefs_sdk::fs::{BaseFileSystem, FileSystem, OpenFileOptions};
+use std::io::SeekFrom;
+
+#[tokio::main]
+async fn main() -> goosefs_sdk::error::Result<()> {
+    // Build once per application — one TCP+SASL handshake, shared across all ops
+    let config = GooseFsConfig::new("127.0.0.1:9200");
+    let ctx = FileSystemContext::connect(config).await?;
+    let fs = BaseFileSystem::from_context(ctx);
+
+    // Metadata operations (all reuse the same Master connection)
+    let status = fs.get_status("/data/file.parquet").await?;
+    println!("length = {}", status.length);
+
+    let entries = fs.list_status("/data", false).await?;
+    for e in &entries {
+        println!("  {} ({} bytes)", e.name, e.length);
+    }
+
+    let exists = fs.exists("/data/file.parquet").await?;
+    println!("exists = {}", exists);
+
+    // Open a seekable file input stream
+    let mut stream = fs.open_file("/data/file.parquet", OpenFileOptions::default()).await?;
+
+    // Sequential read
+    let data = stream.read(1024).await?;
+    println!("read {} bytes", data.len());
+
+    // Seek to a position
+    stream.seek(SeekFrom::Start(4096)).await?;
+    let data = stream.read(512).await?;
+
+    // Random read (does not change current position)
+    let data = stream.read_at(8192, 256).await?;
+    println!("random read {} bytes", data.len());
+
     Ok(())
 }
 ```
@@ -401,22 +452,28 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 
 | Module | Description |
 |--------|-------------|
-| **`io::GooseFsFileWriter`** | **High-level file writer** — one-shot `write_file()` or builder pattern `create()` → `write()` → `close()`. Supports all 4 WriteTypes (MUST_CACHE / CACHE_THROUGH / THROUGH / ASYNC_THROUGH). Orchestrates `CreateFile` → `WriteStrategy` → `BlockMapper` → `WorkerRouter` → `GrpcBlockWriter` → `CompleteFile` [→ `ScheduleAsyncPersistence`]. **Note**: CACHE_THROUGH and THROUGH both use `UfsFile` mode — Worker writes directly to UFS (CACHE_THROUGH also caches data locally). |
+| **`fs::FileSystem`** | **FileSystem trait** — high-level async interface (`get_status`, `list_status`, `exists`, `open_file`, `create_file`, `mkdir`, `delete`, `rename`). Object-safe via `async_trait`, `Send+Sync+'static`. |
+| **`fs::BaseFileSystem`** | **Production FileSystem implementation** — supports shared-context mode via `FileSystemContext` and legacy per-call mode. Implements WriteType xattr inheritance. `exists()` follows Java semantics (INCOMPLETE non-folder → false). |
+| **`context::FileSystemContext`** | **Shared connection pool** — three-layer architecture eliminating repeated TCP+SASL handshakes. Holds `Arc<MasterClient>` + `Arc<WorkerClientPool>` + `Arc<WorkerRouter>`. Background worker-list refresh (30s) and config hot-reload (60s). |
+| **`io::GooseFsFileInStream`** | **Seekable dual-path file input stream** — sequential reads via `block_in_stream` (streaming, prefetch) and random reads via `positioned_read` (`position_short=true`). Auto-switches based on 8 KiB threshold. Supports `seek(SeekFrom)` and `read_at()`. |
+| **`io::GooseFsFileWriter`** | **High-level file writer** — one-shot `write_file()` or builder pattern `create()` → `write()` → `close()`. Supports all 4 WriteTypes. Cancel/close state machine with UUID-based idempotent `FsOpPId`. |
 | **`io::GooseFsFileReader`** | **High-level file reader** — one-shot `read_file()` / `read_range()` or streaming `open()` → `read_next_block()`. Orchestrates `GetStatus` → `BlockMapper` → `WorkerRouter` → `GrpcBlockReader` |
-| `auth::ChannelAuthenticator` | SASL authentication for gRPC channels — supports `NOSASL` (no handshake) and `SIMPLE` (PLAIN SASL). `MasterClient::connect` uses this internally based on `GooseFsConfig.auth_type` |
+| `fs::URIStatus` | Immutable file/directory metadata snapshot converted from proto `FileInfo`. Typed accessors for all metadata fields. |
+| `fs::options` | Rust-native options structs — `OpenFileOptions`, `CreateFileOptions`, `DeleteOptions`, `InStreamOptions`, `ReadType` |
+| `auth::ChannelAuthenticator` | SASL authentication for gRPC channels — supports `NOSASL` (no handshake) and `SIMPLE` (PLAIN SASL) |
 | `auth::AuthType` | Authentication type enum — `NoSasl`, `Simple` (default). Corresponds to Java's `goosefs.security.authentication.type` |
-| `auth::SaslClientHandler` | Low-level PLAIN SASL handshake handler — generates initial messages and processes server responses |
-| `client::MasterClient` | File system metadata CRUD — `get_status`, `list_status`, `create_file`, `complete_file`, `delete`, `rename`, `create_directory`, `schedule_async_persistence` |
+| `client::MasterClient` | File system metadata CRUD — `get_status`, `list_status`, `create_file`, `complete_file` (with idempotent `FsOpPId`), `remove_blocks`, `delete`, `rename`, `create_directory`, `schedule_async_persistence` |
+| `client::MasterInquireClient` | Master discovery with singleflight deduplication — only one task polls when multiple callers need the primary address simultaneously |
 | `client::WorkerManagerClient` | Worker discovery — `get_worker_info_list` |
-| `client::WorkerClient` | Bidirectional streaming block read/write — `read_block`, `write_block(options: WriteBlockOptions)` |
-| `client::WriteBlockOptions` | Controls `RequestType` (GoosefsBlock / UfsFile) and optional `CreateUfsFileOptions` for CACHE_THROUGH and THROUGH-mode writes |
+| `client::WorkerClient` | Bidirectional streaming block read/write — `read_block`, `read_block_positioned` (`position_short=true`), `write_block(options: WriteBlockOptions)` |
+| `client::WorkerClientPool` | Connection pool for reusing authenticated worker gRPC channels |
 | `block::BlockMapper` | Converts file-level byte ranges into block-level read/write plans |
-| `block::WorkerRouter` | Consistent-hash routing of block IDs to workers with failure tracking |
-| `io::GrpcBlockReader` | Low-level streaming block reader with flow-control ACK |
+| `block::WorkerRouter` | Consistent-hash routing with TTL-based worker list refresh (30s), local-worker preference (mirrors Java `LocalFirstPolicy`), and failure tracking |
+| `io::GrpcBlockReader` | Low-level streaming block reader with flow-control ACK + `positioned_read()` for random access |
 | `io::GrpcBlockWriter` | Low-level streaming block writer with chunk splitting and flush |
-| `config::GooseFsConfig` | Connection configuration — timeouts, block size, chunk size, root path, **`write_type`** (WritePType), **`auth_type`** / **`auth_username`** / **`auth_timeout`**, multi-master settings (`master_addrs`, `master_polling_timeout`, retry params), unified constructor `from_addresses()` |
+| `config::GooseFsConfig` | Connection configuration — 30+ settings including properties file parsing, YAML auto-config, `ConfigRefresher` hot-reload, `TransparentAccelerationSwitch`, timeouts, block/chunk size, write/read types, auth, multi-master, worker routing |
 | `WritePType` | Write type enum — `MustCache`, `TryCache`, `CacheThrough`, `Through`, `AsyncThrough`, `None` |
-| `error::Error` | Unified error type with gRPC status code mapping and retriable detection |
+| `error::Error` | Unified error type with domain-specific variants (`FileIncomplete`, `DirectoryNotEmpty`, `OpenDirectory`, `InvalidPath`, `AuthenticationFailed`) mapped from Java server exceptions |
 
 ## gRPC Services
 
@@ -441,34 +498,46 @@ goosefs-client-rust/
 │   └── proto/              #   Shared data types (security, acl, status)
 ├── src/
 │   ├── lib.rs              # crate root & proto module tree
-│   ├── config.rs           # GooseFsConfig
-│   ├── error.rs            # Error enum + From impls
+│   ├── config.rs           # GooseFsConfig (properties/YAML/hot-reload, 30+ keys)
+│   ├── context.rs          # ★ FileSystemContext (shared connection pool)
+│   ├── error.rs            # Error enum (domain-specific variants)
 │   ├── auth/
 │   │   ├── mod.rs          # Auth module root
 │   │   ├── authenticator.rs # ChannelAuthenticator + AuthType
 │   │   └── sasl_client.rs  # PLAIN SASL handshake handler
 │   ├── client/
-│   │   ├── master.rs       # MasterClient
-│   │   ├── worker.rs       # WorkerClient
+│   │   ├── master.rs       # MasterClient (idempotent FsOpPId)
+│   │   ├── master_inquire.rs # MasterInquireClient (singleflight)
+│   │   ├── worker.rs       # WorkerClient + WorkerClientPool
 │   │   └── worker_manager.rs # WorkerManagerClient
 │   ├── block/
 │   │   ├── mapper.rs       # BlockMapper (file → block plans)
-│   │   └── router.rs       # WorkerRouter (consistent hash)
+│   │   └── router.rs       # WorkerRouter (consistent hash + TTL + local-first)
+│   ├── fs/                 # ★ FileSystem abstraction layer
+│   │   ├── mod.rs          # Module root + re-exports
+│   │   ├── filesystem.rs   # FileSystem trait (async_trait)
+│   │   ├── base_filesystem.rs # BaseFileSystem (production impl)
+│   │   ├── options.rs      # OpenFileOptions, CreateFileOptions, etc.
+│   │   ├── uri_status.rs   # URIStatus (immutable metadata snapshot)
+│   │   └── write_type.rs   # WriteType xattr helpers
 │   ├── io/
+│   │   ├── file_in_stream.rs # ★ GooseFsFileInStream (seekable dual-path)
 │   │   ├── file_reader.rs  # GooseFsFileReader (high-level)
-│   │   ├── file_writer.rs  # GooseFsFileWriter (high-level)
-│   │   ├── reader.rs       # GrpcBlockReader (low-level)
+│   │   ├── file_writer.rs  # GooseFsFileWriter (cancel/close state machine)
+│   │   ├── reader.rs       # GrpcBlockReader (streaming + positioned)
 │   │   └── writer.rs       # GrpcBlockWriter (low-level)
 │   └── generated/          # prost/tonic generated code (git-ignored)
 ├── examples/
 │   ├── highlevel_file_rw.rs     # ★ High-level file read/write (recommended)
-│   ├── write_types.rs           # ★ WriteType comparison (MUST_CACHE/CACHE_THROUGH/THROUGH/ASYNC_THROUGH)
-│   ├── ha_multi_master.rs       # ★ Multi-master mode (auto single/multi via from_addresses)
+│   ├── write_types.rs           # ★ WriteType comparison
+│   ├── ha_multi_master.rs       # ★ Multi-master mode
 │   ├── auth_demo.rs             # ★ Authentication demo (NOSASL / SIMPLE)
 │   ├── lowlevel_block_read.rs   # Low-level block streaming read
 │   ├── lowlevel_create_file.rs  # Low-level file creation (metadata only)
 │   ├── metadata_crud.rs         # File/directory metadata CRUD
 │   └── async_persistence.rs     # Async persistence scheduling
+├── tests/
+│   └── connection_reuse.rs      # Connection reuse integration test
 └── target/                 # build artifacts (git-ignored)
 ```
 
@@ -515,6 +584,8 @@ cargo build
 | `tracing` | 0.1 | Structured logging |
 | `serde` | 1.x | Config serialization |
 | `uuid` | 1.x | Channel-id generation for SASL authentication |
+| `hostname` | 0.3 | Local worker detection for routing preference |
+| `async-trait` | 0.1 | Async trait support for FileSystem trait |
 
 ## GooseFS Compatibility
 

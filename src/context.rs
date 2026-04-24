@@ -302,9 +302,12 @@ impl FileSystemContext {
 
     /// Start the background config refresh loop.
     ///
-    /// The loop wakes every [`CONFIG_REFRESH_INTERVAL`] seconds (default 60s,
-    /// matching Java's `refreshInterval`), reloads `goosefs-site.properties`
-    /// if expired, and updates the transparent acceleration switch flags.
+    /// On first invocation the task **immediately** loads the config from
+    /// `goosefs-site.properties` (via `refresh_transparent_acceleration_switch`)
+    /// so that the transparent acceleration switches are up-to-date right after
+    /// `connect()` returns.  Subsequent refreshes happen every
+    /// [`CONFIG_REFRESH_INTERVAL`] seconds (default 60s, matching Java's
+    /// `refreshInterval`).
     ///
     /// This runs independently from the worker-list refresh task.
     async fn start_config_refresh_task(self: Arc<Self>) {
@@ -312,6 +315,15 @@ impl FileSystemContext {
         let closed = self.closed.clone();
 
         let handle = tokio::spawn(async move {
+            // Eagerly load config on startup so the switches are current
+            // before any file-system operation is issued.
+            let switch = config_refresher.refresh_transparent_acceleration_switch();
+            debug!(
+                transparent_acceleration_enabled = switch.enabled,
+                cosranger_enabled = switch.cosranger_enabled,
+                "config refresh: initial load completed"
+            );
+
             loop {
                 tokio::time::sleep(CONFIG_REFRESH_INTERVAL).await;
 
