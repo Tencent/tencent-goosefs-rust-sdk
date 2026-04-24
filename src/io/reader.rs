@@ -15,6 +15,14 @@
 //!   │←─────────────────────────────────────────┤
 //!   │  5. stream ends                          │
 //! ```
+//!
+//! # Positioned read
+//!
+//! [`GrpcBlockReader::positioned_read`] opens a fresh stream with
+//! `position_short = true`, which tells the worker to skip prefetch and serve
+//! the exact requested byte range directly.  This path is used by
+//! `GooseFsFileInStream` for random seeks that cross a
+//! `TRANSFER_POSITIONED_READ_THRESHOLD` (8 KiB) boundary.
 
 use bytes::{Bytes, BytesMut};
 use tokio::sync::mpsc;
@@ -154,5 +162,62 @@ impl GrpcBlockReader {
     /// Whether all expected data has been received.
     pub fn is_complete(&self) -> bool {
         self.bytes_received >= self.length
+    }
+
+    // ── Positioned read ──────────────────────────────────────────────────────
+
+    /// Perform a one-shot positioned read from `offset` for `length` bytes.
+    ///
+    /// Opens a **new** gRPC stream with `position_short = true`, reads all
+    /// data, and returns it as a single `Bytes`.  The new stream is discarded
+    /// after this call.
+    ///
+    /// # Design
+    ///
+    /// `position_short = true` instructs the worker to:
+    /// 1. Skip prefetch / eviction — serve the range directly from cache or UFS.
+    /// 2. Complete the stream after delivering exactly `length` bytes.
+    ///
+    /// This path is chosen by `GooseFsFileInStream` when the caller uses
+    /// `read_at()` (random access) or when the seek distance exceeds the
+    /// `TRANSFER_POSITIONED_READ_THRESHOLD` (8 KiB).
+    ///
+    /// # Arguments
+    ///
+    /// - `worker`    — connected `WorkerClient`.
+    /// - `block_id`  — block to read from.
+    /// - `offset`    — byte offset within the block.
+    /// - `length`    — number of bytes to read.
+    /// - `chunk_size` — preferred gRPC chunk size.
+    /// - `open_ufs_block_options` — required for THROUGH-mode blocks.
+    pub async fn positioned_read(
+        worker: &WorkerClient,
+        block_id: i64,
+        offset: i64,
+        length: i64,
+        chunk_size: i64,
+        open_ufs_block_options: Option<OpenUfsBlockOptions>,
+    ) -> Result<Bytes> {
+        let (request_tx, response_rx) = worker
+            .read_block_positioned(block_id, offset, length, chunk_size, open_ufs_block_options)
+            .await?;
+
+        debug!(
+            block_id = block_id,
+            offset = offset,
+            length = length,
+            "positioned_read: opened position_short stream"
+        );
+
+        let mut reader = Self {
+            block_id,
+            offset,
+            length,
+            bytes_received: 0,
+            request_tx,
+            response_rx,
+        };
+
+        reader.read_all().await
     }
 }

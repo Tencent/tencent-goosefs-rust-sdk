@@ -265,6 +265,48 @@ impl WorkerClient {
         Ok((tx, response.into_inner()))
     }
 
+    /// Open a positioned (random-access) block read stream.
+    ///
+    /// Identical to [`read_block`] but sets `position_short = true` in the
+    /// initial `ReadRequest`, instructing the worker to skip prefetch and
+    /// serve the exact requested byte range.
+    ///
+    /// Used by [`crate::io::reader::GrpcBlockReader::positioned_read`].
+    pub async fn read_block_positioned(
+        &self,
+        block_id: i64,
+        offset: i64,
+        length: i64,
+        chunk_size: i64,
+        open_ufs_block_options: Option<OpenUfsBlockOptions>,
+    ) -> Result<(mpsc::Sender<ReadRequest>, Streaming<ReadResponse>)> {
+        let (tx, rx) = mpsc::channel::<ReadRequest>(32);
+
+        let initial_request = ReadRequest {
+            block_id: Some(block_id),
+            offset: Some(offset),
+            length: Some(length),
+            chunk_size: Some(chunk_size),
+            open_ufs_block_options,
+            offset_received: None,
+            position_short: Some(true), // positioned-read hint to worker
+            request_id: None,
+            capability: None,
+            block_size: None,
+            prefetch_window: None,
+        };
+        tx.send(initial_request)
+            .await
+            .map_err(|_| Error::BlockIoError {
+                message: "failed to send initial positioned ReadRequest".to_string(),
+            })?;
+
+        let stream = ReceiverStream::new(rx);
+        let response = self.inner.clone().read_block(stream).await?;
+
+        Ok((tx, response.into_inner()))
+    }
+
     /// Start a bidirectional streaming WriteBlock RPC.
     ///
     /// Returns a [`WriteBlockHandle`] that manages the background gRPC task.

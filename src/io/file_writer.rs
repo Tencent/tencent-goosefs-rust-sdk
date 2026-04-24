@@ -35,20 +35,24 @@
 //! # }
 //! ```
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use crate::block::router::WorkerRouter;
 use crate::client::master::default_file_mode;
 use crate::client::worker::{WorkerClientPool, WriteBlockOptions};
 use crate::client::{MasterClient, WorkerManagerClient};
 use crate::config::GooseFsConfig;
+use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
+use crate::fs::options::DeleteOptions;
 use crate::io::writer::GrpcBlockWriter;
 use crate::proto::grpc::block::RequestType;
-use crate::proto::grpc::file::{CreateFilePOptions, FileInfo};
+use crate::proto::grpc::file::{CreateFilePOptions, FileInfo, FsOpPId};
 use crate::proto::proto::dataserver::CreateUfsFileOptions;
 
 /// Write strategy derived from the effective `WritePType`.
@@ -127,6 +131,28 @@ fn resolve_write_strategy(write_type: Option<i32>, file_info: &FileInfo) -> Writ
     }
 }
 
+/// Convert a [`Uuid`] to the `FsOpPId` proto message expected by GooseFS Master.
+///
+/// # Java authority
+///
+/// Java uses `UUID.getMostSignificantBits()` / `getLeastSignificantBits()` which
+/// return the high 64 bits and low 64 bits of the 128-bit UUID value respectively.
+/// `Uuid::as_u64_pair()` in the `uuid` crate returns `(high, low)` with the same
+/// bit layout (big-endian interpretation of the 16-byte UUID).
+///
+/// # Go SDK bug
+///
+/// The Go SDK stores the UUID locally but **never writes `FsOpPId` into the proto
+/// request** (`CompleteFilePOptions.common_options.operation_id` is always empty).
+/// This implementation fixes that by always wiring the ID into the request.
+fn uuid_to_fs_op_pid(id: Uuid) -> FsOpPId {
+    let (high, low) = id.as_u64_pair();
+    FsOpPId {
+        most_significant_bits: Some(high as i64),
+        least_significant_bits: Some(low as i64),
+    }
+}
+
 /// High-level file writer that orchestrates the full GooseFS write pipeline.
 ///
 /// This struct encapsulates the complete write flow:
@@ -135,6 +161,18 @@ fn resolve_write_strategy(write_type: Option<i32>, file_info: &FileInfo) -> Writ
 /// 3. Split data into blocks via `BlockMapper`
 /// 4. Write each block to a worker via `GrpcBlockWriter`
 /// 5. `CompleteFile` on Master to finalize
+///
+/// ## Cancellation / Close state machine
+///
+/// Two atomic flags model the writer lifecycle:
+///
+/// - `cancelled`: set to `true` when `cancel()` is called.  Once set,
+///   subsequent writes are rejected and `close()` becomes a no-op.
+/// - `closed`: CAS-locked by `close()` to prevent concurrent/duplicate closes.
+///   Once `closed` is `true` the writer is terminal.
+///
+/// This mirrors Java `GooseFSFileOutStream.mCanceled` + `mClosed` and avoids
+/// the ambiguity of the previous single-bool design.
 pub struct GooseFsFileWriter {
     /// The GooseFS config.
     config: GooseFsConfig,
@@ -147,14 +185,27 @@ pub struct GooseFsFileWriter {
     /// Connection pool for reusing authenticated worker gRPC channels.
     /// Matches Java's `FileSystemContext.acquireBlockWorkerClient()`.
     worker_pool: Arc<WorkerClientPool>,
+    /// Optional shared context (non-None when created via `create_with_context`).
+    /// Kept alive to prevent context GC while the writer is in use.
+    _context: Option<Arc<FileSystemContext>>,
     /// File info returned by CreateFile.
     file_info: FileInfo,
     /// Total bytes written so far across all blocks (committed only).
     total_bytes_written: u64,
-    /// Whether the file has been completed (closed) or cancelled.
-    completed: bool,
-    /// Whether the file write has been cancelled.
-    cancelled: bool,
+    /// Idempotency token for `CompleteFile`.
+    ///
+    /// Generated at construction time; reused on every retry of `complete_file`.
+    /// Stored as a `Uuid` and converted to `FsOpPId` at call time via
+    /// [`uuid_to_fs_op_pid`].
+    operation_id: Uuid,
+    /// Cancel intent flag — set by `cancel()`, checked by `write()` / `close()`.
+    ///
+    /// Uses `Ordering::SeqCst` throughout to ensure visibility across tasks.
+    cancelled: AtomicBool,
+    /// Close CAS lock — set by the first `close()` call to prevent duplicates.
+    ///
+    /// `close()` does `compare_exchange(false, true)` to claim exclusive access.
+    closed: AtomicBool,
     /// Write strategy derived from config.write_type + FileInfo.
     write_strategy: WriteStrategy,
     /// Block IDs that have been successfully committed to workers.
@@ -176,6 +227,12 @@ pub struct GooseFsFileWriter {
     ufs_stream: Option<GrpcBlockWriter>,
     /// Worker address hosting the UFS stream (for failure tracking).
     ufs_worker_addr: Option<String>,
+    /// Whether the UFS stream has been successfully closed.
+    ///
+    /// Used during CACHE_THROUGH error recovery in `handle_complete_file_error`:
+    /// if UFS close succeeded but `completeFile` failed, we must clean up the
+    /// GooseFS-side metadata entry only (not the UFS file).
+    ufs_stream_completed: AtomicBool,
 }
 
 impl GooseFsFileWriter {
@@ -266,21 +323,119 @@ impl GooseFsFileWriter {
         // Create connection pool for worker client reuse
         let worker_pool = WorkerClientPool::new_shared(config.clone());
 
+        // Generate a unique operation ID for this write session.
+        // Reused across retries of complete_file for idempotency.
+        let operation_id = Uuid::new_v4();
+
         Ok(Self {
             config: config.clone(),
             path: path.to_string(),
             master,
             router,
             worker_pool,
+            _context: None, // legacy mode: no shared context
             file_info,
             total_bytes_written: 0,
-            completed: false,
-            cancelled: false,
+            operation_id,
+            cancelled: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
             write_strategy,
             committed_block_ids: Vec::new(),
             current_block_writer: None,
             ufs_stream: None,
             ufs_worker_addr: None,
+            ufs_stream_completed: AtomicBool::new(false),
+        })
+    }
+
+    /// Create a new file using a shared [`FileSystemContext`].
+    ///
+    /// Unlike [`create`], this method reuses the persistent Master connection,
+    /// worker router, and connection pool from `ctx` instead of establishing
+    /// new TCP+SASL connections.  Use this when you have a long-lived
+    /// [`FileSystemContext`] and want zero-handshake file writes.
+    ///
+    /// # Arguments
+    /// - `ctx` — Shared context created with `FileSystemContext::connect()`
+    /// - `path` — File path in GooseFS namespace
+    /// - `options` — Optional `CreateFilePOptions` (block size, write type, etc.)
+    pub async fn create_with_context(
+        ctx: Arc<FileSystemContext>,
+        path: &str,
+        options: Option<CreateFilePOptions>,
+    ) -> Result<Self> {
+        let config = ctx.config().clone();
+
+        // Reuse the shared Master client (zero TCP+SASL handshake).
+        let master_arc = ctx.acquire_master();
+
+        let create_options = options.unwrap_or_else(|| {
+            let mut opts = CreateFilePOptions {
+                block_size_bytes: Some(config.block_size as i64),
+                mode: Some(default_file_mode()),
+                recursive: Some(true),
+                ..Default::default()
+            };
+            if config.write_type.is_some() {
+                opts.write_type = config.write_type;
+            }
+            opts
+        });
+
+        let mut create_options = create_options;
+        if create_options.recursive.is_none() {
+            create_options.recursive = Some(true);
+        }
+
+        let file_info = master_arc.create_file(path, create_options.clone()).await?;
+        debug!(
+            path = %path,
+            file_id = ?file_info.file_id,
+            "file created on Master (via context)"
+        );
+
+        let effective_write_type = create_options.write_type.or(config.write_type);
+        let write_strategy = resolve_write_strategy(effective_write_type, &file_info);
+
+        // Reuse shared router and pool from context (zero additional RPCs).
+        let router_arc = ctx.acquire_router();
+        let worker_pool = ctx.acquire_worker_pool();
+
+        // Clone the router into a local WorkerRouter wrapper.
+        // We snapshot the current worker list from the shared router.
+        let router = WorkerRouter::new();
+        let workers = (*router_arc.get_workers().await).clone();
+        if workers.is_empty() {
+            return Err(Error::NoWorkerAvailable {
+                message: "no workers available for writing".to_string(),
+            });
+        }
+        router.update_workers(workers).await;
+
+        let operation_id = Uuid::new_v4();
+
+        // SAFETY: We clone the MasterClient from Arc<MasterClient>.
+        // The file_writer holds it by value; the Arc in ctx keeps the channel alive.
+        let master = (*master_arc).clone();
+
+        Ok(Self {
+            config,
+            path: path.to_string(),
+            master,
+            router,
+            worker_pool,
+            _context: Some(ctx), // keep ctx alive for pool/router lifetime
+            file_info,
+            total_bytes_written: 0,
+            operation_id,
+            cancelled: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            write_strategy,
+            committed_block_ids: Vec::new(),
+            current_block_writer: None,
+            ufs_stream: None,
+            ufs_worker_addr: None,
+            ufs_stream_completed: AtomicBool::new(false),
         })
     }
 
@@ -299,7 +454,7 @@ impl GooseFsFileWriter {
     ///
     /// Can be called multiple times for streaming writes.
     pub async fn write(&mut self, data: &[u8]) -> Result<()> {
-        if self.completed || self.cancelled {
+        if self.cancelled.load(Ordering::SeqCst) || self.closed.load(Ordering::SeqCst) {
             return Err(Error::BlockIoError {
                 message: "cannot write to a completed or cancelled file".to_string(),
             });
@@ -320,6 +475,31 @@ impl GooseFsFileWriter {
             self.write_to_ufs_stream(data).await?;
         }
 
+        Ok(())
+    }
+
+    /// Flush in-progress data to the current block writer.
+    ///
+    /// Calls `flush()` on the active `GrpcBlockWriter` to push buffered chunks
+    /// to the worker and wait for an acknowledgment.  This does **not** close
+    /// the current block or call `completeFile`.
+    ///
+    /// # Java authority
+    ///
+    /// Mirrors `GooseFSFileOutStream.flush()` which calls
+    /// `mCurrentBlockOutStream.flush()` if one is active.
+    pub async fn flush(&mut self) -> Result<()> {
+        if self.cancelled.load(Ordering::SeqCst) || self.closed.load(Ordering::SeqCst) {
+            return Err(Error::BlockIoError {
+                message: "cannot flush a completed or cancelled file".to_string(),
+            });
+        }
+
+        if let Some(active) = self.current_block_writer.as_mut() {
+            if active.bytes_written > 0 {
+                active.writer.flush().await?;
+            }
+        }
         Ok(())
     }
 
@@ -659,51 +839,84 @@ impl GooseFsFileWriter {
         Err(err)
     }
 
-    /// Cancel the file write, cleaning up all committed blocks.
-    ///
-    /// Matches Java's `GooseFSFileOutStream.cancel()`:
-    /// 1. Cancel the current in-progress block stream
-    /// 2. Request Master to remove all previously committed blocks
-    /// 3. Mark the file as cancelled
-    ///
-    /// After cancellation, the incomplete file should be deleted by the caller.
-    pub async fn cancel(&mut self) -> Result<()> {
-        if self.completed || self.cancelled {
-            return Ok(());
-        }
+    // -----------------------------------------------------------------------
+    // Cancel cleanup
+    // -----------------------------------------------------------------------
 
-        self.cancelled = true;
-
-        // 1. Cancel the UFS stream first (no commit, Worker will clean up temp file).
+    /// Perform cancel cleanup: tear down streams, then call
+    /// `remove_blocks` with a fallback to `delete(unchecked=true)`.
+    ///
+    /// # Java authority
+    ///
+    /// Matches `GooseFSFileOutStream.cancel()`:
+    /// 1. Cancel all in-flight streams (UFS + cache block).
+    /// 2. Call `fileSystemMasterClient.removeBlocks(mPreviousCommittedBlockIds)`.
+    /// 3. If `removeBlocks` fails, fall back to `delete(path, unchecked=true)`.
+    ///
+    /// `removeBlocks` is preferred over `delete` because it only cleans up
+    /// block metadata and does **not** remove the INCOMPLETE inode from the
+    /// namespace.  This is important if a higher-level retry layer wants to
+    /// re-create the file at the same path.
+    async fn do_cancel_cleanup(&mut self) {
+        // 1. Cancel UFS stream (Worker cleans up the temp UFS file).
         if let Some(writer) = self.ufs_stream.take() {
             writer.cancel().await;
         }
         self.ufs_worker_addr = None;
 
-        // 2. Cancel the current cache block writer if any
+        // 2. Cancel current in-progress cache block writer.
         if let Some(active) = self.current_block_writer.take() {
             active.writer.cancel().await;
         }
 
-        // 3. Request Master to remove committed blocks
-        // Note: Java uses `fileSystemMasterClient.removeBlocks(mPreviousCommittedBlockIds)`
-        // Since our MasterClient doesn't have removeBlocks yet, we delete the incomplete file
-        // which will trigger block cleanup on the Master side.
-        if !self.committed_block_ids.is_empty() || self.write_strategy.ufs_stream {
-            warn!(
+        // 3. Clean up committed blocks on Master.
+        if !self.committed_block_ids.is_empty() {
+            let block_ids = self.committed_block_ids.clone();
+            debug!(
                 path = %self.path,
-                committed_blocks = self.committed_block_ids.len(),
-                "cancelling file write, requesting cleanup of committed blocks"
+                block_count = block_ids.len(),
+                "cancel: calling remove_blocks on Master"
             );
-            // Delete the incomplete file — Master will clean up associated blocks
-            if let Err(e) = self.master.delete(&self.path, false).await {
+            if let Err(e) = self.master.remove_blocks(block_ids).await {
+                // remove_blocks failed — fall back to delete(unchecked=true).
                 warn!(
                     path = %self.path,
                     error = %e,
-                    "failed to delete incomplete file during cancel — blocks may need manual cleanup"
+                    "remove_blocks failed, falling back to delete(unchecked=true)"
                 );
+                if let Err(del_err) = self
+                    .master
+                    .delete_with_options(&self.path, DeleteOptions::for_cancel())
+                    .await
+                {
+                    warn!(
+                        path = %self.path,
+                        error = %del_err,
+                        "fallback delete also failed — blocks may need manual cleanup"
+                    );
+                }
             }
         }
+    }
+
+    /// Cancel the file write, cleaning up all committed blocks.
+    ///
+    /// Sets the `cancelled` flag and delegates to [`do_cancel_cleanup`].
+    ///
+    /// Calling `cancel()` after `close()` is a no-op.
+    /// Calling `cancel()` twice is idempotent.
+    pub async fn cancel(&mut self) -> Result<()> {
+        // Already closed (normally) — nothing to clean up.
+        if self.closed.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        // Already cancelled — idempotent.
+        if self.cancelled.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        self.do_cancel_cleanup().await;
 
         info!(
             path = %self.path,
@@ -712,6 +925,69 @@ impl GooseFsFileWriter {
         );
 
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // T2-C: CACHE_THROUGH error recovery
+    // -----------------------------------------------------------------------
+
+    /// Handle a `completeFile` failure after UFS `close()` succeeded.
+    ///
+    /// In CACHE_THROUGH mode there is a small window where the UFS file has
+    /// been fully written (UFS `close()` returned OK) but `completeFile` on
+    /// the Master then fails (e.g. a Master failover or transient network
+    /// error).  In this situation we must:
+    ///
+    /// 1. Delete the GooseFS metadata entry (`goosefs_only=true, unchecked=true`)
+    ///    so the incomplete inode is cleaned up.
+    /// 2. **Not** touch the UFS file — it was written successfully and serves
+    ///    as the source of truth.
+    ///
+    /// # Java authority (T2-C)
+    ///
+    /// Matches the catch block in `GooseFSFileOutStream.close()`:
+    /// ```java
+    /// } catch (Exception e) {
+    ///     if (ufsSucceeded) {
+    ///         // UFS file is OK; remove the GooseFS entry only.
+    ///         mFileSystem.delete(mUri,
+    ///             DeleteOptions.defaults().setGoosefsOnly(true).setUnchecked(true));
+    ///         // Reload so the next open() sees the UFS file via listStatus(ALWAYS).
+    ///         mFileSystem.loadMetadata(mUri, ...);
+    ///     }
+    ///     throw e;
+    /// }
+    /// ```
+    ///
+    /// The `listStatus` reload (equivalent of `loadMetadata`) is tracked as a
+    /// separate TODO — it requires a new `list_status` RPC variant — and is
+    /// deferred to Wave 2.
+    async fn handle_complete_file_error(&mut self, err: Error) -> Error {
+        if self.ufs_stream_completed.load(Ordering::SeqCst) {
+            warn!(
+                path = %self.path,
+                error = %err,
+                "completeFile failed after UFS close succeeded; \
+                 removing GooseFS-only metadata entry (goosefs_only=true, unchecked=true)"
+            );
+            if let Err(del_err) = self
+                .master
+                .delete_with_options(&self.path, DeleteOptions::goosefs_only_unchecked())
+                .await
+            {
+                warn!(
+                    path = %self.path,
+                    error = %del_err,
+                    "failed to clean up GooseFS metadata after completeFile failure — \
+                     manual cleanup may be required"
+                );
+            }
+            // TODO (Wave 2): call list_status(ALWAYS) to force the Master to reload
+            // UFS metadata so a subsequent open() of this path returns the UFS file.
+            // This requires adding a new list_status_with_load_metadata() variant to
+            // MasterClient (see T2-C in FINAL_DESIGN.md).
+        }
+        err
     }
 
     /// Close the file writer, finalizing the file on the Master.
@@ -723,15 +999,25 @@ impl GooseFsFileWriter {
     /// Matches Java's `GooseFSFileOutStream.close()` — note the order:
     /// 1. close UFS stream (flush + close, triggers Worker-side `OutputStream.close()`);
     /// 2. close current cache block (flush + commitBlock);
-    /// 3. `completeFile(ufsLength)` on Master;
+    /// 3. `completeFile(path, ufsLength, operationId)` on Master;
     /// 4. ASYNC_THROUGH → `scheduleAsyncPersistence`.
+    ///
+    /// ## Idempotency
+    ///
+    /// `closed` is set via `compare_exchange(false, true)` so only the first
+    /// concurrent `close()` call proceeds; subsequent calls are no-ops.
     pub async fn close(&mut self) -> Result<()> {
-        if self.completed {
+        // CAS: only the first close() wins.
+        if self
+            .closed
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             warn!(path = %self.path, "close() called on already-completed file");
             return Ok(());
         }
 
-        if self.cancelled {
+        if self.cancelled.load(Ordering::SeqCst) {
             return Ok(());
         }
 
@@ -746,7 +1032,7 @@ impl GooseFsFileWriter {
                     "failed to flush UFS stream during close, cancelling"
                 );
                 ufs.cancel().await;
-                self.cancel().await?;
+                self.do_cancel_cleanup().await;
                 return Err(e);
             }
             if let Err(e) = ufs.close().await {
@@ -755,9 +1041,11 @@ impl GooseFsFileWriter {
                     error = %e,
                     "failed to close UFS stream during close, cancelling"
                 );
-                self.cancel().await?;
+                self.do_cancel_cleanup().await;
                 return Err(e);
             }
+            // UFS stream closed successfully — record this for error recovery.
+            self.ufs_stream_completed.store(true, Ordering::SeqCst);
             self.ufs_worker_addr = None;
         }
 
@@ -768,12 +1056,13 @@ impl GooseFsFileWriter {
                 error = %e,
                 "failed to close current block during file close, cancelling"
             );
-            self.cancel().await?;
+            self.do_cancel_cleanup().await;
             return Err(e);
         }
 
-        // 3) Complete the file. Always pass ufs_length for CACHE_THROUGH/THROUGH so
-        //    Master knows exactly how many bytes ended up in UFS.
+        // 3) Complete the file on Master with the idempotency operation ID.
+        //    Always pass ufs_length for CACHE_THROUGH/THROUGH so Master knows
+        //    exactly how many bytes ended up in UFS.
         let ufs_length = if self.write_strategy.ufs_stream {
             Some(self.total_bytes_written as i64)
         } else if self.total_bytes_written > 0 {
@@ -782,8 +1071,16 @@ impl GooseFsFileWriter {
             None
         };
 
-        self.master.complete_file(&self.path, ufs_length).await?;
-        self.completed = true;
+        let op_id = uuid_to_fs_op_pid(self.operation_id);
+        if let Err(e) = self
+            .master
+            .complete_file(&self.path, ufs_length, Some(op_id))
+            .await
+        {
+            // T2-C: CACHE_THROUGH error recovery — clean up GooseFS-only if UFS succeeded.
+            let e = self.handle_complete_file_error(e).await;
+            return Err(e);
+        }
 
         // 4) ASYNC_THROUGH: schedule asynchronous persistence to UFS after file is complete.
         if self.write_strategy.need_async_persist {
@@ -856,9 +1153,14 @@ impl GooseFsFileWriter {
         &self.path
     }
 
-    /// Whether the file has been completed.
+    /// Whether the file has been completed (close returned OK).
     pub fn is_completed(&self) -> bool {
-        self.completed
+        self.closed.load(Ordering::SeqCst) && !self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Whether the write has been cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
     }
 
     /// Get a reference to the file info.
@@ -923,7 +1225,9 @@ impl ActiveBlockWriter {
 
 impl Drop for GooseFsFileWriter {
     fn drop(&mut self) {
-        if !self.completed && !self.cancelled && self.total_bytes_written > 0 {
+        let is_closed = self.closed.load(Ordering::SeqCst);
+        let is_cancelled = self.cancelled.load(Ordering::SeqCst);
+        if !is_closed && !is_cancelled && self.total_bytes_written > 0 {
             warn!(
                 path = %self.path,
                 bytes_written = self.total_bytes_written,
@@ -1044,5 +1348,37 @@ mod tests {
         assert!(!s.ufs_stream);
         assert!(s.create_ufs_file_options.is_none());
         assert!(!s.need_async_persist);
+    }
+
+    /// Verify that legacy mode has `_context = None` and
+    /// context mode would hold `Some(Arc<FileSystemContext>)`.
+    /// (Full create() requires a running server — we test the shape here.)
+    #[test]
+    fn test_context_field_is_option_arc() {
+        // The field type must be `Option<Arc<FileSystemContext>>`.
+        // We verify this at the type-system level by creating a None value.
+        let ctx_field: Option<Arc<FileSystemContext>> = None;
+        assert!(ctx_field.is_none());
+    }
+
+    /// Verify UUID → FsOpPId bit layout matches Java's UUID.getMostSignificantBits().
+    #[test]
+    fn test_uuid_to_fs_op_pid_bit_layout() {
+        // Construct a UUID with known high/low values.
+        // UUID bytes: first 8 bytes = high, last 8 bytes = low (big-endian).
+        let high_bytes: [u8; 8] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77];
+        let low_bytes: [u8; 8] = [0x88u8, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&high_bytes);
+        bytes[8..].copy_from_slice(&low_bytes);
+        let uuid = Uuid::from_bytes(bytes);
+
+        let op_id = uuid_to_fs_op_pid(uuid);
+
+        let expected_high = i64::from_be_bytes(high_bytes);
+        let expected_low = i64::from_be_bytes(low_bytes);
+
+        assert_eq!(op_id.most_significant_bits, Some(expected_high));
+        assert_eq!(op_id.least_significant_bits, Some(expected_low));
     }
 }

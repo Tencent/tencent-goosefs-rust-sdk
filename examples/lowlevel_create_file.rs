@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
     // Mark file as complete (only sets completed=true + length on Master side)
     println!("\nMarking file as complete (metadata only)...");
     master
-        .complete_file("/test-demo/world.txt", Some(fake_length))
+        .complete_file("/test-demo/world.txt", Some(fake_length), None)
         .await?;
     println!(
         "File metadata marked complete, length set to {} bytes",

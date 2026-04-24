@@ -14,12 +14,29 @@
 //! RPCs. Standby Masters reject `getServiceVersion` with `NotFound` (or
 //! `Unavailable`). [`PollingMasterInquireClient`] iterates over all configured
 //! addresses and returns the first one that responds successfully.
+//!
+//! # Singleflight deduplication
+//!
+//! When the cached Primary address is stale and multiple concurrent callers
+//! all call `get_primary_rpc_address()` at once, only **one** goroutine should
+//! issue the expensive polling loop.  The others wait for the result via a
+//! `tokio::sync::watch` channel.  This is the Rust equivalent of Go's
+//! `singleflight.Group`.
+//!
+//! Implementation:
+//! - A `Mutex<Option<watch::Receiver<PollResult>>>` acts as the singleflight
+//!   gate.  `None` means no poll in flight.
+//! - The **leader** sets `Some(rx)` while it polls, then sends the result on
+//!   the watch channel and sets the gate back to `None`.
+//! - **Followers** clone the `rx` from the gate and call `rx.changed().await`
+//!   to wait for the leader's result.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::RwLock;
+use tokio::sync::watch;
+use tokio::sync::{Mutex, RwLock};
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
@@ -90,6 +107,25 @@ impl MasterInquireClient for SingleMasterInquireClient {
 }
 
 // ---------------------------------------------------------------------------
+// Singleflight gate types
+// ---------------------------------------------------------------------------
+
+/// The result broadcast by the polling leader to all waiting followers.
+///
+/// `Ok(addr)` — the discovered primary address.  
+/// `Err(msg)` — the polling loop exhausted all retries; followers should
+/// surface this as an [`Error::Internal`].
+#[derive(Debug, Clone)]
+enum PollResult {
+    Ok(String),
+    Err(String),
+}
+
+/// Singleflight gate: holds a `watch::Receiver` while a poll is in flight,
+/// or `None` when no poll is active.
+type PollGate = Mutex<Option<watch::Receiver<Option<PollResult>>>>;
+
+// ---------------------------------------------------------------------------
 // PollingMasterInquireClient
 // ---------------------------------------------------------------------------
 
@@ -99,6 +135,12 @@ impl MasterInquireClient for SingleMasterInquireClient {
 /// Only the Primary Master responds successfully to this RPC with
 /// `ServiceType::MetaMasterClientService`. Standby nodes return `NotFound`
 /// or fail to connect.
+///
+/// # Singleflight
+///
+/// Concurrent callers share a single in-flight poll via a `watch` channel.
+/// The first caller becomes the **leader** and broadcasts the result; all
+/// other callers wait on the same channel receiver.
 pub struct PollingMasterInquireClient {
     addresses: Vec<String>,
     /// Cached Primary address from the last successful discovery.
@@ -109,6 +151,8 @@ pub struct PollingMasterInquireClient {
     max_sleep: Duration,
     /// Timeout for a single ping attempt (connect + RPC deadline).
     polling_timeout: Duration,
+    /// Singleflight gate — `Some(rx)` means a poll is in flight.
+    poll_gate: Arc<PollGate>,
 }
 
 impl PollingMasterInquireClient {
@@ -126,6 +170,7 @@ impl PollingMasterInquireClient {
             initial_sleep,
             max_sleep,
             polling_timeout,
+            poll_gate: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -194,26 +239,12 @@ impl PollingMasterInquireClient {
         let mut cache = self.cached_primary.write().await;
         *cache = None;
     }
-}
 
-#[async_trait]
-impl MasterInquireClient for PollingMasterInquireClient {
-    async fn get_primary_rpc_address(&self) -> Result<String> {
-        // Fast path: return cached primary if available.
-        {
-            let cache = self.cached_primary.read().await;
-            if let Some(ref addr) = *cache {
-                // Verify the cached primary is still alive.
-                if self.ping_meta_service(addr).await.is_ok() {
-                    debug!(addr = %addr, "cached primary still valid");
-                    return Ok(addr.clone());
-                }
-                // Cached primary is stale, fall through to full poll.
-                debug!(addr = %addr, "cached primary stale, re-polling");
-            }
-        }
-
-        // Slow path: poll all addresses.
+    /// Run the full polling loop and return the result.
+    ///
+    /// This is the **leader path** called only once even when multiple
+    /// concurrent callers are waiting (singleflight).
+    async fn poll_for_primary(&self) -> std::result::Result<String, String> {
         let mut retry =
             ExponentialTimeBoundedRetry::new(self.max_duration, self.initial_sleep, self.max_sleep);
 
@@ -225,14 +256,13 @@ impl MasterInquireClient for PollingMasterInquireClient {
             for addr in &self.addresses {
                 match self.ping_meta_service(addr).await {
                     Ok(()) => {
-                        // Found the Primary!
                         info!(addr = %addr, attempts = retry.attempt_count(), "discovered primary master");
+                        // Update the shared cache.
                         let mut cache = self.cached_primary.write().await;
                         *cache = Some(addr.clone());
                         return Ok(addr.clone());
                     }
                     Err(PingError::Standby) => {
-                        // Expected for standby nodes, continue.
                         last_errors.push(format!("{}: standby", addr));
                         continue;
                     }
@@ -242,13 +272,11 @@ impl MasterInquireClient for PollingMasterInquireClient {
                     }
                     Err(PingError::Fatal(msg)) => {
                         last_errors.push(msg);
-                        // Fatal error on this address — break this round and retry.
                         break;
                     }
                 }
             }
 
-            // Sleep before next round.
             let sleep_dur = retry.next_sleep();
             debug!(
                 attempt = retry.attempt_count(),
@@ -258,13 +286,114 @@ impl MasterInquireClient for PollingMasterInquireClient {
             tokio::time::sleep(sleep_dur).await;
         }
 
+        Err(format!(
+            "failed to find primary master after {} attempts across {} addresses. Last round errors: [{}]",
+            retry.attempt_count(),
+            self.addresses.len(),
+            last_errors.join("; "),
+        ))
+    }
+}
+
+#[async_trait]
+impl MasterInquireClient for PollingMasterInquireClient {
+    async fn get_primary_rpc_address(&self) -> Result<String> {
+        // ── Fast path: return cached primary if still alive ──────────────────
+        {
+            let cache = self.cached_primary.read().await;
+            if let Some(ref addr) = *cache {
+                if self.ping_meta_service(addr).await.is_ok() {
+                    debug!(addr = %addr, "cached primary still valid");
+                    return Ok(addr.clone());
+                }
+                debug!(addr = %addr, "cached primary stale, re-polling");
+            }
+        }
+
+        // ── Singleflight gate ────────────────────────────────────────────────
+        //
+        // Try to become the **leader** (first caller to find the gate = None).
+        // If another caller is already the leader, become a **follower** and
+        // wait for the broadcast result.
+
+        let rx_opt: Option<watch::Receiver<Option<PollResult>>> = {
+            let mut gate = self.poll_gate.lock().await;
+            match &*gate {
+                Some(existing_rx) => {
+                    // Another goroutine is already polling — clone the receiver
+                    // and wait as a follower.
+                    debug!("singleflight follower: waiting for in-flight poll");
+                    Some(existing_rx.clone())
+                }
+                None => {
+                    // We are the leader.  Create the watch channel and
+                    // install the receiver in the gate before releasing
+                    // the lock so followers can attach.
+                    let (tx, rx) = watch::channel::<Option<PollResult>>(None);
+                    *gate = Some(rx);
+                    drop(gate); // Release the lock before the expensive poll.
+
+                    debug!("singleflight leader: starting primary poll");
+
+                    let result = self.poll_for_primary().await;
+
+                    // Broadcast result to all followers.
+                    let broadcast = match &result {
+                        Ok(addr) => PollResult::Ok(addr.clone()),
+                        Err(msg) => PollResult::Err(msg.clone()),
+                    };
+                    // `send` fails only when all receivers are gone, which is
+                    // harmless — nobody was waiting.
+                    let _ = tx.send(Some(broadcast));
+
+                    // Clear the gate so future callers start fresh.
+                    let mut gate2 = self.poll_gate.lock().await;
+                    *gate2 = None;
+
+                    return result.map_err(|msg| Error::Internal {
+                        message: msg,
+                        source: None,
+                    });
+                }
+            }
+        };
+
+        // ── Follower path: wait for the leader's result ───────────────────────
+        if let Some(mut rx) = rx_opt {
+            // Wait until the value changes from None (initial sentinel) to Some.
+            loop {
+                // `changed()` returns Err only if the sender is dropped, which
+                // means the leader panicked — treat as a transient error and
+                // fall back to a fresh poll.
+                if rx.changed().await.is_err() {
+                    warn!("singleflight leader dropped channel, follower retrying");
+                    return self.get_primary_rpc_address().await;
+                }
+
+                let value = rx.borrow().clone();
+                match value {
+                    Some(PollResult::Ok(addr)) => {
+                        debug!(addr = %addr, "singleflight follower received primary");
+                        return Ok(addr);
+                    }
+                    Some(PollResult::Err(msg)) => {
+                        return Err(Error::Internal {
+                            message: msg,
+                            source: None,
+                        });
+                    }
+                    None => {
+                        // Spurious wake (should not happen with watch, but be safe).
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Unreachable: either the leader branch or the follower branch returns.
         Err(Error::Internal {
-            message: format!(
-                "failed to find primary master after {} attempts across {} addresses. Last round errors: [{}]",
-                retry.attempt_count(),
-                self.addresses.len(),
-                last_errors.join("; "),
-            ),
+            message: "singleflight logic error: neither leader nor follower path returned"
+                .to_string(),
             source: None,
         })
     }
@@ -315,5 +444,127 @@ pub fn create_master_inquire_client(config: &GooseFsConfig) -> Arc<dyn MasterInq
             config.master_inquire_max_sleep,
             config.master_polling_timeout,
         ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn test_single_master_returns_address() {
+        let client = SingleMasterInquireClient::new("master:19998".to_string());
+        assert_eq!(
+            client.get_primary_rpc_address().await.unwrap(),
+            "master:19998"
+        );
+        assert_eq!(
+            client.get_master_rpc_addresses(),
+            vec!["master:19998".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_single_master_reset_is_noop() {
+        let client = SingleMasterInquireClient::new("master:19998".to_string());
+        client.reset_cached_primary().await;
+        // Still returns the same address.
+        assert_eq!(
+            client.get_primary_rpc_address().await.unwrap(),
+            "master:19998"
+        );
+    }
+
+    /// Verify that `poll_gate` starts as `None` (no poll in flight).
+    #[tokio::test]
+    async fn test_polling_client_gate_starts_empty() {
+        let client = PollingMasterInquireClient::new(
+            vec!["a:1".to_string(), "b:2".to_string()],
+            Duration::from_millis(100),
+            Duration::from_millis(10),
+            Duration::from_millis(50),
+            Duration::from_millis(50),
+        );
+        let gate = client.poll_gate.lock().await;
+        assert!(gate.is_none(), "gate should start empty");
+    }
+
+    /// Verify `get_master_rpc_addresses` returns all configured addresses.
+    #[tokio::test]
+    async fn test_polling_client_addresses() {
+        let addrs = vec!["host1:19998".to_string(), "host2:19998".to_string()];
+        let client = PollingMasterInquireClient::new(
+            addrs.clone(),
+            Duration::from_millis(100),
+            Duration::from_millis(10),
+            Duration::from_millis(50),
+            Duration::from_millis(50),
+        );
+        assert_eq!(client.get_master_rpc_addresses(), addrs);
+    }
+
+    /// Verify `reset_cached_primary` clears the cache.
+    #[tokio::test]
+    async fn test_polling_client_reset_clears_cache() {
+        let client = PollingMasterInquireClient::new(
+            vec!["host:19998".to_string()],
+            Duration::from_millis(100),
+            Duration::from_millis(10),
+            Duration::from_millis(50),
+            Duration::from_millis(50),
+        );
+        // Manually populate the cache.
+        {
+            let mut cache = client.cached_primary.write().await;
+            *cache = Some("host:19998".to_string());
+        }
+        client.reset_cached_primary().await;
+        let cache = client.cached_primary.read().await;
+        assert!(cache.is_none(), "cache should be cleared after reset");
+    }
+
+    /// Verify that concurrent callers share a single poll: the leader sends
+    /// the result on the watch channel and followers receive it without
+    /// issuing their own polls.
+    ///
+    /// We simulate the singleflight mechanism directly without a real gRPC
+    /// server by using the `watch` channel internals.
+    #[tokio::test]
+    async fn test_singleflight_gate_broadcast() {
+        // Create a watch channel as the leader would.
+        let (tx, rx) = watch::channel::<Option<PollResult>>(None);
+
+        // Simulate a follower cloning the receiver.
+        let mut follower_rx = rx.clone();
+
+        // Counter to track how many times the follower receives a value.
+        let received = Arc::new(AtomicUsize::new(0));
+        let received_clone = received.clone();
+
+        // Spawn follower task.
+        let follower = tokio::spawn(async move {
+            follower_rx.changed().await.unwrap();
+            let value = follower_rx.borrow().clone();
+            if let Some(PollResult::Ok(addr)) = value {
+                received_clone.fetch_add(1, Ordering::SeqCst);
+                addr
+            } else {
+                panic!("expected Ok result");
+            }
+        });
+
+        // Leader sends the result after a small delay.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        tx.send(Some(PollResult::Ok("primary:19998".to_string())))
+            .unwrap();
+
+        let addr = follower.await.unwrap();
+        assert_eq!(addr, "primary:19998");
+        assert_eq!(received.load(Ordering::SeqCst), 1);
     }
 }

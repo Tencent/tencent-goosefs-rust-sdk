@@ -67,7 +67,7 @@ async fn main() -> Result<()> {
     // Mark file as complete (simulating write completion)
     println!("\n4. Marking file as complete...");
     master
-        .complete_file("/test-demo/hello.txt", Some(content.len() as i64))
+        .complete_file("/test-demo/hello.txt", Some(content.len() as i64), None)
         .await?;
     println!(
         "File marked complete, content length: {} bytes",

@@ -23,6 +23,7 @@ serde = { version = "1", features = ["derive"] }
 async-trait = "0.1"
 rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
+hostname = "0.3"
 
 [build-dependencies]
 tonic-build = { version = "0.12", features = ["prost"] }

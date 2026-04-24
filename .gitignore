@@ -4,3 +4,5 @@ src/generated/
 .codebuddy
 /goosefs-client-rust.code-workspace
 .DS_Store
+docs/gap/
+docs/design/

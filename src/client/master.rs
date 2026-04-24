@@ -4,8 +4,9 @@
 //! - `get_status` — stat / head
 //! - `list_status` — list directory (server-side streaming)
 //! - `create_file` — create a new file
-//! - `complete_file` — mark file write complete
-//! - `delete` — delete file or directory
+//! - `complete_file` — mark file write complete (with idempotency operation-ID)
+//! - `remove_blocks` — clean up block metadata for in-flight or failed writes
+//! - `delete` / `delete_with_options` — delete file or directory
 //! - `rename` — rename / move
 //! - `create_directory` — mkdir -p
 //!
@@ -28,12 +29,14 @@ use crate::auth::{ChannelAuthenticator, ChannelIdInterceptor, SaslStreamGuard};
 use crate::client::master_inquire::{create_master_inquire_client, MasterInquireClient};
 use crate::config::GooseFsConfig;
 use crate::error::{Error, Result};
+use crate::fs::options::DeleteOptions;
 use crate::proto::grpc::file::{
     file_system_master_client_service_client::FileSystemMasterClientServiceClient,
     CompleteFilePOptions, CompleteFilePRequest, CreateDirectoryPOptions, CreateDirectoryPRequest,
     CreateFilePOptions, CreateFilePRequest, DeletePOptions, DeletePRequest, FileInfo,
-    GetStatusPOptions, GetStatusPRequest, ListStatusPOptions, ListStatusPRequest, RenamePOptions,
-    RenamePRequest, ScheduleAsyncPersistencePOptions, ScheduleAsyncPersistencePRequest,
+    FileSystemMasterCommonPOptions, FsOpPId, GetStatusPOptions, GetStatusPRequest,
+    ListStatusPOptions, ListStatusPRequest, RemoveBlocksPRequest, RenamePOptions, RenamePRequest,
+    ScheduleAsyncPersistencePOptions, ScheduleAsyncPersistencePRequest,
 };
 use crate::proto::grpc::{Bits, PMode};
 
@@ -316,16 +319,52 @@ impl MasterClient {
     }
 
     /// Mark a file as completed (called after all blocks are written).
+    ///
+    /// # Idempotent operation ID
+    ///
+    /// `operation_id` is used by the Master for exactly-once semantics: if the
+    /// RPC is retried after a network hiccup the Master detects the duplicate
+    /// via `FsOpPId` and returns success without applying the operation twice.
+    ///
+    /// The caller (`GooseFsFileWriter`) generates a fresh `uuid::Uuid` at
+    /// construction time and reuses it across all `complete_file` calls for the
+    /// same write session.  The UUID is split into two `i64` halves via
+    /// `Uuid::as_u64_pair()`:
+    ///
+    /// ```text
+    /// (high, low) = uuid.as_u64_pair()
+    /// FsOpPId { most_significant_bits: high as i64,
+    ///           least_significant_bits: low  as i64 }
+    /// ```
+    ///
+    /// This matches Java `UUID.getMostSignificantBits()` / `getLeastSignificantBits()`
+    /// as verified in `DefaultFileSystemMaster.completeFile()`.
+    ///
+    /// # Note on Go SDK bug
+    ///
+    /// The Go SDK `base_filesystem.go:394-400` accepts an `operationID` parameter
+    /// but **never writes it to the proto request**.  The Rust implementation
+    /// fixes this: `operation_id` is always wired into `CompleteFilePOptions`.
     #[instrument(skip(self), fields(path = %path))]
-    pub async fn complete_file(&self, path: &str, ufs_length: Option<i64>) -> Result<()> {
+    pub async fn complete_file(
+        &self,
+        path: &str,
+        ufs_length: Option<i64>,
+        operation_id: Option<FsOpPId>,
+    ) -> Result<()> {
         let path = path.to_string();
         self.with_retry("complete_file", |mut client| {
             let path = path.clone();
             async move {
+                let common_options = operation_id.map(|op_id| FileSystemMasterCommonPOptions {
+                    operation_id: Some(op_id),
+                    ..Default::default()
+                });
                 let req = CompleteFilePRequest {
                     path: Some(path),
                     options: Some(CompleteFilePOptions {
                         ufs_length,
+                        common_options,
                         ..Default::default()
                     }),
                     inode_id: None,
@@ -337,17 +376,62 @@ impl MasterClient {
         .await
     }
 
-    /// Delete a file or directory.
-    #[instrument(skip(self), fields(path = %path, recursive = %recursive))]
-    pub async fn delete(&self, path: &str, recursive: bool) -> Result<()> {
+    // -----------------------------------------------------------------------
+    // RemoveBlocks RPC
+    // -----------------------------------------------------------------------
+
+    /// Request the Master to free block metadata for the given block IDs.
+    ///
+    /// This is the preferred cleanup path for `GooseFsFileWriter::cancel()`:
+    /// it removes only the block metadata on the Master without touching the
+    /// file-system namespace entry (the INCOMPLETE inode).
+    ///
+    /// Falls back to `delete_with_options(unchecked=true)` when this RPC fails.
+    ///
+    /// # Java authority
+    ///
+    /// Matches `FileSystemMasterClientServiceHandler.removeBlocks()` →
+    /// `DefaultFileSystemMaster.removeBlocks(blockIds)`.
+    #[instrument(skip(self, block_ids), fields(block_count = block_ids.len()))]
+    pub async fn remove_blocks(&self, block_ids: Vec<i64>) -> Result<()> {
+        if block_ids.is_empty() {
+            return Ok(());
+        }
+        let block_ids_clone = block_ids.clone();
+        self.with_retry("remove_blocks", |mut client| {
+            let block_ids = block_ids_clone.clone();
+            async move {
+                let req = RemoveBlocksPRequest { block_ids };
+                client.remove_blocks(req).await?;
+                Ok(())
+            }
+        })
+        .await
+    }
+
+    // -----------------------------------------------------------------------
+    // Delete with full DeleteOptions
+    // -----------------------------------------------------------------------
+
+    /// Delete a file or directory with fine-grained options.
+    ///
+    /// Prefer this over the legacy [`delete`] wrapper when you need
+    /// `unchecked` or `goosefs_only` semantics.
+    ///
+    /// See [`DeleteOptions`] for field semantics and Java authority notes.
+    #[instrument(skip(self, opts), fields(path = %path))]
+    pub async fn delete_with_options(&self, path: &str, opts: DeleteOptions) -> Result<()> {
         let path = path.to_string();
-        self.with_retry("delete", |mut client| {
+        self.with_retry("delete_with_options", |mut client| {
             let path = path.clone();
+            let opts = opts.clone();
             async move {
                 let req = DeletePRequest {
                     path: Some(path),
                     options: Some(DeletePOptions {
-                        recursive: Some(recursive),
+                        recursive: Some(opts.recursive),
+                        unchecked: Some(opts.unchecked),
+                        goosefs_only: Some(opts.goosefs_only),
                         ..Default::default()
                     }),
                 };
@@ -355,6 +439,22 @@ impl MasterClient {
                 Ok(())
             }
         })
+        .await
+    }
+
+    /// Delete a file or directory (simple recursive wrapper).
+    ///
+    /// For `unchecked` or `goosefs_only` deletion use [`delete_with_options`]
+    /// directly.
+    #[instrument(skip(self), fields(path = %path, recursive = %recursive))]
+    pub async fn delete(&self, path: &str, recursive: bool) -> Result<()> {
+        self.delete_with_options(
+            path,
+            DeleteOptions {
+                recursive,
+                ..Default::default()
+            },
+        )
         .await
     }
 

@@ -12,18 +12,21 @@
 //!
 //! ## High-level: File-level I/O (recommended)
 //!
-//! - [`GooseFsFileReader`] — Orchestrates the full read pipeline:
-//!   `GetStatus` → `BlockMapper` → `WorkerRouter` → `GrpcBlockReader` per block
-//! - [`GooseFsFileWriter`] — Orchestrates the full write pipeline:
-//!   `CreateFile` → `BlockMapper` → `WorkerRouter` → `GrpcBlockWriter` per block → `CompleteFile`
+//! - [`GooseFsFileReader`] — Orchestrates the full read pipeline (sequential,
+//!   block-by-block).
+//! - [`GooseFsFileInStream`] — Seekable dual-path file stream: supports
+//!   sequential reads, `seek`, and positioned random reads (`read_at`).
+//! - [`GooseFsFileWriter`] — Orchestrates the full write pipeline.
 //!
 //! The high-level APIs are the recommended entry point for most users.
 
+pub mod file_in_stream;
 pub mod file_reader;
 pub mod file_writer;
 pub mod reader;
 pub mod writer;
 
+pub use file_in_stream::GooseFsFileInStream;
 pub use file_reader::GooseFsFileReader;
 pub use file_writer::GooseFsFileWriter;
 pub use reader::GrpcBlockReader;
