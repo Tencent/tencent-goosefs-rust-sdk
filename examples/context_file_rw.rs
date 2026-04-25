@@ -1,24 +1,17 @@
 //! Context-based file read/write example using `FileSystemContext`.
 //!
-//! This example demonstrates the **context-based** high-level API, which
-//! reuses persistent Master/Worker connections via `FileSystemContext`:
+//! This example demonstrates the **recommended** high-level API:
 //!
 //! 1. Create a `FileSystemContext` once (the only call that does TCP+SASL)
 //! 2. Write a file via `GooseFsFileWriter::create_with_context()`
 //! 3. Read the file back via `GooseFsFileReader::open_with_context()`
 //! 4. Range read via `GooseFsFileReader::open_range_with_context()`
-//! 5. One-shot convenience: `read_file_with_context()` / `read_range_with_context()`
+//! 5. One-shot convenience: `read_file_with_context()` / `write_file_with_context()`
 //! 6. Write with custom `CreateFilePOptions` (e.g. CACHE_THROUGH mode)
 //!
-//! # Context vs Config API comparison
-//!
-//! | Aspect           | Config API (legacy)                | Context API (recommended)              |
-//! |------------------|------------------------------------|----------------------------------------|
-//! | Write entry      | `create(&config, path)`            | `create_with_context(ctx, path, opts)` |
-//! | Read entry       | `open(&config, path)`              | `open_with_context(ctx, path)`         |
-//! | First parameter  | `&GooseFsConfig`                   | `Arc<FileSystemContext>`               |
-//! | Write options    | Built internally from config       | Explicit `Option<CreateFilePOptions>`  |
-//! | Connection cost  | New TCP+SASL per call              | Zero handshake (reused from context)   |
+//! `FileSystemContext` is the sole entry point for all file I/O.
+//! It holds persistent connections to Master + WorkerManager + WorkerPool,
+//! and routes all operations through them at zero TCP+SASL cost after `connect()`.
 //!
 //! Usage:
 //!   cargo run --example context_file_rw
@@ -71,10 +64,6 @@ async fn main() -> Result<()> {
     // `create_with_context` accepts `Option<CreateFilePOptions>`:
     //   - `None` → uses default options derived from config (block_size, write_type, etc.)
     //   - `Some(opts)` → uses the provided options (see Step 5 below)
-    //
-    // Compare with legacy API:
-    //   Legacy:  GooseFsFileWriter::create(&config, path)
-    //   Context: GooseFsFileWriter::create_with_context(ctx, path, None)
     println!("\n1. Writing file via create_with_context (default options)...");
     let content = "Hello from context-based API!\n\
                    Line 2: Zero TCP+SASL handshake for this write.\n\
@@ -91,10 +80,6 @@ async fn main() -> Result<()> {
     );
 
     // ── Step 2: Read the file back via open_with_context ─────────
-    //
-    // Compare with legacy API:
-    //   Legacy:  GooseFsFileReader::open(&config, path)
-    //   Context: GooseFsFileReader::open_with_context(ctx, path)
     println!("\n2. Reading file via open_with_context...");
     let mut reader =
         GooseFsFileReader::open_with_context(ctx.clone(), "/ctx-test/hello.txt").await?;
@@ -121,10 +106,6 @@ async fn main() -> Result<()> {
     }
 
     // ── Step 3: Range read via open_range_with_context ───────────
-    //
-    // Compare with legacy API:
-    //   Legacy:  GooseFsFileReader::open_range(&config, path, offset, length)
-    //   Context: GooseFsFileReader::open_range_with_context(ctx, path, offset, length)
     println!("\n3. Range read via open_range_with_context (offset=0, length=29)...");
     let mut range_reader =
         GooseFsFileReader::open_range_with_context(ctx.clone(), "/ctx-test/hello.txt", 0, 29)
@@ -169,12 +150,8 @@ async fn main() -> Result<()> {
 
     // ── Step 6: Write with custom CreateFilePOptions ─────────────
     //
-    // The context API exposes `Option<CreateFilePOptions>` directly,
-    // allowing fine-grained control over block size, write type, etc.
-    //
-    // Compare with legacy API:
-    //   Legacy:  GooseFsFileWriter::create_with_options(&config, path, Some(opts))
-    //   Context: GooseFsFileWriter::create_with_context(ctx, path, Some(opts))
+    // `Option<CreateFilePOptions>` gives fine-grained control over block size,
+    // write type, and other file creation parameters.
     println!("\n6. Writing with custom CreateFilePOptions (CACHE_THROUGH)...");
     let custom_options = CreateFilePOptions {
         block_size_bytes: Some(32 * 1024 * 1024), // 32MB block size

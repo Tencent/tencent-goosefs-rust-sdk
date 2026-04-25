@@ -4,13 +4,12 @@
 //! easy-to-use API, analogous to Java's `GooseFSFileInStream`:
 //!
 //! ```text
-//! GooseFsFileReader::read_file(path)
+//! GooseFsFileReader::open_with_context(ctx, path)
 //!   → MasterClient.get_status()          — get file metadata + block IDs
-//!   → WorkerManagerClient.get_worker_info_list() — discover workers
 //!   → BlockMapper.plan_read()            — split file range → block segments
 //!   → for each block segment:
 //!       → WorkerRouter.select_worker()   — consistent hash routing
-//!       → WorkerClient.connect()         — connect to target worker
+//!       → WorkerClient.connect()         — connect to target worker (pooled)
 //!       → GrpcBlockReader.open()         — open streaming read
 //!       → reader.read_all()              — read all chunk data
 //!   → concatenate results
@@ -19,21 +18,23 @@
 //! # Example
 //!
 //! ```rust,no_run
+//! use std::sync::Arc;
 //! use goosefs_sdk::io::GooseFsFileReader;
+//! use goosefs_sdk::context::FileSystemContext;
 //! use goosefs_sdk::config::GooseFsConfig;
 //!
 //! # async fn example() -> goosefs_sdk::error::Result<()> {
-//! let config = GooseFsConfig::new("127.0.0.1:9200");
+//! let ctx = FileSystemContext::connect(GooseFsConfig::new("127.0.0.1:9200")).await?;
 //!
 //! // Read entire file
-//! let data = GooseFsFileReader::read_file(&config, "/my-file.txt").await?;
+//! let data = GooseFsFileReader::read_file_with_context(ctx.clone(), "/my-file.txt").await?;
 //! println!("read {} bytes", data.len());
 //!
 //! // Range read (offset=100, length=500)
-//! let data = GooseFsFileReader::read_range(&config, "/my-file.txt", 100, 500).await?;
+//! let data = GooseFsFileReader::read_range_with_context(ctx.clone(), "/my-file.txt", 100, 500).await?;
 //!
 //! // Or use the builder for streaming reads
-//! let mut reader = GooseFsFileReader::open(&config, "/my-file.txt").await?;
+//! let mut reader = GooseFsFileReader::open_with_context(ctx.clone(), "/my-file.txt").await?;
 //! while let Some(chunk) = reader.read_next_block().await? {
 //!     println!("got {} bytes from block", chunk.len());
 //! }
@@ -49,7 +50,7 @@ use tracing::{debug, warn};
 use crate::block::mapper::{BlockMapper, BlockReadPlan};
 use crate::block::router::WorkerRouter;
 use crate::client::worker::WorkerClientPool;
-use crate::client::{MasterClient, WorkerClient, WorkerManagerClient};
+use crate::client::WorkerClient;
 use crate::config::GooseFsConfig;
 use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
@@ -97,33 +98,6 @@ pub struct GooseFsFileReader {
 }
 
 impl GooseFsFileReader {
-    /// Open a file for reading from the beginning (full file read).
-    ///
-    /// This fetches file metadata and discovers workers, but does not start
-    /// reading data until `read_next_block()` or `read_all()` is called.
-    pub async fn open(config: &GooseFsConfig, path: &str) -> Result<Self> {
-        let (file_info, router) = Self::init(config, path).await?;
-        let file_length = file_info.length.unwrap_or(0) as u64;
-        Self::build(config, path, file_info, router, None, None, 0, file_length)
-    }
-
-    /// Open a file for range reading.
-    ///
-    /// # Arguments
-    /// - `config` — GooseFS client configuration
-    /// - `path` — File path in GooseFS namespace
-    /// - `offset` — Start byte offset in the file
-    /// - `length` — Number of bytes to read
-    pub async fn open_range(
-        config: &GooseFsConfig,
-        path: &str,
-        offset: u64,
-        length: u64,
-    ) -> Result<Self> {
-        let (file_info, router) = Self::init(config, path).await?;
-        Self::build(config, path, file_info, router, None, None, offset, length)
-    }
-
     /// Open a file for reading using a shared [`FileSystemContext`].
     ///
     /// Reuses the Master client, worker-list snapshot and worker-connection
@@ -170,46 +144,6 @@ impl GooseFsFileReader {
             offset,
             length,
         )
-    }
-
-    /// Internal: connect to master, get file info, discover workers.
-    async fn init(config: &GooseFsConfig, path: &str) -> Result<(FileInfo, WorkerRouter)> {
-        config
-            .validate()
-            .map_err(|e| Error::ConfigError { message: e })?;
-
-        // 1. Connect to Master (uses MasterInquireClient for HA support)
-        let master = MasterClient::connect(config).await?;
-        let file_info = master.get_status(path).await?;
-
-        let file_length = file_info.length.unwrap_or(0);
-        if file_length == 0 {
-            debug!(path = %path, "file is empty");
-        }
-
-        debug!(
-            path = %path,
-            file_length = file_length,
-            block_count = file_info.block_ids.len(),
-            block_size = ?file_info.block_size_bytes,
-            "fetched file metadata"
-        );
-
-        // 2. Discover workers (shares the same inquire client via MasterClient)
-        let inquire_client = master.inquire_client().clone();
-        let wm = WorkerManagerClient::connect_with_inquire(config, inquire_client).await?;
-        let workers = wm.get_worker_info_list().await?;
-        if workers.is_empty() {
-            return Err(Error::NoWorkerAvailable {
-                message: "no workers available for reading".to_string(),
-            });
-        }
-        debug!(worker_count = workers.len(), "discovered workers");
-
-        let router = WorkerRouter::new();
-        router.update_workers(workers).await;
-
-        Ok((file_info, router))
     }
 
     /// Internal: fetch file info via the shared Master, snapshot workers from
@@ -507,46 +441,6 @@ impl GooseFsFileReader {
             user: None,
             caller_type: None,
         })
-    }
-
-    /// One-shot convenience: read an entire file and return its contents.
-    ///
-    /// ```rust,no_run
-    /// # async fn example() -> goosefs_sdk::error::Result<()> {
-    /// use goosefs_sdk::io::GooseFsFileReader;
-    /// use goosefs_sdk::config::GooseFsConfig;
-    ///
-    /// let config = GooseFsConfig::new("127.0.0.1:9200");
-    /// let data = GooseFsFileReader::read_file(&config, "/my-file.txt").await?;
-    /// println!("content: {}", String::from_utf8_lossy(&data));
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn read_file(config: &GooseFsConfig, path: &str) -> Result<Bytes> {
-        let mut reader = Self::open(config, path).await?;
-        reader.read_all().await
-    }
-
-    /// One-shot convenience: read a byte range from a file.
-    ///
-    /// ```rust,no_run
-    /// # async fn example() -> goosefs_sdk::error::Result<()> {
-    /// use goosefs_sdk::io::GooseFsFileReader;
-    /// use goosefs_sdk::config::GooseFsConfig;
-    ///
-    /// let config = GooseFsConfig::new("127.0.0.1:9200");
-    /// let data = GooseFsFileReader::read_range(&config, "/my-file.txt", 100, 500).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn read_range(
-        config: &GooseFsConfig,
-        path: &str,
-        offset: u64,
-        length: u64,
-    ) -> Result<Bytes> {
-        let mut reader = Self::open_range(config, path, offset, length).await?;
-        reader.read_all().await
     }
 
     /// One-shot convenience: read an entire file using a shared context.

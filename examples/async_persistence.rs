@@ -22,10 +22,13 @@
 //! Usage:
 //!   cargo run --example async_persistence
 
-use goosefs_sdk::client::MasterClient;
+use std::sync::Arc;
+
 use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::context::FileSystemContext;
 use goosefs_sdk::error::Result;
 use goosefs_sdk::io::GooseFsFileWriter;
+use goosefs_sdk::proto::grpc::file::CreateFilePOptions;
 use goosefs_sdk::WritePType;
 
 #[tokio::main]
@@ -33,11 +36,12 @@ async fn main() -> Result<()> {
     println!("GooseFS Async Persistence Demo");
     println!("===============================");
 
-    let base_config = GooseFsConfig::new("127.0.0.1:9200");
+    let ctx: Arc<FileSystemContext> =
+        FileSystemContext::connect(GooseFsConfig::new("127.0.0.1:9200")).await?;
 
     // ── Step 0: Cleanup & create directory ────────────────────────
     println!("\n0. Cleaning up existing test directory...");
-    let master = MasterClient::connect(&base_config).await?;
+    let master = ctx.acquire_master();
     match master.delete("/persisted-demo", true).await {
         Ok(_) => println!("  Deleted old test directory"),
         Err(_) => println!("  Old directory does not exist, skipping"),
@@ -49,15 +53,22 @@ async fn main() -> Result<()> {
     println!("\n━━━ 1. ASYNC_THROUGH mode (automatic async persistence) ━━━");
     println!("  Data is written to Worker cache first; close() automatically schedules async persistence to UFS.");
     {
-        let config = GooseFsConfig::new("127.0.0.1:9200").with_write_type(WritePType::AsyncThrough);
-
+        let opts = CreateFilePOptions {
+            write_type: Some(WritePType::AsyncThrough as i32),
+            recursive: Some(true),
+            ..Default::default()
+        };
         let content = b"This file is written with ASYNC_THROUGH mode.\n\
                         Data goes to Worker cache first, then persisted to UFS asynchronously.\n\
                         GooseFS Rust Client async persistence demo.";
 
-        let bytes_written =
-            GooseFsFileWriter::write_file(&config, "/persisted-demo/async_through.txt", content)
-                .await?;
+        let bytes_written = GooseFsFileWriter::write_file_with_context_and_options(
+            ctx.clone(),
+            "/persisted-demo/async_through.txt",
+            content,
+            Some(opts),
+        )
+        .await?;
         println!("  ✅ Write complete: {} bytes", bytes_written);
 
         // Check initial status
@@ -73,15 +84,22 @@ async fn main() -> Result<()> {
     println!("\n━━━ 2. MUST_CACHE + manual persistence scheduling ━━━");
     println!("  Data is written to Worker cache only, then manually schedule async persistence.");
     {
-        let config = GooseFsConfig::new("127.0.0.1:9200").with_write_type(WritePType::MustCache);
-
+        let opts = CreateFilePOptions {
+            write_type: Some(WritePType::MustCache as i32),
+            recursive: Some(true),
+            ..Default::default()
+        };
         let content = b"This file is written with MUST_CACHE mode.\n\
                         After writing, we manually schedule async persistence.\n\
                         GooseFS Rust Client manual persistence demo.";
 
-        let bytes_written =
-            GooseFsFileWriter::write_file(&config, "/persisted-demo/manual_persist.txt", content)
-                .await?;
+        let bytes_written = GooseFsFileWriter::write_file_with_context_and_options(
+            ctx.clone(),
+            "/persisted-demo/manual_persist.txt",
+            content,
+            Some(opts),
+        )
+        .await?;
         println!("  ✅ Write complete: {} bytes", bytes_written);
 
         // Check status before scheduling
@@ -145,6 +163,8 @@ async fn main() -> Result<()> {
             entry.persisted.unwrap_or(false),
         );
     }
+
+    ctx.close().await?;
 
     println!("\n✅ Async persistence demo complete!");
     Ok(())

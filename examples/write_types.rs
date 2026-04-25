@@ -12,10 +12,13 @@
 //! Usage:
 //!   cargo run --example write_types
 
-use goosefs_sdk::client::MasterClient;
+use std::sync::Arc;
+
 use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::context::FileSystemContext;
 use goosefs_sdk::error::Result;
 use goosefs_sdk::io::{GooseFsFileReader, GooseFsFileWriter};
+use goosefs_sdk::proto::grpc::file::CreateFilePOptions;
 use goosefs_sdk::WritePType;
 
 #[tokio::main]
@@ -23,10 +26,11 @@ async fn main() -> Result<()> {
     println!("GooseFS WriteType Demo");
     println!("=======================");
 
-    let base_config = GooseFsConfig::new("127.0.0.1:9200");
+    let ctx: Arc<FileSystemContext> =
+        FileSystemContext::connect(GooseFsConfig::new("127.0.0.1:9200")).await?;
 
     // Initialize: cleanup & create test directory
-    let master = MasterClient::connect(&base_config).await?;
+    let master = ctx.acquire_master();
     match master.delete("/write-type-demo", true).await {
         Ok(_) => println!("Cleaned up old test directory"),
         Err(_) => {}
@@ -40,15 +44,27 @@ async fn main() -> Result<()> {
     println!("━━━ 1. MUST_CACHE (default) ━━━");
     println!("  Data is written to Worker cache only, not persisted to underlying storage.");
     {
-        let config = GooseFsConfig::new("127.0.0.1:9200").with_write_type(WritePType::MustCache);
-
+        let opts = CreateFilePOptions {
+            write_type: Some(WritePType::MustCache as i32),
+            recursive: Some(true),
+            ..Default::default()
+        };
         let data = b"MUST_CACHE: data lives only in GooseFS cache.";
-        let bytes =
-            GooseFsFileWriter::write_file(&config, "/write-type-demo/must_cache.txt", data).await?;
+        let bytes = GooseFsFileWriter::write_file_with_context_and_options(
+            ctx.clone(),
+            "/write-type-demo/must_cache.txt",
+            data,
+            Some(opts),
+        )
+        .await?;
         println!("  ✅ Write complete: {} bytes", bytes);
 
         // Read back and verify
-        let read = GooseFsFileReader::read_file(&config, "/write-type-demo/must_cache.txt").await?;
+        let read = GooseFsFileReader::read_file_with_context(
+            ctx.clone(),
+            "/write-type-demo/must_cache.txt",
+        )
+        .await?;
         assert_eq!(read.as_ref(), data.as_slice());
         println!("  ✅ Read verification passed");
     }
@@ -59,16 +75,26 @@ async fn main() -> Result<()> {
     println!("\n━━━ 2. CACHE_THROUGH ━━━");
     println!("  Data is written to cache; Master auto-syncs to UFS on CompleteFile.");
     {
-        let config = GooseFsConfig::new("127.0.0.1:9200").with_write_type(WritePType::CacheThrough);
-
+        let opts = CreateFilePOptions {
+            write_type: Some(WritePType::CacheThrough as i32),
+            recursive: Some(true),
+            ..Default::default()
+        };
         let data = b"CACHE_THROUGH: written to cache, Master syncs to UFS on CompleteFile.";
-        let bytes =
-            GooseFsFileWriter::write_file(&config, "/write-type-demo/cache_through.txt", data)
-                .await?;
+        let bytes = GooseFsFileWriter::write_file_with_context_and_options(
+            ctx.clone(),
+            "/write-type-demo/cache_through.txt",
+            data,
+            Some(opts),
+        )
+        .await?;
         println!("  ✅ Write complete: {} bytes", bytes);
 
-        let read =
-            GooseFsFileReader::read_file(&config, "/write-type-demo/cache_through.txt").await?;
+        let read = GooseFsFileReader::read_file_with_context(
+            ctx.clone(),
+            "/write-type-demo/cache_through.txt",
+        )
+        .await?;
         assert_eq!(read.as_ref(), data.as_slice());
         println!("  ✅ Read verification passed");
     }
@@ -80,14 +106,24 @@ async fn main() -> Result<()> {
     println!("  Data is written directly to UFS (COS/S3/HDFS), bypassing cache.");
     println!("  Worker uses UfsFile + CreateUfsFileOptions to complete the write.");
     {
-        let config = GooseFsConfig::new("127.0.0.1:9200").with_write_type(WritePType::Through);
-
+        let opts = CreateFilePOptions {
+            write_type: Some(WritePType::Through as i32),
+            recursive: Some(true),
+            ..Default::default()
+        };
         let data = b"THROUGH: data written directly to UFS, bypassing cache.";
-        let bytes =
-            GooseFsFileWriter::write_file(&config, "/write-type-demo/through.txt", data).await?;
+        let bytes = GooseFsFileWriter::write_file_with_context_and_options(
+            ctx.clone(),
+            "/write-type-demo/through.txt",
+            data,
+            Some(opts),
+        )
+        .await?;
         println!("  ✅ Write complete: {} bytes", bytes);
 
-        let read = GooseFsFileReader::read_file(&config, "/write-type-demo/through.txt").await?;
+        let read =
+            GooseFsFileReader::read_file_with_context(ctx.clone(), "/write-type-demo/through.txt")
+                .await?;
         assert_eq!(read.as_ref(), data.as_slice());
         println!("  ✅ Read verification passed");
     }
@@ -99,17 +135,27 @@ async fn main() -> Result<()> {
     println!("  Data is written to cache; close() automatically calls scheduleAsyncPersistence.");
     println!("  Data will eventually be persisted to UFS asynchronously.");
     {
-        let config = GooseFsConfig::new("127.0.0.1:9200").with_write_type(WritePType::AsyncThrough);
-
+        let opts = CreateFilePOptions {
+            write_type: Some(WritePType::AsyncThrough as i32),
+            recursive: Some(true),
+            ..Default::default()
+        };
         let data = b"ASYNC_THROUGH: written to cache, async persistence scheduled after close.";
-        let bytes =
-            GooseFsFileWriter::write_file(&config, "/write-type-demo/async_through.txt", data)
-                .await?;
+        let bytes = GooseFsFileWriter::write_file_with_context_and_options(
+            ctx.clone(),
+            "/write-type-demo/async_through.txt",
+            data,
+            Some(opts),
+        )
+        .await?;
         println!("  ✅ Write complete: {} bytes", bytes);
         println!("  ℹ️  close() has already called scheduleAsyncPersistence internally");
 
-        let read =
-            GooseFsFileReader::read_file(&config, "/write-type-demo/async_through.txt").await?;
+        let read = GooseFsFileReader::read_file_with_context(
+            ctx.clone(),
+            "/write-type-demo/async_through.txt",
+        )
+        .await?;
         assert_eq!(read.as_ref(), data.as_slice());
         println!("  ✅ Read verification passed");
 
@@ -141,6 +187,8 @@ async fn main() -> Result<()> {
             entry.persisted.unwrap_or(false),
         );
     }
+
+    ctx.close().await?;
 
     println!("\n=======================");
     println!("✅ All WriteType demos complete!");

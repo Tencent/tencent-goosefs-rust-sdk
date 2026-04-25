@@ -6,3 +6,5 @@ src/generated/
 .DS_Store
 docs/gap/
 docs/design/
+docs/prompt/
+docs/images/

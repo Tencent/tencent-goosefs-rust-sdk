@@ -29,18 +29,13 @@ pub const WRITE_TYPE_XATTR_KEY: &str = "innerWriteType";
 /// that the write type should be inherited from the parent directory's xattr.
 ///
 /// Used in [`crate::fs::options::CreateFileOptions`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum WriteTypeXAttr {
     /// Explicitly set by the caller — do not inherit from xattr.
     Explicit(WriteType),
     /// Not set — inherit from the parent directory xattr (if present).
+    #[default]
     Inherit,
-}
-
-impl Default for WriteTypeXAttr {
-    fn default() -> Self {
-        WriteTypeXAttr::Inherit
-    }
 }
 
 /// Extract the `WriteType` from a file/directory's `xattr` map.

@@ -4,12 +4,12 @@
 //! easy-to-use API, analogous to Java's `GooseFSFileOutStream`:
 //!
 //! ```text
-//! GooseFsFileWriter::create(path, data)
+//! GooseFsFileWriter::create_with_context(ctx, path, opts)
 //!   → MasterClient.create_file()
 //!   → BlockMapper.plan_write()
 //!   → for each block:
 //!       → WorkerRouter.select_worker()
-//!       → WorkerClient.connect()
+//!       → WorkerClient.connect()        (pooled — zero new TCP+SASL)
 //!       → GrpcBlockWriter.open() → write_all() → flush() → close()
 //!   → MasterClient.complete_file()
 //! ```
@@ -17,18 +17,20 @@
 //! # Example
 //!
 //! ```rust,no_run
+//! use std::sync::Arc;
 //! use goosefs_sdk::io::GooseFsFileWriter;
+//! use goosefs_sdk::context::FileSystemContext;
 //! use goosefs_sdk::config::GooseFsConfig;
 //!
 //! # async fn example() -> goosefs_sdk::error::Result<()> {
-//! let config = GooseFsConfig::new("127.0.0.1:9200");
+//! let ctx = FileSystemContext::connect(GooseFsConfig::new("127.0.0.1:9200")).await?;
 //! let data = b"Hello, GooseFS!";
 //!
-//! // One-shot write
-//! GooseFsFileWriter::write_file(&config, "/my-file.txt", data).await?;
+//! // One-shot write (zero new connections)
+//! GooseFsFileWriter::write_file_with_context(ctx.clone(), "/my-file.txt", data).await?;
 //!
 //! // Or use the builder for more control
-//! let mut writer = GooseFsFileWriter::create(&config, "/my-file.txt").await?;
+//! let mut writer = GooseFsFileWriter::create_with_context(ctx.clone(), "/my-file.txt", None).await?;
 //! writer.write(data).await?;
 //! writer.close().await?;
 //! # Ok(())
@@ -45,7 +47,7 @@ use uuid::Uuid;
 use crate::block::router::WorkerRouter;
 use crate::client::master::default_file_mode;
 use crate::client::worker::{WorkerClientPool, WriteBlockOptions};
-use crate::client::{MasterClient, WorkerManagerClient};
+use crate::client::MasterClient;
 use crate::config::GooseFsConfig;
 use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
@@ -236,124 +238,12 @@ pub struct GooseFsFileWriter {
 }
 
 impl GooseFsFileWriter {
-    /// Create a new file and prepare for writing.
-    ///
-    /// This calls `CreateFile` on the Master and discovers available workers.
-    /// After creation, call `write()` to send data, then `close()` to finalize.
-    pub async fn create(config: &GooseFsConfig, path: &str) -> Result<Self> {
-        Self::create_with_options(config, path, None).await
-    }
-
-    /// Create a new file with custom options.
-    ///
-    /// # Arguments
-    /// - `config` — GooseFS client configuration
-    /// - `path` — File path in GooseFS namespace
-    /// - `options` — Optional `CreateFilePOptions` (block size, write type, etc.)
-    pub async fn create_with_options(
-        config: &GooseFsConfig,
-        path: &str,
-        options: Option<CreateFilePOptions>,
-    ) -> Result<Self> {
-        config
-            .validate()
-            .map_err(|e| Error::ConfigError { message: e })?;
-
-        // 1. Connect to Master (uses MasterInquireClient for HA support)
-        let master = MasterClient::connect(config).await?;
-        debug!(path = %path, "connected to Master for file creation");
-
-        // 2. Create the file
-        let create_options = options.unwrap_or_else(|| {
-            let mut opts = CreateFilePOptions {
-                block_size_bytes: Some(config.block_size as i64),
-                // Default file mode: 0644 (rw-r--r--)
-                mode: Some(default_file_mode()),
-                // Automatically create parent directories (e.g. for Lance Dataset sub-dirs)
-                recursive: Some(true),
-                ..Default::default()
-            };
-            // Apply config-level write_type if set
-            if config.write_type.is_some() {
-                opts.write_type = config.write_type;
-            }
-            opts
-        });
-
-        // Ensure recursive is set so parent directories are created automatically
-        let mut create_options = create_options;
-        if create_options.recursive.is_none() {
-            create_options.recursive = Some(true);
-        }
-
-        let file_info = master.create_file(path, create_options.clone()).await?;
-        debug!(
-            path = %path,
-            file_id = ?file_info.file_id,
-            block_size = ?file_info.block_size_bytes,
-            "file created on Master"
-        );
-
-        // Derive the write strategy from the effective write_type + file info.
-        // Priority: CreateFilePOptions.write_type > config.write_type > default (MUST_CACHE).
-        let effective_write_type = create_options.write_type.or(config.write_type);
-        let write_strategy = resolve_write_strategy(effective_write_type, &file_info);
-        debug!(
-            write_type = ?effective_write_type,
-            cache_stream = write_strategy.cache_stream,
-            ufs_stream = write_strategy.ufs_stream,
-            need_async_persist = write_strategy.need_async_persist,
-            "resolved write strategy"
-        );
-
-        // 3. Discover workers (shares inquire client via MasterClient)
-        let inquire_client = master.inquire_client().clone();
-        let wm = WorkerManagerClient::connect_with_inquire(config, inquire_client).await?;
-        let workers = wm.get_worker_info_list().await?;
-        if workers.is_empty() {
-            return Err(Error::NoWorkerAvailable {
-                message: "no workers available for writing".to_string(),
-            });
-        }
-        debug!(worker_count = workers.len(), "discovered workers");
-
-        let router = WorkerRouter::new();
-        router.update_workers(workers).await;
-
-        // Create connection pool for worker client reuse
-        let worker_pool = WorkerClientPool::new_shared(config.clone());
-
-        // Generate a unique operation ID for this write session.
-        // Reused across retries of complete_file for idempotency.
-        let operation_id = Uuid::new_v4();
-
-        Ok(Self {
-            config: config.clone(),
-            path: path.to_string(),
-            master,
-            router,
-            worker_pool,
-            _context: None, // legacy mode: no shared context
-            file_info,
-            total_bytes_written: 0,
-            operation_id,
-            cancelled: AtomicBool::new(false),
-            closed: AtomicBool::new(false),
-            write_strategy,
-            committed_block_ids: Vec::new(),
-            current_block_writer: None,
-            ufs_stream: None,
-            ufs_worker_addr: None,
-            ufs_stream_completed: AtomicBool::new(false),
-        })
-    }
-
     /// Create a new file using a shared [`FileSystemContext`].
     ///
-    /// Unlike [`create`], this method reuses the persistent Master connection,
-    /// worker router, and connection pool from `ctx` instead of establishing
-    /// new TCP+SASL connections.  Use this when you have a long-lived
-    /// [`FileSystemContext`] and want zero-handshake file writes.
+    /// Reuses the persistent Master connection, worker router, and connection
+    /// pool from `ctx` — **no additional TCP+SASL handshake** is performed.
+    /// Use this when you have a long-lived [`FileSystemContext`] and want
+    /// zero-handshake file writes.
     ///
     /// # Arguments
     /// - `ctx` — Shared context created with `FileSystemContext::connect()`
@@ -386,8 +276,17 @@ impl GooseFsFileWriter {
         if create_options.recursive.is_none() {
             create_options.recursive = Some(true);
         }
+        // Always ensure block_size_bytes and mode are set — callers that pass a
+        // partial CreateFilePOptions (e.g. only overriding write_type) would
+        // otherwise get "Invalid block size 0" from the Master.
+        if create_options.block_size_bytes.is_none() || create_options.block_size_bytes == Some(0) {
+            create_options.block_size_bytes = Some(config.block_size as i64);
+        }
+        if create_options.mode.is_none() {
+            create_options.mode = Some(default_file_mode());
+        }
 
-        let file_info = master_arc.create_file(path, create_options.clone()).await?;
+        let file_info = master_arc.create_file(path, create_options).await?;
         debug!(
             path = %path,
             file_id = ?file_info.file_id,
@@ -1063,9 +962,7 @@ impl GooseFsFileWriter {
         // 3) Complete the file on Master with the idempotency operation ID.
         //    Always pass ufs_length for CACHE_THROUGH/THROUGH so Master knows
         //    exactly how many bytes ended up in UFS.
-        let ufs_length = if self.write_strategy.ufs_stream {
-            Some(self.total_bytes_written as i64)
-        } else if self.total_bytes_written > 0 {
+        let ufs_length = if self.write_strategy.ufs_stream || self.total_bytes_written > 0 {
             Some(self.total_bytes_written as i64)
         } else {
             None
@@ -1109,35 +1006,58 @@ impl GooseFsFileWriter {
         Ok(())
     }
 
-    /// One-shot convenience method: create file, write all data, and close.
+    /// One-shot convenience: create file, write all data, and complete it.
     ///
-    /// This is the simplest way to write a file to GooseFS:
+    /// Reuses the Master client, worker router, and connection pool from `ctx`.
+    /// This is the context-based equivalent of `write_file(&config, path, data)`.
+    ///
+    /// # Arguments
+    /// - `ctx` — Shared context created with `FileSystemContext::connect()`
+    /// - `path` — File path in GooseFS namespace
+    /// - `data` — Bytes to write
+    ///
+    /// # Returns
+    /// Total bytes written on success.
+    ///
+    /// # Example
     ///
     /// ```rust,no_run
-    /// # async fn example() -> goosefs_sdk::error::Result<()> {
-    /// use goosefs_sdk::io::GooseFsFileWriter;
+    /// use std::sync::Arc;
+    /// use goosefs_sdk::context::FileSystemContext;
     /// use goosefs_sdk::config::GooseFsConfig;
+    /// use goosefs_sdk::io::GooseFsFileWriter;
     ///
-    /// let config = GooseFsConfig::new("127.0.0.1:9200");
-    /// GooseFsFileWriter::write_file(&config, "/my-file.txt", b"Hello!").await?;
+    /// # async fn example() -> goosefs_sdk::error::Result<()> {
+    /// let ctx = FileSystemContext::connect(GooseFsConfig::new("127.0.0.1:9200")).await?;
+    /// GooseFsFileWriter::write_file_with_context(ctx, "/my-file.txt", b"Hello!").await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn write_file(config: &GooseFsConfig, path: &str, data: &[u8]) -> Result<u64> {
-        let mut writer = Self::create(config, path).await?;
-        writer.write(data).await?;
-        writer.close().await?;
-        Ok(writer.total_bytes_written)
-    }
-
-    /// One-shot convenience method with custom create options.
-    pub async fn write_file_with_options(
-        config: &GooseFsConfig,
+    pub async fn write_file_with_context(
+        ctx: Arc<FileSystemContext>,
         path: &str,
         data: &[u8],
-        options: CreateFilePOptions,
     ) -> Result<u64> {
-        let mut writer = Self::create_with_options(config, path, Some(options)).await?;
+        Self::write_file_with_context_and_options(ctx, path, data, None).await
+    }
+
+    /// One-shot convenience with custom create options, using a shared context.
+    ///
+    /// Like [`write_file_with_context`] but lets the caller supply
+    /// `CreateFilePOptions` (e.g. to override `write_type` or `block_size_bytes`).
+    ///
+    /// # Arguments
+    /// - `ctx` — Shared context created with `FileSystemContext::connect()`
+    /// - `path` — File path in GooseFS namespace
+    /// - `data` — Bytes to write
+    /// - `options` — Optional `CreateFilePOptions`
+    pub async fn write_file_with_context_and_options(
+        ctx: Arc<FileSystemContext>,
+        path: &str,
+        data: &[u8],
+        options: Option<CreateFilePOptions>,
+    ) -> Result<u64> {
+        let mut writer = Self::create_with_context(ctx, path, options).await?;
         writer.write(data).await?;
         writer.close().await?;
         Ok(writer.total_bytes_written)

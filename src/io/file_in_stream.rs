@@ -294,6 +294,11 @@ impl GooseFsFileInStream {
         self.file_length
     }
 
+    /// `true` if the file has zero bytes.
+    pub fn is_empty(&self) -> bool {
+        self.file_length == 0
+    }
+
     /// `true` if the stream is at or past the end of the file.
     pub fn is_eof(&self) -> bool {
         self.pos >= self.file_length
@@ -523,7 +528,7 @@ impl GooseFsFileInStream {
             .values()
             .find(|fbi| {
                 fbi.offset
-                    .map_or(false, |off| off == self.block_start(block_idx))
+                    .is_some_and(|off| off == self.block_start(block_idx))
             })
             .and_then(|fbi| fbi.block_info.as_ref())
             .and_then(|bi| bi.block_id)

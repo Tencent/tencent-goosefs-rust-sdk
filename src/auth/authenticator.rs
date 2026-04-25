@@ -40,11 +40,12 @@ use super::sasl_client::{PlainSaslClientHandler, SaslClientHandler};
 ///
 /// Corresponds to Java's `AuthType` enum and the configuration key
 /// `goosefs.security.authentication.type`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum AuthType {
     /// No authentication — skip SASL handshake, use the gRPC channel directly.
     NoSasl,
     /// Simple authentication (default) — transmit username via PLAIN SASL; server does not verify password.
+    #[default]
     Simple,
     // TODO: implement as needed
     // /// Custom authentication — server verifies via a custom AuthenticationProvider.
@@ -88,12 +89,6 @@ impl FromStr for AuthType {
                 s
             )),
         }
-    }
-}
-
-impl Default for AuthType {
-    fn default() -> Self {
-        AuthType::Simple
     }
 }
 

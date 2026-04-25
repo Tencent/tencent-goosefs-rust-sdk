@@ -303,7 +303,6 @@ impl MasterClient {
         let path = path.to_string();
         self.with_retry("create_file", |mut client| {
             let path = path.clone();
-            let options = options.clone();
             async move {
                 let req = CreateFilePRequest {
                     path: Some(path),

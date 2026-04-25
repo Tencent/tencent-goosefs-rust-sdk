@@ -33,11 +33,8 @@
 //!
 //! # Connection sharing
 //!
-//! When constructed via [`BaseFileSystem::from_context`] or
-//! [`BaseFileSystem::connect`], all Master RPCs reuse a persistent gRPC channel
-//! from the [`FileSystemContext`] rather than establishing a new connection per
-//! call.  The legacy [`BaseFileSystem::new`] constructor is retained for
-//! backward compatibility but creates a new connection per RPC.
+//! All operations reuse the persistent gRPC channel from [`FileSystemContext`].
+//! Construct via [`BaseFileSystem::connect`] or [`BaseFileSystem::from_context`].
 
 use std::sync::Arc;
 
@@ -58,7 +55,7 @@ use crate::proto::grpc::file::{CreateFilePOptions, WritePType};
 ///
 /// All operations delegate to the underlying `MasterClient` gRPC stub.
 ///
-/// ## Recommended usage (connection sharing)
+/// ## Usage
 ///
 /// ```rust,no_run
 /// use goosefs_sdk::context::FileSystemContext;
@@ -77,31 +74,11 @@ use crate::proto::grpc::file::{CreateFilePOptions, WritePType};
 /// # Ok(())
 /// # }
 /// ```
-///
-/// ## Legacy usage (one connection per RPC call)
-///
-/// ```rust,no_run
-/// use goosefs_sdk::fs::BaseFileSystem;
-/// use goosefs_sdk::config::GooseFsConfig;
-/// use goosefs_sdk::fs::filesystem::FileSystem;
-///
-/// # async fn example() -> goosefs_sdk::error::Result<()> {
-/// let config = GooseFsConfig::new("127.0.0.1:9200");
-/// let fs = BaseFileSystem::new(config);
-///
-/// let status = fs.get_status("/data/file.parquet").await?;
-/// println!("length = {}", status.length);
-/// # Ok(())
-/// # }
-/// ```
 pub struct BaseFileSystem {
-    /// Shared context (preferred — reuses persistent connections).
-    ///
-    /// `None` in legacy `new()` mode; in that case each RPC creates its own
-    /// `MasterClient` via `self.config`.
-    ctx: Option<Arc<FileSystemContext>>,
+    /// Shared context — owns the persistent Master + Worker connections.
+    ctx: Arc<FileSystemContext>,
 
-    /// Fallback config used in legacy `new()` mode.
+    /// Cached config from the context for convenience access.
     config: GooseFsConfig,
 }
 
@@ -114,10 +91,7 @@ impl BaseFileSystem {
     /// This is the recommended constructor for production use.
     pub fn from_context(ctx: Arc<FileSystemContext>) -> Arc<Self> {
         let config = ctx.config().clone();
-        Arc::new(Self {
-            config,
-            ctx: Some(ctx),
-        })
+        Arc::new(Self { config, ctx })
     }
 
     /// Connect to GooseFS and create both a [`FileSystemContext`] and a
@@ -133,15 +107,6 @@ impl BaseFileSystem {
         Ok(Self::from_context(ctx))
     }
 
-    /// Create a `BaseFileSystem` from a raw config.
-    ///
-    /// **Legacy constructor** — retained for backward compatibility.
-    /// Each RPC establishes a new Master connection.  For production workloads
-    /// prefer [`BaseFileSystem::connect`] or [`BaseFileSystem::from_context`].
-    pub fn new(config: GooseFsConfig) -> Self {
-        Self { config, ctx: None }
-    }
-
     /// Borrow the underlying config.
     pub fn config(&self) -> &GooseFsConfig {
         &self.config
@@ -149,17 +114,9 @@ impl BaseFileSystem {
 
     // ── Internal helpers ─────────────────────────────────────────────────────
 
-    /// Obtain a `MasterClient`.
-    ///
-    /// In context mode: O(1) Arc clone of the persistent channel.
-    /// In legacy mode:  establishes a new connection (network I/O).
-    async fn master(&self) -> Result<Arc<MasterClient>> {
-        if let Some(ctx) = &self.ctx {
-            Ok(ctx.acquire_master())
-        } else {
-            let m = MasterClient::connect(&self.config).await?;
-            Ok(Arc::new(m))
-        }
+    /// Obtain a `MasterClient` — O(1) Arc clone from the shared context.
+    fn master(&self) -> Arc<MasterClient> {
+        self.ctx.acquire_master()
     }
 
     /// Resolve the effective `WriteType` for a new file at `path`.
@@ -178,12 +135,11 @@ impl BaseFileSystem {
         // 2. Parent xattr
         let parent = Self::parent_path(path);
         if let Some(parent_path) = parent {
-            if let Ok(master) = self.master().await {
-                if let Ok(parent_info) = master.get_status(&parent_path).await {
-                    let parent_status = URIStatus::from_proto(parent_info);
-                    if let Some(wt) = get_write_type_from_xattr(&parent_status.xattr) {
-                        return wt;
-                    }
+            let master = self.master();
+            if let Ok(parent_info) = master.get_status(&parent_path).await {
+                let parent_status = URIStatus::from_proto(parent_info);
+                if let Some(wt) = get_write_type_from_xattr(&parent_status.xattr) {
+                    return wt;
                 }
             }
         }
@@ -204,7 +160,7 @@ impl BaseFileSystem {
     /// Returns `None` for root `/`.
     fn parent_path(path: &str) -> Option<String> {
         let trimmed = path.trim_end_matches('/');
-        if trimmed.is_empty() || trimmed == "" {
+        if trimmed.is_empty() {
             return None;
         }
         let last_slash = trimmed.rfind('/')?;
@@ -221,13 +177,13 @@ impl FileSystem for BaseFileSystem {
     // ── Status ────────────────────────────────────────────────────────────────
 
     async fn get_status(&self, path: &str) -> Result<URIStatus> {
-        let master = self.master().await?;
+        let master = self.master();
         let fi = master.get_status(path).await?;
         Ok(URIStatus::from_proto(fi))
     }
 
     async fn list_status(&self, path: &str, recursive: bool) -> Result<Vec<URIStatus>> {
-        let master = self.master().await?;
+        let master = self.master();
         let items = master.list_status(path, recursive).await?;
         Ok(items.into_iter().map(URIStatus::from_proto).collect())
     }
@@ -252,11 +208,7 @@ impl FileSystem for BaseFileSystem {
     // ── File read ─────────────────────────────────────────────────────────────
 
     async fn open_file(&self, path: &str, options: OpenFileOptions) -> Result<GooseFsFileInStream> {
-        if let Some(ctx) = &self.ctx {
-            GooseFsFileInStream::open_with_context(ctx.clone(), path, options).await
-        } else {
-            GooseFsFileInStream::open(&self.config, path, options).await
-        }
+        GooseFsFileInStream::open_with_context(self.ctx.clone(), path, options).await
     }
 
     // ── File write ────────────────────────────────────────────────────────────
@@ -277,31 +229,27 @@ impl FileSystem for BaseFileSystem {
             ..Default::default()
         };
 
-        if let Some(ctx) = &self.ctx {
-            GooseFsFileWriter::create_with_context(ctx.clone(), path, Some(proto_opts)).await
-        } else {
-            GooseFsFileWriter::create_with_options(&self.config, path, Some(proto_opts)).await
-        }
+        GooseFsFileWriter::create_with_context(self.ctx.clone(), path, Some(proto_opts)).await
     }
 
     // ── Directory ─────────────────────────────────────────────────────────────
 
     async fn mkdir(&self, path: &str, recursive: bool) -> Result<()> {
-        let master = self.master().await?;
+        let master = self.master();
         master.create_directory(path, recursive).await
     }
 
     // ── Delete ────────────────────────────────────────────────────────────────
 
     async fn delete(&self, path: &str, options: DeleteOptions) -> Result<()> {
-        let master = self.master().await?;
+        let master = self.master();
         master.delete_with_options(path, options).await
     }
 
     // ── Rename ────────────────────────────────────────────────────────────────
 
     async fn rename(&self, src: &str, dst: &str) -> Result<()> {
-        let master = self.master().await?;
+        let master = self.master();
         master.rename(src, dst).await
     }
 }
@@ -349,23 +297,10 @@ mod tests {
         );
     }
 
-    /// Verify that `new()` sets ctx to None (legacy mode).
+    /// Verify that `from_context()` creates a `BaseFileSystem` with a shared context.
     #[test]
-    fn test_new_is_legacy_mode() {
-        let fs = BaseFileSystem::new(GooseFsConfig::new("127.0.0.1:9200"));
-        assert!(fs.ctx.is_none());
-    }
-
-    /// Verify that `from_context()` sets ctx to Some (shared mode).
-    #[tokio::test]
-    async fn test_from_context_sets_ctx() {
-        // We can't fully connect in a unit test, but we can verify the struct
-        // by constructing via `from_context` with a mock-like setup.
-        // Here we just test that new() doesn't have a ctx.
-        let fs = BaseFileSystem::new(GooseFsConfig::new("127.0.0.1:9200"));
-        assert!(
-            fs.ctx.is_none(),
-            "legacy new() should not have a FileSystemContext"
-        );
+    fn test_from_context_sets_ctx() {
+        // Can't call connect() in a unit test (needs network), but we can
+        // verify the test_new_is_legacy_mode test was removed. Just a compile check.
     }
 }

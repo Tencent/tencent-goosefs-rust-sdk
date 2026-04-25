@@ -351,8 +351,16 @@ impl FileSystemContext {
 
 impl Drop for FileSystemContext {
     fn drop(&mut self) {
-        // Best-effort: abort the refresh tasks if still running.
-        // We use `try_lock` because `drop` is synchronous.
+        // Signal `closed` first so any in-flight background tasks that poll
+        // this flag stop themselves before we try to abort their handles.
+        // This avoids a race where a task wakes up between our abort() call
+        // and the actual cancellation and touches shared state.
+        self.closed.store(true, Ordering::SeqCst);
+
+        // Best-effort abort of the refresh tasks.
+        // `drop` is synchronous, so we use `try_lock`; if we cannot obtain the
+        // lock the task loop will observe `closed == true` on its next iteration
+        // and exit on its own.
         if let Ok(mut guard) = self.worker_refresh_task.try_lock() {
             if let Some(h) = guard.take() {
                 h.abort();
@@ -363,8 +371,6 @@ impl Drop for FileSystemContext {
                 h.abort();
             }
         }
-        // Mark closed so any in-flight tasks see it.
-        self.closed.store(true, Ordering::SeqCst);
     }
 }
 

@@ -51,17 +51,16 @@ mod integration {
         println!("✓ Arc<WorkerClientPool> strong_count = {}", strong_count);
     }
 
-    /// Verify that legacy mode (without context) doesn't break.
+    /// Verify that `BaseFileSystem::connect` and `from_context` APIs compile.
     #[test]
-    fn legacy_mode_still_works() {
+    fn context_based_filesystem_compiles() {
         use goosefs_sdk::fs::BaseFileSystem;
 
-        let config = GooseFsConfig::new("127.0.0.1:9200");
+        // Just verify the type signatures are accessible — no network needed.
+        let _ = BaseFileSystem::connect; // fn(GooseFsConfig) -> impl Future<...>
+        let _ = BaseFileSystem::from_context; // fn(Arc<FileSystemContext>) -> Arc<Self>
 
-        // Old way: no context
-        let _fs = BaseFileSystem::new(config);
-
-        println!("✓ BaseFileSystem::new() (legacy mode) compiles and constructs");
+        println!("✓ BaseFileSystem context-based constructors compile");
     }
 
     /// Verify context connection establishment and reuse semantics.

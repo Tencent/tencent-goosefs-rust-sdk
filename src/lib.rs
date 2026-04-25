@@ -28,18 +28,21 @@
 //! # Quick Start — High-Level API
 //!
 //! ```rust,no_run
+//! use std::sync::Arc;
+//! use goosefs_sdk::context::FileSystemContext;
 //! use goosefs_sdk::io::{GooseFsFileWriter, GooseFsFileReader};
 //! use goosefs_sdk::config::GooseFsConfig;
 //!
 //! #[tokio::main]
 //! async fn main() -> goosefs_sdk::error::Result<()> {
-//!     let config = GooseFsConfig::new("127.0.0.1:9200");
+//!     // Build once — the only call that performs TCP+SASL.
+//!     let ctx = FileSystemContext::connect(GooseFsConfig::new("127.0.0.1:9200")).await?;
 //!
-//!     // Write a file
-//!     GooseFsFileWriter::write_file(&config, "/my-file.txt", b"Hello!").await?;
+//!     // Write a file (zero new connections — reuses ctx).
+//!     GooseFsFileWriter::write_file_with_context(ctx.clone(), "/my-file.txt", b"Hello!").await?;
 //!
-//!     // Read it back
-//!     let data = GooseFsFileReader::read_file(&config, "/my-file.txt").await?;
+//!     // Read it back.
+//!     let data = GooseFsFileReader::read_file_with_context(ctx.clone(), "/my-file.txt").await?;
 //!     println!("read {} bytes", data.len());
 //!
 //!     Ok(())
@@ -111,7 +114,7 @@ pub use crate::proto::grpc::file::WritePType;
 /// Key path resolutions from generated code:
 /// - `grpc::file` uses `super::Bits`              → `grpc::Bits`   ✓
 /// - `grpc::file` uses `super::super::proto::security::Capability`
-///                                                → `proto(root)::proto::security::Capability` ✓
+///   → `proto(root)::proto::security::Capability` ✓
 /// - `proto::dataserver` uses `super::shared::*`  → `proto(inner)::shared::*` ✓
 pub mod proto {
     pub mod grpc {
