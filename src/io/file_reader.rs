@@ -41,13 +41,17 @@
 //! # }
 //! ```
 
+use std::sync::Arc;
+
 use bytes::{Bytes, BytesMut};
 use tracing::{debug, warn};
 
 use crate::block::mapper::{BlockMapper, BlockReadPlan};
 use crate::block::router::WorkerRouter;
+use crate::client::worker::WorkerClientPool;
 use crate::client::{MasterClient, WorkerClient, WorkerManagerClient};
 use crate::config::GooseFsConfig;
+use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
 use crate::io::reader::GrpcBlockReader;
 use crate::proto::grpc::file::FileInfo;
@@ -70,6 +74,16 @@ pub struct GooseFsFileReader {
     file_info: FileInfo,
     /// Worker router for block → worker mapping.
     router: WorkerRouter,
+    /// Optional shared worker-connection pool.
+    ///
+    /// Non-`None` when constructed via `*_with_context`: worker connections
+    /// are acquired from the shared `WorkerClientPool` (zero TCP+SASL
+    /// handshake on cache hit). `None` falls back to per-call
+    /// `WorkerClient::connect` (legacy path).
+    worker_pool: Option<Arc<WorkerClientPool>>,
+    /// Optional shared context (non-`None` when created via `*_with_context`).
+    /// Kept alive to prevent context GC while the reader is in use.
+    _context: Option<Arc<FileSystemContext>>,
     /// Block-level read plans (populated on open).
     plans: Vec<BlockReadPlan>,
     /// Index of the next block to read.
@@ -90,7 +104,7 @@ impl GooseFsFileReader {
     pub async fn open(config: &GooseFsConfig, path: &str) -> Result<Self> {
         let (file_info, router) = Self::init(config, path).await?;
         let file_length = file_info.length.unwrap_or(0) as u64;
-        Self::build(config, path, file_info, router, 0, file_length)
+        Self::build(config, path, file_info, router, None, None, 0, file_length)
     }
 
     /// Open a file for range reading.
@@ -107,7 +121,55 @@ impl GooseFsFileReader {
         length: u64,
     ) -> Result<Self> {
         let (file_info, router) = Self::init(config, path).await?;
-        Self::build(config, path, file_info, router, offset, length)
+        Self::build(config, path, file_info, router, None, None, offset, length)
+    }
+
+    /// Open a file for reading using a shared [`FileSystemContext`].
+    ///
+    /// Reuses the Master client, worker-list snapshot and worker-connection
+    /// pool cached inside the context — **no additional TCP+SASL handshake**
+    /// to Master or Worker Manager is performed. This is the recommended
+    /// constructor for long-running clients (OpenDAL, Lance, etc.).
+    pub async fn open_with_context(ctx: Arc<FileSystemContext>, path: &str) -> Result<Self> {
+        let (file_info, router) = Self::init_with_context(&ctx, path).await?;
+        let file_length = file_info.length.unwrap_or(0) as u64;
+        let config = ctx.config().clone();
+        let pool = Some(ctx.acquire_worker_pool());
+        Self::build(
+            &config,
+            path,
+            file_info,
+            router,
+            pool,
+            Some(ctx),
+            0,
+            file_length,
+        )
+    }
+
+    /// Open a file for range reading using a shared [`FileSystemContext`].
+    ///
+    /// Same benefits as [`open_with_context`](Self::open_with_context) plus
+    /// explicit `(offset, length)` control.
+    pub async fn open_range_with_context(
+        ctx: Arc<FileSystemContext>,
+        path: &str,
+        offset: u64,
+        length: u64,
+    ) -> Result<Self> {
+        let (file_info, router) = Self::init_with_context(&ctx, path).await?;
+        let config = ctx.config().clone();
+        let pool = Some(ctx.acquire_worker_pool());
+        Self::build(
+            &config,
+            path,
+            file_info,
+            router,
+            pool,
+            Some(ctx),
+            offset,
+            length,
+        )
     }
 
     /// Internal: connect to master, get file info, discover workers.
@@ -150,12 +212,64 @@ impl GooseFsFileReader {
         Ok((file_info, router))
     }
 
+    /// Internal: fetch file info via the shared Master, snapshot workers from
+    /// the shared router — **no new RPC connections**.
+    ///
+    /// This is the context-aware analogue of [`Self::init`]. It mirrors the
+    /// pattern used by `GooseFsFileWriter::create_with_context`: a local
+    /// `WorkerRouter` is created and seeded from the shared router's current
+    /// snapshot, so per-read failure marking stays local and does not pollute
+    /// the long-lived context-level routing state.
+    async fn init_with_context(
+        ctx: &Arc<FileSystemContext>,
+        path: &str,
+    ) -> Result<(FileInfo, WorkerRouter)> {
+        // 1. Reuse the shared Master client (zero handshake).
+        let master = ctx.acquire_master();
+        let file_info = master.get_status(path).await?;
+
+        let file_length = file_info.length.unwrap_or(0);
+        if file_length == 0 {
+            debug!(path = %path, "file is empty");
+        }
+
+        debug!(
+            path = %path,
+            file_length = file_length,
+            block_count = file_info.block_ids.len(),
+            block_size = ?file_info.block_size_bytes,
+            "fetched file metadata (via context)"
+        );
+
+        // 2. Snapshot workers from the shared router (kept fresh by the
+        //    context's background worker-refresh task — no extra RPC here).
+        let shared_router = ctx.acquire_router();
+        let workers = (*shared_router.get_workers().await).clone();
+        if workers.is_empty() {
+            return Err(Error::NoWorkerAvailable {
+                message: "no workers available for reading".to_string(),
+            });
+        }
+        debug!(
+            worker_count = workers.len(),
+            "reusing worker list from context"
+        );
+
+        let router = WorkerRouter::new();
+        router.update_workers(workers).await;
+
+        Ok((file_info, router))
+    }
+
     /// Internal: build the reader from file info and router.
+    #[allow(clippy::too_many_arguments)]
     fn build(
         config: &GooseFsConfig,
         path: &str,
         file_info: FileInfo,
         router: WorkerRouter,
+        worker_pool: Option<Arc<WorkerClientPool>>,
+        context: Option<Arc<FileSystemContext>>,
         offset: u64,
         length: u64,
     ) -> Result<Self> {
@@ -174,6 +288,8 @@ impl GooseFsFileReader {
             path: path.to_string(),
             file_info,
             router,
+            worker_pool,
+            _context: context,
             plans,
             current_plan_index: 0,
             total_bytes_read: 0,
@@ -232,8 +348,13 @@ impl GooseFsFileReader {
                 "reading block"
             );
 
-            // Connect to the worker (with one retry on a different worker)
-            let worker = match WorkerClient::connect(&worker_addr, &self.config).await {
+            // Connect to the worker (with one retry on a different worker).
+            //
+            // When a shared `WorkerClientPool` is available (context path),
+            // connections are cached and reused across blocks / files.
+            // Otherwise fall back to the per-call `WorkerClient::connect`
+            // (legacy config-only path).
+            let worker = match self.acquire_worker(&worker_addr).await {
                 Ok(w) => w,
                 Err(e) => {
                     // Mark worker as failed for future routing
@@ -262,7 +383,7 @@ impl GooseFsFileReader {
                                 retry_addr_info.rpc_port.unwrap_or(9203)
                             );
                             debug!(retry_worker = %retry_worker_addr, "retrying with different worker");
-                            WorkerClient::connect(&retry_worker_addr, &self.config).await?
+                            self.acquire_worker(&retry_worker_addr).await?
                         }
                         Err(_) => return Err(e), // No other worker available, propagate original error
                     }
@@ -318,12 +439,28 @@ impl GooseFsFileReader {
         Ok(buf.freeze())
     }
 
+    /// Acquire a worker client for the given address.
+    ///
+    /// When a shared [`WorkerClientPool`] is available (context path), the
+    /// connection is pulled from the pool — which caches authenticated gRPC
+    /// channels per-address — so repeated reads to the same worker pay
+    /// **zero** handshake cost.
+    ///
+    /// Without a pool (legacy config-only path), a fresh `WorkerClient` is
+    /// established per call, matching the pre-context behaviour.
+    async fn acquire_worker(&self, addr: &str) -> Result<WorkerClient> {
+        if let Some(pool) = &self.worker_pool {
+            pool.acquire(addr).await
+        } else {
+            WorkerClient::connect(addr, &self.config).await
+        }
+    }
+
     /// Resolve the best block ID for a read plan.
     ///
     /// Prefers the block ID from `file_block_infos` (which contains the actual
     /// assigned block ID from the server) over the ID computed from `block_ids`.
     fn resolve_block_id(&self, plan: &BlockReadPlan) -> i64 {
-        // First try file_block_infos for the actual server-assigned block ID
         if let Some(fbi) = self
             .file_info
             .file_block_infos
@@ -409,6 +546,41 @@ impl GooseFsFileReader {
         length: u64,
     ) -> Result<Bytes> {
         let mut reader = Self::open_range(config, path, offset, length).await?;
+        reader.read_all().await
+    }
+
+    /// One-shot convenience: read an entire file using a shared context.
+    ///
+    /// Reuses Master and Worker connections from the supplied
+    /// [`FileSystemContext`]. This is the recommended entry point for
+    /// long-running clients that want to avoid per-call handshakes.
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> goosefs_sdk::error::Result<()> {
+    /// use std::sync::Arc;
+    /// use goosefs_sdk::io::GooseFsFileReader;
+    /// use goosefs_sdk::config::GooseFsConfig;
+    /// use goosefs_sdk::context::FileSystemContext;
+    ///
+    /// let config = GooseFsConfig::new("127.0.0.1:9200");
+    /// let ctx = FileSystemContext::connect(config).await?;
+    /// let data = GooseFsFileReader::read_file_with_context(ctx, "/my-file.txt").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn read_file_with_context(ctx: Arc<FileSystemContext>, path: &str) -> Result<Bytes> {
+        let mut reader = Self::open_with_context(ctx, path).await?;
+        reader.read_all().await
+    }
+
+    /// One-shot convenience: read a byte range from a file using a shared context.
+    pub async fn read_range_with_context(
+        ctx: Arc<FileSystemContext>,
+        path: &str,
+        offset: u64,
+        length: u64,
+    ) -> Result<Bytes> {
+        let mut reader = Self::open_range_with_context(ctx, path, offset, length).await?;
         reader.read_all().await
     }
 
