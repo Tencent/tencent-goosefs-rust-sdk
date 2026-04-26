@@ -379,6 +379,12 @@ impl GooseFsFileInStream {
     ///
     /// Falls back to positioned read when the stream would need to skip more
     /// than `TRANSFER_POSITIONED_READ_THRESHOLD` bytes (handled in `seek`).
+    ///
+    /// # Authentication failure recovery
+    ///
+    /// If opening a block reader fails with `AuthenticationFailed`, the stale
+    /// connection is invalidated and a fresh authenticated connection is used
+    /// for one retry.
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         if self.is_eof() || buf.is_empty() {
             return Ok(0);
@@ -394,16 +400,49 @@ impl GooseFsFileInStream {
             let remaining_in_block = self.remaining_in_block(self.pos);
 
             let worker = self.connect_worker(block_id).await?;
+            let worker_generation = worker.generation();
             let ufs_opts = self.build_ufs_opts(block_idx);
-            let reader = GrpcBlockReader::open(
+            let reader_result = GrpcBlockReader::open(
                 &worker,
                 block_id,
                 offset_in_block,
                 remaining_in_block,
                 self.config.chunk_size as i64,
-                ufs_opts,
+                ufs_opts.clone(),
             )
-            .await?;
+            .await;
+
+            let reader = match reader_result {
+                Ok(r) => r,
+                Err(e) if e.is_authentication_failed() => {
+                    // SASL expired between connect_worker and open.  Use the
+                    // single-flight reconnect path so concurrent readers
+                    // hitting the same stale channel produce exactly one
+                    // TCP+SASL handshake, not N.
+                    //
+                    // `debug!` (not `warn!`) because collapsed-herd events
+                    // are expected and bounded.
+                    debug!(
+                        block_id = block_id,
+                        stale_generation = worker_generation,
+                        error = %e,
+                        "auth failed on block reader open, requesting single-flight reconnect"
+                    );
+                    let fresh = self
+                        .reconnect_worker_for_block(block_id, Some(worker_generation))
+                        .await?;
+                    GrpcBlockReader::open(
+                        &fresh,
+                        block_id,
+                        offset_in_block,
+                        remaining_in_block,
+                        self.config.chunk_size as i64,
+                        ufs_opts,
+                    )
+                    .await?
+                }
+                Err(e) => return Err(e),
+            };
 
             self.block_in_stream = Some(reader);
             self.block_in_stream_block_id = block_id;
@@ -427,6 +466,11 @@ impl GooseFsFileInStream {
     ///
     /// Reads that span multiple blocks are handled by issuing one positioned
     /// read per block and concatenating the results.
+    ///
+    /// # Authentication failure recovery
+    ///
+    /// If a positioned read fails with `AuthenticationFailed`, the stale
+    /// connection is invalidated and a fresh one is used for one retry.
     pub async fn read_at(&mut self, offset: i64, n: usize) -> Result<Bytes> {
         if offset >= self.file_length || n == 0 {
             return Ok(Bytes::new());
@@ -445,17 +489,43 @@ impl GooseFsFileInStream {
             let length = read_end - cur;
 
             let worker = self.connect_worker(block_id).await?;
+            let worker_generation = worker.generation();
             let ufs_opts = self.build_ufs_opts(block_idx);
 
-            let data = GrpcBlockReader::positioned_read(
+            let read_result = GrpcBlockReader::positioned_read(
                 &worker,
                 block_id,
                 offset_in_block,
                 length,
                 self.config.chunk_size as i64,
-                ufs_opts,
+                ufs_opts.clone(),
             )
-            .await?;
+            .await;
+
+            let data = match read_result {
+                Ok(d) => d,
+                Err(e) if e.is_authentication_failed() => {
+                    debug!(
+                        block_id = block_id,
+                        stale_generation = worker_generation,
+                        error = %e,
+                        "auth failed on positioned read, requesting single-flight reconnect"
+                    );
+                    let fresh = self
+                        .reconnect_worker_for_block(block_id, Some(worker_generation))
+                        .await?;
+                    GrpcBlockReader::positioned_read(
+                        &fresh,
+                        block_id,
+                        offset_in_block,
+                        length,
+                        self.config.chunk_size as i64,
+                        ufs_opts,
+                    )
+                    .await?
+                }
+                Err(e) => return Err(e),
+            };
 
             result.extend_from_slice(&data);
             cur += length;
@@ -550,6 +620,14 @@ impl GooseFsFileInStream {
     ///
     /// If a `WorkerClientPool` is available (context mode), connections are
     /// reused from the pool instead of establishing a new TCP connection per block.
+    ///
+    /// # Authentication failure recovery
+    ///
+    /// When a cached connection's SASL stream has expired (e.g. after process
+    /// fork or long idle), the pool returns a stale client whose RPCs will fail
+    /// with `AuthenticationFailed`.  This method detects such failures during
+    /// gRPC calls and triggers a `reconnect()` to drop the stale channel and
+    /// establish a fresh authenticated connection.
     async fn connect_worker(&mut self, block_id: i64) -> Result<WorkerClient> {
         let worker_info = self.router.select_worker(block_id).await?;
         let addr = worker_info
@@ -576,15 +654,31 @@ impl GooseFsFileInStream {
         match result {
             Ok(w) => Ok(w),
             Err(e) => {
-                // Only mark failed for non-auth errors
-                if !matches!(e, Error::AuthenticationFailed { .. }) {
-                    self.router.mark_failed(addr);
-                    // Also invalidate from pool so next acquire creates fresh connection
+                if matches!(e, Error::AuthenticationFailed { .. }) {
+                    // Authentication failure on `acquire` — no WorkerClient
+                    // was produced so we have no generation to coalesce
+                    // against.  Fall back to the unconditional reconnect,
+                    // which still funnels through the per-address mutex
+                    // inside the pool to dedupe concurrent callers.
+                    debug!(
+                        worker = %worker_addr,
+                        error = %e,
+                        "authentication failed on acquire, reconnecting with fresh credentials"
+                    );
                     if let Some(pool) = &self.worker_pool {
-                        pool.invalidate(&worker_addr).await;
+                        return pool.reconnect(&worker_addr).await;
                     }
+                    // No pool — just create a fresh connection
+                    return WorkerClient::connect(&worker_addr, &self.config).await;
+                }
+
+                // Non-auth error: mark worker as failed and try another
+                self.router.mark_failed(addr);
+                if let Some(pool) = &self.worker_pool {
+                    pool.invalidate(&worker_addr).await;
                 }
                 warn!(worker = %worker_addr, error = %e, "worker connect failed, retrying");
+
                 // Retry with a different worker
                 let retry_info = self.router.select_worker(block_id).await?;
                 let retry_addr_info =
@@ -603,6 +697,46 @@ impl GooseFsFileInStream {
                     WorkerClient::connect(&retry_addr, &self.config).await
                 }
             }
+        }
+    }
+
+    /// Reconnect to the worker for `block_id` with fresh authentication.
+    ///
+    /// Used as a retry path when a block read fails with `AuthenticationFailed`.
+    ///
+    /// When `stale_generation` is `Some(gen)`, the pool performs a
+    /// **single-flight reconnect**: concurrent callers that observed the same
+    /// stale generation on this address share exactly one TCP+SASL handshake
+    /// — all but the first receive the already-replaced client without doing
+    /// any network I/O.  When `None`, an unconditional reconnect is issued
+    /// (still per-address serialised).
+    async fn reconnect_worker_for_block(
+        &mut self,
+        block_id: i64,
+        stale_generation: Option<u64>,
+    ) -> Result<WorkerClient> {
+        let worker_info = self.router.select_worker(block_id).await?;
+        let addr = worker_info
+            .address
+            .as_ref()
+            .ok_or_else(|| Error::Internal {
+                message: "worker has no address".to_string(),
+                source: None,
+            })?;
+
+        let worker_addr = format!(
+            "{}:{}",
+            addr.host.as_deref().unwrap_or("127.0.0.1"),
+            addr.rpc_port.unwrap_or(9203)
+        );
+
+        if let Some(pool) = &self.worker_pool {
+            match stale_generation {
+                Some(gen) => pool.reconnect_if_stale(&worker_addr, gen).await,
+                None => pool.reconnect(&worker_addr).await,
+            }
+        } else {
+            WorkerClient::connect(&worker_addr, &self.config).await
         }
     }
 

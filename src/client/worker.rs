@@ -17,10 +17,11 @@
 //! to receive server responses.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex as AsyncMutex, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tonic::service::interceptor::InterceptedService;
@@ -145,10 +146,26 @@ type AuthenticatedBlockWorkerClient =
     BlockWorkerClient<InterceptedService<Channel, ChannelIdInterceptor>>;
 
 /// Client for `BlockWorker` service on a single worker node.
+///
+/// Each `WorkerClient` carries a monotonic `generation` tag assigned by
+/// [`WorkerClientPool`] at construction time.  The generation allows callers
+/// that observed a failure on a specific client to request a **single-flight
+/// reconnect** via [`WorkerClientPool::reconnect_if_stale`]: only the first
+/// observer of generation `N` actually re-establishes the TCP+SASL
+/// connection; all concurrent observers with the same (or older) generation
+/// simply receive the already-replaced client.  This collapses the
+/// "thundering-herd reconnect" that previously produced hundreds of duplicate
+/// `authentication failed` warnings when a SASL session expired.
 #[derive(Clone)]
 pub struct WorkerClient {
     inner: AuthenticatedBlockWorkerClient,
     addr: String,
+    /// Monotonic tag identifying this exact connection instance.
+    ///
+    /// Two clients cached for the same address must have different
+    /// generations; a caller that observes a failure on generation `N` can
+    /// ask the pool to reconnect *only if* generation has not advanced yet.
+    generation: u64,
     /// Keeps the SASL authentication stream alive for the channel's lifetime.
     _sasl_guard: std::sync::Arc<Option<SaslStreamGuard>>,
 }
@@ -178,6 +195,7 @@ impl WorkerClient {
         Ok(Self {
             inner: BlockWorkerClient::new(auth_channel.channel),
             addr: addr.to_string(),
+            generation: 0,
             _sasl_guard: std::sync::Arc::new(sasl_guard),
         })
     }
@@ -200,6 +218,7 @@ impl WorkerClient {
         Ok(Self {
             inner: BlockWorkerClient::new(intercepted),
             addr: addr.to_string(),
+            generation: 0,
             _sasl_guard: std::sync::Arc::new(None),
         })
     }
@@ -213,6 +232,7 @@ impl WorkerClient {
         Self {
             inner: BlockWorkerClient::new(intercepted),
             addr,
+            generation: 0,
             _sasl_guard: std::sync::Arc::new(None),
         }
     }
@@ -414,18 +434,56 @@ impl WorkerClient {
     pub fn addr(&self) -> &str {
         &self.addr
     }
+
+    /// The monotonic generation tag assigned by the pool.
+    ///
+    /// Callers should save this value alongside the `WorkerClient` when
+    /// starting an RPC; if the RPC fails with an authentication error they
+    /// pass the saved generation back to
+    /// [`WorkerClientPool::reconnect_if_stale`] to trigger a single-flight
+    /// reconnect (de-duplicating concurrent observers of the same failure).
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
 }
 
 /// Connection pool for `WorkerClient` instances.
 ///
 /// Caches authenticated gRPC channels by worker address, avoiding the overhead
-/// of re-establishing connections and re-authenticating for every block write.
+/// of re-establishing connections and re-authenticating for every block I/O.
 /// Matches Java's `FileSystemContext.acquireBlockWorkerClient()` pattern.
 ///
-/// The pool is thread-safe and can be shared across concurrent writers.
+/// The pool is thread-safe and can be shared across concurrent workers.
+///
+/// ## Single-Flight Reconnect
+///
+/// When a SASL stream silently expires server-side, many concurrent RPCs on
+/// the same cached channel will fail simultaneously with UNAUTHENTICATED.
+/// Without coordination each observer would independently invoke `reconnect`,
+/// producing a "thundering herd" that serialises through the pool's write
+/// lock and wastes CPU/RTT on duplicate TCP+SASL handshakes.
+///
+/// To collapse this herd, each [`WorkerClient`] carries a monotonic
+/// `generation` tag.  Callers pass the observed generation back into
+/// [`reconnect_if_stale`](Self::reconnect_if_stale) after an auth failure;
+/// only the **first** observer of a given generation actually performs the
+/// reconnect, all other concurrent observers receive the already-replaced
+/// client.  This reduces N concurrent reconnects to exactly 1.
 pub struct WorkerClientPool {
     /// Cached worker clients keyed by `"host:port"` address.
+    ///
+    /// The stored client carries its own `generation` in-band; readers simply
+    /// clone it and inspect `client.generation()`.
     clients: RwLock<HashMap<String, WorkerClient>>,
+    /// Per-address async mutex guarding the reconnect critical section.
+    ///
+    /// Separated from `clients` so the reconnect handshake (which performs
+    /// network I/O) does not hold the clients-map write lock.  Acquiring this
+    /// mutex for one address does not block other addresses' reconnects.
+    reconnect_locks: RwLock<HashMap<String, Arc<AsyncMutex<()>>>>,
+    /// Monotonic counter used to hand out a unique `generation` for every
+    /// freshly-created `WorkerClient`.
+    next_generation: AtomicU64,
     /// Config used to create new connections.
     config: GooseFsConfig,
 }
@@ -435,6 +493,12 @@ impl WorkerClientPool {
     pub fn new(config: GooseFsConfig) -> Self {
         Self {
             clients: RwLock::new(HashMap::new()),
+            reconnect_locks: RwLock::new(HashMap::new()),
+            // Start generations at 1 so `0` (the default on constructed-but-
+            // never-pooled clients) is always "stale" relative to any pooled
+            // client — this makes `reconnect_if_stale(addr, 0)` always force
+            // a fresh connection when needed.
+            next_generation: AtomicU64::new(1),
             config,
         }
     }
@@ -449,7 +513,7 @@ impl WorkerClientPool {
         {
             let cache = self.clients.read().await;
             if let Some(client) = cache.get(addr) {
-                debug!(addr = %addr, "reusing cached WorkerClient");
+                debug!(addr = %addr, generation = client.generation, "reusing cached WorkerClient");
                 return Ok(client.clone());
             }
         }
@@ -462,7 +526,8 @@ impl WorkerClientPool {
         }
 
         debug!(addr = %addr, "creating new WorkerClient for pool");
-        let client = WorkerClient::connect(addr, &self.config).await?;
+        let mut client = WorkerClient::connect(addr, &self.config).await?;
+        client.generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         cache.insert(addr.to_string(), client.clone());
         Ok(client)
     }
@@ -477,8 +542,234 @@ impl WorkerClientPool {
         }
     }
 
+    /// Get (or lazily create) the per-address reconnect mutex.
+    async fn reconnect_lock_for(&self, addr: &str) -> Arc<AsyncMutex<()>> {
+        {
+            let locks = self.reconnect_locks.read().await;
+            if let Some(m) = locks.get(addr) {
+                return Arc::clone(m);
+            }
+        }
+        let mut locks = self.reconnect_locks.write().await;
+        Arc::clone(
+            locks
+                .entry(addr.to_string())
+                .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+        )
+    }
+
+    /// **Single-flight reconnect**: invalidate + reconnect only if the
+    /// currently cached client's generation still matches `stale_generation`.
+    ///
+    /// This is the preferred recovery path on authentication failure.  The
+    /// caller passes the `generation()` of the client that just failed;
+    /// because every `WorkerClient` carries a unique monotonic generation
+    /// allocated by this pool:
+    ///
+    /// - If another concurrent task has **already** reconnected in response
+    ///   to the same underlying SASL expiry, the cached generation will have
+    ///   advanced past `stale_generation` and this call returns the
+    ///   already-replaced client **without** performing another
+    ///   TCP+SASL handshake.
+    /// - Otherwise, this call performs exactly one reconnect under the
+    ///   per-address mutex.
+    ///
+    /// Net effect: N concurrent `AuthenticationFailed` observers on the
+    /// same channel trigger exactly **one** reconnect instead of N.
+    pub async fn reconnect_if_stale(
+        &self,
+        addr: &str,
+        stale_generation: u64,
+    ) -> Result<WorkerClient> {
+        // Take the per-address reconnect mutex.  Concurrent callers for the
+        // same address serialise here; callers for *different* addresses do
+        // not block each other.
+        let lock = self.reconnect_lock_for(addr).await;
+        let _guard = lock.lock().await;
+
+        // Under the mutex, re-check the cache.  If another task already
+        // replaced the stale client while we were queuing, skip the
+        // reconnect entirely.
+        {
+            let cache = self.clients.read().await;
+            if let Some(client) = cache.get(addr) {
+                if client.generation > stale_generation {
+                    debug!(
+                        addr = %addr,
+                        observed = stale_generation,
+                        current = client.generation,
+                        "reconnect coalesced — another task already refreshed this channel"
+                    );
+                    return Ok(client.clone());
+                }
+            }
+        }
+
+        // We are the designated reconnect-er: drop the stale entry, then
+        // build and install a new one.
+        debug!(
+            addr = %addr,
+            stale_generation = stale_generation,
+            "performing single-flight reconnect"
+        );
+        {
+            let mut cache = self.clients.write().await;
+            cache.remove(addr);
+        }
+        let mut fresh = WorkerClient::connect(addr, &self.config).await?;
+        fresh.generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut cache = self.clients.write().await;
+            cache.insert(addr.to_string(), fresh.clone());
+        }
+        debug!(
+            addr = %addr,
+            new_generation = fresh.generation,
+            "single-flight reconnect installed fresh WorkerClient"
+        );
+        Ok(fresh)
+    }
+
+    /// Invalidate a cached worker connection and immediately reconnect.
+    ///
+    /// **Prefer [`reconnect_if_stale`](Self::reconnect_if_stale) whenever the
+    /// caller holds a reference to the failing `WorkerClient`** — it
+    /// deduplicates concurrent reconnects triggered by the same underlying
+    /// SASL expiry.
+    ///
+    /// This unconditional variant is kept for paths where the caller does
+    /// not know the generation of the failing client (e.g. a stand-alone
+    /// `connect()` failure that never produced a `WorkerClient`).  It
+    /// acquires the same per-address reconnect mutex so it still coalesces
+    /// against any in-flight `reconnect_if_stale`.
+    pub async fn reconnect(&self, addr: &str) -> Result<WorkerClient> {
+        // Use `u64::MAX` as "stale" so `reconnect_if_stale` always proceeds
+        // with the handshake (current generation can never exceed MAX).
+        // This still passes through the per-address mutex so concurrent
+        // callers on the same address share a single handshake.
+        self.reconnect_if_stale(addr, u64::MAX).await
+    }
+
     /// Create a new pool wrapped in `Arc` for shared ownership.
     pub fn new_shared(config: GooseFsConfig) -> Arc<Self> {
         Arc::new(Self::new(config))
+    }
+
+    // ── Test-only helpers ────────────────────────────────────────────
+    //
+    // These helpers are gated on `cfg(test)` so downstream code cannot
+    // accidentally inject bypass-auth clients into the pool.  They exist
+    // purely to let the unit tests in this module drive the single-flight
+    // reconnect logic without needing a live Worker process to handshake
+    // against.
+
+    /// Manually insert a client with a specific `generation` into the
+    /// pool for testing.  Returns the previously-cached client, if any.
+    #[cfg(test)]
+    async fn test_install(&self, addr: &str, mut client: WorkerClient) -> Option<WorkerClient> {
+        client.generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        let mut cache = self.clients.write().await;
+        cache.insert(addr.to_string(), client)
+    }
+
+    /// Snapshot the current cached generation for `addr` (if any).
+    #[cfg(test)]
+    async fn test_current_generation(&self, addr: &str) -> Option<u64> {
+        let cache = self.clients.read().await;
+        cache.get(addr).map(|c| c.generation)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tonic::transport::Channel;
+
+    /// Fabricate a `WorkerClient` from a *never-connected* channel.  The
+    /// client is fully usable for anything that only touches the in-memory
+    /// struct (addr/generation lookups, clone, drop), which is all the
+    /// coalesce tests need.
+    fn fake_client(addr: &str) -> WorkerClient {
+        // `Channel::from_static` is synchronous and does not open a TCP
+        // connection; any actual RPC on this channel would fail but the
+        // tests below never issue one.
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        WorkerClient::from_channel(channel, addr.to_string())
+    }
+
+    #[tokio::test]
+    async fn test_reconnect_if_stale_coalesces_when_generation_advanced() {
+        // Scenario: generation 5 is cached.  Caller A "observes" a failure
+        // on gen 5 and calls reconnect_if_stale(5).  Before it enters the
+        // critical section, caller B has already replaced gen 5 with gen 6
+        // (simulated by manually bumping via test_install).  Caller A must
+        // NOT trigger a second reconnect — it should return gen 6 as-is.
+        let pool = WorkerClientPool::new(GooseFsConfig::new("127.0.0.1:9200"));
+        let addr = "test-worker:9203";
+
+        // Install a gen-1 client, then another gen-2 client (simulating
+        // "someone else already reconnected").
+        pool.test_install(addr, fake_client(addr)).await;
+        let gen_before = pool.test_current_generation(addr).await.unwrap();
+        pool.test_install(addr, fake_client(addr)).await;
+        let gen_after = pool.test_current_generation(addr).await.unwrap();
+        assert!(gen_after > gen_before);
+
+        // Caller passes the *old* generation — pool must short-circuit and
+        // NOT call WorkerClient::connect (which would fail against a
+        // non-existent host and fail the test).
+        let result = pool.reconnect_if_stale(addr, gen_before).await;
+        assert!(
+            result.is_ok(),
+            "coalesced reconnect must short-circuit without network I/O, got {:?}",
+            result.err()
+        );
+        let returned = result.unwrap();
+        assert_eq!(
+            returned.generation(),
+            gen_after,
+            "caller must receive the already-replaced generation"
+        );
+        assert_eq!(
+            pool.test_current_generation(addr).await,
+            Some(gen_after),
+            "cached generation must not advance for a coalesced caller"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reconnect_locks_are_per_address() {
+        // Acquiring the reconnect lock for addr-A must not block acquiring
+        // the lock for addr-B.  Without per-address locks, unrelated worker
+        // reconnects would serialise through one global mutex.
+        let pool = WorkerClientPool::new(GooseFsConfig::new("127.0.0.1:9200"));
+        let lock_a = pool.reconnect_lock_for("worker-a:9203").await;
+        let lock_b = pool.reconnect_lock_for("worker-b:9203").await;
+
+        // Hold A, must still be able to grab B immediately.
+        let guard_a = lock_a.lock().await;
+        let guard_b = tokio::time::timeout(std::time::Duration::from_millis(50), lock_b.lock())
+            .await
+            .expect("lock for different address must not be blocked");
+        drop(guard_b);
+        drop(guard_a);
+    }
+
+    #[tokio::test]
+    async fn test_generation_is_monotonic_across_installs() {
+        let pool = WorkerClientPool::new(GooseFsConfig::new("127.0.0.1:9200"));
+        let addr = "w:9203";
+
+        pool.test_install(addr, fake_client(addr)).await;
+        let g1 = pool.test_current_generation(addr).await.unwrap();
+
+        pool.test_install(addr, fake_client(addr)).await;
+        let g2 = pool.test_current_generation(addr).await.unwrap();
+
+        pool.test_install(addr, fake_client(addr)).await;
+        let g3 = pool.test_current_generation(addr).await.unwrap();
+
+        assert!(g1 < g2, "gen {} not less than {}", g1, g2);
+        assert!(g2 < g3, "gen {} not less than {}", g2, g3);
     }
 }

@@ -208,6 +208,10 @@ impl Error {
                 tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Aborted
             ),
             Error::TransportError { .. } => true,
+            // Authentication failures are retriable — the SASL stream may have
+            // expired (e.g. after process fork or long idle).  The caller should
+            // invalidate the cached channel and re-authenticate before retrying.
+            Error::AuthenticationFailed { .. } => true,
             _ => false,
         }
     }
@@ -268,7 +272,9 @@ mod tests {
         let status = tonic::Status::unauthenticated("token expired");
         let err = Error::from(status);
         assert!(err.is_authentication_failed());
-        assert!(!err.is_retriable());
+        // AuthenticationFailed is now retriable — the caller should invalidate
+        // the cached channel and re-authenticate before retrying.
+        assert!(err.is_retriable());
     }
 
     #[test]
