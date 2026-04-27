@@ -5,6 +5,27 @@ edition = "2021"
 description = "GooseFS Rust gRPC Client - Direct gRPC client for GooseFS Master/Worker"
 license = "Apache-2.0"
 authors = ["GooseFS Team"]
+readme = "README.md"
+repository = "https://git.woa.com/tencent-cloud-datalake/goosefs-client-rust"
+homepage = "https://git.woa.com/tencent-cloud-datalake/goosefs-client-rust"
+documentation = "https://docs.rs/goosefs-sdk"
+keywords = ["goosefs", "grpc", "storage", "filesystem", "cache"]
+categories = ["network-programming", "filesystem"]
+rust-version = "1.70"
+exclude = [
+    ".idea/*",
+    ".codebuddy/*",
+    ".DS_Store",
+    "**/.DS_Store",
+    "docs/gap/*",
+    "docs/design/*",
+    "docs/prompt/*",
+    "docs/images/*",
+    "docs/RELEASE.md",
+    "docs/RELEASE_CHECKLIST.md",
+    "goosefs-client-rust.code-workspace",
+    "target/*",
+]
 
 [lib]
 name = "goosefs_sdk"

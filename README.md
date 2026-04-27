@@ -526,7 +526,7 @@ goosefs-client-rust/
 │   │   ├── file_writer.rs  # GooseFsFileWriter (cancel/close state machine)
 │   │   ├── reader.rs       # GrpcBlockReader (streaming + positioned)
 │   │   └── writer.rs       # GrpcBlockWriter (low-level)
-│   └── generated/          # prost/tonic generated code (git-ignored)
+│   └── generated/          # prost/tonic generated code (checked-in; shipped with the crate)
 ├── examples/
 │   ├── highlevel_file_rw.rs     # ★ High-level file read/write (recommended)
 │   ├── write_types.rs           # ★ WriteType comparison
@@ -563,12 +563,18 @@ cargo build --release
 
 ### Re-generate Proto Code
 
-Proto files are compiled automatically by `build.rs` during `cargo build`. The generated Rust code is written to `src/generated/` and is git-ignored. To force regeneration:
+This crate ships **pre-generated** protobuf code under [`src/generated/`](src/generated/), so downstream users do **NOT** need `protoc` installed to build `goosefs-sdk` — a regular `cargo build` just works out of the box.
+
+The regeneration flow is **opt-in** and only required when you modify any `.proto` file under [`proto/`](proto/). To regenerate:
 
 ```shell
-cargo clean
-cargo build
+# Requires `protoc` (>= 3.15) on PATH.
+GOOSEFS_SDK_REGEN_PROTO=1 cargo build
 ```
+
+The updated `.rs` files will be written back to `src/generated/` — **commit them** along with your `.proto` changes so that downstream users continue to get a zero-`protoc` build.
+
+> **Why the opt-in design?** Running `tonic-build::compile_protos` on every `cargo build` would force all downstream users to install `protoc`, and would also break `cargo publish` verification (the package tarball is read-only). Shipping pre-generated code follows the same approach as [`etcd-client`](https://crates.io/crates/etcd-client) and [`tonic-health`](https://crates.io/crates/tonic-health).
 
 ### Key Dependencies
 
