@@ -18,7 +18,7 @@
 //! ## `xattr` stays as `HashMap<String, Vec<u8>>`
 //!
 //! The proto already uses this representation.  Typed xattr accessors
-//! (e.g. [`get_write_type_xattr`]) are provided as separate helpers rather
+//! (e.g. `get_write_type_xattr`) are provided as separate helpers rather
 //! than encoding them into the struct to keep the type simple.
 
 use std::collections::HashMap;
@@ -140,7 +140,7 @@ impl URIStatus {
     /// Convert a raw `FileInfo` proto message into a `URIStatus`.
     ///
     /// This is the **only** constructor.  It eagerly builds the
-    /// `block_id → FileBlockInfo` map so that subsequent [`get_block_info`]
+    /// `block_id → FileBlockInfo` map so that subsequent [`get_block_info`](URIStatus::get_block_info)
     /// calls are O(1).
     pub fn from_proto(fi: FileInfo) -> Self {
         // Build block-info map from the repeated file_block_infos field.
@@ -246,7 +246,7 @@ impl URIStatus {
 
     /// Borrow the full `block_id → FileBlockInfo` map.
     ///
-    /// Prefer [`get_block_info`] for single lookups.
+    /// Prefer [`get_block_info`](URIStatus::get_block_info) for single lookups.
     #[inline]
     pub fn block_infos(&self) -> &HashMap<i64, FileBlockInfo> {
         &self.block_infos

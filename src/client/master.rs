@@ -94,7 +94,8 @@ impl MasterClient {
     ///
     /// In single-master mode, connects directly to `config.master_addr`.
     /// In HA mode (multiple addresses in `config.master_addrs`), uses
-    /// [`PollingMasterInquireClient`] to discover the Primary first.
+    /// [`PollingMasterInquireClient`](crate::client::master_inquire::PollingMasterInquireClient)
+    /// to discover the Primary first.
     ///
     /// Authentication is performed according to `config.auth_type`.
     pub async fn connect(config: &GooseFsConfig) -> Result<Self> {
@@ -414,7 +415,7 @@ impl MasterClient {
 
     /// Delete a file or directory with fine-grained options.
     ///
-    /// Prefer this over the legacy [`delete`] wrapper when you need
+    /// Prefer this over the legacy [`delete`](Self::delete) wrapper when you need
     /// `unchecked` or `goosefs_only` semantics.
     ///
     /// See [`DeleteOptions`] for field semantics and Java authority notes.
@@ -443,7 +444,7 @@ impl MasterClient {
 
     /// Delete a file or directory (simple recursive wrapper).
     ///
-    /// For `unchecked` or `goosefs_only` deletion use [`delete_with_options`]
+    /// For `unchecked` or `goosefs_only` deletion use [`delete_with_options`](Self::delete_with_options)
     /// directly.
     #[instrument(skip(self), fields(path = %path, recursive = %recursive))]
     pub async fn delete(&self, path: &str, recursive: bool) -> Result<()> {

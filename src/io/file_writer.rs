@@ -340,7 +340,7 @@ impl GooseFsFileWriter {
 
     /// Write data to the file.
     ///
-    /// Depending on the resolved [`WriteStrategy`], data is fanned out to one or
+    /// Depending on the resolved `WriteStrategy`, data is fanned out to one or
     /// both of the following streams — matching Java `GooseFSFileOutStream.writeInternal`:
     ///
     /// - **cache stream** (`cache_stream = true`): chunk-level streaming, sliced
@@ -800,7 +800,7 @@ impl GooseFsFileWriter {
 
     /// Cancel the file write, cleaning up all committed blocks.
     ///
-    /// Sets the `cancelled` flag and delegates to [`do_cancel_cleanup`].
+    /// Sets the `cancelled` flag and delegates to `do_cancel_cleanup`.
     ///
     /// Calling `cancel()` after `close()` is a no-op.
     /// Calling `cancel()` twice is idempotent.
@@ -1043,7 +1043,7 @@ impl GooseFsFileWriter {
 
     /// One-shot convenience with custom create options, using a shared context.
     ///
-    /// Like [`write_file_with_context`] but lets the caller supply
+    /// Like [`write_file_with_context`](Self::write_file_with_context) but lets the caller supply
     /// `CreateFilePOptions` (e.g. to override `write_type` or `block_size_bytes`).
     ///
     /// # Arguments

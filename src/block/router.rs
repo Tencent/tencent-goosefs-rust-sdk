@@ -204,7 +204,7 @@ impl WorkerRouter {
     /// **Note**: The background refresh requires access to a
     /// `WorkerManagerClient`. Since `WorkerRouter` does not hold a reference
     /// to one, callers that want automatic refresh should call
-    /// [`needs_refresh`] + [`refresh_workers`] themselves (e.g. in
+    /// `needs_refresh` + `refresh_workers` themselves (e.g. in
     /// `GooseFsFileInStream::open`).
     ///
     /// # Local-first routing

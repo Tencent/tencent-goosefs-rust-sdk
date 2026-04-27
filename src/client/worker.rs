@@ -287,7 +287,7 @@ impl WorkerClient {
 
     /// Open a positioned (random-access) block read stream.
     ///
-    /// Identical to [`read_block`] but sets `position_short = true` in the
+    /// Identical to [`read_block`](Self::read_block) but sets `position_short = true` in the
     /// initial `ReadRequest`, instructing the worker to skip prefetch and
     /// serve the exact requested byte range.
     ///

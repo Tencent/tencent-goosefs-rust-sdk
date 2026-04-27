@@ -31,7 +31,7 @@ pub trait RetryPolicy: Send + Sync {
 
     /// The duration to sleep before the **next** attempt.
     ///
-    /// Should be called *after* [`should_retry`] returns `true`.
+    /// Should be called *after* [`should_retry`](Self::should_retry) returns `true`.
     fn next_sleep(&self) -> Duration;
 }
 

@@ -608,14 +608,15 @@ pub struct GooseFsConfig {
     /// Primary master address in `host:port` format (backward-compatible).
     ///
     /// When only a single master is used, set this field.
-    /// For HA deployments, use [`master_addrs`] instead (or both — `master_addr`
+    /// For HA deployments, use [`master_addrs`](Self::master_addrs) instead (or both — `master_addr`
     /// is automatically included if `master_addrs` is also provided).
     pub master_addr: String,
 
     /// Multiple master addresses for HA deployments.
     ///
     /// When this list contains more than one address, the client will
-    /// automatically use [`PollingMasterInquireClient`] to discover the
+    /// automatically use [`PollingMasterInquireClient`](crate::client::master_inquire::PollingMasterInquireClient)
+    /// to discover the
     /// Primary Master via the `getServiceVersion` RPC.
     ///
     /// If empty, `master_addr` is used as the sole address.
@@ -669,7 +670,7 @@ pub struct GooseFsConfig {
 
     /// Timeout for a single master polling ping RPC (default: 30 s).
     ///
-    /// This is independent of [`connect_timeout`] — it controls only the
+    /// This is independent of [`connect_timeout`](Self::connect_timeout) — it controls only the
     /// `getServiceVersion` probe used to discover the Primary Master.
     /// Mirrors Java's `goosefs.user.master.polling.timeout`.
     #[serde(default = "default_master_polling_timeout")]
@@ -834,8 +835,8 @@ impl GooseFsConfig {
     /// Create a config from one or more master addresses.
     ///
     /// Automatically selects the right mode:
-    /// - 1 address  → single-master (same as [`new`]).
-    /// - 2+ addresses → multi-master (same as [`new_ha`]).
+    /// - 1 address  → single-master (same as [`new`](Self::new)).
+    /// - 2+ addresses → multi-master (same as [`new_ha`](Self::new_ha)).
     ///
     /// # Panics
     /// Panics if `addrs` is empty.
@@ -850,8 +851,8 @@ impl GooseFsConfig {
 
     /// Return the effective list of master addresses.
     ///
-    /// If [`master_addrs`] is non-empty, returns it directly.
-    /// Otherwise, returns a single-element list containing [`master_addr`].
+    /// If [`master_addrs`](Self::master_addrs) is non-empty, returns it directly.
+    /// Otherwise, returns a single-element list containing [`master_addr`](Self::master_addr).
     pub fn master_addresses(&self) -> Vec<String> {
         if self.master_addrs.is_empty() {
             vec![self.master_addr.clone()]

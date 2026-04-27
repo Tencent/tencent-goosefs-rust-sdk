@@ -70,7 +70,7 @@ pub trait MasterInquireClient: Send + Sync {
     ///
     /// For [`SingleMasterInquireClient`] this is a no-op.
     /// For [`PollingMasterInquireClient`] this clears the internal cache
-    /// so the next call to [`get_primary_rpc_address`] will re-poll.
+    /// so the next call to [`get_primary_rpc_address`](Self::get_primary_rpc_address) will re-poll.
     async fn reset_cached_primary(&self);
 }
 

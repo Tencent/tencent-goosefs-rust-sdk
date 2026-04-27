@@ -23,7 +23,7 @@
 //!
 //! This means we cannot `await` the tonic streaming call inline — it would
 //! deadlock. Instead, `WorkerClient::write_block()` returns a
-//! [`WriteBlockHandle`](crate::client::worker::WriteBlockHandle) that manages
+//! [`WriteBlockHandle`] that manages
 //! a background task.
 
 use bytes::Bytes;
