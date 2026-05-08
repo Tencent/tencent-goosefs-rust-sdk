@@ -1,8 +1,8 @@
 //! Dual-path seekable file input stream.
 //!
-//! [`GooseFsFileInStream`] provides both sequential reads and random reads
-//! (`read_at` / `seek + read`) over a GooseFS file.  It mirrors the Java
-//! client's `GooseFSFileInStream` and Go SDK's `GooseFSFileInStream`.
+//! [`GoosefsFileInStream`] provides both sequential reads and random reads
+//! (`read_at` / `seek + read`) over a Goosefs file.  It mirrors the Java
+//! client's `GoosefsFileInStream` and Go SDK's `GoosefsFileInStream`.
 //!
 //! # Two read paths
 //!
@@ -26,7 +26,7 @@
 //!
 //! # Java authority
 //!
-//! Ported from `alluxio.client.file.GooseFSFileInStream` (Java) and verified
+//! Ported from `alluxio.client.file.GoosefsFileInStream` (Java) and verified
 //! against `client/fs/file_in_stream.go` (Go SDK).
 //!
 //! Key constants match Go SDK:
@@ -35,7 +35,7 @@
 //!
 //! # Concurrency
 //!
-//! `GooseFsFileInStream` is NOT `Sync` — it requires exclusive (`&mut self`)
+//! `GoosefsFileInStream` is NOT `Sync` — it requires exclusive (`&mut self`)
 //! access for all reads and seeks.  Random reads via `read_at` also use
 //! `&mut self` to allow updating the per-block cache.
 //!
@@ -50,7 +50,7 @@ use tracing::{debug, warn};
 
 use crate::block::router::WorkerRouter;
 use crate::client::{WorkerClient, WorkerClientPool, WorkerManagerClient};
-use crate::config::GooseFsConfig;
+use crate::config::GoosefsConfig;
 use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
 use crate::fs::options::InStreamOptions;
@@ -68,19 +68,19 @@ pub const TRANSFER_POSITIONED_READ_THRESHOLD: i64 = 8 * 1024;
 #[allow(dead_code)]
 const MAX_PREFETCH_WINDOW: i32 = 8;
 
-/// Seekable, dual-path file input stream for a GooseFS file.
+/// Seekable, dual-path file input stream for a Goosefs file.
 ///
 /// # Usage
 ///
 /// ```rust,no_run
-/// use goosefs_sdk::io::GooseFsFileInStream;
-/// use goosefs_sdk::config::GooseFsConfig;
+/// use goosefs_sdk::io::GoosefsFileInStream;
+/// use goosefs_sdk::config::GoosefsConfig;
 /// use goosefs_sdk::fs::options::OpenFileOptions;
 ///
 /// # async fn example() -> goosefs_sdk::error::Result<()> {
-/// let config = GooseFsConfig::new("127.0.0.1:9200");
+/// let config = GoosefsConfig::new("127.0.0.1:9200");
 /// let opts = OpenFileOptions::default();
-/// let mut stream = GooseFsFileInStream::open(&config, "/data/file.parquet", opts).await?;
+/// let mut stream = GoosefsFileInStream::open(&config, "/data/file.parquet", opts).await?;
 ///
 /// // Sequential read
 /// let mut buf = vec![0u8; 4096];
@@ -91,12 +91,12 @@ const MAX_PREFETCH_WINDOW: i32 = 8;
 /// # Ok(())
 /// # }
 /// ```
-pub struct GooseFsFileInStream {
+pub struct GoosefsFileInStream {
     // ── File metadata ────────────────────────────────────────────────────────
     /// Immutable file status (block map, length, etc.).
     status: URIStatus,
-    /// GooseFS config (chunk_size, etc.).
-    config: GooseFsConfig,
+    /// Goosefs config (chunk_size, etc.).
+    config: GoosefsConfig,
     /// Read options for this stream.
     options: InStreamOptions,
 
@@ -134,10 +134,10 @@ pub struct GooseFsFileInStream {
     worker_pool: Option<Arc<WorkerClientPool>>,
 }
 
-impl GooseFsFileInStream {
+impl GoosefsFileInStream {
     // ── Construction ────────────────────────────────────────────────────────
 
-    /// Open a `GooseFsFileInStream` for the file at `path`.
+    /// Open a `GoosefsFileInStream` for the file at `path`.
     ///
     /// # Errors
     ///
@@ -146,7 +146,7 @@ impl GooseFsFileInStream {
     /// - [`Error::OpenDirectory`] if `path` refers to a directory.
     /// - [`Error::NotFound`] if the path does not exist.
     pub async fn open(
-        config: &GooseFsConfig,
+        config: &GoosefsConfig,
         path: &str,
         options: crate::fs::options::OpenFileOptions,
     ) -> Result<Self> {
@@ -192,7 +192,7 @@ impl GooseFsFileInStream {
             path = %path,
             file_length = file_length,
             block_count = status.block_ids.len(),
-            "GooseFsFileInStream opened"
+            "GoosefsFileInStream opened"
         );
 
         Ok(Self {
@@ -209,7 +209,7 @@ impl GooseFsFileInStream {
         })
     }
 
-    /// Open a `GooseFsFileInStream` using a shared [`FileSystemContext`].
+    /// Open a `GoosefsFileInStream` using a shared [`FileSystemContext`].
     ///
     /// # Connection sharing
     ///
@@ -220,7 +220,7 @@ impl GooseFsFileInStream {
     ///
     /// # Errors
     ///
-    /// Same as [`GooseFsFileInStream::open`].
+    /// Same as [`GoosefsFileInStream::open`].
     pub async fn open_with_context(
         ctx: Arc<FileSystemContext>,
         path: &str,
@@ -265,7 +265,7 @@ impl GooseFsFileInStream {
             path = %path,
             file_length = file_length,
             block_count = status.block_ids.len(),
-            "GooseFsFileInStream opened (context mode)"
+            "GoosefsFileInStream opened (context mode)"
         );
 
         Ok(Self {
@@ -840,10 +840,10 @@ mod tests {
         URIStatus::from_proto(fi)
     }
 
-    fn make_stream(status: URIStatus) -> GooseFsFileInStream {
-        let config = crate::config::GooseFsConfig::new("127.0.0.1:9200");
+    fn make_stream(status: URIStatus) -> GoosefsFileInStream {
+        let config = crate::config::GoosefsConfig::new("127.0.0.1:9200");
         let file_length = status.length;
-        GooseFsFileInStream {
+        GoosefsFileInStream {
             file_length,
             status,
             config,

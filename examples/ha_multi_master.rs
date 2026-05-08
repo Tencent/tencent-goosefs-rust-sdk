@@ -1,4 +1,4 @@
-//! Example: GooseFS HA (High Availability) multi-master configuration.
+//! Example: Goosefs HA (High Availability) multi-master configuration.
 //!
 //! Demonstrates how to configure the Rust client with multiple Master
 //! addresses for automatic Primary discovery and failover.
@@ -15,7 +15,7 @@
 //! ```
 
 use goosefs_sdk::client::MasterClient;
-use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::config::GoosefsConfig;
 use std::time::Duration;
 
 #[tokio::main]
@@ -32,7 +32,7 @@ async fn main() -> goosefs_sdk::error::Result<()> {
     }
 
     // Create config — automatically selects single or multi-master mode.
-    let mut config = GooseFsConfig::from_addresses(args.clone());
+    let mut config = GoosefsConfig::from_addresses(args.clone());
 
     // Tune timeouts for faster Primary discovery on local networks.
     if config.is_multi_master() {
@@ -58,7 +58,7 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 
     // Connect to the Master — this will automatically discover the Primary
     // in HA mode via PollingMasterInquireClient.
-    println!("\n▸ Connecting to GooseFS Master...");
+    println!("\n▸ Connecting to Goosefs Master...");
     let master = MasterClient::connect(&config).await?;
     println!("  ✓ Connected successfully!");
 

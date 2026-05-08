@@ -1,17 +1,17 @@
 [package]
 name = "goosefs-sdk"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
-description = "GooseFS Rust gRPC Client - Direct gRPC client for GooseFS Master/Worker"
+description = "Goosefs Rust gRPC Client - Direct gRPC client for Goosefs Master/Worker"
 license = "Apache-2.0"
-authors = ["GooseFS Team"]
+authors = ["Goosefs Team"]
 readme = "README.md"
 repository = "https://git.woa.com/tencent-cloud-datalake/goosefs-client-rust"
 homepage = "https://git.woa.com/tencent-cloud-datalake/goosefs-client-rust"
 documentation = "https://docs.rs/goosefs-sdk"
 keywords = ["goosefs", "grpc", "storage", "filesystem", "cache"]
 categories = ["network-programming", "filesystem"]
-rust-version = "1.70"
+rust-version = "1.75"
 exclude = [
     ".idea/*",
     ".codebuddy/*",

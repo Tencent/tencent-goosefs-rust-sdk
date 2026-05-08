@@ -1,7 +1,7 @@
 //! `BaseFileSystem` — the standard `FileSystem` implementation.
 //!
 //! [`BaseFileSystem`] implements the [`FileSystem`] trait against a real
-//! GooseFS cluster via gRPC.  It is the primary production implementation.
+//! Goosefs cluster via gRPC.  It is the primary production implementation.
 //!
 //! # Thread safety
 //!
@@ -29,7 +29,7 @@
 //! When `CreateFileOptions.write_type == WriteTypeXAttr::Inherit`, `create_file`
 //! fetches the parent directory's xattr and calls
 //! [`crate::fs::write_type::get_write_type_from_xattr`] to determine the
-//! effective `WriteType`.  Falls back to the `GooseFsConfig` default.
+//! effective `WriteType`.  Falls back to the `GoosefsConfig` default.
 //!
 //! # Connection sharing
 //!
@@ -41,17 +41,17 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::client::MasterClient;
-use crate::config::{GooseFsConfig, WriteType};
+use crate::config::{GoosefsConfig, WriteType};
 use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
 use crate::fs::filesystem::FileSystem;
 use crate::fs::options::{CreateFileOptions, DeleteOptions, OpenFileOptions};
 use crate::fs::uri_status::URIStatus;
 use crate::fs::write_type::{get_write_type_from_xattr, WriteTypeXAttr};
-use crate::io::{GooseFsFileInStream, GooseFsFileWriter};
+use crate::io::{GoosefsFileInStream, GoosefsFileWriter};
 use crate::proto::grpc::file::{CreateFilePOptions, WritePType};
 
-/// Standard GooseFS filesystem client.
+/// Standard Goosefs filesystem client.
 ///
 /// All operations delegate to the underlying `MasterClient` gRPC stub.
 ///
@@ -60,12 +60,12 @@ use crate::proto::grpc::file::{CreateFilePOptions, WritePType};
 /// ```rust,no_run
 /// use goosefs_sdk::context::FileSystemContext;
 /// use goosefs_sdk::fs::BaseFileSystem;
-/// use goosefs_sdk::config::GooseFsConfig;
+/// use goosefs_sdk::config::GoosefsConfig;
 /// use goosefs_sdk::fs::filesystem::FileSystem;
 ///
 /// # async fn example() -> goosefs_sdk::error::Result<()> {
 /// // Build once per application lifetime — one TCP+SASL handshake
-/// let ctx = FileSystemContext::connect(GooseFsConfig::new("127.0.0.1:9200")).await?;
+/// let ctx = FileSystemContext::connect(GoosefsConfig::new("127.0.0.1:9200")).await?;
 /// let fs = BaseFileSystem::from_context(ctx);
 ///
 /// // All calls reuse the same Master connection — zero extra handshakes
@@ -79,7 +79,7 @@ pub struct BaseFileSystem {
     ctx: Arc<FileSystemContext>,
 
     /// Cached config from the context for convenience access.
-    config: GooseFsConfig,
+    config: GoosefsConfig,
 }
 
 impl BaseFileSystem {
@@ -94,7 +94,7 @@ impl BaseFileSystem {
         Arc::new(Self { config, ctx })
     }
 
-    /// Connect to GooseFS and create both a [`FileSystemContext`] and a
+    /// Connect to Goosefs and create both a [`FileSystemContext`] and a
     /// `BaseFileSystem` in one step.
     ///
     /// Equivalent to:
@@ -102,13 +102,13 @@ impl BaseFileSystem {
     /// let ctx = FileSystemContext::connect(config).await?;
     /// let fs  = BaseFileSystem::from_context(ctx);
     /// ```
-    pub async fn connect(config: GooseFsConfig) -> Result<Arc<Self>> {
+    pub async fn connect(config: GoosefsConfig) -> Result<Arc<Self>> {
         let ctx = FileSystemContext::connect(config).await?;
         Ok(Self::from_context(ctx))
     }
 
     /// Borrow the underlying config.
-    pub fn config(&self) -> &GooseFsConfig {
+    pub fn config(&self) -> &GoosefsConfig {
         &self.config
     }
 
@@ -124,7 +124,7 @@ impl BaseFileSystem {
     /// Priority:
     /// 1. Explicit `WriteTypeXAttr::Explicit(wt)` in `options`
     /// 2. Parent directory `"innerWriteType"` xattr
-    /// 3. `GooseFsConfig.write_type` (if set)
+    /// 3. `GoosefsConfig.write_type` (if set)
     /// 4. Default: `WriteType::MustCache` (Java default)
     async fn resolve_write_type(&self, path: &str, options: &CreateFileOptions) -> WriteType {
         // 1. Explicit override
@@ -207,8 +207,8 @@ impl FileSystem for BaseFileSystem {
 
     // ── File read ─────────────────────────────────────────────────────────────
 
-    async fn open_file(&self, path: &str, options: OpenFileOptions) -> Result<GooseFsFileInStream> {
-        GooseFsFileInStream::open_with_context(self.ctx.clone(), path, options).await
+    async fn open_file(&self, path: &str, options: OpenFileOptions) -> Result<GoosefsFileInStream> {
+        GoosefsFileInStream::open_with_context(self.ctx.clone(), path, options).await
     }
 
     // ── File write ────────────────────────────────────────────────────────────
@@ -219,7 +219,7 @@ impl FileSystem for BaseFileSystem {
         &self,
         path: &str,
         options: CreateFileOptions,
-    ) -> Result<GooseFsFileWriter> {
+    ) -> Result<GoosefsFileWriter> {
         let write_type = self.resolve_write_type(path, &options).await;
 
         let proto_opts = CreateFilePOptions {
@@ -229,7 +229,7 @@ impl FileSystem for BaseFileSystem {
             ..Default::default()
         };
 
-        GooseFsFileWriter::create_with_context(self.ctx.clone(), path, Some(proto_opts)).await
+        GoosefsFileWriter::create_with_context(self.ctx.clone(), path, Some(proto_opts)).await
     }
 
     // ── Directory ─────────────────────────────────────────────────────────────

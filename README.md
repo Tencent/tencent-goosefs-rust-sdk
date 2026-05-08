@@ -1,30 +1,30 @@
-# GooseFS Rust gRPC Client
+# Goosefs Rust gRPC Client
 
 ![Experimental](https://img.shields.io/badge/status-experimental-orange)
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-green)
 
-A native Rust client library that communicates directly with [GooseFS](https://cloud.tencent.com/document/product/1424) Master/Worker via gRPC (tonic/protobuf).
+A native Rust client library that communicates directly with [Goosefs](https://cloud.tencent.com/document/product/1424) Master/Worker via gRPC (tonic/protobuf).
 
-## Why GooseFS?
+## Why Goosefs?
 
-[GooseFS](https://cloud.tencent.com/document/product/1424) is a high-performance distributed caching file system built on top of COS (Cloud Object Storage). It accelerates data access for big data and AI/ML workloads by providing a unified namespace and intelligent caching layer between compute engines and cloud storage.
+[Goosefs](https://cloud.tencent.com/document/product/1424) is a high-performance distributed caching file system built on top of COS (Cloud Object Storage). It accelerates data access for big data and AI/ML workloads by providing a unified namespace and intelligent caching layer between compute engines and cloud storage.
 
-## Why GooseFS Rust Client?
+## Why Goosefs Rust Client?
 
-This is a standalone Rust gRPC client crate (Layer 3) in the **Lance → OpenDAL → GooseFS** architecture. It talks directly to GooseFS Master and Worker services over gRPC, enabling:
+This is a standalone Rust gRPC client crate (Layer 3) in the **Lance → OpenDAL → Goosefs** architecture. It talks directly to Goosefs Master and Worker services over gRPC, enabling:
 
 - **Native performance** — Zero-copy block streaming with bidirectional gRPC, no JNI/FFI overhead
 - **Async-first** — Built entirely on `tokio` + `tonic` for high-concurrency I/O
-- **Lance integration** — Designed as the foundation for the OpenDAL GooseFS backend powering Lance vector storage acceleration
+- **Lance integration** — Designed as the foundation for the OpenDAL Goosefs backend powering Lance vector storage acceleration
 
 ```text
 ┌────────────────────────────────────────────────────────────────┐
 │  Layer 1 — Lance Provider (lance-io / ObjectStore)             │
 ├────────────────────────────────────────────────────────────────┤
-│  Layer 2 — OpenDAL GooseFS Service (opendal::services)         │
+│  Layer 2 — OpenDAL Goosefs Service (opendal::services)         │
 ├────────────────────────────────────────────────────────────────┤
-│  Layer 3 — GooseFS Rust gRPC Client  ← this crate             │
+│  Layer 3 — Goosefs Rust gRPC Client  ← this crate             │
 │                                                                │
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │  ★ FileSystem Abstraction (recommended entry point)      │  │
@@ -32,9 +32,9 @@ This is a standalone Rust gRPC client crate (Layer 3) in the **Lance → OpenDAL
 │  │  FileSystemContext — shared connection pool              │  │
 │  ├──────────────────────────────────────────────────────────┤  │
 │  │  ★ High-Level I/O                                        │  │
-│  │  GooseFsFileInStream — seekable dual-path read stream   │  │
-│  │  GooseFsFileWriter — end-to-end file write pipeline      │  │
-│  │  GooseFsFileReader — end-to-end file read pipeline       │  │
+│  │  GoosefsFileInStream — seekable dual-path read stream   │  │
+│  │  GoosefsFileWriter — end-to-end file write pipeline      │  │
+│  │  GoosefsFileReader — end-to-end file read pipeline       │  │
 │  ├──────────────────────────────────────────────────────────┤  │
 │  │  MasterClient    — File metadata CRUD    (Master:9200)   │  │
 │  │  WorkerMgrClient — Worker discovery      (Master:9200)   │  │
@@ -55,17 +55,17 @@ This is a standalone Rust gRPC client crate (Layer 3) in the **Lance → OpenDAL
 
 ## Quick Start
 
-### Step 1: Start a GooseFS Cluster
+### Step 1: Start a Goosefs Cluster
 
 #### Requirements
 
-GooseFS runs on all UNIX-like environments (Linux, macOS). Make sure you have:
+Goosefs runs on all UNIX-like environments (Linux, macOS). Make sure you have:
 
 - **Java 11** (required — set `JAVA_HOME` accordingly)
-- A running GooseFS Master (default RPC port `9200`) and at least one Worker (default data port `9203`)
+- A running Goosefs Master (default RPC port `9200`) and at least one Worker (default data port `9203`)
 
 ```shell
-# Example: start GooseFS locally (adjust paths to your installation)
+# Example: start Goosefs locally (adjust paths to your installation)
 export JAVA_HOME=/path/to/jdk-11
 cd /path/to/goosefs
 ./bin/goosefs-start.sh local SudoMount
@@ -112,12 +112,12 @@ tokio = { version = "1", features = ["full"] }
 
 ```rust
 use goosefs_sdk::client::MasterClient;
-use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::config::GoosefsConfig;
 
 #[tokio::main]
 async fn main() -> goosefs_sdk::error::Result<()> {
-    // 1. Connect to GooseFS Master
-    let config = GooseFsConfig::new("127.0.0.1:9200");
+    // 1. Connect to Goosefs Master
+    let config = GoosefsConfig::new("127.0.0.1:9200");
     let master = MasterClient::connect(&config).await?;
 
     // 2. Create a directory
@@ -146,7 +146,7 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 ### Example: Multi-Master Connection
 
 ```rust
-use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::config::GoosefsConfig;
 use goosefs_sdk::client::MasterClient;
 
 #[tokio::main]
@@ -159,7 +159,7 @@ async fn main() -> goosefs_sdk::error::Result<()> {
         "10.0.0.2:9200".to_string(),
         "10.0.0.3:9200".to_string(),
     ];
-    let config = GooseFsConfig::from_addresses(addrs);
+    let config = GoosefsConfig::from_addresses(addrs);
     println!("is_multi_master = {}", config.is_multi_master());
 
     let master = MasterClient::connect(&config).await?;
@@ -174,7 +174,7 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 ### Example: FileSystem API (Recommended)
 
 ```rust
-use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::config::GoosefsConfig;
 use goosefs_sdk::context::FileSystemContext;
 use goosefs_sdk::fs::{BaseFileSystem, FileSystem, OpenFileOptions};
 use std::io::SeekFrom;
@@ -182,7 +182,7 @@ use std::io::SeekFrom;
 #[tokio::main]
 async fn main() -> goosefs_sdk::error::Result<()> {
     // Build once per application — one TCP+SASL handshake, shared across all ops
-    let config = GooseFsConfig::new("127.0.0.1:9200");
+    let config = GoosefsConfig::new("127.0.0.1:9200");
     let ctx = FileSystemContext::connect(config).await?;
     let fs = BaseFileSystem::from_context(ctx);
 
@@ -220,20 +220,20 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 ### Example: High-Level File Write (Recommended)
 
 ```rust
-use goosefs_sdk::io::GooseFsFileWriter;
-use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::io::GoosefsFileWriter;
+use goosefs_sdk::config::GoosefsConfig;
 use goosefs_sdk::WritePType;
 
 #[tokio::main]
 async fn main() -> goosefs_sdk::error::Result<()> {
-    let config = GooseFsConfig::new("127.0.0.1:9200");
+    let config = GoosefsConfig::new("127.0.0.1:9200");
 
     // One-shot write: creates file, writes data, completes file in one call
     // Default WriteType is MUST_CACHE (data in cache only)
-    GooseFsFileWriter::write_file(&config, "/data/hello.txt", b"Hello, GooseFS!").await?;
+    GoosefsFileWriter::write_file(&config, "/data/hello.txt", b"Hello, Goosefs!").await?;
 
     // Or use the builder for multi-chunk streaming writes
-    let mut writer = GooseFsFileWriter::create(&config, "/data/large-file.bin").await?;
+    let mut writer = GoosefsFileWriter::create(&config, "/data/large-file.bin").await?;
     writer.write(b"first chunk ").await?;
     writer.write(b"second chunk ").await?;
     writer.write(b"final chunk").await?;
@@ -243,19 +243,19 @@ async fn main() -> goosefs_sdk::error::Result<()> {
     // ── Write with different WriteTypes ──
 
     // CACHE_THROUGH — write to cache + sync persist to UFS (COS/S3/HDFS)
-    let ct_config = GooseFsConfig::new("127.0.0.1:9200")
+    let ct_config = GoosefsConfig::new("127.0.0.1:9200")
         .with_write_type(WritePType::CacheThrough);
-    GooseFsFileWriter::write_file(&ct_config, "/data/durable.txt", b"persisted!").await?;
+    GoosefsFileWriter::write_file(&ct_config, "/data/durable.txt", b"persisted!").await?;
 
     // THROUGH — write directly to UFS, bypass cache
-    let th_config = GooseFsConfig::new("127.0.0.1:9200")
+    let th_config = GoosefsConfig::new("127.0.0.1:9200")
         .with_write_type(WritePType::Through);
-    GooseFsFileWriter::write_file(&th_config, "/data/direct.txt", b"direct to UFS").await?;
+    GoosefsFileWriter::write_file(&th_config, "/data/direct.txt", b"direct to UFS").await?;
 
     // ASYNC_THROUGH — write to cache, async persist after close()
-    let at_config = GooseFsConfig::new("127.0.0.1:9200")
+    let at_config = GoosefsConfig::new("127.0.0.1:9200")
         .with_write_type(WritePType::AsyncThrough);
-    GooseFsFileWriter::write_file(&at_config, "/data/async.txt", b"eventually persisted").await?;
+    GoosefsFileWriter::write_file(&at_config, "/data/async.txt", b"eventually persisted").await?;
     // close() automatically calls scheduleAsyncPersistence
 
     Ok(())
@@ -265,22 +265,22 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 ### Example: High-Level File Read (Recommended)
 
 ```rust
-use goosefs_sdk::io::GooseFsFileReader;
-use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::io::GoosefsFileReader;
+use goosefs_sdk::config::GoosefsConfig;
 
 #[tokio::main]
 async fn main() -> goosefs_sdk::error::Result<()> {
-    let config = GooseFsConfig::new("127.0.0.1:9200");
+    let config = GoosefsConfig::new("127.0.0.1:9200");
 
     // One-shot: read entire file
-    let data = GooseFsFileReader::read_file(&config, "/data/hello.txt").await?;
+    let data = GoosefsFileReader::read_file(&config, "/data/hello.txt").await?;
     println!("content: {}", String::from_utf8_lossy(&data));
 
     // Range read: read 500 bytes starting at offset 100
-    let range = GooseFsFileReader::read_range(&config, "/data/hello.txt", 100, 500).await?;
+    let range = GoosefsFileReader::read_range(&config, "/data/hello.txt", 100, 500).await?;
 
     // Streaming read: process block-by-block
-    let mut reader = GooseFsFileReader::open(&config, "/data/hello.txt").await?;
+    let mut reader = GoosefsFileReader::open(&config, "/data/hello.txt").await?;
     while let Some(chunk) = reader.read_next_block().await? {
         println!("got {} bytes from block", chunk.len());
     }
@@ -294,23 +294,23 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 ```rust
 use goosefs_sdk::auth::AuthType;
 use goosefs_sdk::client::MasterClient;
-use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::config::GoosefsConfig;
 
 #[tokio::main]
 async fn main() -> goosefs_sdk::error::Result<()> {
     // Default: SIMPLE mode with current OS username
-    let config = GooseFsConfig::new("127.0.0.1:9200");
+    let config = GoosefsConfig::new("127.0.0.1:9200");
     let master = MasterClient::connect(&config).await?;
     let entries = master.list_status("/", false).await?;
     println!("root has {} entries", entries.len());
 
     // Explicit NOSASL mode (no SASL handshake)
-    let config = GooseFsConfig::new("127.0.0.1:9200")
+    let config = GoosefsConfig::new("127.0.0.1:9200")
         .with_auth_type(AuthType::NoSasl);
     let master = MasterClient::connect(&config).await?;
 
     // Explicit SIMPLE mode with custom username
-    let config = GooseFsConfig::new("127.0.0.1:9200")
+    let config = GoosefsConfig::new("127.0.0.1:9200")
         .with_auth_type(AuthType::Simple)
         .with_auth_username("myuser");
     let master = MasterClient::connect(&config).await?;
@@ -321,7 +321,7 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 
 #### Authentication Guide
 
-GooseFS supports two authentication modes. The Rust client must use the mode that matches the server-side configuration, otherwise RPCs will be rejected with `Unauthenticated`.
+Goosefs supports two authentication modes. The Rust client must use the mode that matches the server-side configuration, otherwise RPCs will be rejected with `Unauthenticated`.
 
 **Authentication Modes**
 
@@ -332,7 +332,7 @@ GooseFS supports two authentication modes. The Rust client must use the mode tha
 
 **Server-Side Configuration**
 
-Set the authentication type in `conf/goosefs-site.properties` on the GooseFS Master/Worker:
+Set the authentication type in `conf/goosefs-site.properties` on the Goosefs Master/Worker:
 
 ```properties
 # Option 1: SIMPLE authentication (recommended, default)
@@ -342,34 +342,34 @@ goosefs.security.authentication.type=SIMPLE
 # goosefs.security.authentication.type=NOSASL
 ```
 
-> **Important:** After changing the authentication type, you must restart the GooseFS cluster for the change to take effect.
+> **Important:** After changing the authentication type, you must restart the Goosefs cluster for the change to take effect.
 
 **Client-Side Configuration**
 
 ```rust
 use goosefs_sdk::auth::AuthType;
-use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::config::GoosefsConfig;
 use std::time::Duration;
 
 // ── SIMPLE mode (default) ──
-// GooseFsConfig::new() defaults to SIMPLE + current OS username.
+// GoosefsConfig::new() defaults to SIMPLE + current OS username.
 // No extra configuration needed in most cases.
-let config = GooseFsConfig::new("127.0.0.1:9200");
+let config = GoosefsConfig::new("127.0.0.1:9200");
 
 // ── SIMPLE mode with explicit username ──
-let config = GooseFsConfig::new("127.0.0.1:9200")
+let config = GoosefsConfig::new("127.0.0.1:9200")
     .with_auth_type(AuthType::Simple)
     .with_auth_username("myuser");
 
 // ── SIMPLE mode with custom auth timeout ──
-let config = GooseFsConfig::new("127.0.0.1:9200")
+let config = GoosefsConfig::new("127.0.0.1:9200")
     .with_auth_type(AuthType::Simple)
     .with_auth_username("myuser")
     .with_auth_timeout(Duration::from_secs(30));
 
 // ── NOSASL mode ──
 // Use only when the server is configured with NOSASL.
-let config = GooseFsConfig::new("127.0.0.1:9200")
+let config = GoosefsConfig::new("127.0.0.1:9200")
     .with_auth_type(AuthType::NoSasl);
 ```
 
@@ -397,11 +397,11 @@ let config = GooseFsConfig::new("127.0.0.1:9200")
 use goosefs_sdk::client::{MasterClient, WorkerClient, WorkerManagerClient};
 use goosefs_sdk::block::{BlockMapper, WorkerRouter};
 use goosefs_sdk::io::GrpcBlockReader;
-use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::config::GoosefsConfig;
 
 #[tokio::main]
 async fn main() -> goosefs_sdk::error::Result<()> {
-    let config = GooseFsConfig::new("127.0.0.1:9200");
+    let config = GoosefsConfig::new("127.0.0.1:9200");
 
     // 1. Get file metadata
     let master = MasterClient::connect(&config).await?;
@@ -455,9 +455,9 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 | **`fs::FileSystem`** | **FileSystem trait** — high-level async interface (`get_status`, `list_status`, `exists`, `open_file`, `create_file`, `mkdir`, `delete`, `rename`). Object-safe via `async_trait`, `Send+Sync+'static`. |
 | **`fs::BaseFileSystem`** | **Production FileSystem implementation** — supports shared-context mode via `FileSystemContext` and legacy per-call mode. Implements WriteType xattr inheritance. `exists()` follows Java semantics (INCOMPLETE non-folder → false). |
 | **`context::FileSystemContext`** | **Shared connection pool** — three-layer architecture eliminating repeated TCP+SASL handshakes. Holds `Arc<MasterClient>` + `Arc<WorkerClientPool>` + `Arc<WorkerRouter>`. Background worker-list refresh (30s) and config hot-reload (60s). |
-| **`io::GooseFsFileInStream`** | **Seekable dual-path file input stream** — sequential reads via `block_in_stream` (streaming, prefetch) and random reads via `positioned_read` (`position_short=true`). Auto-switches based on 8 KiB threshold. Supports `seek(SeekFrom)` and `read_at()`. |
-| **`io::GooseFsFileWriter`** | **High-level file writer** — one-shot `write_file()` or builder pattern `create()` → `write()` → `close()`. Supports all 4 WriteTypes. Cancel/close state machine with UUID-based idempotent `FsOpPId`. |
-| **`io::GooseFsFileReader`** | **High-level file reader** — one-shot `read_file()` / `read_range()` or streaming `open()` → `read_next_block()`. Orchestrates `GetStatus` → `BlockMapper` → `WorkerRouter` → `GrpcBlockReader` |
+| **`io::GoosefsFileInStream`** | **Seekable dual-path file input stream** — sequential reads via `block_in_stream` (streaming, prefetch) and random reads via `positioned_read` (`position_short=true`). Auto-switches based on 8 KiB threshold. Supports `seek(SeekFrom)` and `read_at()`. |
+| **`io::GoosefsFileWriter`** | **High-level file writer** — one-shot `write_file()` or builder pattern `create()` → `write()` → `close()`. Supports all 4 WriteTypes. Cancel/close state machine with UUID-based idempotent `FsOpPId`. |
+| **`io::GoosefsFileReader`** | **High-level file reader** — one-shot `read_file()` / `read_range()` or streaming `open()` → `read_next_block()`. Orchestrates `GetStatus` → `BlockMapper` → `WorkerRouter` → `GrpcBlockReader` |
 | `fs::URIStatus` | Immutable file/directory metadata snapshot converted from proto `FileInfo`. Typed accessors for all metadata fields. |
 | `fs::options` | Rust-native options structs — `OpenFileOptions`, `CreateFileOptions`, `DeleteOptions`, `InStreamOptions`, `ReadType` |
 | `auth::ChannelAuthenticator` | SASL authentication for gRPC channels — supports `NOSASL` (no handshake) and `SIMPLE` (PLAIN SASL) |
@@ -471,13 +471,13 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 | `block::WorkerRouter` | Consistent-hash routing with TTL-based worker list refresh (30s), local-worker preference (mirrors Java `LocalFirstPolicy`), and failure tracking |
 | `io::GrpcBlockReader` | Low-level streaming block reader with flow-control ACK + `positioned_read()` for random access |
 | `io::GrpcBlockWriter` | Low-level streaming block writer with chunk splitting and flush |
-| `config::GooseFsConfig` | Connection configuration — 30+ settings including properties file parsing, YAML auto-config, `ConfigRefresher` hot-reload, `TransparentAccelerationSwitch`, timeouts, block/chunk size, write/read types, auth, multi-master, worker routing |
+| `config::GoosefsConfig` | Connection configuration — 30+ settings including properties file parsing, YAML auto-config, `ConfigRefresher` hot-reload, `TransparentAccelerationSwitch`, timeouts, block/chunk size, write/read types, auth, multi-master, worker routing |
 | `WritePType` | Write type enum — `MustCache`, `TryCache`, `CacheThrough`, `Through`, `AsyncThrough`, `None` |
 | `error::Error` | Unified error type with domain-specific variants (`FileIncomplete`, `DirectoryNotEmpty`, `OpenDirectory`, `InvalidPath`, `AuthenticationFailed`) mapped from Java server exceptions |
 
 ## gRPC Services
 
-This client wraps **5 GooseFS gRPC services** defined in 12 proto files:
+This client wraps **5 Goosefs gRPC services** defined in 12 proto files:
 
 | Service | Port | Proto | Key RPCs |
 |---------|------|-------|----------|
@@ -493,12 +493,12 @@ This client wraps **5 GooseFS gRPC services** defined in 12 proto files:
 goosefs-client-rust/
 ├── Cargo.toml              # crate manifest
 ├── build.rs                # tonic-build proto compilation
-├── proto/                  # GooseFS protobuf definitions (11 files)
+├── proto/                  # Goosefs protobuf definitions (11 files)
 │   ├── grpc/               #   Master/Worker service protos
 │   └── proto/              #   Shared data types (security, acl, status)
 ├── src/
 │   ├── lib.rs              # crate root & proto module tree
-│   ├── config.rs           # GooseFsConfig (properties/YAML/hot-reload, 30+ keys)
+│   ├── config.rs           # GoosefsConfig (properties/YAML/hot-reload, 30+ keys)
 │   ├── context.rs          # ★ FileSystemContext (shared connection pool)
 │   ├── error.rs            # Error enum (domain-specific variants)
 │   ├── auth/
@@ -521,14 +521,17 @@ goosefs-client-rust/
 │   │   ├── uri_status.rs   # URIStatus (immutable metadata snapshot)
 │   │   └── write_type.rs   # WriteType xattr helpers
 │   ├── io/
-│   │   ├── file_in_stream.rs # ★ GooseFsFileInStream (seekable dual-path)
-│   │   ├── file_reader.rs  # GooseFsFileReader (high-level)
-│   │   ├── file_writer.rs  # GooseFsFileWriter (cancel/close state machine)
+│   │   ├── file_in_stream.rs # ★ GoosefsFileInStream (seekable dual-path)
+│   │   ├── file_reader.rs  # GoosefsFileReader (high-level)
+│   │   ├── file_writer.rs  # GoosefsFileWriter (cancel/close state machine)
 │   │   ├── reader.rs       # GrpcBlockReader (streaming + positioned)
 │   │   └── writer.rs       # GrpcBlockWriter (low-level)
 │   └── generated/          # prost/tonic generated code (checked-in; shipped with the crate)
 ├── examples/
 │   ├── highlevel_file_rw.rs     # ★ High-level file read/write (recommended)
+│   ├── streaming_file_read.rs   # ★ Streaming read — constant O(block) memory
+│   ├── seekable_file_read.rs    # ★ Seekable read via GoosefsFileInStream (seek / read_at)
+│   ├── context_file_rw.rs       # ★ FileSystemContext shared connection pool
 │   ├── write_types.rs           # ★ WriteType comparison
 │   ├── ha_multi_master.rs       # ★ Multi-master mode
 │   ├── auth_demo.rs             # ★ Authentication demo (NOSASL / SIMPLE)
@@ -593,13 +596,13 @@ The updated `.rs` files will be written back to `src/generated/` — **commit th
 | `hostname` | 0.3 | Local worker detection for routing preference |
 | `async-trait` | 0.1 | Async trait support for FileSystem trait |
 
-## GooseFS Compatibility
+## Goosefs Compatibility
 
-| GooseFS Version | Java | Status |
+| Goosefs Version | Java | Status |
 |----------------|------|--------|
 | Latest (JDK 11) | Java 11 | ✅ Supported |
 
-> **Note:** GooseFS requires **Java 11**. Make sure `JAVA_HOME` points to a JDK 11 installation when running the GooseFS cluster.
+> **Note:** Goosefs requires **Java 11**. Make sure `JAVA_HOME` points to a JDK 11 installation when running the Goosefs cluster.
 
 ## License
 

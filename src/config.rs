@@ -1,4 +1,4 @@
-//! Client configuration for GooseFS gRPC connections.
+//! Client configuration for Goosefs gRPC connections.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -129,9 +129,9 @@ fn parse_byte_size(s: &str) -> Result<u64, String> {
 }
 
 impl PropertiesMap {
-    /// Convert the parsed properties into a `GooseFsConfig`.
-    fn into_goosefs_config(self) -> GooseFsConfig {
-        let mut cfg = GooseFsConfig::default();
+    /// Convert the parsed properties into a `GoosefsConfig`.
+    fn into_goosefs_config(self) -> GoosefsConfig {
+        let mut cfg = GoosefsConfig::default();
 
         // Master addresses: goosefs.master.rpc.addresses (comma-separated)
         if let Some(addrs) = self.get_list("goosefs.master.rpc.addresses") {
@@ -294,12 +294,12 @@ fn dirs_next_home() -> Option<std::path::PathBuf> {
 
 // ── Default constants ────────────────────────────────────────
 
-/// Default GooseFS Master RPC port.
+/// Default Goosefs Master RPC port.
 const DEFAULT_MASTER_PORT: u16 = 9200;
-/// Default GooseFS Worker data port.
+/// Default Goosefs Worker data port.
 #[allow(dead_code)]
 const DEFAULT_WORKER_PORT: u16 = 9203;
-/// Default block size: 64 MiB (matches GooseFS default).
+/// Default block size: 64 MiB (matches Goosefs default).
 const DEFAULT_BLOCK_SIZE: u64 = 64 * 1024 * 1024;
 /// Default chunk size for streaming reads: 1 MiB.
 const DEFAULT_CHUNK_SIZE: u64 = 1024 * 1024;
@@ -339,7 +339,7 @@ const DEFAULT_CONFIG_EXPIRE_MS: u64 = 30_000;
 // Using these constants avoids hard-coded "magic strings" scattered across
 // the codebase and test code.
 
-/// Storage option key for GooseFS master address(es).
+/// Storage option key for Goosefs master address(es).
 ///
 /// Supports HA: `"addr1:port,addr2:port"`.
 ///
@@ -376,7 +376,7 @@ pub const STORAGE_OPT_AUTH_TYPE: &str = "goosefs_auth_type";
 /// Corresponding environment variable: `GOOSEFS_AUTH_USERNAME`.
 pub const STORAGE_OPT_AUTH_USERNAME: &str = "goosefs_auth_username";
 
-/// GooseFS configuration directory property name.
+/// Goosefs configuration directory property name.
 ///
 /// Mirrors Java's `public static final String CONF_DIR = "goosefs.conf.dir"`.
 /// In the Rust client, the corresponding environment variable is [`ENV_CONF_DIR`].
@@ -385,15 +385,15 @@ pub const CONF_DIR: &str = "goosefs.conf.dir";
 /// Environment variable: explicit config file path (Rust-only convenience).
 pub const ENV_CONFIG_FILE: &str = "GOOSEFS_CONFIG_FILE";
 
-/// Environment variable: GooseFS configuration directory.
+/// Environment variable: Goosefs configuration directory.
 ///
 /// Corresponds to the Java property [`CONF_DIR`] (`goosefs.conf.dir`).
 pub const ENV_CONF_DIR: &str = "GOOSEFS_CONF_DIR";
 
-/// Environment variable: GooseFS installation home directory.
+/// Environment variable: Goosefs installation home directory.
 pub const ENV_HOME: &str = "GOOSEFS_HOME";
 
-/// Environment variable: GooseFS master address(es).
+/// Environment variable: Goosefs master address(es).
 pub const ENV_MASTER_ADDR: &str = "GOOSEFS_MASTER_ADDR";
 
 /// Environment variable: default write type.
@@ -453,7 +453,7 @@ pub const STORAGE_OPT_LOGIN_IMPERSONATION_USERNAME: &str = "goosefs_login_impers
 
 // ── WriteType: ergonomic Rust enum wrapping WritePType ───────
 
-/// High-level write type for GooseFS file creation.
+/// High-level write type for Goosefs file creation.
 ///
 /// This enum provides:
 /// - **String ↔ enum conversion** (`FromStr` / `Display`) — like Java `Enum.valueOf()`.
@@ -490,7 +490,7 @@ pub const STORAGE_OPT_LOGIN_IMPERSONATION_USERNAME: &str = "goosefs_login_impers
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WriteType {
-    /// Write to GooseFS cache only; no UFS persistence.
+    /// Write to Goosefs cache only; no UFS persistence.
     MustCache,
     /// Try to cache; fall back to `Through` if cache is full.
     TryCache,
@@ -602,9 +602,9 @@ impl From<WritePType> for WriteType {
     }
 }
 
-/// Configuration for the GooseFS Rust gRPC client.
+/// Configuration for the Goosefs Rust gRPC client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GooseFsConfig {
+pub struct GoosefsConfig {
     /// Primary master address in `host:port` format (backward-compatible).
     ///
     /// When only a single master is used, set this field.
@@ -645,14 +645,14 @@ pub struct GooseFsConfig {
     ///
     /// Controls how data is persisted when writing files.
     /// Use the `WritePType` enum values (as `i32`):
-    /// - `1` (`MustCache`) — Write to GooseFS cache only, no UFS persistence.
+    /// - `1` (`MustCache`) — Write to Goosefs cache only, no UFS persistence.
     /// - `2` (`TryCache`) — Try to cache; fall back to THROUGH if cache is full.
     /// - `3` (`CacheThrough`) — Write to cache AND synchronously persist to UFS.
     /// - `4` (`Through`) — Write directly to UFS, bypass cache.
     /// - `5` (`AsyncThrough`) — Write to cache, asynchronously persist to UFS.
     ///
     /// If not set (`None`), the server-side default is used (typically `MustCache`).
-    /// Use [`GooseFsConfig::with_write_type`] for a type-safe builder.
+    /// Use [`GoosefsConfig::with_write_type`] for a type-safe builder.
     pub write_type: Option<i32>,
 
     // ── Master Inquire / HA retry configuration ──────────────
@@ -679,7 +679,7 @@ pub struct GooseFsConfig {
     // ── Authentication configuration ─────────────────────────
     /// Authentication type (default: `Simple`).
     ///
-    /// Controls how the client authenticates with GooseFS Master/Worker.
+    /// Controls how the client authenticates with Goosefs Master/Worker.
     /// Mirrors Java's `goosefs.security.authentication.type`.
     ///
     /// Currently supported:
@@ -778,7 +778,7 @@ fn default_login_impersonation_username() -> String {
     DEFAULT_IMPERSONATION_USERNAME.to_string()
 }
 
-impl Default for GooseFsConfig {
+impl Default for GoosefsConfig {
     fn default() -> Self {
         Self {
             master_addr: format!("127.0.0.1:{}", DEFAULT_MASTER_PORT),
@@ -807,7 +807,7 @@ impl Default for GooseFsConfig {
     }
 }
 
-impl GooseFsConfig {
+impl GoosefsConfig {
     /// Create a new config with the given single master address.
     pub fn new(master_addr: impl Into<String>) -> Self {
         Self {
@@ -896,10 +896,10 @@ impl GooseFsConfig {
     ///
     /// # Example
     /// ```
-    /// use goosefs_sdk::config::GooseFsConfig;
+    /// use goosefs_sdk::config::GoosefsConfig;
     /// use goosefs_sdk::auth::AuthType;
     ///
-    /// let config = GooseFsConfig::new("127.0.0.1:9200")
+    /// let config = GoosefsConfig::new("127.0.0.1:9200")
     ///     .with_auth_type(AuthType::NoSasl);
     /// ```
     pub fn with_auth_type(mut self, auth_type: AuthType) -> Self {
@@ -925,10 +925,10 @@ impl GooseFsConfig {
     ///
     /// # Example
     /// ```
-    /// use goosefs_sdk::config::GooseFsConfig;
+    /// use goosefs_sdk::config::GoosefsConfig;
     /// use goosefs_sdk::WritePType;
     ///
-    /// let config = GooseFsConfig::new("127.0.0.1:9200")
+    /// let config = GoosefsConfig::new("127.0.0.1:9200")
     ///     .with_write_type(WritePType::CacheThrough);
     /// ```
     pub fn with_write_type(mut self, wt: WritePType) -> Self {
@@ -940,9 +940,9 @@ impl GooseFsConfig {
     ///
     /// # Example
     /// ```
-    /// use goosefs_sdk::config::{GooseFsConfig, WriteType};
+    /// use goosefs_sdk::config::{GoosefsConfig, WriteType};
     ///
-    /// let config = GooseFsConfig::new("127.0.0.1:9200")
+    /// let config = GoosefsConfig::new("127.0.0.1:9200")
     ///     .with_write_type_enum(WriteType::CacheThrough);
     /// ```
     pub fn with_write_type_enum(mut self, wt: WriteType) -> Self {
@@ -957,9 +957,9 @@ impl GooseFsConfig {
     ///
     /// # Example
     /// ```
-    /// use goosefs_sdk::config::GooseFsConfig;
+    /// use goosefs_sdk::config::GoosefsConfig;
     ///
-    /// let config = GooseFsConfig::new("127.0.0.1:9200")
+    /// let config = GoosefsConfig::new("127.0.0.1:9200")
     ///     .with_write_type_str("cache_through")
     ///     .unwrap();
     /// ```
@@ -1235,7 +1235,7 @@ pub struct TransparentAccelerationSwitch {
 /// Mirrors the Java pattern:
 /// ```text
 /// ConfigurationUtils.loadIfExpire();          // reload if stale
-/// GooseFSProperties props = ConfigurationUtils.defaults();
+/// GoosefsProperties props = ConfigurationUtils.defaults();
 /// InstancedConfiguration cfg = new InstancedConfiguration(props);
 /// boolean enable = cfg.getBoolean(TRANSPARENT_ACCELERATION_ENABLED);
 /// boolean cosRangerEnable = cfg.getBoolean(COSRANGER_ENABLED);
@@ -1292,7 +1292,7 @@ impl ConfigRefresher {
     /// Create a new refresher with a custom expiry duration.
     pub fn with_expire(expire_duration: Duration) -> Self {
         // Load the initial config to seed the switch values.
-        let initial = GooseFsConfig::from_properties_auto().unwrap_or_default();
+        let initial = GoosefsConfig::from_properties_auto().unwrap_or_default();
         Self {
             last_load_time: Mutex::new(Some(Instant::now())),
             expire_duration,
@@ -1305,9 +1305,9 @@ impl ConfigRefresher {
 
     /// Create a refresher seeded from an existing config.
     ///
-    /// Useful when the caller already has a `GooseFsConfig` (e.g. from
+    /// Useful when the caller already has a `GoosefsConfig` (e.g. from
     /// `FileSystemContext::connect`).
-    pub fn from_config(config: &GooseFsConfig) -> Self {
+    pub fn from_config(config: &GoosefsConfig) -> Self {
         Self {
             last_load_time: Mutex::new(Some(Instant::now())),
             expire_duration: Duration::from_millis(DEFAULT_CONFIG_EXPIRE_MS),
@@ -1325,7 +1325,7 @@ impl ConfigRefresher {
     /// ```java
     /// boolean refreshTransparentAccelerationSwitch() {
     ///     ConfigurationUtils.loadIfExpire();
-    ///     GooseFSProperties props = ConfigurationUtils.defaults();
+    ///     GoosefsProperties props = ConfigurationUtils.defaults();
     ///     InstancedConfiguration cfg = new InstancedConfiguration(props);
     ///     cfg.validate();
     ///     boolean enable = cfg.getBoolean(TRANSPARENT_ACCELERATION_ENABLED);
@@ -1388,7 +1388,7 @@ impl ConfigRefresher {
 
     /// Re-read the properties file and update the atomic switch flags.
     fn reload_properties(&self) {
-        match GooseFsConfig::from_properties_auto() {
+        match GoosefsConfig::from_properties_auto() {
             Ok(cfg) => {
                 self.transparent_acceleration_enabled
                     .store(cfg.transparent_acceleration_enabled, Ordering::Relaxed);
@@ -1421,7 +1421,7 @@ mod tests {
 
     #[test]
     fn test_default_config() {
-        let config = GooseFsConfig::default();
+        let config = GoosefsConfig::default();
         assert_eq!(config.master_addr, "127.0.0.1:9200");
         assert!(config.master_addrs.is_empty());
         assert_eq!(config.block_size, 64 * 1024 * 1024);
@@ -1432,7 +1432,7 @@ mod tests {
 
     #[test]
     fn test_new_ha_config() {
-        let config = GooseFsConfig::new_ha(vec![
+        let config = GoosefsConfig::new_ha(vec![
             "10.0.0.1:9200".to_string(),
             "10.0.0.2:9200".to_string(),
             "10.0.0.3:9200".to_string(),
@@ -1445,7 +1445,7 @@ mod tests {
 
     #[test]
     fn test_master_addresses_single() {
-        let config = GooseFsConfig::new("10.0.0.1:9200");
+        let config = GoosefsConfig::new("10.0.0.1:9200");
         let addrs = config.master_addresses();
         assert_eq!(addrs, vec!["10.0.0.1:9200"]);
         assert!(!config.is_multi_master());
@@ -1453,7 +1453,7 @@ mod tests {
 
     #[test]
     fn test_master_addresses_multi() {
-        let config = GooseFsConfig::new_ha(vec![
+        let config = GoosefsConfig::new_ha(vec![
             "10.0.0.1:9200".to_string(),
             "10.0.0.2:9200".to_string(),
         ]);
@@ -1465,12 +1465,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "master addresses must not be empty")]
     fn test_new_ha_empty_panics() {
-        GooseFsConfig::new_ha(vec![]);
+        GoosefsConfig::new_ha(vec![]);
     }
 
     #[test]
     fn test_full_path_with_root() {
-        let config = GooseFsConfig {
+        let config = GoosefsConfig {
             root: "/data".to_string(),
             ..Default::default()
         };
@@ -1480,13 +1480,13 @@ mod tests {
 
     #[test]
     fn test_full_path_without_root() {
-        let config = GooseFsConfig::default();
+        let config = GoosefsConfig::default();
         assert_eq!(config.full_path("/file.txt"), "/file.txt");
     }
 
     #[test]
     fn test_validate_empty_master() {
-        let config = GooseFsConfig {
+        let config = GoosefsConfig {
             master_addr: String::new(),
             master_addrs: Vec::new(),
             ..Default::default()
@@ -1496,7 +1496,7 @@ mod tests {
 
     #[test]
     fn test_validate_empty_addr_in_list() {
-        let config = GooseFsConfig {
+        let config = GoosefsConfig {
             master_addr: "10.0.0.1:9200".to_string(),
             master_addrs: vec!["10.0.0.1:9200".to_string(), "".to_string()],
             ..Default::default()
@@ -1506,7 +1506,7 @@ mod tests {
 
     #[test]
     fn test_validate_chunk_larger_than_block() {
-        let config = GooseFsConfig {
+        let config = GoosefsConfig {
             chunk_size: 128 * 1024 * 1024,
             block_size: 64 * 1024 * 1024,
             ..Default::default()
@@ -1516,14 +1516,14 @@ mod tests {
 
     #[test]
     fn test_write_type_default_is_none() {
-        let config = GooseFsConfig::default();
+        let config = GoosefsConfig::default();
         assert!(config.write_type.is_none());
         assert!(config.get_write_type().is_none());
     }
 
     #[test]
     fn test_with_write_type_builder() {
-        let config = GooseFsConfig::new("127.0.0.1:9200").with_write_type(WritePType::CacheThrough);
+        let config = GoosefsConfig::new("127.0.0.1:9200").with_write_type(WritePType::CacheThrough);
         assert_eq!(config.write_type, Some(3));
         assert_eq!(config.get_write_type(), Some(WritePType::CacheThrough));
     }
@@ -1538,7 +1538,7 @@ mod tests {
             (WritePType::AsyncThrough, 5),
         ];
         for (wt, expected_i32) in cases {
-            let config = GooseFsConfig::new("127.0.0.1:9200").with_write_type(wt);
+            let config = GoosefsConfig::new("127.0.0.1:9200").with_write_type(wt);
             assert_eq!(config.write_type, Some(expected_i32));
             assert_eq!(config.get_write_type(), Some(wt));
         }
@@ -1546,7 +1546,7 @@ mod tests {
 
     #[test]
     fn test_write_type_invalid_i32() {
-        let config = GooseFsConfig {
+        let config = GoosefsConfig {
             write_type: Some(999),
             ..Default::default()
         };
@@ -1685,14 +1685,14 @@ mod tests {
     #[test]
     fn test_config_with_write_type_enum() {
         let config =
-            GooseFsConfig::new("127.0.0.1:9200").with_write_type_enum(WriteType::CacheThrough);
+            GoosefsConfig::new("127.0.0.1:9200").with_write_type_enum(WriteType::CacheThrough);
         assert_eq!(config.write_type, Some(3));
         assert_eq!(config.get_write_type(), Some(WritePType::CacheThrough));
     }
 
     #[test]
     fn test_config_with_write_type_str() {
-        let config = GooseFsConfig::new("127.0.0.1:9200")
+        let config = GoosefsConfig::new("127.0.0.1:9200")
             .with_write_type_str("through")
             .unwrap();
         assert_eq!(config.write_type, Some(4));
@@ -1701,7 +1701,7 @@ mod tests {
 
     #[test]
     fn test_config_with_write_type_str_invalid() {
-        let result = GooseFsConfig::new("127.0.0.1:9200").with_write_type_str("bad_value");
+        let result = GoosefsConfig::new("127.0.0.1:9200").with_write_type_str("bad_value");
         assert!(result.is_err());
     }
 
@@ -1725,7 +1725,7 @@ mod tests {
 
     #[test]
     fn test_default_retry_config() {
-        let config = GooseFsConfig::default();
+        let config = GoosefsConfig::default();
         assert_eq!(
             config.master_inquire_retry_max_duration,
             Duration::from_millis(120_000)
@@ -1752,7 +1752,7 @@ goosefs.user.file.writetype.default=CACHE_THROUGH
 goosefs.user.block.size.bytes.default=64MB
 goosefs.user.network.data.transfer.chunk.size=1MB
 ";
-        let cfg = GooseFsConfig::from_properties_str(props);
+        let cfg = GoosefsConfig::from_properties_str(props);
         assert_eq!(cfg.master_addr, "10.0.0.1:9200");
         assert_eq!(cfg.get_write_type(), Some(WritePType::CacheThrough));
         assert_eq!(cfg.block_size, 64 * 1024 * 1024);
@@ -1762,7 +1762,7 @@ goosefs.user.network.data.transfer.chunk.size=1MB
     #[test]
     fn test_from_properties_str_ha_addresses() {
         let props = "goosefs.master.rpc.addresses=10.0.0.1:9200,10.0.0.2:9200,10.0.0.3:9200\n";
-        let cfg = GooseFsConfig::from_properties_str(props);
+        let cfg = GoosefsConfig::from_properties_str(props);
         assert_eq!(cfg.master_addr, "10.0.0.1:9200");
         assert_eq!(cfg.master_addrs.len(), 3);
         assert!(cfg.is_multi_master());
@@ -1771,20 +1771,20 @@ goosefs.user.network.data.transfer.chunk.size=1MB
     #[test]
     fn test_from_properties_str_byte_size_kb() {
         let props = "goosefs.user.network.data.transfer.chunk.size=512KB\n";
-        let cfg = GooseFsConfig::from_properties_str(props);
+        let cfg = GoosefsConfig::from_properties_str(props);
         assert_eq!(cfg.chunk_size, 512 * 1024);
     }
 
     #[test]
     fn test_from_properties_str_byte_size_plain_int() {
         let props = "goosefs.user.block.size.bytes.default=134217728\n";
-        let cfg = GooseFsConfig::from_properties_str(props);
+        let cfg = GoosefsConfig::from_properties_str(props);
         assert_eq!(cfg.block_size, 128 * 1024 * 1024);
     }
 
     #[test]
     fn test_from_properties_str_empty_uses_defaults() {
-        let cfg = GooseFsConfig::from_properties_str("");
+        let cfg = GoosefsConfig::from_properties_str("");
         assert_eq!(cfg.master_addr, "127.0.0.1:9200");
         assert_eq!(cfg.block_size, 64 * 1024 * 1024);
     }
@@ -1798,7 +1798,7 @@ goosefs.master.hostname=10.0.0.1
 #goosefs.master.rpc.port=9999
 goosefs.master.rpc.port=9200
 ";
-        let cfg = GooseFsConfig::from_properties_str(props);
+        let cfg = GoosefsConfig::from_properties_str(props);
         assert_eq!(cfg.master_addr, "10.0.0.1:9200");
     }
 
@@ -1815,7 +1815,7 @@ goosefs.master.rpc.port=9200
     fn test_apply_env_master_addr() {
         // Set env, build from env, unset env
         std::env::set_var("GOOSEFS_MASTER_ADDR", "192.168.1.1:9200");
-        let cfg = GooseFsConfig::default().apply_env();
+        let cfg = GoosefsConfig::default().apply_env();
         std::env::remove_var("GOOSEFS_MASTER_ADDR");
         assert_eq!(cfg.master_addr, "192.168.1.1:9200");
     }
@@ -1823,7 +1823,7 @@ goosefs.master.rpc.port=9200
     #[test]
     fn test_apply_env_ha_addresses() {
         std::env::set_var("GOOSEFS_MASTER_ADDR", "10.0.0.1:9200,10.0.0.2:9200");
-        let cfg = GooseFsConfig::default().apply_env();
+        let cfg = GoosefsConfig::default().apply_env();
         std::env::remove_var("GOOSEFS_MASTER_ADDR");
         assert_eq!(cfg.master_addrs.len(), 2);
         assert_eq!(cfg.master_addr, "10.0.0.1:9200");
@@ -1832,7 +1832,7 @@ goosefs.master.rpc.port=9200
     #[test]
     fn test_apply_env_write_type() {
         std::env::set_var("GOOSEFS_WRITE_TYPE", "THROUGH");
-        let cfg = GooseFsConfig::default().apply_env();
+        let cfg = GoosefsConfig::default().apply_env();
         std::env::remove_var("GOOSEFS_WRITE_TYPE");
         assert_eq!(cfg.get_write_type(), Some(WritePType::Through));
     }
@@ -1840,7 +1840,7 @@ goosefs.master.rpc.port=9200
     #[test]
     fn test_apply_env_block_size() {
         std::env::set_var("GOOSEFS_BLOCK_SIZE", "134217728");
-        let cfg = GooseFsConfig::default().apply_env();
+        let cfg = GoosefsConfig::default().apply_env();
         std::env::remove_var("GOOSEFS_BLOCK_SIZE");
         assert_eq!(cfg.block_size, 128 * 1024 * 1024);
     }
@@ -1849,7 +1849,7 @@ goosefs.master.rpc.port=9200
 
     #[test]
     fn test_default_new_fields() {
-        let cfg = GooseFsConfig::default();
+        let cfg = GoosefsConfig::default();
         assert!(cfg.config_manager_rpc_addresses.is_empty());
         assert_eq!(cfg.config_rpc_port, 9214);
         assert!(cfg.transparent_acceleration_enabled);
@@ -1864,7 +1864,7 @@ goosefs.master.rpc.port=9200
 goosefs.config.manager.rpc.addresses=10.0.0.1:9214,10.0.0.2:9214
 goosefs.config.rpc.port=9300
 ";
-        let cfg = GooseFsConfig::from_properties_str(props);
+        let cfg = GoosefsConfig::from_properties_str(props);
         assert_eq!(cfg.config_manager_rpc_addresses.len(), 2);
         assert_eq!(cfg.config_manager_rpc_addresses[0], "10.0.0.1:9214");
         assert_eq!(cfg.config_rpc_port, 9300);
@@ -1878,7 +1878,7 @@ goosefs.security.authorization.permission.enabled=true
 goosefs.security.login.impersonation.username=_NONE_
 goosefs.security.login.username=testuser
 ";
-        let cfg = GooseFsConfig::from_properties_str(props);
+        let cfg = GoosefsConfig::from_properties_str(props);
         assert!(cfg.authorization_permission_enabled);
         assert_eq!(cfg.login_impersonation_username, "_NONE_");
         assert_eq!(cfg.auth_username, "testuser");
@@ -1890,7 +1890,7 @@ goosefs.security.login.username=testuser
 goosefs.user.client.transparent_acceleration.enabled=false
 goosefs.user.client.transparent_acceleration.cosranger.enabled=true
 ";
-        let cfg = GooseFsConfig::from_properties_str(props);
+        let cfg = GoosefsConfig::from_properties_str(props);
         assert!(!cfg.transparent_acceleration_enabled);
         assert!(cfg.transparent_acceleration_cosranger_enabled);
     }
@@ -1912,7 +1912,7 @@ goosefs.user.file.writetype.default=CACHE_THROUGH
 goosefs.user.block.size.bytes.default=64MB
 goosefs.user.network.data.transfer.chunk.size=1MB
 ";
-        let cfg = GooseFsConfig::from_properties_str(props);
+        let cfg = GoosefsConfig::from_properties_str(props);
         assert_eq!(cfg.master_addr, "10.0.0.1:9200");
         assert_eq!(cfg.config_manager_rpc_addresses, vec!["10.0.0.1:9214"]);
         assert_eq!(cfg.config_rpc_port, 9214);
@@ -1985,7 +1985,7 @@ goosefs.user.network.data.transfer.chunk.size=1MB
 
     #[test]
     fn test_config_refresher_from_config_seeds_initial_values() {
-        let cfg = GooseFsConfig {
+        let cfg = GoosefsConfig {
             transparent_acceleration_enabled: false,
             transparent_acceleration_cosranger_enabled: true,
             ..Default::default()
@@ -2002,7 +2002,7 @@ goosefs.user.network.data.transfer.chunk.size=1MB
     #[test]
     fn test_config_refresher_default_creates_with_default_values() {
         // Default config has transparent_acceleration_enabled=true, cosranger=false
-        let refresher = ConfigRefresher::from_config(&GooseFsConfig::default());
+        let refresher = ConfigRefresher::from_config(&GoosefsConfig::default());
         let sw = refresher.current_switch();
         assert!(
             sw.enabled,
@@ -2018,7 +2018,7 @@ goosefs.user.network.data.transfer.chunk.size=1MB
     fn test_config_refresher_current_switch_is_lock_free() {
         // current_switch() should return the same values as refresh_transparent_acceleration_switch()
         // but without triggering a reload.
-        let cfg = GooseFsConfig {
+        let cfg = GoosefsConfig {
             transparent_acceleration_enabled: true,
             transparent_acceleration_cosranger_enabled: true,
             ..Default::default()
@@ -2041,7 +2041,7 @@ goosefs.user.network.data.transfer.chunk.size=1MB
     #[test]
     fn test_config_refresher_only_refreshes_switch_params() {
         // 1. Create a user config with custom values for non-switch fields.
-        let user_config = GooseFsConfig {
+        let user_config = GoosefsConfig {
             master_addr: "10.0.0.99:9999".to_string(),
             block_size: 128 * 1024 * 1024, // 128MB (non-default)
             chunk_size: 2 * 1024 * 1024,   // 2MB (non-default)
@@ -2079,7 +2079,7 @@ goosefs.user.network.data.transfer.chunk.size=1MB
         );
 
         // 5. Verify the user's original config is completely unaffected.
-        //    The ConfigRefresher does NOT hold a mutable reference to GooseFsConfig,
+        //    The ConfigRefresher does NOT hold a mutable reference to GoosefsConfig,
         //    so user-set fields like master_addr, block_size, etc. are never touched.
         assert_eq!(user_config.master_addr, "10.0.0.99:9999");
         assert_eq!(user_config.block_size, 128 * 1024 * 1024);
@@ -2126,7 +2126,7 @@ goosefs.user.network.data.transfer.chunk.size=1MB
         std::env::set_var(ENV_CONFIG_FILE, props_path.to_str().unwrap());
 
         // 3. Create a user config with custom non-switch values.
-        let user_config = GooseFsConfig {
+        let user_config = GoosefsConfig {
             master_addr: "user-master:9200".to_string(),
             block_size: 256 * 1024 * 1024,
             chunk_size: 4 * 1024 * 1024,
@@ -2166,7 +2166,7 @@ goosefs.user.network.data.transfer.chunk.size=1MB
             "switch.cosranger_enabled should be overridden to true by file config"
         );
 
-        // 7. But the user's GooseFsConfig object is completely untouched.
+        // 7. But the user's GoosefsConfig object is completely untouched.
         //    The refresher never modifies the original config — it only updates
         //    its own internal AtomicBool fields.
         assert_eq!(
@@ -2233,7 +2233,7 @@ goosefs.user.network.data.transfer.chunk.size=1MB
         std::env::remove_var(ENV_TRANSPARENT_ACCELERATION_ENABLED);
         std::env::remove_var(ENV_TRANSPARENT_ACCELERATION_COSRANGER_ENABLED);
 
-        let user_config = GooseFsConfig {
+        let user_config = GoosefsConfig {
             transparent_acceleration_enabled: false,
             transparent_acceleration_cosranger_enabled: true,
             ..Default::default()
@@ -2255,7 +2255,7 @@ goosefs.user.network.data.transfer.chunk.size=1MB
         // the file config (even if it's just defaults) overrides the refresher's
         // cached values on reload.
         //
-        // But the user's GooseFsConfig object remains untouched:
+        // But the user's GoosefsConfig object remains untouched:
         assert!(
             !user_config.transparent_acceleration_enabled,
             "user config object is never modified by refresher"

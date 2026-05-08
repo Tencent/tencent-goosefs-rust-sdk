@@ -1,6 +1,6 @@
-//! `FileSystem` trait — the high-level GooseFS file-system interface.
+//! `FileSystem` trait — the high-level Goosefs file-system interface.
 //!
-//! [`FileSystem`] defines the contract for all GooseFS client implementations.
+//! [`FileSystem`] defines the contract for all Goosefs client implementations.
 //! The primary implementation is [`crate::fs::base_filesystem::BaseFileSystem`].
 //!
 //! # Design decisions
@@ -9,7 +9,7 @@
 //!
 //! Returning `impl Future` from trait methods currently requires nightly Rust
 //! or `async_trait`.  We use `async_trait` (stable) and return
-//! `Box<dyn GooseFsFileInStream>` from `open_file` so the trait is object-safe
+//! `Box<dyn GoosefsFileInStream>` from `open_file` so the trait is object-safe
 //! and usable as `dyn FileSystem`.
 //!
 //! ## `Send + Sync + 'static`
@@ -22,11 +22,11 @@ use async_trait::async_trait;
 use crate::error::Result;
 use crate::fs::options::{CreateFileOptions, DeleteOptions, OpenFileOptions};
 use crate::fs::uri_status::URIStatus;
-use crate::io::GooseFsFileInStream;
+use crate::io::GoosefsFileInStream;
 
-/// High-level GooseFS file-system interface.
+/// High-level Goosefs file-system interface.
 ///
-/// All operations correspond directly to GooseFS Master RPCs.
+/// All operations correspond directly to Goosefs Master RPCs.
 ///
 /// # Thread safety
 ///
@@ -56,7 +56,7 @@ pub trait FileSystem: Send + Sync + 'static {
     /// - [`crate::error::Error::OpenDirectory`] if `path` is a file.
     async fn list_status(&self, path: &str, recursive: bool) -> Result<Vec<URIStatus>>;
 
-    /// Return `true` if a path exists in GooseFS.
+    /// Return `true` if a path exists in Goosefs.
     ///
     /// # Java authority
     ///
@@ -76,14 +76,14 @@ pub trait FileSystem: Send + Sync + 'static {
 
     /// Open a file for reading.
     ///
-    /// Returns a [`GooseFsFileInStream`] positioned at the beginning of the file.
+    /// Returns a [`GoosefsFileInStream`] positioned at the beginning of the file.
     ///
     /// # Errors
     ///
     /// - [`crate::error::Error::FileIncomplete`] if the file is being written.
     /// - [`crate::error::Error::OpenDirectory`] if `path` is a directory.
     /// - [`crate::error::Error::NotFound`] if the path does not exist.
-    async fn open_file(&self, path: &str, options: OpenFileOptions) -> Result<GooseFsFileInStream>;
+    async fn open_file(&self, path: &str, options: OpenFileOptions) -> Result<GoosefsFileInStream>;
 
     // ── File write ───────────────────────────────────────────────────────────
 
@@ -103,7 +103,7 @@ pub trait FileSystem: Send + Sync + 'static {
         &self,
         path: &str,
         options: CreateFileOptions,
-    ) -> Result<crate::io::GooseFsFileWriter>;
+    ) -> Result<crate::io::GoosefsFileWriter>;
 
     // ── Directory operations ─────────────────────────────────────────────────
 

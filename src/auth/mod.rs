@@ -1,6 +1,6 @@
-//! Authentication module — GooseFS gRPC channel authentication support.
+//! Authentication module — Goosefs gRPC channel authentication support.
 //!
-//! The GooseFS server supports multiple authentication methods. After establishing
+//! The Goosefs server supports multiple authentication methods. After establishing
 //! a gRPC channel, the client must complete a SASL handshake via the
 //! `SaslAuthenticationService.authenticate` bidirectional streaming RPC.
 //!

@@ -1,4 +1,4 @@
-//! GooseFS Master gRPC client for file system metadata operations.
+//! Goosefs Master gRPC client for file system metadata operations.
 //!
 //! Wraps `FileSystemMasterClientService` (Master:9200) providing:
 //! - `get_status` — stat / head
@@ -27,7 +27,7 @@ use tracing::{debug, instrument, warn};
 
 use crate::auth::{ChannelAuthenticator, ChannelIdInterceptor, SaslStreamGuard};
 use crate::client::master_inquire::{create_master_inquire_client, MasterInquireClient};
-use crate::config::GooseFsConfig;
+use crate::config::GoosefsConfig;
 use crate::error::{Error, Result};
 use crate::fs::options::DeleteOptions;
 use crate::proto::grpc::file::{
@@ -68,7 +68,7 @@ pub fn default_file_mode() -> PMode {
     }
 }
 
-/// Client for GooseFS `FileSystemMasterClientService` (Master:9200).
+/// Client for Goosefs `FileSystemMasterClientService` (Master:9200).
 ///
 /// In HA mode, the client holds a reference to the [`MasterInquireClient`]
 /// and can automatically re-discover the Primary Master when RPCs fail.
@@ -82,7 +82,7 @@ pub fn default_file_mode() -> PMode {
 #[derive(Clone)]
 pub struct MasterClient {
     inner: Arc<RwLock<AuthenticatedFsClient>>,
-    config: GooseFsConfig,
+    config: GoosefsConfig,
     inquire_client: Arc<dyn MasterInquireClient>,
     /// Keeps the SASL authentication stream alive for the channel's lifetime.
     /// In SIMPLE mode, dropping this would cause the server to unregister the channel.
@@ -90,7 +90,7 @@ pub struct MasterClient {
 }
 
 impl MasterClient {
-    /// Connect to the GooseFS Master.
+    /// Connect to the Goosefs Master.
     ///
     /// In single-master mode, connects directly to `config.master_addr`.
     /// In HA mode (multiple addresses in `config.master_addrs`), uses
@@ -98,7 +98,7 @@ impl MasterClient {
     /// to discover the Primary first.
     ///
     /// Authentication is performed according to `config.auth_type`.
-    pub async fn connect(config: &GooseFsConfig) -> Result<Self> {
+    pub async fn connect(config: &GoosefsConfig) -> Result<Self> {
         let inquire_client = create_master_inquire_client(config);
         Self::connect_with_inquire(config, inquire_client).await
     }
@@ -108,12 +108,12 @@ impl MasterClient {
     /// This is useful when sharing a single inquire client across multiple
     /// client types (e.g. `MasterClient` + `WorkerManagerClient`).
     pub async fn connect_with_inquire(
-        config: &GooseFsConfig,
+        config: &GoosefsConfig,
         inquire_client: Arc<dyn MasterInquireClient>,
     ) -> Result<Self> {
         let primary_addr = inquire_client.get_primary_rpc_address().await?;
         let (client, sasl_guard) = Self::build_authenticated_client(config, &primary_addr).await?;
-        debug!(addr = %primary_addr, auth_type = %config.auth_type, "connected to GooseFS Master");
+        debug!(addr = %primary_addr, auth_type = %config.auth_type, "connected to Goosefs Master");
 
         Ok(Self {
             inner: Arc::new(RwLock::new(client)),
@@ -127,7 +127,7 @@ impl MasterClient {
     ///
     /// **Note**: This bypasses authentication. The channel is wrapped with a
     /// no-op channel-id interceptor for API compatibility.
-    pub fn from_channel(channel: Channel, config: GooseFsConfig) -> Self {
+    pub fn from_channel(channel: Channel, config: GoosefsConfig) -> Self {
         let inquire_client = create_master_inquire_client(&config);
         let interceptor = ChannelIdInterceptor::new("test-no-auth".to_string());
         let intercepted = InterceptedService::new(channel, interceptor);
@@ -144,7 +144,7 @@ impl MasterClient {
     /// Build a gRPC channel and perform authentication, returning an authenticated client
     /// and the SASL stream guard that must be kept alive.
     async fn build_authenticated_client(
-        config: &GooseFsConfig,
+        config: &GoosefsConfig,
         addr: &str,
     ) -> Result<(AuthenticatedFsClient, Option<SaslStreamGuard>)> {
         let channel = Self::build_raw_channel(config, addr).await?;
@@ -167,7 +167,7 @@ impl MasterClient {
     }
 
     /// Build a raw gRPC channel to a specific master address (without authentication).
-    async fn build_raw_channel(config: &GooseFsConfig, addr: &str) -> Result<Channel> {
+    async fn build_raw_channel(config: &GoosefsConfig, addr: &str) -> Result<Channel> {
         let endpoint_uri = format!("http://{}", addr);
         let endpoint = Channel::from_shared(endpoint_uri)
             .map_err(|e| Error::ConfigError {
@@ -196,7 +196,7 @@ impl MasterClient {
         // Replace the old SASL guard (dropping the old one closes the old stream)
         let mut guard = self._sasl_guard.write().await;
         *guard = sasl_guard;
-        debug!(addr = %primary_addr, "reconnected to GooseFS Master after failover");
+        debug!(addr = %primary_addr, "reconnected to Goosefs Master after failover");
         Ok(())
     }
 
@@ -326,7 +326,7 @@ impl MasterClient {
     /// RPC is retried after a network hiccup the Master detects the duplicate
     /// via `FsOpPId` and returns success without applying the operation twice.
     ///
-    /// The caller (`GooseFsFileWriter`) generates a fresh `uuid::Uuid` at
+    /// The caller (`GoosefsFileWriter`) generates a fresh `uuid::Uuid` at
     /// construction time and reuses it across all `complete_file` calls for the
     /// same write session.  The UUID is split into two `i64` halves via
     /// `Uuid::as_u64_pair()`:
@@ -382,7 +382,7 @@ impl MasterClient {
 
     /// Request the Master to free block metadata for the given block IDs.
     ///
-    /// This is the preferred cleanup path for `GooseFsFileWriter::cancel()`:
+    /// This is the preferred cleanup path for `GoosefsFileWriter::cancel()`:
     /// it removes only the block metadata on the Master without touching the
     /// file-system namespace entry (the INCOMPLETE inode).
     ///
@@ -482,7 +482,7 @@ impl MasterClient {
     /// Create a directory (recursive by default).
     ///
     /// Sets a default mode of `0755` (rwxr-xr-x) so that the corresponding
-    /// UFS directory created by GooseFS has usable permissions.
+    /// UFS directory created by Goosefs has usable permissions.
     #[instrument(skip(self), fields(path = %path))]
     pub async fn create_directory(&self, path: &str, recursive: bool) -> Result<()> {
         let path = path.to_string();
@@ -532,7 +532,7 @@ impl MasterClient {
     }
 
     /// Get a reference to the underlying config.
-    pub fn config(&self) -> &GooseFsConfig {
+    pub fn config(&self) -> &GoosefsConfig {
         &self.config
     }
 

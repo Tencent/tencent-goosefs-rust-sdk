@@ -1,4 +1,4 @@
-//! Options structs for GooseFS file-system operations.
+//! Options structs for Goosefs file-system operations.
 //!
 //! These types are the Rust-native layer that sits in front of the raw proto
 //! options (`DeletePOptions`, etc.) and are exposed in the public API.
@@ -25,7 +25,7 @@ use crate::fs::write_type::WriteTypeXAttr;
 /// Verified against `alluxio.grpc.ReadPType` enum in the proto.  The Java
 /// proto defines exactly **two** values: `NO_CACHE = 1`, `CACHE = 2`.
 /// The Go SDK also defines `ReadTypeCachePromote` (=2 in Go) but that maps to
-/// a *different* Java proto value that is **not** exposed by GooseFS.
+/// a *different* Java proto value that is **not** exposed by Goosefs.
 /// We only expose `NoCache` and `Cache`.
 ///
 /// | Variant   | Proto value | Description                                  |
@@ -66,7 +66,7 @@ impl ReadType {
 
 /// Options controlling how an open file stream reads data.
 ///
-/// Passed to [`crate::io::GooseFsFileInStream`] via
+/// Passed to [`crate::io::GoosefsFileInStream`] via
 /// [`OpenFileOptions`].
 ///
 /// # Defaults (match Java client defaults)
@@ -86,7 +86,7 @@ pub struct InStreamOptions {
     /// which tells the Worker to skip prefetching and serve the request
     /// directly from UFS or cache without eviction.
     ///
-    /// Set automatically by `GooseFsFileInStream` when choosing the
+    /// Set automatically by `GoosefsFileInStream` when choosing the
     /// positioned-read path.
     pub position_short: bool,
 
@@ -134,7 +134,7 @@ impl InStreamOptions {
 // OpenFileOptions
 // ---------------------------------------------------------------------------
 
-/// Options for opening a GooseFS file for reading.
+/// Options for opening a Goosefs file for reading.
 ///
 /// # Example
 ///
@@ -173,7 +173,7 @@ impl OpenFileOptions {
 // CreateFileOptions
 // ---------------------------------------------------------------------------
 
-/// Options for creating a new GooseFS file.
+/// Options for creating a new Goosefs file.
 ///
 /// # WriteType inheritance
 ///
@@ -230,10 +230,10 @@ impl CreateFileOptions {
 /// - `unchecked`    — skip the "directory must be empty" check and also allow
 ///   deletion of **INCOMPLETE** files (files still being written).  Required
 ///   for `cancel()` to clean up an in-progress write.
-/// - `goosefs_only` — remove the path only from the GooseFS namespace; do NOT
+/// - `goosefs_only` — remove the path only from the Goosefs namespace; do NOT
 ///   propagate the delete to the underlying UFS.  Used in CACHE_THROUGH error
 ///   recovery: when `completeFile` fails after UFS `close` succeeded, we
-///   must remove the GooseFS-side metadata without touching the already-written
+///   must remove the Goosefs-side metadata without touching the already-written
 ///   UFS file.
 ///
 /// # Note on Go SDK gap
@@ -248,10 +248,10 @@ pub struct DeleteOptions {
     pub recursive: bool,
 
     /// Skip safety checks (empty-directory enforcement) and allow deleting
-    /// files in INCOMPLETE state.  Needed by `GooseFsFileWriter::cancel()`.
+    /// files in INCOMPLETE state.  Needed by `GoosefsFileWriter::cancel()`.
     pub unchecked: bool,
 
-    /// Restrict deletion to the GooseFS namespace only; do not propagate to
+    /// Restrict deletion to the Goosefs namespace only; do not propagate to
     /// the underlying storage (UFS).  Used during CACHE_THROUGH error recovery.
     pub goosefs_only: bool,
 }
@@ -280,7 +280,7 @@ impl DeleteOptions {
     /// Create options for CACHE_THROUGH error recovery.
     ///
     /// After UFS `close()` succeeds but `completeFile` fails, the caller must
-    /// remove the GooseFS metadata entry without deleting the already-written
+    /// remove the Goosefs metadata entry without deleting the already-written
     /// UFS file.
     pub fn goosefs_only_unchecked() -> Self {
         Self {

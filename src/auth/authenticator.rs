@@ -36,7 +36,7 @@ use super::sasl_client::{PlainSaslClientHandler, SaslClientHandler};
 
 // ── AuthType enum ────────────────────────────────────────────
 
-/// GooseFS authentication type.
+/// Goosefs authentication type.
 ///
 /// Corresponds to Java's `AuthType` enum and the configuration key
 /// `goosefs.security.authentication.type`.

@@ -1,6 +1,6 @@
 //! `WriteType` xattr key and inheritance helpers.
 //!
-//! GooseFS supports a per-directory extended attribute
+//! Goosefs supports a per-directory extended attribute
 //! `"innerWriteType"` (key: [`WRITE_TYPE_XATTR_KEY`]) that encodes the
 //! preferred write strategy for files created under that directory.
 //!

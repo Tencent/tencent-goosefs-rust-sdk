@@ -1,4 +1,4 @@
-//! GooseFS filesystem abstractions.
+//! Goosefs filesystem abstractions.
 //!
 //! This module houses all high-level filesystem types:
 //! - [`options`]          — options structs for file-system operations.

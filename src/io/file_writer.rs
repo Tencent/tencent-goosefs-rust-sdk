@@ -1,10 +1,10 @@
 //! High-level file writer that orchestrates the complete write pipeline.
 //!
-//! `GooseFsFileWriter` ties together all low-level components into a single
-//! easy-to-use API, analogous to Java's `GooseFSFileOutStream`:
+//! `GoosefsFileWriter` ties together all low-level components into a single
+//! easy-to-use API, analogous to Java's `GoosefsFileOutStream`:
 //!
 //! ```text
-//! GooseFsFileWriter::create_with_context(ctx, path, opts)
+//! GoosefsFileWriter::create_with_context(ctx, path, opts)
 //!   → MasterClient.create_file()
 //!   → BlockMapper.plan_write()
 //!   → for each block:
@@ -18,19 +18,19 @@
 //!
 //! ```rust,no_run
 //! use std::sync::Arc;
-//! use goosefs_sdk::io::GooseFsFileWriter;
+//! use goosefs_sdk::io::GoosefsFileWriter;
 //! use goosefs_sdk::context::FileSystemContext;
-//! use goosefs_sdk::config::GooseFsConfig;
+//! use goosefs_sdk::config::GoosefsConfig;
 //!
 //! # async fn example() -> goosefs_sdk::error::Result<()> {
-//! let ctx = FileSystemContext::connect(GooseFsConfig::new("127.0.0.1:9200")).await?;
-//! let data = b"Hello, GooseFS!";
+//! let ctx = FileSystemContext::connect(GoosefsConfig::new("127.0.0.1:9200")).await?;
+//! let data = b"Hello, Goosefs!";
 //!
 //! // One-shot write (zero new connections)
-//! GooseFsFileWriter::write_file_with_context(ctx.clone(), "/my-file.txt", data).await?;
+//! GoosefsFileWriter::write_file_with_context(ctx.clone(), "/my-file.txt", data).await?;
 //!
 //! // Or use the builder for more control
-//! let mut writer = GooseFsFileWriter::create_with_context(ctx.clone(), "/my-file.txt", None).await?;
+//! let mut writer = GoosefsFileWriter::create_with_context(ctx.clone(), "/my-file.txt", None).await?;
 //! writer.write(data).await?;
 //! writer.close().await?;
 //! # Ok(())
@@ -48,7 +48,7 @@ use crate::block::router::WorkerRouter;
 use crate::client::master::default_file_mode;
 use crate::client::worker::{WorkerClientPool, WriteBlockOptions};
 use crate::client::MasterClient;
-use crate::config::GooseFsConfig;
+use crate::config::GoosefsConfig;
 use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
 use crate::fs::options::DeleteOptions;
@@ -60,7 +60,7 @@ use crate::proto::proto::dataserver::CreateUfsFileOptions;
 /// Write strategy derived from the effective `WritePType`.
 ///
 /// Unlike the old single-stream design, CACHE_THROUGH must drive **two
-/// independent streams in parallel** (matching Java `GooseFSFileOutStream`):
+/// independent streams in parallel** (matching Java `GoosefsFileOutStream`):
 /// - a cache stream, sliced by block boundaries (`RequestType::GoosefsBlock`);
 /// - a UFS stream, a single long-lived stream for the entire file
 ///   (`RequestType::UfsFile`, `block_id = -1`, `length = i64::MAX`).
@@ -133,7 +133,7 @@ fn resolve_write_strategy(write_type: Option<i32>, file_info: &FileInfo) -> Writ
     }
 }
 
-/// Convert a [`Uuid`] to the `FsOpPId` proto message expected by GooseFS Master.
+/// Convert a [`Uuid`] to the `FsOpPId` proto message expected by Goosefs Master.
 ///
 /// # Java authority
 ///
@@ -155,7 +155,7 @@ fn uuid_to_fs_op_pid(id: Uuid) -> FsOpPId {
     }
 }
 
-/// High-level file writer that orchestrates the full GooseFS write pipeline.
+/// High-level file writer that orchestrates the full Goosefs write pipeline.
 ///
 /// This struct encapsulates the complete write flow:
 /// 1. `CreateFile` on Master to register the new file
@@ -173,11 +173,11 @@ fn uuid_to_fs_op_pid(id: Uuid) -> FsOpPId {
 /// - `closed`: CAS-locked by `close()` to prevent concurrent/duplicate closes.
 ///   Once `closed` is `true` the writer is terminal.
 ///
-/// This mirrors Java `GooseFSFileOutStream.mCanceled` + `mClosed` and avoids
+/// This mirrors Java `GoosefsFileOutStream.mCanceled` + `mClosed` and avoids
 /// the ambiguity of the previous single-bool design.
-pub struct GooseFsFileWriter {
-    /// The GooseFS config.
-    config: GooseFsConfig,
+pub struct GoosefsFileWriter {
+    /// The Goosefs config.
+    config: GoosefsConfig,
     /// The file path being written.
     path: String,
     /// Master client for metadata operations.
@@ -233,11 +233,11 @@ pub struct GooseFsFileWriter {
     ///
     /// Used during CACHE_THROUGH error recovery in `handle_complete_file_error`:
     /// if UFS close succeeded but `completeFile` failed, we must clean up the
-    /// GooseFS-side metadata entry only (not the UFS file).
+    /// Goosefs-side metadata entry only (not the UFS file).
     ufs_stream_completed: AtomicBool,
 }
 
-impl GooseFsFileWriter {
+impl GoosefsFileWriter {
     /// Create a new file using a shared [`FileSystemContext`].
     ///
     /// Reuses the persistent Master connection, worker router, and connection
@@ -247,7 +247,7 @@ impl GooseFsFileWriter {
     ///
     /// # Arguments
     /// - `ctx` — Shared context created with `FileSystemContext::connect()`
-    /// - `path` — File path in GooseFS namespace
+    /// - `path` — File path in Goosefs namespace
     /// - `options` — Optional `CreateFilePOptions` (block size, write type, etc.)
     pub async fn create_with_context(
         ctx: Arc<FileSystemContext>,
@@ -341,7 +341,7 @@ impl GooseFsFileWriter {
     /// Write data to the file.
     ///
     /// Depending on the resolved `WriteStrategy`, data is fanned out to one or
-    /// both of the following streams — matching Java `GooseFSFileOutStream.writeInternal`:
+    /// both of the following streams — matching Java `GoosefsFileOutStream.writeInternal`:
     ///
     /// - **cache stream** (`cache_stream = true`): chunk-level streaming, sliced
     ///   by block boundaries. Matches Java's `BlockOutStream.write()` →
@@ -385,7 +385,7 @@ impl GooseFsFileWriter {
     ///
     /// # Java authority
     ///
-    /// Mirrors `GooseFSFileOutStream.flush()` which calls
+    /// Mirrors `GoosefsFileOutStream.flush()` which calls
     /// `mCurrentBlockOutStream.flush()` if one is active.
     pub async fn flush(&mut self) -> Result<()> {
         if self.cancelled.load(Ordering::SeqCst) || self.closed.load(Ordering::SeqCst) {
@@ -480,7 +480,7 @@ impl GooseFsFileWriter {
 
     /// Open the next **cache** block writer.
     ///
-    /// Matches Java's `GooseFSFileOutStream.getNextBlock()`:
+    /// Matches Java's `GoosefsFileOutStream.getNextBlock()`:
     /// - Close the current block if any
     /// - Compute the next block ID
     /// - Select a worker via consistent hashing (excluding failed workers)
@@ -665,7 +665,7 @@ impl GooseFsFileWriter {
 
     /// Handle a cache write exception.
     ///
-    /// Matches Java's `GooseFSFileOutStream.handleCacheWriteException()`:
+    /// Matches Java's `GoosefsFileOutStream.handleCacheWriteException()`:
     /// - Cancel the current block stream
     /// - Mark the worker as failed
     /// - Return the error (caller decides whether to retry or propagate)
@@ -673,7 +673,7 @@ impl GooseFsFileWriter {
         warn!(
             path = %self.path,
             error = %err,
-            "failed to write to GooseFS cache, cancelling block"
+            "failed to write to Goosefs cache, cancelling block"
         );
 
         // Cancel the current block writer
@@ -747,7 +747,7 @@ impl GooseFsFileWriter {
     ///
     /// # Java authority
     ///
-    /// Matches `GooseFSFileOutStream.cancel()`:
+    /// Matches `GoosefsFileOutStream.cancel()`:
     /// 1. Cancel all in-flight streams (UFS + cache block).
     /// 2. Call `fileSystemMasterClient.removeBlocks(mPreviousCommittedBlockIds)`.
     /// 3. If `removeBlocks` fails, fall back to `delete(path, unchecked=true)`.
@@ -837,18 +837,18 @@ impl GooseFsFileWriter {
     /// the Master then fails (e.g. a Master failover or transient network
     /// error).  In this situation we must:
     ///
-    /// 1. Delete the GooseFS metadata entry (`goosefs_only=true, unchecked=true`)
+    /// 1. Delete the Goosefs metadata entry (`goosefs_only=true, unchecked=true`)
     ///    so the incomplete inode is cleaned up.
     /// 2. **Not** touch the UFS file — it was written successfully and serves
     ///    as the source of truth.
     ///
     /// # Java authority (T2-C)
     ///
-    /// Matches the catch block in `GooseFSFileOutStream.close()`:
+    /// Matches the catch block in `GoosefsFileOutStream.close()`:
     /// ```java
     /// } catch (Exception e) {
     ///     if (ufsSucceeded) {
-    ///         // UFS file is OK; remove the GooseFS entry only.
+    ///         // UFS file is OK; remove the Goosefs entry only.
     ///         mFileSystem.delete(mUri,
     ///             DeleteOptions.defaults().setGoosefsOnly(true).setUnchecked(true));
     ///         // Reload so the next open() sees the UFS file via listStatus(ALWAYS).
@@ -867,7 +867,7 @@ impl GooseFsFileWriter {
                 path = %self.path,
                 error = %err,
                 "completeFile failed after UFS close succeeded; \
-                 removing GooseFS-only metadata entry (goosefs_only=true, unchecked=true)"
+                 removing Goosefs-only metadata entry (goosefs_only=true, unchecked=true)"
             );
             if let Err(del_err) = self
                 .master
@@ -877,7 +877,7 @@ impl GooseFsFileWriter {
                 warn!(
                     path = %self.path,
                     error = %del_err,
-                    "failed to clean up GooseFS metadata after completeFile failure — \
+                    "failed to clean up Goosefs metadata after completeFile failure — \
                      manual cleanup may be required"
                 );
             }
@@ -895,7 +895,7 @@ impl GooseFsFileWriter {
     /// the file as fully written. After calling `close()`, the writer cannot
     /// be used again.
     ///
-    /// Matches Java's `GooseFSFileOutStream.close()` — note the order:
+    /// Matches Java's `GoosefsFileOutStream.close()` — note the order:
     /// 1. close UFS stream (flush + close, triggers Worker-side `OutputStream.close()`);
     /// 2. close current cache block (flush + commitBlock);
     /// 3. `completeFile(path, ufsLength, operationId)` on Master;
@@ -974,7 +974,7 @@ impl GooseFsFileWriter {
             .complete_file(&self.path, ufs_length, Some(op_id))
             .await
         {
-            // T2-C: CACHE_THROUGH error recovery — clean up GooseFS-only if UFS succeeded.
+            // T2-C: CACHE_THROUGH error recovery — clean up Goosefs-only if UFS succeeded.
             let e = self.handle_complete_file_error(e).await;
             return Err(e);
         }
@@ -1013,7 +1013,7 @@ impl GooseFsFileWriter {
     ///
     /// # Arguments
     /// - `ctx` — Shared context created with `FileSystemContext::connect()`
-    /// - `path` — File path in GooseFS namespace
+    /// - `path` — File path in Goosefs namespace
     /// - `data` — Bytes to write
     ///
     /// # Returns
@@ -1024,12 +1024,12 @@ impl GooseFsFileWriter {
     /// ```rust,no_run
     /// use std::sync::Arc;
     /// use goosefs_sdk::context::FileSystemContext;
-    /// use goosefs_sdk::config::GooseFsConfig;
-    /// use goosefs_sdk::io::GooseFsFileWriter;
+    /// use goosefs_sdk::config::GoosefsConfig;
+    /// use goosefs_sdk::io::GoosefsFileWriter;
     ///
     /// # async fn example() -> goosefs_sdk::error::Result<()> {
-    /// let ctx = FileSystemContext::connect(GooseFsConfig::new("127.0.0.1:9200")).await?;
-    /// GooseFsFileWriter::write_file_with_context(ctx, "/my-file.txt", b"Hello!").await?;
+    /// let ctx = FileSystemContext::connect(GoosefsConfig::new("127.0.0.1:9200")).await?;
+    /// GoosefsFileWriter::write_file_with_context(ctx, "/my-file.txt", b"Hello!").await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -1048,7 +1048,7 @@ impl GooseFsFileWriter {
     ///
     /// # Arguments
     /// - `ctx` — Shared context created with `FileSystemContext::connect()`
-    /// - `path` — File path in GooseFS namespace
+    /// - `path` — File path in Goosefs namespace
     /// - `data` — Bytes to write
     /// - `options` — Optional `CreateFilePOptions`
     pub async fn write_file_with_context_and_options(
@@ -1091,7 +1091,7 @@ impl GooseFsFileWriter {
 
 /// Compute a deterministic block ID from file ID (inode ID) and block index.
 ///
-/// GooseFS uses a scheme where block IDs are derived from the file's inode ID:
+/// Goosefs uses a scheme where block IDs are derived from the file's inode ID:
 ///
 /// ```text
 /// Block ID layout (64 bits):
@@ -1143,7 +1143,7 @@ impl ActiveBlockWriter {
     }
 }
 
-impl Drop for GooseFsFileWriter {
+impl Drop for GoosefsFileWriter {
     fn drop(&mut self) {
         let is_closed = self.closed.load(Ordering::SeqCst);
         let is_cancelled = self.cancelled.load(Ordering::SeqCst);
@@ -1152,7 +1152,7 @@ impl Drop for GooseFsFileWriter {
                 path = %self.path,
                 bytes_written = self.total_bytes_written,
                 committed_blocks = self.committed_block_ids.len(),
-                "GooseFsFileWriter dropped without calling close() or cancel() — file may be incomplete"
+                "GoosefsFileWriter dropped without calling close() or cancel() — file may be incomplete"
             );
         }
     }
@@ -1164,10 +1164,10 @@ mod tests {
 
     #[test]
     fn test_compute_block_id() {
-        // GooseFS inode IDs have the container ID in the upper 40 bits.
+        // Goosefs inode IDs have the container ID in the upper 40 bits.
         // For inode_id = 33554431 (0x1FFFFFF), container_id = 33554431 >> 24 = 1
         // block_id = (1 << 24) | 0 = 16777216
-        let inode_id = 33554431i64; // typical GooseFS inode ID
+        let inode_id = 33554431i64; // typical Goosefs inode ID
         assert_eq!(compute_block_id(inode_id, 0), 1 << 24);
         assert_eq!(compute_block_id(inode_id, 1), (1 << 24) | 1);
 

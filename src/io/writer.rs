@@ -1,6 +1,6 @@
 //! gRPC streaming block writer.
 //!
-//! Implements the GooseFS bidirectional streaming write protocol:
+//! Implements the Goosefs bidirectional streaming write protocol:
 //!
 //! ```text
 //! 1. Master: CreateFile(path, blockSizeBytes, writeType) → FileInfo
@@ -13,7 +13,7 @@
 //! 3. Master: CompleteFile(path)
 //! ```
 //!
-//! ## GooseFS Write Protocol Detail
+//! ## Goosefs Write Protocol Detail
 //!
 //! The Worker's `WriteBlock` RPC is bidirectional streaming, but the server
 //! does **not** send HTTP/2 response headers immediately. Response headers
@@ -34,7 +34,7 @@ use crate::client::WorkerClient;
 use crate::error::{Error, Result};
 use crate::proto::grpc::block::{write_request, Chunk, WriteRequest, WriteRequestCommand};
 
-/// A streaming writer for a single GooseFS block.
+/// A streaming writer for a single Goosefs block.
 ///
 /// Wraps a [`WriteBlockHandle`] that manages the background gRPC call.
 /// The initial `WriteRequestCommand` is sent during `open()`.

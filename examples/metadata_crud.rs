@@ -21,15 +21,15 @@
 //!   cargo run --example metadata_crud
 
 use goosefs_sdk::client::MasterClient;
-use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::config::GoosefsConfig;
 use goosefs_sdk::error::Result;
 use goosefs_sdk::proto::grpc::file::CreateFilePOptions;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Connect to GooseFS Master
-    println!("Connecting to GooseFS Master...");
-    let config = GooseFsConfig::new("127.0.0.1:9200");
+    // Connect to Goosefs Master
+    println!("Connecting to Goosefs Master...");
+    let config = GoosefsConfig::new("127.0.0.1:9200");
     let master = MasterClient::connect(&config).await?;
     println!("Connected!");
 
@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
 
     // Write file content
     println!("\n3. Writing file content...");
-    let content = "Hello, GooseFS! This is a test file.\nWelcome to GooseFS Rust Client!\nTimestamp: 2026-03-26 18:06:32";
+    let content = "Hello, Goosefs! This is a test file.\nWelcome to Goosefs Rust Client!\nTimestamp: 2026-03-26 18:06:32";
     // File write logic needs to be implemented; the current API may not support direct writes
     println!("Content: {}", content);
     println!("Note: the current API may require writing via the Worker client");

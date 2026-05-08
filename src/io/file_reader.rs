@@ -1,10 +1,10 @@
 //! High-level file reader that orchestrates the complete read pipeline.
 //!
-//! `GooseFsFileReader` ties together all low-level components into a single
-//! easy-to-use API, analogous to Java's `GooseFSFileInStream`:
+//! `GoosefsFileReader` ties together all low-level components into a single
+//! easy-to-use API, analogous to Java's `GoosefsFileInStream`:
 //!
 //! ```text
-//! GooseFsFileReader::open_with_context(ctx, path)
+//! GoosefsFileReader::open_with_context(ctx, path)
 //!   → MasterClient.get_status()          — get file metadata + block IDs
 //!   → BlockMapper.plan_read()            — split file range → block segments
 //!   → for each block segment:
@@ -19,22 +19,22 @@
 //!
 //! ```rust,no_run
 //! use std::sync::Arc;
-//! use goosefs_sdk::io::GooseFsFileReader;
+//! use goosefs_sdk::io::GoosefsFileReader;
 //! use goosefs_sdk::context::FileSystemContext;
-//! use goosefs_sdk::config::GooseFsConfig;
+//! use goosefs_sdk::config::GoosefsConfig;
 //!
 //! # async fn example() -> goosefs_sdk::error::Result<()> {
-//! let ctx = FileSystemContext::connect(GooseFsConfig::new("127.0.0.1:9200")).await?;
+//! let ctx = FileSystemContext::connect(GoosefsConfig::new("127.0.0.1:9200")).await?;
 //!
 //! // Read entire file
-//! let data = GooseFsFileReader::read_file_with_context(ctx.clone(), "/my-file.txt").await?;
+//! let data = GoosefsFileReader::read_file_with_context(ctx.clone(), "/my-file.txt").await?;
 //! println!("read {} bytes", data.len());
 //!
 //! // Range read (offset=100, length=500)
-//! let data = GooseFsFileReader::read_range_with_context(ctx.clone(), "/my-file.txt", 100, 500).await?;
+//! let data = GoosefsFileReader::read_range_with_context(ctx.clone(), "/my-file.txt", 100, 500).await?;
 //!
 //! // Or use the builder for streaming reads
-//! let mut reader = GooseFsFileReader::open_with_context(ctx.clone(), "/my-file.txt").await?;
+//! let mut reader = GoosefsFileReader::open_with_context(ctx.clone(), "/my-file.txt").await?;
 //! while let Some(chunk) = reader.read_next_block().await? {
 //!     println!("got {} bytes from block", chunk.len());
 //! }
@@ -51,14 +51,14 @@ use crate::block::mapper::{BlockMapper, BlockReadPlan};
 use crate::block::router::WorkerRouter;
 use crate::client::worker::WorkerClientPool;
 use crate::client::WorkerClient;
-use crate::config::GooseFsConfig;
+use crate::config::GoosefsConfig;
 use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
 use crate::io::reader::GrpcBlockReader;
 use crate::proto::grpc::file::FileInfo;
 use crate::proto::proto::dataserver::OpenUfsBlockOptions;
 
-/// High-level file reader that orchestrates the full GooseFS read pipeline.
+/// High-level file reader that orchestrates the full Goosefs read pipeline.
 ///
 /// This struct encapsulates the complete read flow:
 /// 1. `GetStatus` on Master to obtain file metadata (block IDs, block size, length)
@@ -66,9 +66,9 @@ use crate::proto::proto::dataserver::OpenUfsBlockOptions;
 /// 3. Plan the read via `BlockMapper` (map file range → block segments)
 /// 4. For each block: select worker → connect → stream-read via `GrpcBlockReader`
 /// 5. Concatenate results
-pub struct GooseFsFileReader {
-    /// The GooseFS config.
-    config: GooseFsConfig,
+pub struct GoosefsFileReader {
+    /// The Goosefs config.
+    config: GoosefsConfig,
     /// The file path being read.
     path: String,
     /// File info from Master (contains block IDs, block size, length).
@@ -97,7 +97,7 @@ pub struct GooseFsFileReader {
     length: u64,
 }
 
-impl GooseFsFileReader {
+impl GoosefsFileReader {
     /// Open a file for reading using a shared [`FileSystemContext`].
     ///
     /// Reuses the Master client, worker-list snapshot and worker-connection
@@ -150,7 +150,7 @@ impl GooseFsFileReader {
     /// the shared router — **no new RPC connections**.
     ///
     /// This is the context-aware analogue of [`Self::init`]. It mirrors the
-    /// pattern used by `GooseFsFileWriter::create_with_context`: a local
+    /// pattern used by `GoosefsFileWriter::create_with_context`: a local
     /// `WorkerRouter` is created and seeded from the shared router's current
     /// snapshot, so per-read failure marking stays local and does not pollute
     /// the long-lived context-level routing state.
@@ -198,7 +198,7 @@ impl GooseFsFileReader {
     /// Internal: build the reader from file info and router.
     #[allow(clippy::too_many_arguments)]
     fn build(
-        config: &GooseFsConfig,
+        config: &GoosefsConfig,
         path: &str,
         file_info: FileInfo,
         router: WorkerRouter,
@@ -568,13 +568,13 @@ impl GooseFsFileReader {
     /// ```rust,no_run
     /// # async fn example() -> goosefs_sdk::error::Result<()> {
     /// use std::sync::Arc;
-    /// use goosefs_sdk::io::GooseFsFileReader;
-    /// use goosefs_sdk::config::GooseFsConfig;
+    /// use goosefs_sdk::io::GoosefsFileReader;
+    /// use goosefs_sdk::config::GoosefsConfig;
     /// use goosefs_sdk::context::FileSystemContext;
     ///
-    /// let config = GooseFsConfig::new("127.0.0.1:9200");
+    /// let config = GoosefsConfig::new("127.0.0.1:9200");
     /// let ctx = FileSystemContext::connect(config).await?;
-    /// let data = GooseFsFileReader::read_file_with_context(ctx, "/my-file.txt").await?;
+    /// let data = GoosefsFileReader::read_file_with_context(ctx, "/my-file.txt").await?;
     /// # Ok(())
     /// # }
     /// ```

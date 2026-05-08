@@ -1,12 +1,12 @@
-//! High-level file write and read example using `GooseFsFileWriter` / `GooseFsFileReader`.
+//! High-level file write and read example using `GoosefsFileWriter` / `GoosefsFileReader`.
 //!
 //! This example demonstrates the **recommended** high-level API:
 //! 1. Create a `FileSystemContext` once (the only call that does TCP+SASL)
-//! 2. One-shot write via `GooseFsFileWriter::write_file_with_context()`
-//! 3. Full-file read via `GooseFsFileReader::read_file_with_context()`
-//! 4. Range read via `GooseFsFileReader::read_range_with_context()`
-//! 5. Streaming block-by-block read via `GooseFsFileReader::open_with_context()` + `read_next_block()`
-//! 6. Builder-pattern multi-chunk write via `GooseFsFileWriter::create_with_context()` + `write()` + `close()`
+//! 2. One-shot write via `GoosefsFileWriter::write_file_with_context()`
+//! 3. Full-file read via `GoosefsFileReader::read_file_with_context()`
+//! 4. Range read via `GoosefsFileReader::read_range_with_context()`
+//! 5. Streaming block-by-block read via `GoosefsFileReader::open_with_context()` + `read_next_block()`
+//! 6. Builder-pattern multi-chunk write via `GoosefsFileWriter::create_with_context()` + `write()` + `close()`
 //! 7. Write with `CACHE_THROUGH` mode for durable persistence
 //!
 //! WriteType controls where data is physically persisted:
@@ -23,21 +23,21 @@
 
 use std::sync::Arc;
 
-use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::config::GoosefsConfig;
 use goosefs_sdk::context::FileSystemContext;
 use goosefs_sdk::error::Result;
-use goosefs_sdk::io::{GooseFsFileReader, GooseFsFileWriter};
+use goosefs_sdk::io::{GoosefsFileReader, GoosefsFileWriter};
 use goosefs_sdk::proto::grpc::file::CreateFilePOptions;
 use goosefs_sdk::WritePType;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("GooseFS End-to-End File Read/Write Demo (High-level API)");
+    println!("Goosefs End-to-End File Read/Write Demo (High-level API)");
     println!("========================================================");
 
     // ── Step 0: Build FileSystemContext (the ONLY network I/O) ───
     println!("\n0. Creating FileSystemContext (one-time TCP+SASL handshake)...");
-    let config = GooseFsConfig::new("127.0.0.1:9200");
+    let config = GoosefsConfig::new("127.0.0.1:9200");
     let ctx: Arc<FileSystemContext> = FileSystemContext::connect(config).await?;
     println!("  ✅ Context created — Master + WorkerManager connected");
 
@@ -57,12 +57,12 @@ async fn main() -> Result<()> {
 
     // ── Step 1: One-shot write ───────────────────────────────────
     println!("\n1. Writing file /e2e-test/hello.txt ...");
-    let content = "Hello, GooseFS! This file was written via the high-level API.\n\
-                   Line 2: GooseFS Rust Client end-to-end test.\n\
+    let content = "Hello, Goosefs! This file was written via the high-level API.\n\
+                   Line 2: Goosefs Rust Client end-to-end test.\n\
                    Line 3: Supports auto-chunking, consistent-hash routing, gRPC streaming write.\n\
                    Line 4: CompleteFile is called automatically after writing.";
 
-    let bytes_written = GooseFsFileWriter::write_file_with_context(
+    let bytes_written = GoosefsFileWriter::write_file_with_context(
         ctx.clone(),
         "/e2e-test/hello.txt",
         content.as_bytes(),
@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
     // ── Step 2: Read the file back ───────────────────────────────
     println!("\n2. Reading file /e2e-test/hello.txt ...");
     let data =
-        GooseFsFileReader::read_file_with_context(ctx.clone(), "/e2e-test/hello.txt").await?;
+        GoosefsFileReader::read_file_with_context(ctx.clone(), "/e2e-test/hello.txt").await?;
     let read_content = String::from_utf8_lossy(&data);
     println!("  ✅ Read complete: {} bytes", data.len());
     println!("  Content:\n  ---");
@@ -97,7 +97,7 @@ async fn main() -> Result<()> {
     // ── Step 3: Range read ───────────────────────────────────────
     println!("\n3. Range read (offset=0, length=20) ...");
     let range_data =
-        GooseFsFileReader::read_range_with_context(ctx.clone(), "/e2e-test/hello.txt", 0, 20)
+        GoosefsFileReader::read_range_with_context(ctx.clone(), "/e2e-test/hello.txt", 0, 20)
             .await?;
     println!("  ✅ Range read complete: {} bytes", range_data.len());
     println!("  Content: {:?}", String::from_utf8_lossy(&range_data));
@@ -105,7 +105,7 @@ async fn main() -> Result<()> {
     // ── Step 4: Streaming read ───────────────────────────────────
     println!("\n4. Streaming block-by-block read...");
     let mut reader =
-        GooseFsFileReader::open_with_context(ctx.clone(), "/e2e-test/hello.txt").await?;
+        GoosefsFileReader::open_with_context(ctx.clone(), "/e2e-test/hello.txt").await?;
     println!(
         "  File length: {} bytes, blocks: {}",
         reader.file_length(),
@@ -131,7 +131,7 @@ async fn main() -> Result<()> {
     }
 
     let mut writer =
-        GooseFsFileWriter::create_with_context(ctx.clone(), "/e2e-test/multi.txt", None).await?;
+        GoosefsFileWriter::create_with_context(ctx.clone(), "/e2e-test/multi.txt", None).await?;
     writer.write(b"First chunk of data. ").await?;
     writer.write(b"Second chunk of data. ").await?;
     writer.write(b"Third and final chunk.").await?;
@@ -143,7 +143,7 @@ async fn main() -> Result<()> {
 
     // Verify
     let multi_data =
-        GooseFsFileReader::read_file_with_context(ctx.clone(), "/e2e-test/multi.txt").await?;
+        GoosefsFileReader::read_file_with_context(ctx.clone(), "/e2e-test/multi.txt").await?;
     println!("  Verify: {:?}", String::from_utf8_lossy(&multi_data));
 
     // ── Step 6: Write with CACHE_THROUGH mode ────────────────────
@@ -158,7 +158,7 @@ async fn main() -> Result<()> {
         recursive: Some(true),
         ..Default::default()
     };
-    let durable_bytes = GooseFsFileWriter::write_file_with_context_and_options(
+    let durable_bytes = GoosefsFileWriter::write_file_with_context_and_options(
         ctx.clone(),
         "/e2e-test/durable.txt",
         durable_content,

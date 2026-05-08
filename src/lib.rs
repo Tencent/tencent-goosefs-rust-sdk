@@ -1,16 +1,16 @@
-//! GooseFS Rust gRPC Client
+//! Goosefs Rust gRPC Client
 //!
-//! A Rust client library that communicates with GooseFS Master/Worker
+//! A Rust client library that communicates with Goosefs Master/Worker
 //! via gRPC (tonic/protobuf). This is the **Layer 3** crate in the
-//! Lance → OpenDAL → GooseFS architecture.
+//! Lance → OpenDAL → Goosefs architecture.
 //!
 //! # Architecture
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────┐
 //! │  ★ High-Level API (recommended)                     │
-//! │  GooseFsFileWriter — end-to-end file write pipeline │
-//! │  GooseFsFileReader — end-to-end file read pipeline  │
+//! │  GoosefsFileWriter — end-to-end file write pipeline │
+//! │  GoosefsFileReader — end-to-end file read pipeline  │
 //! ├─────────────────────────────────────────────────────┤
 //! │  MasterClient    — File metadata CRUD (Master:9200) │
 //! │  WorkerMgrClient — Worker discovery  (Master:9200)  │
@@ -30,19 +30,19 @@
 //! ```rust,no_run
 //! use std::sync::Arc;
 //! use goosefs_sdk::context::FileSystemContext;
-//! use goosefs_sdk::io::{GooseFsFileWriter, GooseFsFileReader};
-//! use goosefs_sdk::config::GooseFsConfig;
+//! use goosefs_sdk::io::{GoosefsFileWriter, GoosefsFileReader};
+//! use goosefs_sdk::config::GoosefsConfig;
 //!
 //! #[tokio::main]
 //! async fn main() -> goosefs_sdk::error::Result<()> {
 //!     // Build once — the only call that performs TCP+SASL.
-//!     let ctx = FileSystemContext::connect(GooseFsConfig::new("127.0.0.1:9200")).await?;
+//!     let ctx = FileSystemContext::connect(GoosefsConfig::new("127.0.0.1:9200")).await?;
 //!
 //!     // Write a file (zero new connections — reuses ctx).
-//!     GooseFsFileWriter::write_file_with_context(ctx.clone(), "/my-file.txt", b"Hello!").await?;
+//!     GoosefsFileWriter::write_file_with_context(ctx.clone(), "/my-file.txt", b"Hello!").await?;
 //!
 //!     // Read it back.
-//!     let data = GooseFsFileReader::read_file_with_context(ctx.clone(), "/my-file.txt").await?;
+//!     let data = GoosefsFileReader::read_file_with_context(ctx.clone(), "/my-file.txt").await?;
 //!     println!("read {} bytes", data.len());
 //!
 //!     Ok(())
@@ -53,11 +53,11 @@
 //!
 //! ```rust,no_run
 //! use goosefs_sdk::client::MasterClient;
-//! use goosefs_sdk::config::GooseFsConfig;
+//! use goosefs_sdk::config::GoosefsConfig;
 //!
 //! #[tokio::main]
 //! async fn main() -> goosefs_sdk::error::Result<()> {
-//!     let config = GooseFsConfig::default();
+//!     let config = GoosefsConfig::default();
 //!     let master = MasterClient::connect(&config).await?;
 //!     let file_info = master.get_status("/my-file.txt").await?;
 //!     println!("file length: {:?}", file_info.length);
@@ -92,7 +92,7 @@ pub use crate::config::{
 pub use crate::context::FileSystemContext;
 pub use crate::proto::grpc::file::WritePType;
 
-/// Generated protobuf / gRPC types from GooseFS `.proto` definitions.
+/// Generated protobuf / gRPC types from Goosefs `.proto` definitions.
 ///
 /// The module layout must mirror the proto package hierarchy exactly so that
 /// prost-generated `super::` relative paths resolve correctly:

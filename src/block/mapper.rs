@@ -1,6 +1,6 @@
 //! Block mapper: converts file-level byte ranges into block-level read plans.
 //!
-//! GooseFS splits files into fixed-size blocks. A range read like
+//! Goosefs splits files into fixed-size blocks. A range read like
 //! `read(offset=70MB, length=100MB)` on a file with 64MB blocks
 //! must be split into multiple `ReadBlock` RPCs to different blocks.
 //!
@@ -17,7 +17,7 @@ use crate::proto::grpc::file::FileInfo;
 /// A single block-level read segment computed by the mapper.
 #[derive(Debug, Clone)]
 pub struct BlockReadPlan {
-    /// GooseFS block ID.
+    /// Goosefs block ID.
     pub block_id: i64,
     /// Index of this block in the file's block list.
     pub block_index: u64,

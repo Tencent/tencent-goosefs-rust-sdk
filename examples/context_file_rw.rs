@@ -3,9 +3,9 @@
 //! This example demonstrates the **recommended** high-level API:
 //!
 //! 1. Create a `FileSystemContext` once (the only call that does TCP+SASL)
-//! 2. Write a file via `GooseFsFileWriter::create_with_context()`
-//! 3. Read the file back via `GooseFsFileReader::open_with_context()`
-//! 4. Range read via `GooseFsFileReader::open_range_with_context()`
+//! 2. Write a file via `GoosefsFileWriter::create_with_context()`
+//! 3. Read the file back via `GoosefsFileReader::open_with_context()`
+//! 4. Range read via `GoosefsFileReader::open_range_with_context()`
 //! 5. One-shot convenience: `read_file_with_context()` / `write_file_with_context()`
 //! 6. Write with custom `CreateFilePOptions` (e.g. CACHE_THROUGH mode)
 //!
@@ -18,16 +18,16 @@
 
 use std::sync::Arc;
 
-use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::config::GoosefsConfig;
 use goosefs_sdk::context::FileSystemContext;
 use goosefs_sdk::error::Result;
-use goosefs_sdk::io::{GooseFsFileReader, GooseFsFileWriter};
+use goosefs_sdk::io::{GoosefsFileReader, GoosefsFileWriter};
 use goosefs_sdk::proto::grpc::file::CreateFilePOptions;
 use goosefs_sdk::WritePType;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("GooseFS Context-Based File Read/Write Demo");
+    println!("Goosefs Context-Based File Read/Write Demo");
     println!("===========================================");
 
     // ── Step 0: Build FileSystemContext (the ONLY network I/O) ───
@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
     // fetches the initial worker list, and starts a background refresh task.
     // All subsequent operations reuse these connections — zero TCP+SASL.
     println!("\n0. Creating FileSystemContext (one-time TCP+SASL handshake)...");
-    let config = GooseFsConfig::new("127.0.0.1:9200");
+    let config = GoosefsConfig::new("127.0.0.1:9200");
     let ctx: Arc<FileSystemContext> = FileSystemContext::connect(config).await?;
     println!("  ✅ Context created — Master + WorkerManager connected");
 
@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
                    Line 4: This is the recommended API for production use.";
 
     let mut writer =
-        GooseFsFileWriter::create_with_context(ctx.clone(), "/ctx-test/hello.txt", None).await?;
+        GoosefsFileWriter::create_with_context(ctx.clone(), "/ctx-test/hello.txt", None).await?;
     writer.write(content.as_bytes()).await?;
     writer.close().await?;
     println!(
@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
     // ── Step 2: Read the file back via open_with_context ─────────
     println!("\n2. Reading file via open_with_context...");
     let mut reader =
-        GooseFsFileReader::open_with_context(ctx.clone(), "/ctx-test/hello.txt").await?;
+        GoosefsFileReader::open_with_context(ctx.clone(), "/ctx-test/hello.txt").await?;
     println!(
         "  File length: {} bytes, blocks: {}",
         reader.file_length(),
@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
     // ── Step 3: Range read via open_range_with_context ───────────
     println!("\n3. Range read via open_range_with_context (offset=0, length=29)...");
     let mut range_reader =
-        GooseFsFileReader::open_range_with_context(ctx.clone(), "/ctx-test/hello.txt", 0, 29)
+        GoosefsFileReader::open_range_with_context(ctx.clone(), "/ctx-test/hello.txt", 0, 29)
             .await?;
     let range_data = range_reader.read_all().await?;
     println!("  ✅ Range read: {} bytes", range_data.len());
@@ -121,12 +121,12 @@ async fn main() -> Result<()> {
     //   read_range_with_context(ctx, path, offset, length)
     println!("\n4. One-shot read_file_with_context...");
     let oneshot_data =
-        GooseFsFileReader::read_file_with_context(ctx.clone(), "/ctx-test/hello.txt").await?;
+        GoosefsFileReader::read_file_with_context(ctx.clone(), "/ctx-test/hello.txt").await?;
     println!("  ✅ One-shot read: {} bytes", oneshot_data.len());
 
     println!("   One-shot read_range_with_context (offset=0, length=10)...");
     let oneshot_range =
-        GooseFsFileReader::read_range_with_context(ctx.clone(), "/ctx-test/hello.txt", 0, 10)
+        GoosefsFileReader::read_range_with_context(ctx.clone(), "/ctx-test/hello.txt", 0, 10)
             .await?;
     println!(
         "  ✅ One-shot range read: {:?}",
@@ -136,7 +136,7 @@ async fn main() -> Result<()> {
     // ── Step 5: Streaming block-by-block read via context ────────
     println!("\n5. Streaming block-by-block read via context...");
     let mut stream_reader =
-        GooseFsFileReader::open_with_context(ctx.clone(), "/ctx-test/hello.txt").await?;
+        GoosefsFileReader::open_with_context(ctx.clone(), "/ctx-test/hello.txt").await?;
     let mut block_idx = 0;
     while let Some(chunk) = stream_reader.read_next_block().await? {
         println!("  Block {}: {} bytes", block_idx, chunk.len());
@@ -160,7 +160,7 @@ async fn main() -> Result<()> {
         ..Default::default()
     };
 
-    let mut custom_writer = GooseFsFileWriter::create_with_context(
+    let mut custom_writer = GoosefsFileWriter::create_with_context(
         ctx.clone(),
         "/ctx-test/custom.txt",
         Some(custom_options),
@@ -177,7 +177,7 @@ async fn main() -> Result<()> {
 
     // Verify the custom-written file
     let custom_data =
-        GooseFsFileReader::read_file_with_context(ctx.clone(), "/ctx-test/custom.txt").await?;
+        GoosefsFileReader::read_file_with_context(ctx.clone(), "/ctx-test/custom.txt").await?;
     println!("  Verify: {:?}", String::from_utf8_lossy(&custom_data));
 
     // Check persistence status
@@ -195,7 +195,7 @@ async fn main() -> Result<()> {
     }
 
     let mut multi_writer =
-        GooseFsFileWriter::create_with_context(ctx.clone(), "/ctx-test/multi.txt", None).await?;
+        GoosefsFileWriter::create_with_context(ctx.clone(), "/ctx-test/multi.txt", None).await?;
     multi_writer.write(b"Chunk 1: context-based. ").await?;
     multi_writer.write(b"Chunk 2: zero handshake. ").await?;
     multi_writer.write(b"Chunk 3: connection reuse.").await?;
@@ -206,7 +206,7 @@ async fn main() -> Result<()> {
     );
 
     let multi_data =
-        GooseFsFileReader::read_file_with_context(ctx.clone(), "/ctx-test/multi.txt").await?;
+        GoosefsFileReader::read_file_with_context(ctx.clone(), "/ctx-test/multi.txt").await?;
     println!("  Verify: {:?}", String::from_utf8_lossy(&multi_data));
 
     // ── Cleanup: close context ───────────────────────────────────

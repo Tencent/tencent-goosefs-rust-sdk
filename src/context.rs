@@ -21,19 +21,19 @@
 //! | Operation | Before (per-call) | After (shared) |
 //! |-----------|-------------------|----------------|
 //! | `BaseFileSystem::get_status()` | 1 TCP+SASL | 0 (reused) |
-//! | `GooseFsFileInStream::open()` | 2 TCP+SASL | 0 (reused) |
+//! | `GoosefsFileInStream::open()` | 2 TCP+SASL | 0 (reused) |
 //! | Reading N blocks | N TCP connects | ~N_workers (pooled) |
 //!
 //! # Usage
 //!
 //! ```rust,no_run
 //! use goosefs_sdk::context::FileSystemContext;
-//! use goosefs_sdk::config::GooseFsConfig;
+//! use goosefs_sdk::config::GoosefsConfig;
 //! use goosefs_sdk::fs::FileSystem; // needed to call trait methods
 //!
 //! # async fn example() -> goosefs_sdk::error::Result<()> {
 //! // Build once, share across all operations
-//! let ctx = FileSystemContext::connect(GooseFsConfig::new("127.0.0.1:9200")).await?;
+//! let ctx = FileSystemContext::connect(GoosefsConfig::new("127.0.0.1:9200")).await?;
 //!
 //! // Pass ctx into filesystem operations
 //! use goosefs_sdk::fs::BaseFileSystem;
@@ -55,7 +55,7 @@ use crate::client::{
     create_master_inquire_client, MasterClient, MasterInquireClient, WorkerClientPool,
     WorkerManagerClient,
 };
-use crate::config::{ConfigRefresher, GooseFsConfig, TransparentAccelerationSwitch};
+use crate::config::{ConfigRefresher, GoosefsConfig, TransparentAccelerationSwitch};
 use crate::error::{Error, Result};
 
 /// How often the background refresh loop checks whether the worker list is stale.
@@ -69,11 +69,11 @@ const REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 /// config reloading and worker-list refreshing run on independent cadences.
 const CONFIG_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Shared connection context for GooseFS filesystem operations.
+/// Shared connection context for Goosefs filesystem operations.
 ///
-/// A single `FileSystemContext` instance should be created per GooseFS cluster
-/// and shared across all `BaseFileSystem`, `GooseFsFileInStream`, and
-/// `GooseFsFileWriter` instances that connect to that cluster.
+/// A single `FileSystemContext` instance should be created per Goosefs cluster
+/// and shared across all `BaseFileSystem`, `GoosefsFileInStream`, and
+/// `GoosefsFileWriter` instances that connect to that cluster.
 ///
 /// The context owns:
 /// - One persistent gRPC channel to the Master
@@ -81,7 +81,7 @@ const CONFIG_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 /// - One `WorkerClientPool` shared across all readers and writers
 /// - One `WorkerRouter` that tracks live workers and routes block reads
 pub struct FileSystemContext {
-    config: Arc<GooseFsConfig>,
+    config: Arc<GoosefsConfig>,
 
     /// Persistent Master gRPC connection (metadata RPCs).
     master: Arc<MasterClient>,
@@ -120,14 +120,14 @@ pub struct FileSystemContext {
 impl FileSystemContext {
     // ── Construction ────────────────────────────────────────────────────────
 
-    /// Build a `FileSystemContext` by connecting to the GooseFS cluster.
+    /// Build a `FileSystemContext` by connecting to the Goosefs cluster.
     ///
     /// Establishes persistent connections to the Master and WorkerManager,
     /// fetches the initial worker list, and starts a background refresh task.
     ///
     /// This is the **only** call that performs network I/O.  All subsequent
     /// operations on the context are zero-cost Arc clones.
-    pub async fn connect(config: GooseFsConfig) -> Result<Arc<Self>> {
+    pub async fn connect(config: GoosefsConfig) -> Result<Arc<Self>> {
         let config = Arc::new(config);
 
         // Build a shared inquire client so Master + WorkerManager both use the
@@ -210,7 +210,7 @@ impl FileSystemContext {
     }
 
     /// Return the configuration used to build this context.
-    pub fn config(&self) -> &GooseFsConfig {
+    pub fn config(&self) -> &GoosefsConfig {
         &self.config
     }
 

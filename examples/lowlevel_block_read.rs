@@ -14,18 +14,18 @@
 
 use goosefs_sdk::block::WorkerRouter;
 use goosefs_sdk::client::{MasterClient, WorkerClient, WorkerManagerClient};
-use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::config::GoosefsConfig;
 use goosefs_sdk::error::Result;
 use goosefs_sdk::io::GrpcBlockReader;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("GooseFS Low-level Block Streaming Read Demo");
+    println!("Goosefs Low-level Block Streaming Read Demo");
     println!("==========================");
 
-    // Connect to GooseFS Master
-    println!("\n1. Connecting to GooseFS Master...");
-    let config = GooseFsConfig::new("127.0.0.1:9200");
+    // Connect to Goosefs Master
+    println!("\n1. Connecting to Goosefs Master...");
+    let config = GoosefsConfig::new("127.0.0.1:9200");
     let master = MasterClient::connect(&config).await?;
     println!("Connected!");
 

@@ -1,4 +1,4 @@
-//! Master discovery clients for GooseFS HA (High Availability).
+//! Master discovery clients for Goosefs HA (High Availability).
 //!
 //! Mirrors the Java `MasterInquireClient` hierarchy:
 //!
@@ -10,7 +10,7 @@
 //!
 //! # How Primary detection works
 //!
-//! In a GooseFS HA cluster, only the **Primary** Master serves client-facing
+//! In a Goosefs HA cluster, only the **Primary** Master serves client-facing
 //! RPCs. Standby Masters reject `getServiceVersion` with `NotFound` (or
 //! `Unavailable`). [`PollingMasterInquireClient`] iterates over all configured
 //! addresses and returns the first one that responds successfully.
@@ -40,7 +40,7 @@ use tokio::sync::{Mutex, RwLock};
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
-use crate::config::GooseFsConfig;
+use crate::config::GoosefsConfig;
 use crate::error::{Error, Result};
 use crate::proto::grpc::version::{
     service_version_client_service_client::ServiceVersionClientServiceClient,
@@ -425,7 +425,7 @@ enum PingError {
 ///
 /// - If only one address is configured → [`SingleMasterInquireClient`].
 /// - If multiple addresses → [`PollingMasterInquireClient`].
-pub fn create_master_inquire_client(config: &GooseFsConfig) -> Arc<dyn MasterInquireClient> {
+pub fn create_master_inquire_client(config: &GoosefsConfig) -> Arc<dyn MasterInquireClient> {
     let addrs = config.master_addresses();
 
     if addrs.len() <= 1 {

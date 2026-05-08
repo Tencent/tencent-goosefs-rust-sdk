@@ -1,6 +1,6 @@
 //! gRPC streaming block reader with flow-control ACK.
 //!
-//! Implements the GooseFS bidirectional streaming read protocol:
+//! Implements the Goosefs bidirectional streaming read protocol:
 //!
 //! ```text
 //! Client                                    Worker
@@ -21,7 +21,7 @@
 //! [`GrpcBlockReader::positioned_read`] opens a fresh stream with
 //! `position_short = true`, which tells the worker to skip prefetch and serve
 //! the exact requested byte range directly.  This path is used by
-//! `GooseFsFileInStream` for random seeks that cross a
+//! `GoosefsFileInStream` for random seeks that cross a
 //! `TRANSFER_POSITIONED_READ_THRESHOLD` (8 KiB) boundary.
 
 use bytes::{Bytes, BytesMut};
@@ -34,7 +34,7 @@ use crate::error::Result;
 use crate::proto::grpc::block::{ReadRequest, ReadResponse};
 use crate::proto::proto::dataserver::OpenUfsBlockOptions;
 
-/// A streaming reader for a single GooseFS block.
+/// A streaming reader for a single Goosefs block.
 ///
 /// Wraps a bidirectional gRPC `ReadBlock` stream and implements
 /// flow-control via `offset_received` ACK messages.
@@ -178,7 +178,7 @@ impl GrpcBlockReader {
     /// 1. Skip prefetch / eviction — serve the range directly from cache or UFS.
     /// 2. Complete the stream after delivering exactly `length` bytes.
     ///
-    /// This path is chosen by `GooseFsFileInStream` when the caller uses
+    /// This path is chosen by `GoosefsFileInStream` when the caller uses
     /// `read_at()` (random access) or when the seek distance exceeds the
     /// `TRANSFER_POSITIONED_READ_THRESHOLD` (8 KiB).
     ///

@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod integration {
-    use goosefs_sdk::config::GooseFsConfig;
+    use goosefs_sdk::config::GoosefsConfig;
     use goosefs_sdk::context::FileSystemContext;
     use goosefs_sdk::fs::FileSystem;
     use std::sync::Arc;
@@ -34,7 +34,7 @@ mod integration {
     fn worker_pool_arc_structure() {
         use goosefs_sdk::client::WorkerClientPool;
 
-        let config = GooseFsConfig::new("127.0.0.1:9200");
+        let config = GoosefsConfig::new("127.0.0.1:9200");
 
         // Create a shared pool
         let pool_original = Arc::new(WorkerClientPool::new_shared(config));
@@ -57,7 +57,7 @@ mod integration {
         use goosefs_sdk::fs::BaseFileSystem;
 
         // Just verify the type signatures are accessible — no network needed.
-        let _ = BaseFileSystem::connect; // fn(GooseFsConfig) -> impl Future<...>
+        let _ = BaseFileSystem::connect; // fn(GoosefsConfig) -> impl Future<...>
         let _ = BaseFileSystem::from_context; // fn(Arc<FileSystemContext>) -> Arc<Self>
 
         println!("✓ BaseFileSystem context-based constructors compile");
@@ -69,12 +69,12 @@ mod integration {
     /// - Before: Each operation creates new TCP+SASL connections
     /// - After: Single FileSystemContext is shared across all operations
     ///
-    /// To run with a real GooseFS cluster:
+    /// To run with a real Goosefs cluster:
     /// cargo test --test connection_reuse shared_context_reuses_connections -- --nocapture --ignored
     #[tokio::test]
-    #[ignore] // Ignored by default — requires real GooseFS cluster
+    #[ignore] // Ignored by default — requires real Goosefs cluster
     async fn shared_context_reuses_connections() -> goosefs_sdk::error::Result<()> {
-        let config = GooseFsConfig::new("127.0.0.1:9200");
+        let config = GoosefsConfig::new("127.0.0.1:9200");
 
         // Build context once (2 TCP+SASL handshakes: Master + WorkerManager)
         let start = Instant::now();
@@ -105,7 +105,7 @@ mod integration {
     #[tokio::test]
     #[ignore]
     async fn context_is_shareable() -> goosefs_sdk::error::Result<()> {
-        let config = GooseFsConfig::new("127.0.0.1:9200");
+        let config = GoosefsConfig::new("127.0.0.1:9200");
         let ctx = FileSystemContext::connect(config).await?;
 
         // Context should be cloneable (Arc-based)

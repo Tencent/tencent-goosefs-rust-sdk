@@ -10,7 +10,7 @@
 | 版本号 | `0.1.0` | ✅ 首次发布保持 `0.1.0` |
 | description | 已有 | ✅ |
 | license | `Apache-2.0` | ✅ |
-| authors | `GooseFS Team` | ✅ |
+| authors | `Goosefs Team` | ✅ |
 | repository | 缺失 | TODO: 填写仓库地址（如需公开） |
 | homepage | 缺失 | TODO: 填写项目主页 |
 | keywords | 缺失 | TODO: 建议 `["goosefs", "grpc", "storage", "distributed-filesystem", "cache"]` |

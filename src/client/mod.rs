@@ -1,4 +1,4 @@
-//! gRPC client modules for GooseFS Master and Worker services.
+//! gRPC client modules for Goosefs Master and Worker services.
 
 pub mod master;
 pub mod master_inquire;

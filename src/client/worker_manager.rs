@@ -1,4 +1,4 @@
-//! GooseFS Worker Manager client for worker discovery.
+//! Goosefs Worker Manager client for worker discovery.
 //!
 //! Wraps `WorkerManagerMasterClientService` (Master:9200) to fetch
 //! the list of live workers and their addresses.
@@ -16,7 +16,7 @@ use tracing::{debug, instrument};
 
 use crate::auth::{ChannelAuthenticator, ChannelIdInterceptor, SaslStreamGuard};
 use crate::client::master_inquire::{create_master_inquire_client, MasterInquireClient};
-use crate::config::GooseFsConfig;
+use crate::config::GoosefsConfig;
 use crate::error::{Error, Result};
 use crate::proto::grpc::block::{
     worker_manager_master_client_service_client::WorkerManagerMasterClientServiceClient,
@@ -38,10 +38,10 @@ pub struct WorkerManagerClient {
 }
 
 impl WorkerManagerClient {
-    /// Connect to the GooseFS Master for worker management.
+    /// Connect to the Goosefs Master for worker management.
     ///
     /// In HA mode, discovers the Primary Master first via the inquire client.
-    pub async fn connect(config: &GooseFsConfig) -> Result<Self> {
+    pub async fn connect(config: &GoosefsConfig) -> Result<Self> {
         let inquire_client = create_master_inquire_client(config);
         Self::connect_with_inquire(config, inquire_client).await
     }
@@ -51,7 +51,7 @@ impl WorkerManagerClient {
     /// This allows sharing the same inquire client with `MasterClient`,
     /// avoiding redundant Primary discovery.
     pub async fn connect_with_inquire(
-        config: &GooseFsConfig,
+        config: &GoosefsConfig,
         inquire_client: Arc<dyn MasterInquireClient>,
     ) -> Result<Self> {
         let primary_addr = inquire_client.get_primary_rpc_address().await?;

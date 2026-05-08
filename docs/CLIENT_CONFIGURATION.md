@@ -1,16 +1,16 @@
-# GooseFS Rust Client — Configuration Parameter Reference
+# Goosefs Rust Client — Configuration Parameter Reference
 
 > **Version**: 0.2.0 | **Date**: 2026-04-24
 
 This document provides a comprehensive reference for all configuration parameters
-supported by the GooseFS Rust Client (`goosefs-sdk`).
+supported by the Goosefs Rust Client (`goosefs-sdk`).
 
 ---
 
 ## Table of Contents
 
 1. [Configuration Loading Priority](#1-configuration-loading-priority)
-2. [GooseFsConfig Fields](#2-goosefsconfig-fields)
+2. [GoosefsConfig Fields](#2-goosefsconfig-fields)
    - [Connection Settings](#21-connection-settings)
    - [Data Transfer Settings](#22-data-transfer-settings)
    - [Authentication Settings](#23-authentication-settings)
@@ -50,14 +50,14 @@ Priority (highest → lowest):
   3. Built-in defaults
 ```
 
-Use `GooseFsConfig::from_properties_auto()` to apply the full priority chain
+Use `GoosefsConfig::from_properties_auto()` to apply the full priority chain
 automatically.
 
 > **⚠️ Default Behavior**: When building a filesystem context via
 > `FileSystemContext::connect(config)`, a `ConfigRefresher` is **automatically
 > created** internally and a background config hot-reload task is started
 > (runs every 60s). This background task **calls
-> `GooseFsConfig::from_properties_auto()` by default** to reload the config
+> `GoosefsConfig::from_properties_auto()` by default** to reload the config
 > file and environment variables, refreshing the transparent acceleration
 > switches (`transparent_acceleration_enabled` /
 > `transparent_acceleration_cosranger_enabled`).
@@ -75,12 +75,12 @@ automatically.
 >         ├── [immediate] config_refresher.refresh_transparent_acceleration_switch()
 >         │     └── load_if_expire()             // eagerly load config on first connect
 >         │           └── reload_properties()
->         │                 └── GooseFsConfig::from_properties_auto()  ← called immediately
+>         │                 └── GoosefsConfig::from_properties_auto()  ← called immediately
 >         └── every 60s loop:
 >               └── config_refresher.refresh_transparent_acceleration_switch()
 >                     └── load_if_expire()       // check 30s expiry
 >                           └── reload_properties()
->                                 └── GooseFsConfig::from_properties_auto()  ← called automatically
+>                                 └── GoosefsConfig::from_properties_auto()  ← called automatically
 > ```
 
 ### Config File Search Paths
@@ -98,7 +98,7 @@ When auto-discovering the properties file, the client searches in this order
 
 ---
 
-## 2. GooseFsConfig Fields
+## 2. GoosefsConfig Fields
 
 ### 2.1 Connection Settings
 
@@ -115,7 +115,7 @@ When auto-discovering the properties file, the client searches in this order
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `block_size` | `u64` | `67108864` (64 MiB) | Default block size in bytes for new files. Matches GooseFS server default. |
+| `block_size` | `u64` | `67108864` (64 MiB) | Default block size in bytes for new files. Matches Goosefs server default. |
 | `chunk_size` | `u64` | `1048576` (1 MiB) | Chunk size for streaming read/write RPCs. Each gRPC message carries one chunk. |
 | `write_type` | `Option<i32>` | `None` | Default write type for newly created files. `None` = use server default (typically `MustCache`). See [WriteType](#71-writetype) for values. |
 
@@ -123,7 +123,7 @@ When auto-discovering the properties file, the client searches in this order
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `auth_type` | `AuthType` | `Simple` | Authentication type. Controls how the client authenticates with GooseFS Master/Worker. See [AuthType](#73-authtype). |
+| `auth_type` | `AuthType` | `Simple` | Authentication type. Controls how the client authenticates with Goosefs Master/Worker. See [AuthType](#73-authtype). |
 | `auth_username` | `String` | Current OS user (`$USER`) | Username for authentication. Used in SIMPLE mode as the login identity. |
 | `auth_timeout` | `Duration` | `30s` | Maximum time to wait for SASL handshake completion. |
 
@@ -165,8 +165,8 @@ in HA (multi-master) deployments.
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `IMPERSONATION_NONE` | `"_NONE_"` | Sentinel value to disable impersonation. |
-| `DEFAULT_MASTER_PORT` | `9200` | Default GooseFS Master RPC port. |
-| `DEFAULT_WORKER_PORT` | `9203` | Default GooseFS Worker data port. |
+| `DEFAULT_MASTER_PORT` | `9200` | Default Goosefs Master RPC port. |
+| `DEFAULT_WORKER_PORT` | `9203` | Default Goosefs Worker data port. |
 | `DEFAULT_CONFIG_RPC_PORT` | `9214` | Default Config Manager RPC port. |
 | `DEFAULT_CONFIG_EXPIRE_MS` | `30000` (30s) | Config expiry time for `ConfigRefresher` hot-reload. |
 
@@ -177,7 +177,7 @@ in HA (multi-master) deployments.
 All environment variables are optional. When set, they override the corresponding
 properties file values and built-in defaults.
 
-| Environment Variable | GooseFsConfig Field | Description |
+| Environment Variable | GoosefsConfig Field | Description |
 |---------------------|---------------------|-------------|
 | `GOOSEFS_MASTER_ADDR` | `master_addr` / `master_addrs` | Master address(es). Comma-separated for HA: `"addr1:port,addr2:port"`. |
 | `GOOSEFS_WRITE_TYPE` | `write_type` | Default write type. Accepted: `must_cache`, `try_cache`, `cache_through`, `through`, `async_through` (case-insensitive). |
@@ -186,8 +186,8 @@ properties file values and built-in defaults.
 | `GOOSEFS_AUTH_TYPE` | `auth_type` | Authentication type. Accepted: `nosasl`, `simple` (case-insensitive). |
 | `GOOSEFS_AUTH_USERNAME` | `auth_username` | Authentication username. |
 | `GOOSEFS_CONFIG_FILE` | — | Explicit path to a config file (Rust-only convenience, highest priority). |
-| `GOOSEFS_CONF_DIR` | — | GooseFS configuration directory (mirrors Java `goosefs.conf.dir`). |
-| `GOOSEFS_HOME` | — | GooseFS installation home directory. |
+| `GOOSEFS_CONF_DIR` | — | Goosefs configuration directory (mirrors Java `goosefs.conf.dir`). |
+| `GOOSEFS_HOME` | — | Goosefs installation home directory. |
 | `GOOSEFS_CONFIG_MANAGER_RPC_ADDRESSES` | `config_manager_rpc_addresses` | Config manager RPC addresses (comma-separated). |
 | `GOOSEFS_CONFIG_RPC_PORT` | `config_rpc_port` | Config manager RPC port. |
 | `GOOSEFS_TRANSPARENT_ACCELERATION_ENABLED` | `transparent_acceleration_enabled` | Transparent acceleration enabled (`true`/`false`). |
@@ -223,7 +223,7 @@ These constants are used in `storage_options` maps (e.g. Lance's
 
 These keys are used in `goosefs-site.properties` files (Java-style `key=value` format).
 
-| Properties Key | GooseFsConfig Field | Value Format | Description |
+| Properties Key | GoosefsConfig Field | Value Format | Description |
 |---------------|---------------------|--------------|-------------|
 | `goosefs.master.hostname` | `master_addr` (host part) | hostname/IP | Master hostname. Combined with `goosefs.master.rpc.port` to form `master_addr`. |
 | `goosefs.master.rpc.port` | `master_addr` (port part) | integer | Master RPC port. Default: `9200`. |
@@ -246,7 +246,7 @@ These keys are used in `goosefs-site.properties` files (Java-style `key=value` f
 
 ### 6.1 OpenFileOptions
 
-Options for opening a GooseFS file for reading. Passed to `FileSystem::open_file()`.
+Options for opening a Goosefs file for reading. Passed to `FileSystem::open_file()`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -262,7 +262,7 @@ Options for opening a GooseFS file for reading. Passed to `FileSystem::open_file
 
 ### 6.2 CreateFileOptions
 
-Options for creating a new GooseFS file. Passed to `FileSystem::create_file()`.
+Options for creating a new Goosefs file. Passed to `FileSystem::create_file()`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -285,8 +285,8 @@ Options controlling how a file or directory is deleted. Passed to `FileSystem::d
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `recursive` | `bool` | `false` | Delete directories recursively. Required for non-empty directories. |
-| `unchecked` | `bool` | `false` | Skip safety checks (empty-directory enforcement) and allow deleting INCOMPLETE files. Needed by `GooseFsFileWriter::cancel()`. |
-| `goosefs_only` | `bool` | `false` | Restrict deletion to GooseFS namespace only; do not propagate to UFS. Used during CACHE_THROUGH error recovery. |
+| `unchecked` | `bool` | `false` | Skip safety checks (empty-directory enforcement) and allow deleting INCOMPLETE files. Needed by `GoosefsFileWriter::cancel()`. |
+| `goosefs_only` | `bool` | `false` | Restrict deletion to Goosefs namespace only; do not propagate to UFS. Used during CACHE_THROUGH error recovery. |
 
 **Factory methods:**
 
@@ -300,12 +300,12 @@ Options controlling how a file or directory is deleted. Passed to `FileSystem::d
 ### 6.4 InStreamOptions
 
 Options controlling how an open file stream reads data. Used internally by
-`GooseFsFileInStream`.
+`GoosefsFileInStream`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `read_type` | `ReadType` | `Cache` | Cache strategy for this read. See [ReadType](#72-readtype). |
-| `position_short` | `bool` | `false` | Hint: this is a short/random read. When `true`, the Worker skips prefetching. Set automatically by `GooseFsFileInStream` for positioned-read path. |
+| `position_short` | `bool` | `false` | Hint: this is a short/random read. When `true`, the Worker skips prefetching. Set automatically by `GoosefsFileInStream` for positioned-read path. |
 | `max_ufs_read_concurrency` | `i32` | `8` | Maximum concurrent UFS read threads the worker may use for this stream. |
 | `prefetch_window` | `i32` | `1` | Initial prefetch window (number of chunks). `1` = no prefetch beyond current chunk. |
 
@@ -327,7 +327,7 @@ Controls how data is persisted when writing files.
 
 | Variant | Proto Value (`i32`) | String Representation | Description |
 |---------|--------------------|-----------------------|-------------|
-| `MustCache` | `1` | `must_cache` / `MUST_CACHE` | Write to GooseFS cache only; no UFS persistence. |
+| `MustCache` | `1` | `must_cache` / `MUST_CACHE` | Write to Goosefs cache only; no UFS persistence. |
 | `TryCache` | `2` | `try_cache` / `TRY_CACHE` | Try to cache; fall back to `Through` if cache is full. |
 | `CacheThrough` | `3` | `cache_through` / `CACHE_THROUGH` | Write to cache **and** synchronously persist to UFS. |
 | `Through` | `4` | `through` / `THROUGH` | Write directly to UFS, bypassing cache. |
@@ -396,7 +396,7 @@ The xattr key is `"innerWriteType"` (`WRITE_TYPE_XATTR_KEY`). The value is the
 The client supports Java-style `goosefs-site.properties` files:
 
 ```properties
-# GooseFS Client Configuration
+# Goosefs Client Configuration
 # Lines starting with '#' or '!' are comments.
 # Key and value are separated by '=' or ':'.
 
@@ -445,40 +445,40 @@ Properties that accept byte sizes support the following suffixes (case-insensiti
 ### 9.1 Programmatic Configuration
 
 ```rust
-use goosefs_sdk::config::{GooseFsConfig, WriteType};
+use goosefs_sdk::config::{GoosefsConfig, WriteType};
 use goosefs_sdk::auth::AuthType;
 
 // Single master with defaults
-let config = GooseFsConfig::new("127.0.0.1:9200");
+let config = GoosefsConfig::new("127.0.0.1:9200");
 
 // Single master with custom settings
-let config = GooseFsConfig::new("10.0.0.1:9200")
+let config = GoosefsConfig::new("10.0.0.1:9200")
     .with_auth_type(AuthType::Simple)
     .with_auth_username("myuser")
     .with_write_type_enum(WriteType::CacheThrough);
 
 // HA mode with multiple masters
-let config = GooseFsConfig::new_ha(vec![
+let config = GoosefsConfig::new_ha(vec![
     "10.0.0.1:9200".to_string(),
     "10.0.0.2:9200".to_string(),
     "10.0.0.3:9200".to_string(),
 ]);
 
 // Auto-detect single/multi master
-let config = GooseFsConfig::from_addresses(vec![
+let config = GoosefsConfig::from_addresses(vec![
     "10.0.0.1:9200".to_string(),
 ]);
 
 // Load from properties file
-let config = GooseFsConfig::from_properties("/etc/goosefs/goosefs-site.properties")
+let config = GoosefsConfig::from_properties("/etc/goosefs/goosefs-site.properties")
     .expect("failed to load config");
 
 // Auto-discover config file + overlay env vars
-let config = GooseFsConfig::from_properties_auto()
+let config = GoosefsConfig::from_properties_auto()
     .expect("failed to auto-load config");
 
 // Load from environment variables only
-let config = GooseFsConfig::from_env();
+let config = GoosefsConfig::from_env();
 ```
 
 ### 9.2 Environment Variable Configuration
@@ -508,7 +508,7 @@ export GOOSEFS_CONFIG_FILE="/path/to/goosefs-site.properties"
 ### 9.3 FileSystem API with Configuration
 
 ```rust
-use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::config::GoosefsConfig;
 use goosefs_sdk::context::FileSystemContext;
 use goosefs_sdk::fs::{BaseFileSystem, FileSystem, OpenFileOptions, CreateFileOptions};
 use goosefs_sdk::fs::options::DeleteOptions;
@@ -517,8 +517,8 @@ use goosefs_sdk::config::WriteType;
 #[tokio::main]
 async fn main() -> goosefs_sdk::error::Result<()> {
     // Build config (auto-discover properties + env vars)
-    let config = GooseFsConfig::from_properties_auto()
-        .unwrap_or_else(|_| GooseFsConfig::new("127.0.0.1:9200"));
+    let config = GoosefsConfig::from_properties_auto()
+        .unwrap_or_else(|_| GoosefsConfig::new("127.0.0.1:9200"));
 
     // Create shared context (one TCP+SASL handshake, reused everywhere)
     let ctx = FileSystemContext::connect(config).await?;
@@ -548,20 +548,20 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 > is started** — no manual management required. The background task checks
 > every **60 seconds**; if more than **30 seconds** (`DEFAULT_CONFIG_EXPIRE_MS`)
 > have elapsed since the last load, it automatically calls
-> `GooseFsConfig::from_properties_auto()` to reload the config file and
+> `GoosefsConfig::from_properties_auto()` to reload the config file and
 > environment variables.
 >
 > The manual usage below is only needed when **not** using `FileSystemContext`.
 
 ```rust
-use goosefs_sdk::config::{ConfigRefresher, GooseFsConfig};
+use goosefs_sdk::config::{ConfigRefresher, GoosefsConfig};
 
 // Approach 1 (recommended): automatic management via FileSystemContext
 // let ctx = FileSystemContext::connect(config).await?;
 // ConfigRefresher is already running in the background, refreshing every 60s
 
 // Approach 2 (manual): only needed when not using FileSystemContext
-let config = GooseFsConfig::from_properties_auto().unwrap_or_default();
+let config = GoosefsConfig::from_properties_auto().unwrap_or_default();
 let refresher = ConfigRefresher::from_config(&config);
 
 // Manually trigger a refresh (internally checks 30s expiry; skips if not expired):
@@ -575,7 +575,7 @@ let switch = refresher.current_switch();
 > **Note**: `ConfigRefresher` only refreshes the two transparent acceleration
 > switch parameters (`enabled` and `cosranger_enabled`). It does **not** affect
 > other user-set config fields (e.g. `master_addr`, `block_size`, `write_type`).
-> The user's `GooseFsConfig` object is never modified by the refresher.
+> The user's `GoosefsConfig` object is never modified by the refresher.
 >
 > **Background Task Lifecycle**: The background refresh task is automatically
 > terminated when `FileSystemContext::close()` is called. If the

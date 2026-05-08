@@ -1,4 +1,4 @@
-//! Authentication demo — demonstrates GooseFS SASL authentication.
+//! Authentication demo — demonstrates Goosefs SASL authentication.
 //!
 //! This example shows how to:
 //! 1. Use `ChannelAuthenticator` directly (low-level API) for both NOSASL and SIMPLE modes
@@ -6,7 +6,7 @@
 //! 3. Verify that authenticated channels work by performing actual RPCs
 //!
 //! Prerequisites:
-//!   A running GooseFS Master on 127.0.0.1:9200 (default).
+//!   A running Goosefs Master on 127.0.0.1:9200 (default).
 //!
 //! Usage:
 //!   cargo run --example auth_demo
@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use goosefs_sdk::auth::{AuthType, ChannelAuthenticator};
 use goosefs_sdk::client::MasterClient;
-use goosefs_sdk::config::GooseFsConfig;
+use goosefs_sdk::config::GoosefsConfig;
 use goosefs_sdk::error::Result;
 use goosefs_sdk::proto::grpc::file::{
     file_system_master_client_service_client::FileSystemMasterClientServiceClient,
@@ -125,9 +125,9 @@ async fn demo_simple_low_level(addr: &str) -> Result<()> {
 /// Demo 3: High-level MasterClient with NOSASL config.
 ///
 /// `MasterClient::connect` handles authentication internally based on
-/// the `GooseFsConfig.auth_type` setting.
+/// the `GoosefsConfig.auth_type` setting.
 async fn demo_nosasl_master_client(addr: &str) -> Result<()> {
-    let config = GooseFsConfig::new(addr).with_auth_type(AuthType::NoSasl);
+    let config = GoosefsConfig::new(addr).with_auth_type(AuthType::NoSasl);
 
     println!(
         "  Connecting MasterClient with auth_type={}...",
@@ -155,7 +155,7 @@ async fn demo_nosasl_master_client(addr: &str) -> Result<()> {
 /// This is the default and most common authentication mode.
 async fn demo_simple_master_client(addr: &str) -> Result<()> {
     let username = whoami();
-    let config = GooseFsConfig::new(addr)
+    let config = GoosefsConfig::new(addr)
         .with_auth_type(AuthType::Simple)
         .with_auth_username(&username);
 
@@ -178,10 +178,10 @@ async fn demo_simple_master_client(addr: &str) -> Result<()> {
 
 /// Demo 5: Default config (SIMPLE mode is the default).
 ///
-/// When no auth_type is explicitly set, `GooseFsConfig::default()` uses
+/// When no auth_type is explicitly set, `GoosefsConfig::default()` uses
 /// SIMPLE mode with the current OS username.
 async fn demo_default_config(addr: &str) -> Result<()> {
-    let config = GooseFsConfig::new(addr);
+    let config = GoosefsConfig::new(addr);
 
     println!(
         "  Default config: auth_type={}, username={}",
@@ -206,7 +206,7 @@ fn whoami() -> String {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("GooseFS Authentication Demo");
+    println!("Goosefs Authentication Demo");
     println!("===========================\n");
 
     let addr = master_addr();

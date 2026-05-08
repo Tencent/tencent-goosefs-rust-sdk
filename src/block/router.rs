@@ -1,6 +1,6 @@
 //! Worker router: maps block IDs to workers using consistent hashing.
 //!
-//! GooseFS uses consistent hashing to decide which worker should serve
+//! Goosefs uses consistent hashing to decide which worker should serve
 //! a particular block. This module implements the routing logic with:
 //! - Consistent hash ring based on worker IDs
 //! - Failed-worker filtering with configurable TTL
@@ -205,7 +205,7 @@ impl WorkerRouter {
     /// `WorkerManagerClient`. Since `WorkerRouter` does not hold a reference
     /// to one, callers that want automatic refresh should call
     /// `needs_refresh` + `refresh_workers` themselves (e.g. in
-    /// `GooseFsFileInStream::open`).
+    /// `GoosefsFileInStream::open`).
     ///
     /// # Local-first routing
     ///

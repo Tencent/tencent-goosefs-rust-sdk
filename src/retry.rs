@@ -1,6 +1,6 @@
-//! Retry policies for GooseFS client operations.
+//! Retry policies for Goosefs client operations.
 //!
-//! Provides configurable retry strategies modelled after the Java GooseFS client:
+//! Provides configurable retry strategies modelled after the Java Goosefs client:
 //!
 //! - [`ExponentialTimeBoundedRetry`] — retries with exponential backoff bounded by
 //!   a maximum total duration (mirrors Java `ExponentialTimeBoundedRetry`).
@@ -73,7 +73,7 @@ impl ExponentialTimeBoundedRetry {
         }
     }
 
-    /// Convenience constructor with GooseFS default parameters.
+    /// Convenience constructor with Goosefs default parameters.
     ///
     /// Defaults: `max_duration = 2 min`, `initial_sleep = 50 ms`, `max_sleep = 3 s`.
     pub fn with_defaults() -> Self {

@@ -1,4 +1,4 @@
-//! Error types for the GooseFS Rust client.
+//! Error types for the Goosefs Rust client.
 //!
 //! Follows the pattern from fluss-rust: a single `Error` enum with `thiserror`
 //! derive, a `Result<T>` alias, and `From` conversions for common upstream errors.
@@ -25,7 +25,7 @@ pub enum Error {
         source: tonic::transport::Error,
     },
 
-    /// The file or directory was not found on GooseFS.
+    /// The file or directory was not found on Goosefs.
     #[error("not found: {path}")]
     NotFound { path: String },
 
@@ -153,7 +153,7 @@ impl From<tonic::Status> for Error {
             // disambiguate by inspecting the message text.
             //
             // Java exception → gRPC message keyword mapping (verified against
-            // DefaultFileSystemMaster.java and GooseFSStatusException.java):
+            // DefaultFileSystemMaster.java and GoosefsStatusException.java):
             //   FileIncompleteException      → "is incomplete"
             //   DirectoryNotEmptyException   → "is not empty"
             //   IsDirectoryException         → "Is a directory"

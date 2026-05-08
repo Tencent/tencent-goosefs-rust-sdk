@@ -1,4 +1,4 @@
-//! GooseFS URI-level file/directory metadata.
+//! Goosefs URI-level file/directory metadata.
 //!
 //! [`URIStatus`] is the Rust equivalent of Go SDK's `URIStatus` / Java's
 //! `URIStatus`.  It wraps the raw `FileInfo` proto message and exposes a
@@ -12,7 +12,7 @@
 //! `block_id → FileBlockInfo` map on first access.  Rust's ownership model
 //! makes eager construction simpler and avoids `OnceCell` complexity.
 //! We build the `HashMap<i64, FileBlockInfo>` once inside `from_proto()`.
-//! For typical GooseFS files (≤ 100k blocks of 64 MiB each), the map is at
+//! For typical Goosefs files (≤ 100k blocks of 64 MiB each), the map is at
 //! most a few MB — an acceptable trade-off.
 //!
 //! ## `xattr` stays as `HashMap<String, Vec<u8>>`
@@ -25,7 +25,7 @@ use std::collections::HashMap;
 
 use crate::proto::grpc::file::{FileBlockInfo, FileInfo};
 
-/// Immutable snapshot of a GooseFS file or directory path.
+/// Immutable snapshot of a Goosefs file or directory path.
 ///
 /// Corresponds to Java's `alluxio.client.file.URIStatus` and
 /// Go SDK's `wire.URIStatus`.
@@ -58,7 +58,7 @@ pub struct URIStatus {
     pub file_id: i64,
     /// Last path component (basename).
     pub name: String,
-    /// Full path in the GooseFS namespace (e.g. `/data/my-file.parquet`).
+    /// Full path in the Goosefs namespace (e.g. `/data/my-file.parquet`).
     pub path: String,
     /// Underlying file-system path (empty for in-cache-only files).
     pub ufs_path: String,
@@ -87,7 +87,7 @@ pub struct URIStatus {
     pub completed: bool,
     /// Whether the path refers to a directory (inode is a `Directory`).
     pub folder: bool,
-    /// Whether the data is allowed to be cached in GooseFS workers.
+    /// Whether the data is allowed to be cached in Goosefs workers.
     pub cacheable: bool,
     /// Whether all data has been durably written to the UFS.
     pub persisted: bool,
@@ -95,7 +95,7 @@ pub struct URIStatus {
     pub mount_point: bool,
 
     // ── Cache statistics ────────────────────────────────────────────────────
-    /// Percentage of the file's data currently in GooseFS cache (`0`–`100`).
+    /// Percentage of the file's data currently in Goosefs cache (`0`–`100`).
     pub in_goose_fs_percentage: i32,
     /// Percentage of the file's data in worker memory (hot tier).
     pub in_memory_percentage: i32,

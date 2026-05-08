@@ -1,4 +1,4 @@
-//! GooseFS Worker gRPC client for block data read/write.
+//! Goosefs Worker gRPC client for block data read/write.
 //!
 //! Wraps `BlockWorker` service (Worker:9203) providing:
 //! - `read_block` — bidirectional streaming block read
@@ -6,7 +6,7 @@
 //!
 //! ## Write Protocol
 //!
-//! GooseFS Worker's `WriteBlock` is a bidirectional streaming RPC but the server
+//! Goosefs Worker's `WriteBlock` is a bidirectional streaming RPC but the server
 //! does **not** send HTTP/2 response headers until the client sends a `flush`
 //! command or closes the stream. This means tonic's
 //! `client.write_block(stream).await` will block until the first server response.
@@ -30,7 +30,7 @@ use tonic::Streaming;
 use tracing::{debug, instrument, warn};
 
 use crate::auth::{ChannelAuthenticator, ChannelIdInterceptor, SaslStreamGuard};
-use crate::config::GooseFsConfig;
+use crate::config::GoosefsConfig;
 use crate::error::{Error, Result};
 use crate::proto::grpc::block::{
     block_worker_client::BlockWorkerClient, write_request, ReadRequest, ReadResponse, RequestType,
@@ -40,7 +40,7 @@ use crate::proto::proto::dataserver::{CreateUfsFileOptions, OpenUfsBlockOptions}
 
 /// Options for a `write_block` RPC that control *where* the Worker writes data.
 ///
-/// - `GoosefsBlock` (default): write to GooseFS cache (MUST_CACHE / CACHE_THROUGH / ASYNC_THROUGH)
+/// - `GoosefsBlock` (default): write to Goosefs cache (MUST_CACHE / CACHE_THROUGH / ASYNC_THROUGH)
 /// - `UfsFile`: write directly to UFS (THROUGH mode), requires `create_ufs_file_options`
 /// - `UfsFallbackBlock`: cache-full fallback to UFS (TRY_CACHE)
 #[derive(Clone, Debug)]
@@ -171,10 +171,10 @@ pub struct WorkerClient {
 }
 
 impl WorkerClient {
-    /// Connect to a GooseFS Worker at the given address with authentication.
+    /// Connect to a Goosefs Worker at the given address with authentication.
     ///
     /// Authentication is performed according to `config.auth_type`.
-    pub async fn connect(addr: &str, config: &GooseFsConfig) -> Result<Self> {
+    pub async fn connect(addr: &str, config: &GoosefsConfig) -> Result<Self> {
         let endpoint = Channel::from_shared(format!("http://{}", addr))
             .map_err(|e| Error::ConfigError {
                 message: format!("invalid worker endpoint: {}", e),
@@ -190,7 +190,7 @@ impl WorkerClient {
 
         let mut auth_channel = authenticator.authenticate(channel).await?;
         let sasl_guard = auth_channel.take_sasl_guard();
-        debug!(addr = %addr, auth_type = %config.auth_type, "connected to GooseFS Worker");
+        debug!(addr = %addr, auth_type = %config.auth_type, "connected to Goosefs Worker");
 
         Ok(Self {
             inner: BlockWorkerClient::new(auth_channel.channel),
@@ -200,7 +200,7 @@ impl WorkerClient {
         })
     }
 
-    /// Connect to a GooseFS Worker with only connect_timeout (backward compatible, NOSASL).
+    /// Connect to a Goosefs Worker with only connect_timeout (backward compatible, NOSASL).
     ///
     /// **Deprecated**: Use `connect(addr, config)` instead for proper authentication.
     pub async fn connect_simple(addr: &str, connect_timeout: Duration) -> Result<Self> {
@@ -213,7 +213,7 @@ impl WorkerClient {
         let channel = endpoint.connect().await?;
         let interceptor = ChannelIdInterceptor::new(uuid::Uuid::new_v4().to_string());
         let intercepted = InterceptedService::new(channel, interceptor);
-        debug!(addr = %addr, "connected to GooseFS Worker (no auth)");
+        debug!(addr = %addr, "connected to Goosefs Worker (no auth)");
 
         Ok(Self {
             inner: BlockWorkerClient::new(intercepted),
@@ -335,7 +335,7 @@ impl WorkerClient {
     ///
     /// ## Why a background task?
     ///
-    /// GooseFS Worker's `WriteBlock` RPC does **not** send HTTP/2 response
+    /// Goosefs Worker's `WriteBlock` RPC does **not** send HTTP/2 response
     /// headers until the client sends a `flush` command or closes the stream.
     /// tonic's `client.write_block(stream).await` waits for response headers
     /// before resolving, so calling it inline would deadlock — we'd need the
@@ -485,12 +485,12 @@ pub struct WorkerClientPool {
     /// freshly-created `WorkerClient`.
     next_generation: AtomicU64,
     /// Config used to create new connections.
-    config: GooseFsConfig,
+    config: GoosefsConfig,
 }
 
 impl WorkerClientPool {
     /// Create a new empty connection pool.
-    pub fn new(config: GooseFsConfig) -> Self {
+    pub fn new(config: GoosefsConfig) -> Self {
         Self {
             clients: RwLock::new(HashMap::new()),
             reconnect_locks: RwLock::new(HashMap::new()),
@@ -651,7 +651,7 @@ impl WorkerClientPool {
     }
 
     /// Create a new pool wrapped in `Arc` for shared ownership.
-    pub fn new_shared(config: GooseFsConfig) -> Arc<Self> {
+    pub fn new_shared(config: GoosefsConfig) -> Arc<Self> {
         Arc::new(Self::new(config))
     }
 
@@ -704,7 +704,7 @@ mod tests {
         // critical section, caller B has already replaced gen 5 with gen 6
         // (simulated by manually bumping via test_install).  Caller A must
         // NOT trigger a second reconnect — it should return gen 6 as-is.
-        let pool = WorkerClientPool::new(GooseFsConfig::new("127.0.0.1:9200"));
+        let pool = WorkerClientPool::new(GoosefsConfig::new("127.0.0.1:9200"));
         let addr = "test-worker:9203";
 
         // Install a gen-1 client, then another gen-2 client (simulating
@@ -742,7 +742,7 @@ mod tests {
         // Acquiring the reconnect lock for addr-A must not block acquiring
         // the lock for addr-B.  Without per-address locks, unrelated worker
         // reconnects would serialise through one global mutex.
-        let pool = WorkerClientPool::new(GooseFsConfig::new("127.0.0.1:9200"));
+        let pool = WorkerClientPool::new(GoosefsConfig::new("127.0.0.1:9200"));
         let lock_a = pool.reconnect_lock_for("worker-a:9203").await;
         let lock_b = pool.reconnect_lock_for("worker-b:9203").await;
 
@@ -757,7 +757,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_generation_is_monotonic_across_installs() {
-        let pool = WorkerClientPool::new(GooseFsConfig::new("127.0.0.1:9200"));
+        let pool = WorkerClientPool::new(GoosefsConfig::new("127.0.0.1:9200"));
         let addr = "w:9203";
 
         pool.test_install(addr, fake_client(addr)).await;
