@@ -341,7 +341,7 @@ impl ChannelAuthenticator {
             })?
             .map_err(|status| Error::GrpcError {
                 message: format!("SASL authentication RPC failed: {}", status),
-                source: status,
+                source: Box::new(status),
             })?;
 
         let mut response_stream = response.into_inner();
@@ -354,7 +354,7 @@ impl ChannelAuthenticator {
                     .await
                     .map_err(|status| Error::GrpcError {
                         message: format!("SASL authentication response error: {}", status),
-                        source: status,
+                        source: Box::new(status),
                     })?
             {
                 match sasl_handler.handle_message(&server_msg)? {

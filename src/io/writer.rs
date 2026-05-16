@@ -32,6 +32,7 @@ use tracing::{debug, trace};
 use crate::client::worker::{WriteBlockHandle, WriteBlockOptions};
 use crate::client::WorkerClient;
 use crate::error::{Error, Result};
+use crate::metrics::name;
 use crate::proto::grpc::block::{write_request, Chunk, WriteRequest, WriteRequestCommand};
 
 /// A streaming writer for a single Goosefs block.
@@ -39,6 +40,12 @@ use crate::proto::grpc::block::{write_request, Chunk, WriteRequest, WriteRequest
 /// Wraps a [`WriteBlockHandle`] that manages the background gRPC call.
 /// The initial `WriteRequestCommand` is sent during `open()`.
 /// Subsequent data is sent via `write_chunk()`.
+///
+/// # Metrics instrumentation
+///
+/// `write_chunk()` increments `Client.BytesWrittenLocal` to count cache-path
+/// writes. UFS direct-write instrumentation is deferred to the high-level
+/// `GoosefsFileWriter` where the write strategy is known.
 pub struct GrpcBlockWriter {
     /// Block being written.
     block_id: i64,
@@ -80,6 +87,8 @@ impl GrpcBlockWriter {
     }
 
     /// Write a data chunk to the block.
+    ///
+    /// Increments the `Client.BytesWrittenLocal` counter.
     pub async fn write_chunk(&mut self, data: Bytes) -> Result<()> {
         let chunk_len = data.len() as i64;
 
@@ -104,6 +113,9 @@ impl GrpcBlockWriter {
             total_written = self.bytes_written,
             "wrote chunk"
         );
+
+        // Instrument: increment written bytes counter (cache path).
+        crate::metrics::counter(name::CLIENT_BYTES_WRITTEN_LOCAL).inc(chunk_len);
 
         Ok(())
     }
@@ -201,5 +213,19 @@ impl GrpcBlockWriter {
     /// Total bytes written so far.
     pub fn bytes_written(&self) -> i64 {
         self.bytes_written
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that metrics instrumentation in write_chunk is sound.
+    /// (Full write path testing is integration-level; here we just verify
+    /// that the metrics counter is accessible and callable.)
+    #[test]
+    fn metrics_counter_accessible() {
+        let _counter = crate::metrics::counter(name::CLIENT_BYTES_WRITTEN_LOCAL);
+        // Just verifying no panics during counter access.
     }
 }

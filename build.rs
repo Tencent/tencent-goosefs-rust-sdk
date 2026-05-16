@@ -39,6 +39,7 @@ fn main() -> Result<()> {
                 "proto/grpc/file_system_master.proto",
                 "proto/grpc/block_worker.proto",
                 "proto/grpc/worker_manager_master.proto",
+                "proto/grpc/metric_master.proto",
                 "proto/proto/dataserver/protocol.proto",
                 "proto/proto/dataserver/status.proto",
                 "proto/proto/security/capability_token.proto",

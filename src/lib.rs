@@ -73,19 +73,20 @@ pub mod context;
 pub mod error;
 pub mod fs;
 pub mod io;
+pub mod metrics;
 pub mod retry;
 
 // Re-export commonly used types for convenience.
 pub use crate::config::{ConfigRefresher, TransparentAccelerationSwitch, WriteType};
 pub use crate::config::{
-    ENV_AUTHORIZATION_PERMISSION_ENABLED, ENV_AUTH_TYPE, ENV_AUTH_USERNAME, ENV_BLOCK_SIZE,
-    ENV_CHUNK_SIZE, ENV_CONFIG_MANAGER_RPC_ADDRESSES, ENV_CONFIG_RPC_PORT,
-    ENV_LOGIN_IMPERSONATION_USERNAME, ENV_MASTER_ADDR,
-    ENV_TRANSPARENT_ACCELERATION_COSRANGER_ENABLED, ENV_TRANSPARENT_ACCELERATION_ENABLED,
-    ENV_WRITE_TYPE, IMPERSONATION_NONE, STORAGE_OPT_AUTHORIZATION_PERMISSION_ENABLED,
-    STORAGE_OPT_AUTH_TYPE, STORAGE_OPT_AUTH_USERNAME, STORAGE_OPT_BLOCK_SIZE,
-    STORAGE_OPT_CHUNK_SIZE, STORAGE_OPT_CONFIG_MANAGER_RPC_ADDRESSES, STORAGE_OPT_CONFIG_RPC_PORT,
-    STORAGE_OPT_LOGIN_IMPERSONATION_USERNAME, STORAGE_OPT_MASTER_ADDR,
+    ENV_APP_ID, ENV_AUTHORIZATION_PERMISSION_ENABLED, ENV_AUTH_TYPE, ENV_AUTH_USERNAME,
+    ENV_BLOCK_SIZE, ENV_CHUNK_SIZE, ENV_CONFIG_MANAGER_RPC_ADDRESSES, ENV_CONFIG_RPC_PORT,
+    ENV_LOGIN_IMPERSONATION_USERNAME, ENV_MASTER_ADDR, ENV_METRICS_ENABLED,
+    ENV_METRICS_HEARTBEAT_INTERVAL_MS, ENV_TRANSPARENT_ACCELERATION_COSRANGER_ENABLED,
+    ENV_TRANSPARENT_ACCELERATION_ENABLED, ENV_WRITE_TYPE, IMPERSONATION_NONE,
+    STORAGE_OPT_AUTHORIZATION_PERMISSION_ENABLED, STORAGE_OPT_AUTH_TYPE, STORAGE_OPT_AUTH_USERNAME,
+    STORAGE_OPT_BLOCK_SIZE, STORAGE_OPT_CHUNK_SIZE, STORAGE_OPT_CONFIG_MANAGER_RPC_ADDRESSES,
+    STORAGE_OPT_CONFIG_RPC_PORT, STORAGE_OPT_LOGIN_IMPERSONATION_USERNAME, STORAGE_OPT_MASTER_ADDR,
     STORAGE_OPT_TRANSPARENT_ACCELERATION_COSRANGER_ENABLED,
     STORAGE_OPT_TRANSPARENT_ACCELERATION_ENABLED, STORAGE_OPT_WRITE_TYPE,
 };
@@ -124,6 +125,7 @@ pub mod proto {
             include!("generated/com.qcloud.cos.goosefs.grpc.file.rs");
         }
 
+        #[allow(clippy::large_enum_variant)]
         pub mod block {
             include!("generated/com.qcloud.cos.goosefs.grpc.block.rs");
         }
@@ -139,8 +141,13 @@ pub mod proto {
         pub mod sasl {
             include!("generated/com.qcloud.cos.goosefs.grpc.sasl.rs");
         }
+
+        pub mod metric {
+            include!("generated/com.qcloud.cos.goosefs.grpc.metric.rs");
+        }
     }
 
+    #[allow(clippy::module_inception)]
     pub mod proto {
         pub mod dataserver {
             include!("generated/com.qcloud.cos.goosefs.proto.dataserver.rs");

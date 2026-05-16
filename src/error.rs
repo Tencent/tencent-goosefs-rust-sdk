@@ -12,17 +12,24 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error)]
 pub enum Error {
     /// gRPC transport or protocol error (from tonic).
+    ///
+    /// The `source` is boxed to keep the enum variant small; `tonic::Status`
+    /// is ~200 bytes which triggers `clippy::result_large_err` otherwise.
     #[error("gRPC error: {message} — {source}")]
     GrpcError {
         message: String,
-        source: tonic::Status,
+        #[source]
+        source: Box<tonic::Status>,
     },
 
     /// gRPC transport / connection-level error.
+    ///
+    /// Boxed for the same reason as `GrpcError`.
     #[error("gRPC transport error: {message} — {source}")]
     TransportError {
         message: String,
-        source: tonic::transport::Error,
+        #[source]
+        source: Box<tonic::transport::Error>,
     },
 
     /// The file or directory was not found on Goosefs.
@@ -174,13 +181,13 @@ impl From<tonic::Status> for Error {
                 } else {
                     Error::GrpcError {
                         message: format!("[{}] {}", status.code(), msg),
-                        source: status,
+                        source: Box::new(status),
                     }
                 }
             }
             _ => Error::GrpcError {
                 message: format!("[{}] {}", status.code(), status.message()),
-                source: status,
+                source: Box::new(status),
             },
         }
     }
@@ -190,7 +197,7 @@ impl From<tonic::transport::Error> for Error {
     fn from(err: tonic::transport::Error) -> Self {
         Error::TransportError {
             message: err.to_string(),
-            source: err,
+            source: Box::new(err),
         }
     }
 }
@@ -204,7 +211,7 @@ impl Error {
     pub fn is_retriable(&self) -> bool {
         match self {
             Error::GrpcError { source, .. } => matches!(
-                source.code(),
+                source.as_ref().code(),
                 tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Aborted
             ),
             Error::TransportError { .. } => true,

@@ -222,6 +222,30 @@ impl PropertiesMap {
             }
         }
 
+        // Metrics enabled: goosefs.user.metrics.collection.enabled
+        if let Some(val) = self.get("goosefs.user.metrics.collection.enabled") {
+            if let Ok(b) = val.to_lowercase().parse::<bool>() {
+                cfg.metrics_enabled = b;
+            }
+        }
+
+        // Metrics heartbeat interval (unit: milliseconds):
+        // goosefs.user.metrics.heartbeat.interval
+        if let Some(ms_str) = self.get("goosefs.user.metrics.heartbeat.interval") {
+            if let Ok(ms) = ms_str.parse::<u64>() {
+                if ms >= MIN_METRICS_HEARTBEAT_INTERVAL_MS {
+                    cfg.metrics_heartbeat_interval = Duration::from_millis(ms);
+                }
+            }
+        }
+
+        // Application ID: goosefs.user.app.id
+        if let Some(id) = self.get("goosefs.user.app.id") {
+            if !id.is_empty() {
+                cfg.app_id = Some(id.to_string());
+            }
+        }
+
         cfg
     }
 }
@@ -332,6 +356,17 @@ const DEFAULT_MASTER_INQUIRE_MAX_SLEEP_MS: u64 = 3_000;
 /// Default config expiry time: 30 seconds (mirrors Java `ConfigurationUtils.expireTime`).
 const DEFAULT_CONFIG_EXPIRE_MS: u64 = 30_000;
 
+/// Default: metrics collection enabled (mirrors Java `USER_METRICS_COLLECTION_ENABLED`).
+const DEFAULT_METRICS_ENABLED: bool = true;
+/// Default metrics heartbeat interval: 10 s (mirrors Java `USER_METRICS_HEARTBEAT_INTERVAL_MS`).
+const DEFAULT_METRICS_HEARTBEAT_INTERVAL_MS: u64 = 10_000;
+/// Default per-heartbeat RPC timeout: 5 s (no Java equivalent).
+const DEFAULT_METRICS_HEARTBEAT_TIMEOUT_MS: u64 = 5_000;
+/// Minimum allowed heartbeat interval: 1 s (mirrors Java `USER_METRICS_HEARTBEAT_INTERVAL_MS` check).
+const MIN_METRICS_HEARTBEAT_INTERVAL_MS: u64 = 1_000;
+/// Default maximum metric entries per heartbeat batch.
+const DEFAULT_METRICS_MAX_BATCH_SIZE: usize = 1024;
+
 // ── Storage option key constants ─────────────────────────────
 //
 // These are the canonical key names used in `storage_options` maps
@@ -429,6 +464,23 @@ pub const ENV_AUTHORIZATION_PERMISSION_ENABLED: &str = "GOOSEFS_AUTHORIZATION_PE
 
 /// Environment variable: login impersonation username.
 pub const ENV_LOGIN_IMPERSONATION_USERNAME: &str = "GOOSEFS_LOGIN_IMPERSONATION_USERNAME";
+
+/// Environment variable: whether client metrics collection is enabled.
+///
+/// Mirrors Java's `goosefs.user.metrics.collection.enabled` (Scope=CLIENT).
+/// Accepted values: `"true"`, `"false"` (case-insensitive).
+pub const ENV_METRICS_ENABLED: &str = "GOOSEFS_USER_METRICS_COLLECTION_ENABLED";
+
+/// Environment variable: metrics heartbeat interval in **milliseconds**.
+///
+/// Mirrors Java's `goosefs.user.metrics.heartbeat.interval` / `USER_METRICS_HEARTBEAT_INTERVAL_MS`.
+/// Must parse as a positive integer ≥ 1000. Example: `"10000"` → 10 s.
+pub const ENV_METRICS_HEARTBEAT_INTERVAL_MS: &str = "GOOSEFS_USER_METRICS_HEARTBEAT_INTERVAL_MS";
+
+/// Environment variable: application ID for metric source attribution.
+///
+/// Mirrors Java's `goosefs.user.app.id`.
+pub const ENV_APP_ID: &str = "GOOSEFS_USER_APP_ID";
 
 /// Storage option key for config manager RPC addresses.
 pub const STORAGE_OPT_CONFIG_MANAGER_RPC_ADDRESSES: &str = "goosefs_config_manager_rpc_addresses";
@@ -746,6 +798,53 @@ pub struct GoosefsConfig {
     /// Mirrors Java's `goosefs.security.login.impersonation.username`.
     #[serde(default = "default_login_impersonation_username")]
     pub login_impersonation_username: String,
+
+    // ── Metrics / Heartbeat configuration ────────────────────────────────
+    /// Whether client metrics collection and heartbeat reporting is enabled.
+    ///
+    /// When `false`, no background tasks are spawned and no RPC is sent to
+    /// the MetricsMaster — identical to Java's behaviour when
+    /// `goosefs.user.metrics.collection.enabled = false`.
+    ///
+    /// Mirrors Java's `goosefs.user.metrics.collection.enabled` (Scope=CLIENT, default: true).
+    #[serde(default = "default_metrics_enabled")]
+    pub metrics_enabled: bool,
+
+    /// Interval between successive metrics heartbeat RPCs (default: 10 s).
+    ///
+    /// Must be ≥ 1 s; values of 0 are rejected by [`GoosefsConfig::validate`].
+    ///
+    /// Mirrors Java's `goosefs.user.metrics.heartbeat.interval`
+    /// (`USER_METRICS_HEARTBEAT_INTERVAL_MS`, default 10 000 ms).
+    /// Environment variable: `GOOSEFS_USER_METRICS_HEARTBEAT_INTERVAL_MS` (unit: **milliseconds**).
+    #[serde(default = "default_metrics_heartbeat_interval")]
+    pub metrics_heartbeat_interval: Duration,
+
+    /// Per-heartbeat RPC timeout (default: 5 s).
+    ///
+    /// No direct Java equivalent; prevents a slow or unresponsive Master from
+    /// blocking `close()` / Drop indefinitely.
+    #[serde(default = "default_metrics_heartbeat_timeout")]
+    pub metrics_heartbeat_timeout: Duration,
+
+    /// Application ID for metric source attribution (default: `None`).
+    ///
+    /// When `None`, the SDK derives the value at runtime in this order:
+    /// 1. `hostname()` from the OS
+    /// 2. `"goosefs-rust-{8-char UUID prefix}"` as a last resort
+    ///
+    /// Mirrors Java's `goosefs.user.app.id` / `IdUtils.createOrGetAppIdFromConfig`.
+    /// Environment variable: `GOOSEFS_USER_APP_ID`.
+    #[serde(default)]
+    pub app_id: Option<String>,
+
+    /// Maximum number of `Metric` entries per single heartbeat RPC (default: 1024).
+    ///
+    /// Acts as a safety cap against extreme registry sizes; entries beyond
+    /// this limit are silently dropped in the current heartbeat and sent in
+    /// subsequent ones once earlier entries have been flushed.
+    #[serde(default = "default_metrics_max_batch_size")]
+    pub metrics_max_batch_size: usize,
 }
 
 fn default_master_inquire_max_duration() -> Duration {
@@ -778,6 +877,19 @@ fn default_login_impersonation_username() -> String {
     DEFAULT_IMPERSONATION_USERNAME.to_string()
 }
 
+fn default_metrics_enabled() -> bool {
+    DEFAULT_METRICS_ENABLED
+}
+fn default_metrics_heartbeat_interval() -> Duration {
+    Duration::from_millis(DEFAULT_METRICS_HEARTBEAT_INTERVAL_MS)
+}
+fn default_metrics_heartbeat_timeout() -> Duration {
+    Duration::from_millis(DEFAULT_METRICS_HEARTBEAT_TIMEOUT_MS)
+}
+fn default_metrics_max_batch_size() -> usize {
+    DEFAULT_METRICS_MAX_BATCH_SIZE
+}
+
 impl Default for GoosefsConfig {
     fn default() -> Self {
         Self {
@@ -803,6 +915,11 @@ impl Default for GoosefsConfig {
             transparent_acceleration_cosranger_enabled: false,
             authorization_permission_enabled: false,
             login_impersonation_username: default_login_impersonation_username(),
+            metrics_enabled: default_metrics_enabled(),
+            metrics_heartbeat_interval: default_metrics_heartbeat_interval(),
+            metrics_heartbeat_timeout: default_metrics_heartbeat_timeout(),
+            app_id: None,
+            metrics_max_batch_size: default_metrics_max_batch_size(),
         }
     }
 }
@@ -986,6 +1103,33 @@ impl GoosefsConfig {
 
     // ── YAML / env configuration loading ───────────────────────────────────
 
+    // ── Metrics builder methods ──────────────────────────────────────────────
+
+    /// Enable or disable client metrics collection and heartbeat reporting.
+    pub fn with_metrics_enabled(mut self, enabled: bool) -> Self {
+        self.metrics_enabled = enabled;
+        self
+    }
+
+    /// Set the metrics heartbeat interval.
+    ///
+    /// # Panics
+    /// Panics if `interval` is less than 1 second.
+    pub fn with_metrics_heartbeat_interval(mut self, interval: Duration) -> Self {
+        assert!(
+            interval >= Duration::from_secs(1),
+            "metrics_heartbeat_interval must be >= 1 s"
+        );
+        self.metrics_heartbeat_interval = interval;
+        self
+    }
+
+    /// Set the application ID used as the metric source identifier.
+    pub fn with_app_id(mut self, app_id: impl Into<String>) -> Self {
+        self.app_id = Some(app_id.into());
+        self
+    }
+
     /// Load configuration from environment variables.
     ///
     /// Reads the following variables (all optional):
@@ -1119,6 +1263,29 @@ impl GoosefsConfig {
             }
         }
 
+        // Metrics collection enabled
+        if let Ok(val) = env::var(ENV_METRICS_ENABLED) {
+            if let Ok(b) = val.to_lowercase().parse::<bool>() {
+                self.metrics_enabled = b;
+            }
+        }
+
+        // Metrics heartbeat interval (unit: milliseconds)
+        if let Ok(ms_str) = env::var(ENV_METRICS_HEARTBEAT_INTERVAL_MS) {
+            if let Ok(ms) = ms_str.parse::<u64>() {
+                if ms >= MIN_METRICS_HEARTBEAT_INTERVAL_MS {
+                    self.metrics_heartbeat_interval = Duration::from_millis(ms);
+                }
+            }
+        }
+
+        // Application ID
+        if let Ok(id) = env::var(ENV_APP_ID) {
+            if !id.is_empty() {
+                self.app_id = Some(id);
+            }
+        }
+
         self
     }
 
@@ -1208,6 +1375,15 @@ impl GoosefsConfig {
         }
         if self.chunk_size > self.block_size {
             return Err("chunk_size must be <= block_size".to_string());
+        }
+        if self.metrics_heartbeat_interval
+            < Duration::from_millis(MIN_METRICS_HEARTBEAT_INTERVAL_MS)
+        {
+            return Err(format!(
+                "metrics_heartbeat_interval must be >= {}ms (got {}ms)",
+                MIN_METRICS_HEARTBEAT_INTERVAL_MS,
+                self.metrics_heartbeat_interval.as_millis()
+            ));
         }
         Ok(())
     }
@@ -2274,6 +2450,99 @@ goosefs.user.network.data.transfer.chunk.size=1MB
         assert!(
             !switch.cosranger_enabled,
             "refresher should pick up default cosranger=false after reload"
+        );
+    }
+
+    // ── Metrics configuration tests ──────────────────────────────────────────
+
+    #[test]
+    fn metrics_defaults_correct() {
+        let cfg = GoosefsConfig::default();
+        assert!(
+            cfg.metrics_enabled,
+            "metrics_enabled should default to true"
+        );
+        assert_eq!(
+            cfg.metrics_heartbeat_interval,
+            Duration::from_secs(10),
+            "metrics_heartbeat_interval should default to 10 s"
+        );
+        assert_eq!(
+            cfg.metrics_heartbeat_timeout,
+            Duration::from_secs(5),
+            "metrics_heartbeat_timeout should default to 5 s"
+        );
+        assert!(cfg.app_id.is_none(), "app_id should default to None");
+        assert_eq!(
+            cfg.metrics_max_batch_size, 1024,
+            "metrics_max_batch_size should default to 1024"
+        );
+        // default config still validates cleanly
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn metrics_interval_zero_rejected() {
+        let cfg = GoosefsConfig {
+            metrics_heartbeat_interval: Duration::from_millis(0),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("metrics_heartbeat_interval"),
+            "error should mention field name: {err}"
+        );
+    }
+
+    #[test]
+    fn metrics_interval_999ms_rejected() {
+        let cfg = GoosefsConfig {
+            metrics_heartbeat_interval: Duration::from_millis(999),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn metrics_interval_1000ms_accepted() {
+        let cfg = GoosefsConfig {
+            metrics_heartbeat_interval: Duration::from_millis(1000),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn metrics_disabled_via_builder() {
+        let cfg = GoosefsConfig::new("127.0.0.1:9200")
+            .with_metrics_enabled(false)
+            .with_app_id("my-service");
+        assert!(!cfg.metrics_enabled);
+        assert_eq!(cfg.app_id.as_deref(), Some("my-service"));
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn metrics_properties_parsing() {
+        let props = "\
+goosefs.user.metrics.collection.enabled=false\n\
+goosefs.user.metrics.heartbeat.interval=30000\n\
+goosefs.user.app.id=test-app\n";
+        let cfg = GoosefsConfig::from_properties_str(props);
+        assert!(!cfg.metrics_enabled);
+        assert_eq!(cfg.metrics_heartbeat_interval, Duration::from_secs(30));
+        assert_eq!(cfg.app_id.as_deref(), Some("test-app"));
+    }
+
+    #[test]
+    fn metrics_properties_interval_too_small_ignored() {
+        // Values < 1000 ms in properties file are silently ignored (keep default)
+        let props = "goosefs.user.metrics.heartbeat.interval=500\n";
+        let cfg = GoosefsConfig::from_properties_str(props);
+        assert_eq!(
+            cfg.metrics_heartbeat_interval,
+            Duration::from_secs(10),
+            "sub-1000 ms value should be ignored, keeping default 10 s"
         );
     }
 }

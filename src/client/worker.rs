@@ -93,7 +93,7 @@ impl WriteBlockHandle {
                     "WriteBlock server error for block_id={}: {}",
                     self.block_id, status
                 ),
-                source: status,
+                source: Box::new(status),
             }),
             None => Ok(None),
         }
@@ -126,7 +126,7 @@ impl WriteBlockHandle {
                             "WriteBlock server error for block_id={}: {}",
                             self.block_id, status
                         ),
-                        source: status,
+                        source: Box::new(status),
                     });
                 }
             }
