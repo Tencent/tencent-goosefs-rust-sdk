@@ -2,12 +2,14 @@ syntax = "proto2";
 
 package com.qcloud.cos.goosefs.proto.shared;
 
+// next available id: 3
 enum AclAction {
     READ = 0;
     WRITE = 1;
     EXECUTE = 2;
 }
 
+// next available id: 6
 enum AclEntryType {
     OWNER = 0;
     NAMED_USER = 1;
@@ -17,10 +19,12 @@ enum AclEntryType {
     OTHER = 5;
 }
 
+// next available id: 2
 message AclActions {
     repeated AclAction actions = 1;
 }
 
+// next available id: 5
 message AclEntry {
     optional AclEntryType type = 1;
     optional string subject = 2;
@@ -28,11 +32,14 @@ message AclEntry {
     optional bool isDefault = 4;
 }
 
+// AclActions for a String name.
+// next available id: 3
 message NamedAclActions {
     optional string name = 1;
     optional AclActions actions = 2;
 }
 
+// next available id: 9
 message AccessControlList {
     optional string owningUser = 1;
     optional string owningGroup = 2;

@@ -10,6 +10,7 @@ import "grpc/common.proto";
 import "grpc/fscommon.proto";
 import "proto/security/token.proto";
 import "proto/security/capability_token.proto";
+import "proto/shared/location.proto";
 
 enum WritePType {
   UNSPECIFIED_WRITE_TYPE = 0;
@@ -28,11 +29,14 @@ enum ReadPType {
 }
 
 enum LoadMetadataPType {
-  NEVER = 0;
-  ONCE = 1;
-  ALWAYS = 2;
+  NEVER = 0;  // Never load metadata.
+  ONCE = 1;  // Load metadata only once.
+  ALWAYS = 2;  // Always load metadata.
 }
 
+/**
+ * Unique operation id.
+ */
 message FsOpPId {
   optional int64 mostSignificantBits = 1;
   optional int64 leastSignificantBits = 2;
@@ -47,6 +51,7 @@ message CheckAccessPRequest {
   optional string path = 1;
   optional CheckAccessPOptions options = 2;
 }
+
 message CheckAccessPResponse {}
 message CheckAccessPOptions {
   optional Bits bits = 1;
@@ -60,6 +65,7 @@ message CheckConsistencyPOptions {
   optional FileSystemMasterCommonPOptions commonOptions = 1;
 }
 message CheckConsistencyPRequest {
+  /** the root of the subtree to check */
   optional string path = 1;
   optional CheckConsistencyPOptions options = 2;
 }
@@ -69,8 +75,13 @@ message CompleteFilePOptions {
   optional int64 ufsLength = 1;
   optional ScheduleAsyncPersistencePOptions asyncPersistOptions = 2;
   optional FileSystemMasterCommonPOptions commonOptions = 3;
+  optional grpc.ChecksumTypeProto crcType = 4;
+  optional int64 crcValue = 5;
+  repeated com.qcloud.cos.goosefs.proto.shared.FileLocation locations = 6;
+  optional bool forcePersisted = 7 [default = false];
 }
 message CompleteFilePRequest {
+  /** the path of the file */
   optional string path = 1;
   optional CompleteFilePOptions options = 2;
   optional int64 inodeId = 3;
@@ -83,7 +94,19 @@ message OpenFilePOptions {
   optional bool updateLastAccessTime = 4 [default = true];
 }
 
+message CommitLocationPOptions {
+  repeated com.qcloud.cos.goosefs.proto.shared.FileLocation locations = 1;
+}
+message CommitLocationPRequest {
+  optional string path = 1;
+  optional int64 inodeId = 2;
+  optional int64 blockId = 3;
+  optional CommitLocationPOptions options = 4;
+}
+message CommitLocationPResponse {}
+
 message CreateDirectoryPResponse {}
+// keep the original writeType,
 message CreateDirectoryPOptions {
   optional bool recursive = 1;
   optional bool allowExists = 2;
@@ -93,6 +116,7 @@ message CreateDirectoryPOptions {
   optional WritePType defaultWriteType = 6;
 }
 message CreateDirectoryPRequest {
+  /** the path of the directory */
   optional string path = 1;
   optional CreateDirectoryPOptions options = 2;
 }
@@ -110,6 +134,7 @@ message CreateFilePOptions {
   optional WritePType defaultWriteType = 7;
 }
 message CreateFilePRequest {
+  /** the path of the file */
   optional string path = 1;
   optional CreateFilePOptions options = 2;
 }
@@ -123,6 +148,7 @@ message DeletePOptions {
   optional bool ttl = 5 [default = false];
 }
 message DeletePRequest {
+  /** the path of the file or directory */
   optional string path = 1;
   optional DeletePOptions options = 2;
 }
@@ -134,6 +160,7 @@ message FreePOptions {
   optional FileSystemMasterCommonPOptions commonOptions = 3;
 }
 message FreePRequest {
+  /** the path of the file or directory */
   optional string path = 1;
   optional FreePOptions options = 2;
 }
@@ -151,6 +178,7 @@ message GetStatusPOptions {
   optional int32 checkBlockReplicas = 7 [default = 0];
 }
 message GetStatusPRequest {
+  /** the path of the file or directory */
   optional string path = 1;
   optional GetStatusPOptions options = 2;
   optional string request_id = 3;
@@ -171,10 +199,11 @@ enum SyncPointStatus {
 message SyncPointInfo {
   optional string syncPointUri = 1;
   optional SyncPointStatus syncStatus = 2;
+  optional int64 timestampSec = 3;
 }
 
 message GetSyncPathListPResponse {
-  repeated SyncPointInfo syncPaths = 1;
+  repeated SyncPointInfo syncPaths= 1;
 }
 message GetSyncPathListPRequest {}
 
@@ -182,22 +211,26 @@ message ListStatusPResponse {
   repeated FileInfo fileInfos = 1;
 }
 message ListStatusPOptions {
+  // This is deprecated since 1.1.1 and will be removed in 2.0. Use loadMetadataType.
   optional bool loadDirectChildren = 1;
   optional LoadMetadataPType loadMetadataType = 2;
   optional FileSystemMasterCommonPOptions commonOptions = 3;
   optional bool recursive = 4;
+  // No data will be transferred.
   optional bool loadMetadataOnly = 5;
   optional LoadMetadataPType defaultLoadMetadataType = 6;
   optional bool isLoadMetadata = 7 [default = false];
   optional int32 checkBlockReplicas = 8 [default = 0];
 }
 message ListStatusPRequest {
+  /** the path of the file or directory */
   optional string path = 1;
   optional ListStatusPOptions options = 2;
   optional string request_id = 3;
 }
 
 message ListNamespacePResponse {
+  // XXX Use the fileinfo instead of the namespace info temporarily here
   repeated FileInfo fileInfo = 1;
 }
 message ListNamespacePOptions {
@@ -219,6 +252,7 @@ message StatNamespacePRequest {
 }
 
 message LoadMetadataPOptions {
+  /** whether to load metadata recursively */
   optional bool recursive = 1;
   optional bool createAncestors = 2;
   optional fscommon.LoadDescendantPType loadDescendantType = 3;
@@ -256,10 +290,14 @@ message PAcl {
   optional bool isDefaultEmpty = 6;
 }
 
+/**
+* Contains the information of a block in a file. In addition to the BlockInfo, it includes the
+* offset in the file, and the under file system locations of the block replicas.
+*/
 message FileBlockInfo {
   optional grpc.BlockInfo blockInfo = 1;
   optional int64 offset = 2;
-  repeated grpc.WorkerNetAddress ufsLocations = 3;
+  repeated grpc.WorkerNetAddress ufsLocations = 3; // deprecated since 1.1 will be removed in 2.0 (replaced by ufsStringLocations)
   repeated string ufsStringLocations = 4;
 }
 
@@ -277,12 +315,14 @@ message FileInfo {
   optional bool persisted = 11;
   repeated int64 blockIds = 12;
   optional int64 lastModificationTimeMs = 13;
+
   optional string owner = 14;
   optional string group = 15;
   optional int32 mode = 16;
   optional string persistenceState = 17;
   optional bool mountPoint = 18;
   repeated FileBlockInfo fileBlockInfos = 19;
+
   optional int64 mountId = 20;
   optional int32 inGooseFSPercentage = 21;
   optional int32 inMemoryPercentage = 22;
@@ -310,12 +350,15 @@ message MountPOptions {
   optional FileSystemMasterCommonPOptions commonOptions = 4;
 }
 message MountPRequest {
+  /** the path of goosefs mount point */
   optional string goosefsPath = 1;
+  /** the path of the under file system */
   optional string ufsPath = 2;
   optional MountPOptions options = 3;
 }
 
 message CreateNamespacePResponse {}
+// The write and read policy is required in creating namespace operation
 message CreateNamespacePOptions {
   optional bool readOnly = 1;
   map<string, string> properties = 2;
@@ -331,6 +374,7 @@ message CreateNamespacePRequest {
 }
 
 message UpdateNamespacePResponse {}
+// The write and read policy is required in creating namespace operation
 message UpdateNamespacePOptions {
   optional bool readOnly = 1;
   map<string, string> properties = 2;
@@ -389,7 +433,9 @@ message RenamePOptions {
   optional bool persist = 2;
 }
 message RenamePRequest {
+  /** the source path of the file or directory */
   optional string path = 1;
+  /** the destination path */
   optional string dstPath = 2;
   optional RenamePOptions options = 3;
 }
@@ -402,6 +448,7 @@ message ReverseResolvePResponse {
 }
 
 message SetAttributePResponse {}
+//
 message SetAttributePOptions {
   optional bool persisted = 1;
   optional string owner = 2;
@@ -414,6 +461,7 @@ message SetAttributePOptions {
   optional bool directChildrenLoad = 11;
 }
 message SetAttributePRequest {
+  /** the path of the file */
   optional string path = 1;
   optional SetAttributePOptions options = 2;
 }
@@ -432,9 +480,13 @@ message SetAclPOptions {
   optional bool recursive = 2;
 }
 message SetAclPRequest {
+  /** the path of the file or directory */
   optional string path = 1;
+  /** the set action to perform */
   optional SetAclAction action = 2;
+  /** the list of ACL entries */
   repeated PAclEntry entries = 3;
+  /** the method options */
   optional SetAclPOptions options = 4;
 }
 
@@ -444,6 +496,7 @@ message ScheduleAsyncPersistencePOptions {
   optional int64 persistenceWaitTime = 2;
 }
 message ScheduleAsyncPersistencePRequest {
+  /** the path of the file */
   optional string path = 1;
   optional ScheduleAsyncPersistencePOptions options = 2;
 }
@@ -471,6 +524,7 @@ message UnmountPOptions {
   optional FileSystemMasterCommonPOptions commonOptions = 1;
 }
 message UnmountPRequest {
+  /** the path of the goosefs mount point */
   optional string goosefsPath = 1;
   optional UnmountPOptions options = 2;
 }
@@ -479,12 +533,13 @@ message DeleteNamespacePResponse {}
 message DeleteNamespacePOptions {
   optional FileSystemMasterCommonPOptions commonOptions = 1;
 }
-message DeleteNamespacePRequest {
+message DeleteNamespacePRequest{
   optional string namespace = 1;
   optional DeleteNamespacePOptions options = 2;
 }
 
 message SetNamespaceAttributePResponse {}
+// Remove the recursive option. For namespace, the default is recursive.
 message SetNamespaceAttributePOptions {
   optional bool persisted = 1;
   optional string owner = 2;
@@ -512,6 +567,7 @@ enum UfsPMode {
 }
 
 message UpdateMountPRequest {
+  /** the path of goosefs mount point */
   optional string goosefsPath = 1;
   optional MountPOptions options = 3;
 }
@@ -522,6 +578,7 @@ message UpdateUfsModePOptions {
   optional UfsPMode ufsMode = 1;
 }
 message UpdateUfsModePRequest {
+  /** the ufs path */
   optional string ufsPath = 1;
   optional UpdateUfsModePOptions options = 2;
 }
@@ -541,11 +598,15 @@ message CommonCacheRestrictPRequest {
 message RemoveBlocksPRequest {
   repeated int64 blockIds = 1;
 }
-message RemoveBlocksPResponse {}
+
+message RemoveBlocksPResponse {
+}
+
 
 message GetDelegationTokenPRequest {
   required string renewer = 1;
 }
+
 message GetDelegationTokenPResponse {
   required com.qcloud.cos.goosefs.proto.security.DelegationToken token = 1;
 }
@@ -553,6 +614,7 @@ message GetDelegationTokenPResponse {
 message RenewDelegationTokenPRequest {
   required com.qcloud.cos.goosefs.proto.security.DelegationToken token = 1;
 }
+
 message RenewDelegationTokenPResponse {
   required com.qcloud.cos.goosefs.proto.security.DelegationToken token = 1;
 }
@@ -560,7 +622,9 @@ message RenewDelegationTokenPResponse {
 message CancelDelegationTokenPRequest {
   required com.qcloud.cos.goosefs.proto.security.DelegationToken token = 1;
 }
-message CancelDelegationTokenPResponse {}
+
+message CancelDelegationTokenPResponse {
+}
 
 message CreateSymlinkPOptions {
   optional string target = 1;
@@ -574,7 +638,8 @@ message CreateSymlinkPRequest {
   optional string link = 1;
   optional CreateSymlinkPOptions options = 2;
 }
-message CreateSymlinkPResponse {}
+message CreateSymlinkPResponse {
+}
 
 message GetLinkTargetPRequest {
   optional string link = 1;
@@ -583,42 +648,290 @@ message GetLinkTargetPResponse {
   optional string target = 1;
 }
 
+message CheckPersistenceDonePRequest {
+}
+message CheckPersistenceDonePResponse {
+  optional bool done = 1;
+}
+
+message RetryFailedPersistencePRequest {
+}
+message RetryFailedPersistencePResponse {
+  optional bool effective = 1;
+}
+
+message CountFailedPersistencePRequest {
+  optional int64 max_traverse_count = 1;
+}
+message CountFailedPersistencePResponse {
+  optional int64 traversed_count = 1;
+  optional bool traverse_finished = 2;
+}
+
+message ListFailedPersistencePRequest {
+  optional int64 max_files_count = 1;
+  optional string marker = 2;
+}
+message ListFailedPersistencePResponse {
+  repeated string failed_files = 1;
+  optional bool truncated = 2;
+  optional string next_marker = 3;
+}
+
+/**
+ * This interface contains file system master service endpoints for GooseFS clients.
+ */
 service FileSystemMasterClientService {
+
+  /**
+   * Checks access to path.
+   */
   rpc CheckAccess(CheckAccessPRequest) returns (CheckAccessPResponse);
+
+  /**
+   * Checks the consistency of the files and directores with the path as the root of the subtree
+   */
   rpc CheckConsistency(CheckConsistencyPRequest) returns (CheckConsistencyPResponse);
+
+  /**
+   * Commits a block location, updating locations to inode metadata and journal.
+   */
+  rpc CommitLocation(CommitLocationPRequest) returns (CommitLocationPResponse);
+
+  /**
+   * Marks a file as completed.
+   */
   rpc CompleteFile(CompleteFilePRequest) returns (CompleteFilePResponse);
+
+  /**
+   * Creates a directory.
+   */
   rpc CreateDirectory(CreateDirectoryPRequest) returns (CreateDirectoryPResponse);
+
+  /**
+   * Creates a file.
+   */
   rpc CreateFile(CreateFilePRequest) returns (CreateFilePResponse);
+
+  /**
+   * Frees the given file or directory from GooseFS.
+   */
   rpc Free(FreePRequest) returns (FreePResponse);
+
+  /**
+  * Returns the file path of a file id
+  */
   rpc GetFilePath(GetFilePathPRequest) returns (GetFilePathPResponse);
+
+  /**
+  * Returns the mount point of a goosefs path
+  */
   rpc GetMountPoint(GetMountPointPRequest) returns (GetMountPointPResponse);
+  /**
+  * Returns a map from each GooseFS path to information of corresponding mount point
+  */
   rpc GetMountTable(GetMountTablePRequest) returns (GetMountTablePResponse);
+
+  /**
+   * Returns a list of paths that are being actively synced by GooseFS
+   */
   rpc GetSyncPathList(GetSyncPathListPRequest) returns (GetSyncPathListPResponse);
-  rpc GetStatus(GetStatusPRequest) returns (GetStatusPResponse);
+
+  /**
+   * Returns the status of the file or directory.
+   */
+  rpc GetStatus (GetStatusPRequest) returns (GetStatusPResponse);
+
+  /**
+   * If the path points to a file, the method returns a singleton with its file information.
+   * If the path points to a directory, the method returns a list with file information for the
+   * directory contents.
+   */
   rpc ListStatus(ListStatusPRequest) returns (stream ListStatusPResponse);
+
+  /**
+   * Creates a new "mount point", mounts the given UFS path in the GooseFS namespace at the given
+   * path. The path should not exist and should not be nested under any existing mount point.
+   */
   rpc Mount(MountPRequest) returns (MountPResponse);
+
+  /**
+   * Deletes a file or a directory and returns whether the remove operation succeeded.
+   */
   rpc Remove(DeletePRequest) returns (DeletePResponse);
+
+  /**
+   * Renames a file or a directory.
+   */
   rpc Rename(RenamePRequest) returns (RenamePResponse);
+
+  /**
+   * Reverse resolve a ufs path.
+   */
   rpc ReverseResolve(ReverseResolvePRequest) returns (ReverseResolvePResponse);
+
+  /**
+   * Schedules async persistence.
+   */
   rpc ScheduleAsyncPersistence(ScheduleAsyncPersistencePRequest) returns (ScheduleAsyncPersistencePResponse);
+
+  /**
+   * Sets ACL for the path.
+   */
   rpc SetAcl(SetAclPRequest) returns (SetAclPResponse);
+
+  /**
+   * Sets file or directory attributes.
+   */
   rpc SetAttribute(SetAttributePRequest) returns (SetAttributePResponse);
+
+  /**
+   * Start the active syncing of the directory or file
+   */
   rpc StartSync(StartSyncPRequest) returns (StartSyncPResponse);
+
+  /**
+   * Start the active syncing of the directory or file
+   */
   rpc StopSync(StopSyncPRequest) returns (StopSyncPResponse);
+
+  /**
+   * Deletes an existing "mount point", voiding the GooseFS namespace at the given path. The path
+   * should correspond to an existing mount point. Any files in its subtree that are backed by UFS
+   * will be persisted before they are removed from the GooseFS namespace.
+   */
   rpc Unmount(UnmountPRequest) returns (UnmountPResponse);
+
+  /**
+   * Updates an existing "mount point", changing its mount properties
+   */
   rpc UpdateMount(UpdateMountPRequest) returns (UpdateMountPResponse);
+
+  /**
+   * Updates the ufs mode for a ufs path under one or more mount points.
+   */
   rpc UpdateUfsMode(UpdateUfsModePRequest) returns (UpdateUfsModePResponse);
+
   rpc GetStateLockHolders(GetStateLockHoldersPRequest) returns (GetStateLockHoldersPResponse);
+
+  /**
+   * Create a namespace in goosefs filesystem.
+   */
   rpc CreateNamespace(CreateNamespacePRequest) returns (CreateNamespacePResponse);
+
+  /**
+   * Update a namespace in goosefs filesystem.
+   */
   rpc UpdateNamespace(UpdateNamespacePRequest) returns (UpdateNamespacePResponse);
+
+  /**
+   * Delete a namespace in goosefs filesystem
+   */
   rpc DeleteNamespace(DeleteNamespacePRequest) returns (DeleteNamespacePResponse);
+
+  /**
+   * List all namespaces in goosefs filesystem
+   */
   rpc ListNamespace(ListNamespacePRequest) returns (stream ListNamespacePResponse);
+
+  /**
+   * Get the metadata of the namespace
+   */
   rpc StatNamespace(StatNamespacePRequest) returns (StatNamespacePResponse);
+
   rpc SetNamespaceAttribute(SetNamespaceAttributePRequest) returns (SetNamespaceAttributePResponse);
+
   rpc RemoveBlocks(RemoveBlocksPRequest) returns (RemoveBlocksPResponse);
+
   rpc GetDelegationToken(GetDelegationTokenPRequest) returns (GetDelegationTokenPResponse);
+
   rpc RenewDelegationToken(RenewDelegationTokenPRequest) returns (RenewDelegationTokenPResponse);
+
   rpc CancelDelegationToken(CancelDelegationTokenPRequest) returns (CancelDelegationTokenPResponse);
+
   rpc CreateSymlink(CreateSymlinkPRequest) returns (CreateSymlinkPResponse);
+
   rpc GetLinkTarget(GetLinkTargetPRequest) returns (GetLinkTargetPResponse);
+
+  rpc checkPersistenceDone(CheckPersistenceDonePRequest) returns (CheckPersistenceDonePResponse);
+
+  rpc retryFailedPersistence(RetryFailedPersistencePRequest) returns (RetryFailedPersistencePResponse);
+
+  rpc countFailedPersistence(CountFailedPersistencePRequest) returns (CountFailedPersistencePResponse);
+
+  rpc listFailedPersistence(ListFailedPersistencePRequest) returns (ListFailedPersistencePResponse);
+}
+
+message FileSystemHeartbeatPResponse {
+  optional FileSystemCommand command = 1;
+}
+message FileSystemHeartbeatPOptions {
+  repeated string persistedFileFingerprints = 1;
+}
+message FileSystemHeartbeatPRequest {
+  /** the id of the worker */
+  optional int64 workerId = 1;
+  /** the list of persisted files */
+  repeated int64 persistedFiles = 2;
+  optional FileSystemHeartbeatPOptions options = 3;
+}
+
+message GetFileInfoPResponse {
+  optional FileInfo fileInfo = 1;
+}
+message GetFileInfoPOptions {}
+message GetFileInfoPRequest {
+  /** the id of the file */
+  optional int64 fileId = 1;
+  optional GetFileInfoPOptions options = 2;
+}
+
+message GetUfsInfoPResponse {
+  optional UfsInfo ufsInfo = 1;
+}
+message GetUfsInfoPOptions {
+}
+message GetUfsInfoPRequest {
+  /** the id of the ufs */
+  optional int64 mountId = 1;
+  optional GetUfsInfoPOptions options = 2;
+  optional string ufsUri = 3;
+}
+
+/**
+ * This interface contains file system master service endpoints for GooseFS workers.
+ */
+service FileSystemMasterWorkerService {
+
+  /**
+   * Periodic file system worker heartbeat. Returns the command for persisting
+   * the blocks of a file.
+   */
+  rpc FileSystemHeartbeat(FileSystemHeartbeatPRequest) returns (FileSystemHeartbeatPResponse);
+
+  /*
+   * Returns the file information for a file or directory identified by the given file id.
+   */
+  rpc GetFileInfo(GetFileInfoPRequest) returns (GetFileInfoPResponse);
+
+  /**
+   * Returns the UFS information for the given mount point identified by its id.
+   **/
+  rpc GetUfsInfo(GetUfsInfoPRequest) returns (GetUfsInfoPResponse);
+
+}
+
+/**
+ * This interface contains file system master service endpoints for GooseFS workers.
+ */
+service FileSystemMasterJobService {
+  /*
+   * Returns the file information for a file or directory identified by the given file id.
+   */
+  rpc GetFileInfo(GetFileInfoPRequest) returns (GetFileInfoPResponse);
+
+  /**
+   * Returns the UFS information for the given mount point identified by its id.
+   **/
+  rpc GetUfsInfo(GetUfsInfoPRequest) returns (GetUfsInfoPResponse);
 }

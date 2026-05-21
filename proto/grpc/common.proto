@@ -23,17 +23,28 @@ message PMode {
   required Bits otherBits = 3;
 }
 
+/**
+ * Contains the information of a block in GooseFS. It maintains the worker nodes where the replicas
+ * of the blocks are stored.
+ */
 message BlockInfo {
   optional int64 blockId = 1;
   optional int64 length = 2;
   optional int32 maxReplicas = 3;
+  repeated BlockLocation locations = 4;
 }
 
+/**
+ * Information about blocks.
+ */
 message BlockLocation {
   optional int64 workerId = 1;
   optional WorkerNetAddress workerAddress = 2;
 }
 
+/**
+ * Information about metrics.
+ */
 message Metric {
   optional string instance = 1;
   optional string source = 2;
@@ -44,18 +55,26 @@ message Metric {
 }
 
 enum MetricType {
+  // GAUGE is the simplest type of metric. If you're not sure which to use, gauge is a safe choice. It is represents a
+  // general K-V pair.
   GAUGE = 0;
+  // COUNTER represents values which can be incremented or decremented over time by certain operations. It does not rely
+  // on timing to determine the value.
   COUNTER = 1;
+  // METER represents a metric value at a _rate_. The value of the metric varies with the time over which events are
+  // recorded
   METER = 2;
+  // TIMER represents a histogram of the rate of the specified events.
   TIMER = 3;
+  // HISTOGRAM gives statistics about the value of past occurrences of an event.
   HISTOGRAM = 4;
 }
 
 enum CommandType {
   Unknown = 0;
   Nothing = 1;
-  Register = 2;
-  Free = 3;
+  Register = 2; // Ask the worker to re-register.
+  Free = 3;     // Ask the worker to free files.
 }
 
 message ConfigProperty {
@@ -78,13 +97,20 @@ message TieredIdentity {
   repeated LocalityTier tiers = 1;
 }
 
+/**
+ * Address information about masters.
+ */
 message NetAddress {
   optional string host = 1;
   optional int32 rpcPort = 2;
+  // 支持腾讯云 VPC 通过 vip 访问托管在 underlay 环境的物理机的 Host 和 Port
   optional string tencentCloudVPCMappingHost = 3;
   optional int32 tencentCloudVPCMappingPort = 4;
 }
 
+/**
+ * Address information about workers.
+ */
 message WorkerNetAddress {
   optional string host = 1;
   optional int32 rpcPort = 2;
@@ -120,12 +146,34 @@ enum WorkerStatus {
 }
 
 enum ManageWorkerAction {
-  REGISTER = 0;
   DELETE = 1;
   ISOLATE = 2;
   ACTIVATE = 3;
+  UPDATE_ATTRIBUTE = 4;
 }
 
 message WorkerRateLimit {
   optional double rateLimit = 1;
+}
+
+message Checksum {
+  required ChecksumTypeProto crcType = 1;
+  required uint32 bytesPerChecksum = 2;
+}
+
+enum ChecksumTypeProto {
+  CHECKSUM_NULL = 0;
+  CHECKSUM_CRC32 = 1;
+  CHECKSUM_CRC32C = 2;
+}
+
+/**
+ * Probe timing information, used to convey server-side sub-phase timings via gRPC Trailer.
+ * Only used in probe mode (when request Header carries probe-enabled: true).
+ */
+message ProbeTimingInfo {
+  // Server total processing duration (microseconds)
+  optional int64 server_total_us = 1;
+  // Sub-phase timings (microseconds), key is the phase name
+  map<string, int64> sub_timings_us = 2;
 }

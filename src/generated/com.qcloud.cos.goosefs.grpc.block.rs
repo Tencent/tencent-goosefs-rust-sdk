@@ -6,15 +6,21 @@ pub struct AvoidBlockDeadLockRequest {
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct AvoidBlockDeadLockResponse {}
+/// The check request
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct CheckRequest {}
+/// The check response
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct CheckResponse {}
+/// The data chunk.
+/// next available id: 2
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Chunk {
     #[prost(bytes = "vec", optional, tag = "1")]
     pub data: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
+/// The read request.
+/// next available id: 9
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ReadRequest {
     #[prost(int64, optional, tag = "1")]
@@ -25,12 +31,15 @@ pub struct ReadRequest {
     pub length: ::core::option::Option<i64>,
     #[prost(int64, optional, tag = "4")]
     pub chunk_size: ::core::option::Option<i64>,
+    /// This is only set for UFS block read.
     #[prost(message, optional, tag = "5")]
     pub open_ufs_block_options: ::core::option::Option<
         super::super::proto::dataserver::OpenUfsBlockOptions,
     >,
+    /// Read receipt
     #[prost(int64, optional, tag = "6")]
     pub offset_received: ::core::option::Option<i64>,
+    /// Is position read to a small buffer
     #[prost(bool, optional, tag = "7")]
     pub position_short: ::core::option::Option<bool>,
     #[prost(string, optional, tag = "8")]
@@ -42,21 +51,28 @@ pub struct ReadRequest {
     #[prost(int32, optional, tag = "11")]
     pub prefetch_window: ::core::option::Option<i32>,
 }
+/// The read response.
+/// next available id: 2
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ReadResponse {
     #[prost(message, optional, tag = "1")]
     pub chunk: ::core::option::Option<Chunk>,
 }
+/// The write request command.
+/// next available id: 10
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct WriteRequestCommand {
     #[prost(enumeration = "RequestType", optional, tag = "1")]
     pub r#type: ::core::option::Option<i32>,
+    /// The block ID or UFS file ID.
     #[prost(int64, optional, tag = "2")]
     pub id: ::core::option::Option<i64>,
     #[prost(int64, optional, tag = "3")]
     pub offset: ::core::option::Option<i64>,
+    /// This is only applicable for block write.
     #[prost(bool, optional, tag = "4")]
     pub flush: ::core::option::Option<bool>,
+    /// Cancel, close and error will be handled by standard gRPC stream APIs.
     #[prost(message, optional, tag = "5")]
     pub create_ufs_file_options: ::core::option::Option<
         super::super::proto::dataserver::CreateUfsFileOptions,
@@ -67,7 +83,12 @@ pub struct WriteRequestCommand {
     pub capability: ::core::option::Option<super::super::proto::security::Capability>,
     #[prost(string, optional, tag = "8")]
     pub medium_type: ::core::option::Option<::prost::alloc::string::String>,
+    /// Whether the write is async (ASYNC_THROUGH write type).
+    #[prost(bool, optional, tag = "9")]
+    pub async_write: ::core::option::Option<bool>,
 }
+/// The write request.
+/// next available id: 3
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct WriteRequest {
     #[prost(oneof = "write_request::Value", tags = "1, 2")]
@@ -83,15 +104,22 @@ pub mod write_request {
         Chunk(super::Chunk),
     }
 }
+/// The write response.
+/// next available id: 2
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct WriteResponse {
+    /// Errors will be handled by standard gRPC stream APIs.
     #[prost(int64, optional, tag = "1")]
     pub offset: ::core::option::Option<i64>,
 }
+/// Request for caching a block asynchronously
+/// next available id: 6
+/// TODO：deprecated: use CacheRequest instead
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AsyncCacheRequest {
     #[prost(int64, optional, tag = "1")]
     pub block_id: ::core::option::Option<i64>,
+    /// TODO(calvin): source host and port should be replace with WorkerNetAddress
     #[prost(string, optional, tag = "2")]
     pub source_host: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(int32, optional, tag = "3")]
@@ -111,6 +139,7 @@ pub struct AsyncCacheResponse {}
 pub struct SyncCacheRequest {
     #[prost(int64, optional, tag = "1")]
     pub block_id: ::core::option::Option<i64>,
+    /// TODO(calvin): source host and port should be replace with WorkerNetAddress
     #[prost(string, optional, tag = "2")]
     pub source_host: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(int32, optional, tag = "3")]
@@ -129,6 +158,7 @@ pub struct SyncCacheResponse {
     #[prost(bool, optional, tag = "1")]
     pub result: ::core::option::Option<bool>,
 }
+/// next available id: 3
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OpenLocalBlockRequest {
     #[prost(int64, optional, tag = "1")]
@@ -138,6 +168,7 @@ pub struct OpenLocalBlockRequest {
     #[prost(int64, optional, tag = "3")]
     pub block_size: ::core::option::Option<i64>,
 }
+/// next available id: 2
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OpenLocalBlockResponse {
     #[prost(string, optional, tag = "1")]
@@ -145,6 +176,7 @@ pub struct OpenLocalBlockResponse {
     #[prost(int64, optional, tag = "2")]
     pub block_size: ::core::option::Option<i64>,
 }
+/// next available id: 8
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateLocalBlockRequest {
     #[prost(int64, optional, tag = "1")]
@@ -153,18 +185,23 @@ pub struct CreateLocalBlockRequest {
     pub tier: ::core::option::Option<i32>,
     #[prost(int64, optional, tag = "3")]
     pub space_to_reserve: ::core::option::Option<i64>,
+    /// If set, only reserve space for the block.
     #[prost(bool, optional, tag = "4")]
     pub only_reserve_space: ::core::option::Option<bool>,
     #[prost(message, optional, tag = "5")]
     pub capability: ::core::option::Option<super::super::proto::security::Capability>,
     #[prost(string, optional, tag = "6")]
     pub medium_type: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, optional, tag = "7")]
+    pub async_write: ::core::option::Option<bool>,
 }
+/// next available id: 2
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateLocalBlockResponse {
     #[prost(string, optional, tag = "1")]
     pub path: ::core::option::Option<::prost::alloc::string::String>,
 }
+/// next available id: 2
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct RemoveBlockRequest {
     #[prost(int64, optional, tag = "1")]
@@ -207,6 +244,7 @@ pub struct Block {
     pub length: i64,
     #[prost(string, optional, tag = "3")]
     pub ufs_path: ::core::option::Option<::prost::alloc::string::String>,
+    /// The offset of the block in within ufs the file.
     #[prost(int64, optional, tag = "4")]
     pub offset_in_file: ::core::option::Option<i64>,
     #[prost(int64, optional, tag = "5")]
@@ -216,8 +254,10 @@ pub struct Block {
 pub struct BlockStatus {
     #[prost(message, required, tag = "1")]
     pub block: Block,
+    /// The status code, which should be an enum value of [google.rpc.Code][google.rpc.Code].
     #[prost(int32, required, tag = "2")]
     pub code: i32,
+    /// A developer-facing error message
     #[prost(string, optional, tag = "3")]
     pub message: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(bool, optional, tag = "4")]
@@ -227,6 +267,10 @@ pub struct BlockStatus {
 pub struct UfsReadOptions {
     #[prost(string, required, tag = "1")]
     pub tag: ::prost::alloc::string::String,
+    /// is position short or not, used for HDFS performance optimization.
+    /// When the client buffer size is large ( > 2MB) and reads are guaranteed to be somewhat
+    /// sequential, the `pread` API to HDFS is not as efficient as simple `read`.
+    /// We introduce a heuristic to choose which API to use.
     #[prost(bool, required, tag = "2")]
     pub position_short: bool,
     #[prost(int64, optional, tag = "3")]
@@ -234,6 +278,8 @@ pub struct UfsReadOptions {
     #[prost(string, optional, tag = "4")]
     pub user: ::core::option::Option<::prost::alloc::string::String>,
 }
+/// The read/write request type. It can either be an GooseFS block operation or a UFS file operation.
+/// next available id: 3
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum RequestType {
@@ -274,6 +320,7 @@ pub mod block_worker_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
+    /// The block worker service
     #[derive(Debug, Clone)]
     pub struct BlockWorkerClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -412,6 +459,7 @@ pub mod block_worker_client {
                 );
             self.inner.streaming(req, path, codec).await
         }
+        /// Replaces ShortCircuitBlockReadHandler.
         pub async fn open_local_block(
             &mut self,
             request: impl tonic::IntoStreamingRequest<
@@ -443,6 +491,7 @@ pub mod block_worker_client {
                 );
             self.inner.streaming(req, path, codec).await
         }
+        /// Replaces ShortCircuitBlockWriteHandler.
         pub async fn create_local_block(
             &mut self,
             request: impl tonic::IntoStreamingRequest<
@@ -474,6 +523,7 @@ pub mod block_worker_client {
                 );
             self.inner.streaming(req, path, codec).await
         }
+        /// deprecated: use Cache instead
         pub async fn async_cache(
             &mut self,
             request: impl tonic::IntoRequest<super::AsyncCacheRequest>,
@@ -590,6 +640,7 @@ pub mod block_worker_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// TODO(lu) Move to metrics worker
         pub async fn clear_metrics(
             &mut self,
             request: impl tonic::IntoRequest<super::ClearMetricsRequest>,
@@ -765,16 +816,23 @@ pub struct WorkerInfo {
     #[prost(int64, optional, tag = "6")]
     pub used_bytes: ::core::option::Option<i64>,
     #[prost(int64, optional, tag = "7")]
+    pub read_cache_used_bytes: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "8")]
+    pub write_cache_used_bytes: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "9")]
     pub start_time_ms: ::core::option::Option<i64>,
-    #[prost(int32, optional, tag = "8")]
+    #[prost(int32, optional, tag = "10")]
     pub virtual_node_num: ::core::option::Option<i32>,
-    #[prost(bool, optional, tag = "9")]
+    #[prost(bool, optional, tag = "11")]
     pub alive: ::core::option::Option<bool>,
-    #[prost(double, optional, tag = "10")]
+    #[prost(double, optional, tag = "12")]
     pub sync_cache_rate_limit: ::core::option::Option<f64>,
+    #[prost(bool, optional, tag = "13", default = "false")]
+    pub forbid_write: ::core::option::Option<bool>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetWorkerReportPOptions {
+    /// * addresses are only valid when workerRange is SPECIFIED
     #[prost(string, repeated, tag = "1")]
     pub addresses: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(enumeration = "WorkerInfoField", repeated, packed = "false", tag = "2")]
@@ -811,9 +869,21 @@ pub struct ManageWorkerPRequest {
     pub address: ::core::option::Option<super::WorkerNetAddress>,
     #[prost(enumeration = "super::ManageWorkerAction", optional, tag = "2")]
     pub action: ::core::option::Option<i32>,
+    #[prost(message, optional, tag = "3")]
+    pub update_attribute_params: ::core::option::Option<UpdateAttributeParams>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct ManageWorkerPResponse {}
+/// *
+/// Parameters for UPDATE_ATTRIBUTE action.
+/// Uses optional fields so that only specified attributes are updated.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct UpdateAttributeParams {
+    #[prost(bool, optional, tag = "1")]
+    pub forbid_write: ::core::option::Option<bool>,
+    #[prost(int32, optional, tag = "2")]
+    pub virtual_node_num: ::core::option::Option<i32>,
+}
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct UpdateClusterRateLimitPRequest {
     #[prost(double, optional, tag = "1")]
@@ -829,6 +899,30 @@ pub struct GetClusterRateLimitPResponse {
     pub rate_limit: ::core::option::Option<f64>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BlockApplyRatePRequest {
+    #[prost(enumeration = "BlockApplyRateType", optional, tag = "1")]
+    pub r#type: ::core::option::Option<i32>,
+    #[prost(string, optional, tag = "2")]
+    pub host: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(int64, optional, tag = "3")]
+    pub id: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "4")]
+    pub cur_bandwidth: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "5")]
+    pub cur_qps: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "6")]
+    pub max_bandwidth: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "7")]
+    pub max_qps: ::core::option::Option<i64>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct BlockApplyRatePResponse {
+    #[prost(int64, optional, tag = "1")]
+    pub quota_bandwidth: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "2")]
+    pub quota_qps: ::core::option::Option<i64>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TierList {
     #[prost(int64, repeated, packed = "false", tag = "1")]
     pub tiers: ::prost::alloc::vec::Vec<i64>,
@@ -838,11 +932,91 @@ pub struct BlockIdList {
     #[prost(int64, repeated, packed = "false", tag = "1")]
     pub block_id: ::prost::alloc::vec::Vec<i64>,
 }
+/// *
+/// A list of lost storage paths inside a worker
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StorageList {
+    /// * a lost storage path
     #[prost(string, repeated, tag = "1")]
     pub storage: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BlockHeartbeatPOptions {
+    #[prost(message, repeated, tag = "1")]
+    pub metrics: ::prost::alloc::vec::Vec<super::Metric>,
+    #[prost(int64, optional, tag = "2")]
+    pub capacity_bytes: ::core::option::Option<i64>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct BlockMeta {
+    #[prost(int64, optional, tag = "1")]
+    pub block_id: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "2")]
+    pub length: ::core::option::Option<i64>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BlockHeartbeatPRequest {
+    /// * the id of the worker
+    #[prost(int64, optional, tag = "1")]
+    pub worker_id: ::core::option::Option<i64>,
+    /// * the space used in bytes on Worker
+    #[prost(int64, optional, tag = "2")]
+    pub used_bytes: ::core::option::Option<i64>,
+    /// * the map of added blocks on all tiers (deprecated since 2.0, replaced by addedBlocks)
+    #[prost(message, optional, tag = "3")]
+    pub options: ::core::option::Option<BlockHeartbeatPOptions>,
+    /// * the space used by read cache directories in bytes
+    #[prost(int64, optional, tag = "4")]
+    pub read_cache_used_bytes: ::core::option::Option<i64>,
+    /// * the space used by write cache directories in bytes
+    #[prost(int64, optional, tag = "5")]
+    pub write_cache_used_bytes: ::core::option::Option<i64>,
+    /// * the lost storage paths
+    #[prost(message, optional, tag = "6")]
+    pub lost_storage: ::core::option::Option<StorageList>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BlockHeartbeatPResponse {
+    #[prost(message, optional, tag = "1")]
+    pub command: ::core::option::Option<super::Command>,
+    #[prost(message, optional, tag = "2")]
+    pub sync_cache_rate_limit: ::core::option::Option<super::WorkerRateLimit>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct GetWorkerIdPOptions {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetWorkerIdPRequest {
+    /// * the worker network address
+    #[prost(message, optional, tag = "1")]
+    pub worker_net_address: ::core::option::Option<super::WorkerNetAddress>,
+    #[prost(message, optional, tag = "2")]
+    pub options: ::core::option::Option<GetWorkerIdPOptions>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct GetWorkerIdPResponse {
+    #[prost(int64, optional, tag = "1")]
+    pub worker_id: ::core::option::Option<i64>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RegisterWorkerPRequest {
+    /// * the id of the worker
+    #[prost(int64, optional, tag = "1")]
+    pub worker_id: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "2")]
+    pub capacity_bytes: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "3")]
+    pub used_bytes: ::core::option::Option<i64>,
+    /// * the space used by read cache directories in bytes
+    #[prost(int64, optional, tag = "4")]
+    pub read_cache_used_bytes: ::core::option::Option<i64>,
+    /// * the space used by write cache directories in bytes
+    #[prost(int64, optional, tag = "5")]
+    pub write_cache_used_bytes: ::core::option::Option<i64>,
+    #[prost(message, optional, tag = "6")]
+    pub lost_storage: ::core::option::Option<StorageList>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct RegisterWorkerPResponse {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum WorkerManagerMasterInfoField {
@@ -885,6 +1059,7 @@ pub enum WorkerRange {
     Live = 2,
     Lost = 3,
     Specified = 4,
+    ForbidWrite = 5,
 }
 impl WorkerRange {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -897,6 +1072,7 @@ impl WorkerRange {
             Self::Live => "LIVE",
             Self::Lost => "LOST",
             Self::Specified => "SPECIFIED",
+            Self::ForbidWrite => "FORBID_WRITE",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -906,6 +1082,7 @@ impl WorkerRange {
             "LIVE" => Some(Self::Live),
             "LOST" => Some(Self::Lost),
             "SPECIFIED" => Some(Self::Specified),
+            "FORBID_WRITE" => Some(Self::ForbidWrite),
             _ => None,
         }
     }
@@ -919,6 +1096,9 @@ pub enum WorkerInfoField {
     StartTimeMs = 4,
     WorkerUsedBytes = 5,
     WorkerSyncCacheRateLimit = 6,
+    WorkerForbidWrite = 7,
+    WorkerReadCacheUsedBytes = 8,
+    WorkerWriteCacheUsedBytes = 9,
 }
 impl WorkerInfoField {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -933,6 +1113,9 @@ impl WorkerInfoField {
             Self::StartTimeMs => "START_TIME_MS",
             Self::WorkerUsedBytes => "WORKER_USED_BYTES",
             Self::WorkerSyncCacheRateLimit => "WORKER_SYNC_CACHE_RATE_LIMIT",
+            Self::WorkerForbidWrite => "WORKER_FORBID_WRITE",
+            Self::WorkerReadCacheUsedBytes => "WORKER_READ_CACHE_USED_BYTES",
+            Self::WorkerWriteCacheUsedBytes => "WORKER_WRITE_CACHE_USED_BYTES",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -944,6 +1127,41 @@ impl WorkerInfoField {
             "START_TIME_MS" => Some(Self::StartTimeMs),
             "WORKER_USED_BYTES" => Some(Self::WorkerUsedBytes),
             "WORKER_SYNC_CACHE_RATE_LIMIT" => Some(Self::WorkerSyncCacheRateLimit),
+            "WORKER_FORBID_WRITE" => Some(Self::WorkerForbidWrite),
+            "WORKER_READ_CACHE_USED_BYTES" => Some(Self::WorkerReadCacheUsedBytes),
+            "WORKER_WRITE_CACHE_USED_BYTES" => Some(Self::WorkerWriteCacheUsedBytes),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum BlockApplyRateType {
+    RateRead = 1,
+    RateWrite = 2,
+    RateReadWrite = 3,
+    RatePersist = 4,
+}
+impl BlockApplyRateType {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::RateRead => "RATE_READ",
+            Self::RateWrite => "RATE_WRITE",
+            Self::RateReadWrite => "RATE_READ_WRITE",
+            Self::RatePersist => "RATE_PERSIST",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "RATE_READ" => Some(Self::RateRead),
+            "RATE_WRITE" => Some(Self::RateWrite),
+            "RATE_READ_WRITE" => Some(Self::RateReadWrite),
+            "RATE_PERSIST" => Some(Self::RatePersist),
             _ => None,
         }
     }
@@ -959,6 +1177,8 @@ pub mod worker_manager_master_client_service_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
+    /// *
+    /// This interface contains block master service endpoints for GooseFS clients.
     #[derive(Debug, Clone)]
     pub struct WorkerManagerMasterClientServiceClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -1041,6 +1261,8 @@ pub mod worker_manager_master_client_service_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
+        /// *
+        /// Returns block master information.
         pub async fn get_worker_manager_master_info(
             &mut self,
             request: impl tonic::IntoRequest<super::GetWorkerManagerMasterInfoPOptions>,
@@ -1070,6 +1292,8 @@ pub mod worker_manager_master_client_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// *
+        /// Returns the capacity (in bytes).
         pub async fn get_capacity_bytes(
             &mut self,
             request: impl tonic::IntoRequest<super::GetCapacityBytesPOptions>,
@@ -1099,6 +1323,8 @@ pub mod worker_manager_master_client_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// *
+        /// Returns the used storage (in bytes).
         pub async fn get_used_bytes(
             &mut self,
             request: impl tonic::IntoRequest<super::GetUsedBytesPOptions>,
@@ -1128,6 +1354,8 @@ pub mod worker_manager_master_client_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// *
+        /// Returns a list of workers information.
         pub async fn get_worker_info_list(
             &mut self,
             request: impl tonic::IntoRequest<super::GetWorkerInfoListPOptions>,
@@ -1157,6 +1385,8 @@ pub mod worker_manager_master_client_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// *
+        /// Returns a list of workers information for report CLI.
         pub async fn get_worker_report(
             &mut self,
             request: impl tonic::IntoRequest<super::GetWorkerReportPOptions>,
@@ -1186,6 +1416,8 @@ pub mod worker_manager_master_client_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// *
+        /// Returns a list of worker lost storage information
         pub async fn get_worker_lost_storage(
             &mut self,
             request: impl tonic::IntoRequest<super::GetWorkerLostStoragePOptions>,
@@ -1298,6 +1530,258 @@ pub mod worker_manager_master_client_service_client {
                     GrpcMethod::new(
                         "com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterClientService",
                         "GetClusterRateLimit",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// *
+        /// Periodic block worker report and apply data rate.
+        pub async fn block_apply_rate(
+            &mut self,
+            request: impl tonic::IntoRequest<super::BlockApplyRatePRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::BlockApplyRatePResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterClientService/BlockApplyRate",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterClientService",
+                        "BlockApplyRate",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated client implementations.
+pub mod worker_manager_master_worker_service_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    /// *
+    /// This interface contains block master service endpoints for GooseFS workers.
+    #[derive(Debug, Clone)]
+    pub struct WorkerManagerMasterWorkerServiceClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl WorkerManagerMasterWorkerServiceClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> WorkerManagerMasterWorkerServiceClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::BoxBody>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> WorkerManagerMasterWorkerServiceClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::BoxBody>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::BoxBody>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::BoxBody>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            WorkerManagerMasterWorkerServiceClient::new(
+                InterceptedService::new(inner, interceptor),
+            )
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// *
+        /// Periodic block worker heartbeat returns an optional command for the block worker to execute.
+        pub async fn block_heartbeat(
+            &mut self,
+            request: impl tonic::IntoRequest<super::BlockHeartbeatPRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::BlockHeartbeatPResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterWorkerService/BlockHeartbeat",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterWorkerService",
+                        "BlockHeartbeat",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// *
+        /// Returns a worker id for the given network address.
+        pub async fn get_worker_id(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetWorkerIdPRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetWorkerIdPResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterWorkerService/GetWorkerId",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterWorkerService",
+                        "GetWorkerId",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// *
+        /// Registers a worker.
+        pub async fn register_worker(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RegisterWorkerPRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RegisterWorkerPResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterWorkerService/RegisterWorker",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterWorkerService",
+                        "RegisterWorker",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// *
+        /// Periodic block worker report and apply data rate.
+        pub async fn block_apply_rate(
+            &mut self,
+            request: impl tonic::IntoRequest<super::BlockApplyRatePRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::BlockApplyRatePResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterWorkerService/BlockApplyRate",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterWorkerService",
+                        "BlockApplyRate",
                     ),
                 );
             self.inner.unary(req, path, codec).await

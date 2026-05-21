@@ -8,7 +8,10 @@ pub struct PMode {
     #[prost(enumeration = "Bits", required, tag = "3")]
     pub other_bits: i32,
 }
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+/// *
+/// Contains the information of a block in GooseFS. It maintains the worker nodes where the replicas
+/// of the blocks are stored.
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BlockInfo {
     #[prost(int64, optional, tag = "1")]
     pub block_id: ::core::option::Option<i64>,
@@ -16,7 +19,11 @@ pub struct BlockInfo {
     pub length: ::core::option::Option<i64>,
     #[prost(int32, optional, tag = "3")]
     pub max_replicas: ::core::option::Option<i32>,
+    #[prost(message, repeated, tag = "4")]
+    pub locations: ::prost::alloc::vec::Vec<BlockLocation>,
 }
+/// *
+/// Information about blocks.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BlockLocation {
     #[prost(int64, optional, tag = "1")]
@@ -24,6 +31,8 @@ pub struct BlockLocation {
     #[prost(message, optional, tag = "2")]
     pub worker_address: ::core::option::Option<WorkerNetAddress>,
 }
+/// *
+/// Information about metrics.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Metric {
     #[prost(string, optional, tag = "1")]
@@ -70,12 +79,15 @@ pub struct TieredIdentity {
     #[prost(message, repeated, tag = "1")]
     pub tiers: ::prost::alloc::vec::Vec<LocalityTier>,
 }
+/// *
+/// Address information about masters.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct NetAddress {
     #[prost(string, optional, tag = "1")]
     pub host: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(int32, optional, tag = "2")]
     pub rpc_port: ::core::option::Option<i32>,
+    /// 支持腾讯云 VPC 通过 vip 访问托管在 underlay 环境的物理机的 Host 和 Port
     #[prost(string, optional, tag = "3")]
     pub tencent_cloud_vpc_mapping_host: ::core::option::Option<
         ::prost::alloc::string::String,
@@ -83,6 +95,8 @@ pub struct NetAddress {
     #[prost(int32, optional, tag = "4")]
     pub tencent_cloud_vpc_mapping_port: ::core::option::Option<i32>,
 }
+/// *
+/// Address information about workers.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct WorkerNetAddress {
     #[prost(string, optional, tag = "1")]
@@ -124,6 +138,25 @@ pub struct ErrorInfo {
 pub struct WorkerRateLimit {
     #[prost(double, optional, tag = "1")]
     pub rate_limit: ::core::option::Option<f64>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct Checksum {
+    #[prost(enumeration = "ChecksumTypeProto", required, tag = "1")]
+    pub crc_type: i32,
+    #[prost(uint32, required, tag = "2")]
+    pub bytes_per_checksum: u32,
+}
+/// *
+/// Probe timing information, used to convey server-side sub-phase timings via gRPC Trailer.
+/// Only used in probe mode (when request Header carries probe-enabled: true).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ProbeTimingInfo {
+    /// Server total processing duration (microseconds)
+    #[prost(int64, optional, tag = "1")]
+    pub server_total_us: ::core::option::Option<i64>,
+    /// Sub-phase timings (microseconds), key is the phase name
+    #[prost(map = "string, int64", tag = "2")]
+    pub sub_timings_us: ::std::collections::HashMap<::prost::alloc::string::String, i64>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -172,10 +205,18 @@ impl Bits {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum MetricType {
+    /// GAUGE is the simplest type of metric. If you're not sure which to use, gauge is a safe choice. It is represents a
+    /// general K-V pair.
     Gauge = 0,
+    /// COUNTER represents values which can be incremented or decremented over time by certain operations. It does not rely
+    /// on timing to determine the value.
     Counter = 1,
+    /// METER represents a metric value at a _rate_. The value of the metric varies with the time over which events are
+    /// recorded
     Meter = 2,
+    /// TIMER represents a histogram of the rate of the specified events.
     Timer = 3,
+    /// HISTOGRAM gives statistics about the value of past occurrences of an event.
     Histogram = 4,
 }
 impl MetricType {
@@ -209,7 +250,9 @@ impl MetricType {
 pub enum CommandType {
     Unknown = 0,
     Nothing = 1,
+    /// Ask the worker to re-register.
     Register = 2,
+    /// Ask the worker to free files.
     Free = 3,
 }
 impl CommandType {
@@ -297,10 +340,10 @@ impl WorkerStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum ManageWorkerAction {
-    Register = 0,
     Delete = 1,
     Isolate = 2,
     Activate = 3,
+    UpdateAttribute = 4,
 }
 impl ManageWorkerAction {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -309,19 +352,48 @@ impl ManageWorkerAction {
     /// (if the ProtoBuf definition does not change) and safe for programmatic use.
     pub fn as_str_name(&self) -> &'static str {
         match self {
-            Self::Register => "REGISTER",
             Self::Delete => "DELETE",
             Self::Isolate => "ISOLATE",
             Self::Activate => "ACTIVATE",
+            Self::UpdateAttribute => "UPDATE_ATTRIBUTE",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
     pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
         match value {
-            "REGISTER" => Some(Self::Register),
             "DELETE" => Some(Self::Delete),
             "ISOLATE" => Some(Self::Isolate),
             "ACTIVATE" => Some(Self::Activate),
+            "UPDATE_ATTRIBUTE" => Some(Self::UpdateAttribute),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ChecksumTypeProto {
+    ChecksumNull = 0,
+    ChecksumCrc32 = 1,
+    ChecksumCrc32c = 2,
+}
+impl ChecksumTypeProto {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::ChecksumNull => "CHECKSUM_NULL",
+            Self::ChecksumCrc32 => "CHECKSUM_CRC32",
+            Self::ChecksumCrc32c => "CHECKSUM_CRC32C",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CHECKSUM_NULL" => Some(Self::ChecksumNull),
+            "CHECKSUM_CRC32" => Some(Self::ChecksumCrc32),
+            "CHECKSUM_CRC32C" => Some(Self::ChecksumCrc32c),
             _ => None,
         }
     }

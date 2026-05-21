@@ -49,6 +49,10 @@ pub struct WriteBlockOptions {
     pub request_type: RequestType,
     /// UFS file creation options (required when `request_type == UfsFile`).
     pub create_ufs_file_options: Option<CreateUfsFileOptions>,
+    /// Whether the write is asynchronous (ASYNC_THROUGH write type).
+    /// When true, the worker may flush data to UFS asynchronously after the
+    /// stream is closed. Defaults to `false`.
+    pub async_write: bool,
 }
 
 impl Default for WriteBlockOptions {
@@ -56,6 +60,7 @@ impl Default for WriteBlockOptions {
         Self {
             request_type: RequestType::GoosefsBlock,
             create_ufs_file_options: None,
+            async_write: false,
         }
     }
 }
@@ -365,6 +370,7 @@ impl WorkerClient {
                 space_to_reserve: Some(space_to_reserve),
                 capability: None,
                 medium_type: None,
+                async_write: Some(options.async_write),
             })),
         };
 

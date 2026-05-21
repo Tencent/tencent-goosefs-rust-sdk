@@ -304,6 +304,7 @@ mod tests {
                 block_id: Some(block_id),
                 length: Some(64 * 1024 * 1024),
                 max_replicas: Some(1),
+                locations: vec![],
             }),
             offset: Some(offset),
             ufs_locations: vec![WorkerNetAddress {

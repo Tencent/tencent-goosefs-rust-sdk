@@ -6,6 +6,7 @@ option java_outer_classname = "VersionProto";
 
 package com.qcloud.cos.goosefs.grpc.version;
 
+
 enum ServiceType {
   UNKNOWN_SERVICE = 0;
   FILE_SYSTEM_MASTER_CLIENT_SERVICE = 1;
@@ -25,17 +26,42 @@ enum ServiceType {
   META_MASTER_BACKUP_MESSAGING_SERVICE = 15;
   RAFT_JOURNAL_SERVICE = 16;
   CONFIG_MANAGER_SERVICE = 17;
+  JOB_WORKER_CLIENT_SERVICE = 18;
 }
 
 message GetServiceVersionPRequest {
   optional ServiceType serviceType = 1;
-  optional bool allowedOnStandbyMasters = 2;
-}
+  // The purpose of this field is to make grpc service on standby masters work without
+    // making client changes and keeps backwards compatibility.
+    // This requests to this endpoint will be rejected on standby masters by default,
+    // unless this field is set.
+    // Two places use this request:
+    // 1. PollingMasterInquireClient uses this endpoint to tell who is the primary master.
+    // 2. AbstractClient uses this endpoint to verify the version before it RPCs with the master.
+    //
+    // Behaviors:
+    // 1. old clients -> new cluster standby masters
+    // PollingMasterInquireClient does not set this field and is able to tell which one is primary master because
+    // the request will be rejected on the standby master.
+    // AbstractClient does not set this field.
+    // Old clients only connects to primary so this doesn't break the existing behavior.
+    //
+    // 2. new clients -> new cluster standby masters
+    // PollingMasterInquireClient does not set this field and is able to tell which one is primary master because
+    // the request will be rejected on the standby master.
+    // AbstractClient sets this field to true. Rpcs to standby masters can go through and pass the version verification.
 
+    optional bool allowedOnStandbyMasters = 2;
+}
 message GetServiceVersionPResponse {
   optional int64 version = 1;
 }
 
 service ServiceVersionClientService {
+
+  /**
+   * Returns the version of the master service.
+   * NOTE: The version should be updated every time a backwards incompatible API change occurs.
+   */
   rpc getServiceVersion(GetServiceVersionPRequest) returns (GetServiceVersionPResponse);
 }

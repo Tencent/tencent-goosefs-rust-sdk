@@ -538,6 +538,7 @@ impl GoosefsFileWriter {
         let write_opts = WriteBlockOptions {
             request_type: RequestType::GoosefsBlock,
             create_ufs_file_options: None,
+            async_write: self.write_strategy.need_async_persist,
         };
 
         // Open block writer with space reservation = block size
@@ -645,6 +646,7 @@ impl GoosefsFileWriter {
         let write_opts = WriteBlockOptions {
             request_type: RequestType::UfsFile,
             create_ufs_file_options: self.write_strategy.create_ufs_file_options.clone(),
+            async_write: false,
         };
 
         let writer =
