@@ -101,10 +101,26 @@ pub struct GoosefsFileInStream {
     options: InStreamOptions,
 
     // ── Position tracking ─────────────────────────────────────────────────────
-    /// Current absolute byte position within the file.
+    /// Internal absolute byte position — points at the byte that the SDK's
+    /// chunk reader will deliver next. May be ahead of the user-visible
+    /// position when bytes have been pulled from the worker but not yet
+    /// consumed by the caller (parked in `carry_over`).
     pos: i64,
     /// Total file length (cached from `status.length`).
     file_length: i64,
+
+    // ── Carry-over buffer (chunk → small read adapter) ───────────────────────
+    /// Bytes already pulled from the SDK chunk reader but not yet copied
+    /// into the caller's `read()` buffer. Drained from index 0 on the
+    /// next `read()` call; cleared on every `seek` / `seek_from`.
+    ///
+    /// Workers deliver one variable-size chunk per gRPC frame (up to
+    /// `chunk_size`, default 1 MiB). When the caller's buffer is smaller
+    /// than the chunk, the excess lives here so subsequent reads continue
+    /// where the previous one left off — matching the
+    /// `std::io::Read` / `tokio::io::AsyncRead` contract that short reads
+    /// must never lose bytes.
+    carry_over: BytesMut,
 
     // ── Sequential read path ─────────────────────────────────────────────────
     /// Active sequential block stream, if any.
@@ -201,6 +217,7 @@ impl GoosefsFileInStream {
             config: config.clone(),
             options: options.in_stream_options,
             pos: 0,
+            carry_over: BytesMut::new(),
             block_in_stream: None,
             block_in_stream_block_id: -1,
             cached_positioned_block_id: -1,
@@ -274,6 +291,7 @@ impl GoosefsFileInStream {
             config,
             options: options.in_stream_options,
             pos: 0,
+            carry_over: BytesMut::new(),
             block_in_stream: None,
             block_in_stream_block_id: -1,
             cached_positioned_block_id: -1,
@@ -284,9 +302,14 @@ impl GoosefsFileInStream {
 
     // ── Position ─────────────────────────────────────────────────────────────
 
-    /// Current byte position within the file.
+    /// Current user-visible byte position within the file.
+    ///
+    /// Equal to `internal_pos - carry_over.len()`, where `internal_pos`
+    /// is the next byte the SDK chunk reader would deliver. The two
+    /// only diverge between a `read()` that pulled an oversized chunk
+    /// and the subsequent `read()` that drains the leftover.
     pub fn pos(&self) -> i64 {
-        self.pos
+        self.pos - self.carry_over.len() as i64
     }
 
     /// File length in bytes.
@@ -299,14 +322,17 @@ impl GoosefsFileInStream {
         self.file_length == 0
     }
 
-    /// `true` if the stream is at or past the end of the file.
+    /// `true` if the stream is at or past the end of the file from the
+    /// caller's point of view.
     pub fn is_eof(&self) -> bool {
-        self.pos >= self.file_length
+        self.carry_over.is_empty() && self.pos >= self.file_length
     }
 
-    /// Returns the number of bytes remaining from the current position.
+    /// Returns the number of bytes remaining from the current user
+    /// position to EOF (includes any bytes parked in `carry_over`).
     pub fn remaining(&self) -> i64 {
-        (self.file_length - self.pos).max(0)
+        let raw = (self.file_length - self.pos).max(0);
+        raw + self.carry_over.len() as i64
     }
 
     // ── Seek ──────────────────────────────────────────────────────────────────
@@ -320,14 +346,22 @@ impl GoosefsFileInStream {
     ///   is dropped — the next `read()` will use the positioned-read path.
     /// - Small forward seeks (< threshold, same block) fast-path through the
     ///   existing sequential stream by discarding bytes up to the target.
+    /// - Any non-zero seek invalidates `carry_over` because the chunk
+    ///   reader is repositioned (or its leftover no longer matches the
+    ///   new offset).
     ///
     /// Seeking past EOF clamps to `file_length`.
     pub async fn seek(&mut self, pos: i64) -> Result<i64> {
         let target = pos.clamp(0, self.file_length);
+        let user_pos = self.pos();
 
-        if target == self.pos {
-            return Ok(self.pos);
+        if target == user_pos {
+            return Ok(user_pos);
         }
+
+        // Drop any bytes parked in the carry-over buffer; the chunk
+        // reader is about to be repositioned (or replaced).
+        self.carry_over.clear();
 
         let seek_dist = (target - self.pos).abs();
         let same_block = self.block_index_for_pos(target) == self.block_index_for_pos(self.pos);
@@ -357,11 +391,16 @@ impl GoosefsFileInStream {
     }
 
     /// Seek using `std::io::SeekFrom` semantics.
+    ///
+    /// `SeekFrom::Current(n)` is resolved against the **user-visible**
+    /// position (i.e. [`Self::pos`]), not the internal chunk-reader
+    /// position, so that a `Current(0)` is always a no-op regardless of
+    /// whether `carry_over` holds parked bytes.
     pub async fn seek_from(&mut self, seek_from: SeekFrom) -> Result<i64> {
         let target = match seek_from {
             SeekFrom::Start(n) => n as i64,
             SeekFrom::End(n) => self.file_length + n,
-            SeekFrom::Current(n) => self.pos + n,
+            SeekFrom::Current(n) => self.pos() + n,
         };
         self.seek(target).await
     }
@@ -386,7 +425,21 @@ impl GoosefsFileInStream {
     /// connection is invalidated and a fresh authenticated connection is used
     /// for one retry.
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        if self.is_eof() || buf.is_empty() {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        // 1) Drain any bytes parked from a previous oversized chunk first.
+        if !self.carry_over.is_empty() {
+            let take = self.carry_over.len().min(buf.len());
+            buf[..take].copy_from_slice(&self.carry_over[..take]);
+            let _ = self.carry_over.split_to(take);
+            return Ok(take);
+        }
+
+        // 2) Already past EOF on the chunk-reader side and no leftover —
+        //    nothing more to read.
+        if self.pos >= self.file_length {
             return Ok(0);
         }
 
@@ -537,10 +590,18 @@ impl GoosefsFileInStream {
     // ── Convenience ───────────────────────────────────────────────────────────
 
     /// Read all remaining bytes from the current position to EOF.
+    ///
+    /// Now that [`Self::read`] is loss-less (any chunk overflow is parked
+    /// in `carry_over`), this is a straightforward read-loop with a
+    /// chunk-sized scratch buffer.
     pub async fn read_all(&mut self) -> Result<Bytes> {
         let remaining = self.remaining() as usize;
         let mut buf = BytesMut::with_capacity(remaining);
-        let mut tmp = vec![0u8; (self.config.chunk_size as usize).min(65536)];
+        // Use a generous scratch buffer so each loop turn typically pulls
+        // a whole worker chunk — but cap it at 64 KiB to keep stack /
+        // peak-memory bounded.
+        let scratch_cap = (self.config.chunk_size as usize).clamp(8 * 1024, 64 * 1024);
+        let mut tmp = vec![0u8; scratch_cap];
 
         loop {
             let n = self.read(&mut tmp).await?;
@@ -776,31 +837,42 @@ impl GoosefsFileInStream {
         Ok(())
     }
 
-    /// Read from the existing sequential block stream into `buf`.
+    /// Read one chunk from the existing sequential block stream and copy
+    /// at most `buf.len()` bytes into `buf`. Any chunk overflow is parked
+    /// in `self.carry_over` so it is delivered on the next `read()` call.
     async fn read_from_sequential_stream(&mut self, buf: &mut [u8]) -> Result<usize> {
+        // Pre-condition: caller guarantees `carry_over` is empty (drained
+        // by `read()` before delegating here).
+        debug_assert!(
+            self.carry_over.is_empty(),
+            "carry_over must be drained before pulling a fresh chunk"
+        );
+
         let stream = match self.block_in_stream.as_mut() {
             Some(s) => s,
             None => return Ok(0),
         };
 
-        // Try to read one chunk and copy into buf
         match stream.read_chunk().await? {
             Some(data) => {
                 let n = data.len().min(buf.len());
                 buf[..n].copy_from_slice(&data[..n]);
 
-                // If the chunk had more data than buf can hold, we've lost bytes!
-                // This is a design simplification — in practice chunk_size ≤ buf size
-                // for normal reads.  A production implementation would buffer the excess.
-                if data.len() > buf.len() {
-                    warn!(
+                // Park any chunk overflow so the next `read()` can deliver
+                // it without losing bytes — this is what gives us the
+                // `std::io::Read`-style "short reads never lose data"
+                // contract that callers expect.
+                if data.len() > n {
+                    self.carry_over.extend_from_slice(&data[n..]);
+                    debug!(
                         chunk_len = data.len(),
-                        buf_len = buf.len(),
-                        "chunk larger than buffer — excess bytes discarded"
+                        copied = n,
+                        carried = self.carry_over.len(),
+                        "chunk larger than caller buffer — overflow parked in carry_over"
                     );
                 }
 
-                // If stream is complete after this chunk, drop it
+                // If stream is complete after this chunk, drop it.
                 if stream.is_complete() {
                     self.block_in_stream = None;
                     self.block_in_stream_block_id = -1;
@@ -808,7 +880,7 @@ impl GoosefsFileInStream {
                 Ok(n)
             }
             None => {
-                // Block stream exhausted — move to next block on next call
+                // Block stream exhausted — move to next block on next call.
                 self.block_in_stream = None;
                 self.block_in_stream_block_id = -1;
                 Ok(0)
@@ -849,6 +921,7 @@ mod tests {
             config,
             options: InStreamOptions::default(),
             pos: 0,
+            carry_over: BytesMut::new(),
             block_in_stream: None,
             block_in_stream_block_id: -1,
             cached_positioned_block_id: -1,
@@ -929,6 +1002,45 @@ mod tests {
         assert_eq!(stream.remaining(), bs - 100);
         stream.pos = bs;
         assert_eq!(stream.remaining(), 0);
+    }
+
+    /// `pos()` reports the user-visible position. With bytes parked in
+    /// `carry_over`, the internal `pos` is ahead of the user view.
+    #[test]
+    fn test_pos_accounts_for_carry_over() {
+        let bs = 1024i64;
+        let status = make_status(bs, bs);
+        let mut stream = make_stream(status);
+
+        stream.pos = 200;
+        stream.carry_over.extend_from_slice(&[0u8; 50]);
+        // SDK has consumed 200 bytes from the worker, but only 150 have
+        // been delivered to the caller — the other 50 sit in carry_over.
+        assert_eq!(stream.pos(), 150);
+        assert_eq!(stream.remaining(), bs - 150);
+        assert!(!stream.is_eof());
+
+        // Drain the carry-over and we're at the SDK position.
+        stream.carry_over.clear();
+        assert_eq!(stream.pos(), 200);
+        assert_eq!(stream.remaining(), bs - 200);
+    }
+
+    /// EOF is only true when both the chunk reader is exhausted *and* the
+    /// carry-over buffer is empty.
+    #[test]
+    fn test_is_eof_with_carry_over() {
+        let bs = 1024i64;
+        let status = make_status(bs, bs);
+        let mut stream = make_stream(status);
+
+        // SDK has read everything but caller hasn't consumed the tail yet.
+        stream.pos = bs;
+        stream.carry_over.extend_from_slice(&[7u8; 20]);
+        assert!(!stream.is_eof(), "carry_over still has bytes — not EOF");
+
+        stream.carry_over.clear();
+        assert!(stream.is_eof(), "chunk reader done and carry_over drained — EOF");
     }
 
     /// Verify that legacy mode sets worker_pool to None.
