@@ -327,6 +327,45 @@ impl PyGoosefs {
         })
     }
 
+    // ── Streaming open / create (P5) ────────────────────────────────────────
+
+    /// `fs.open_file(path)` → `FileReader` (sync).
+    fn open_file(&self, py: Python<'_>, path: String) -> PyResult<crate::streaming::PyFileReader> {
+        let h = self.handle()?;
+        let stream = Self::guarded_block_on(py, async move {
+            crate::streaming::sdk_open_in_stream(h.ctx.clone(), path).await
+        })?;
+        Ok(crate::streaming::PyFileReader::from_sdk(stream))
+    }
+
+    /// `fs.create_file(path, *, write_type=None, block_size_bytes=None, recursive=False)` → `FileWriter`.
+    #[pyo3(signature = (path, *, write_type=None, block_size_bytes=None, recursive=false))]
+    fn create_file(
+        &self,
+        py: Python<'_>,
+        path: String,
+        write_type: Option<crate::types::PyWriteType>,
+        block_size_bytes: Option<i64>,
+        recursive: bool,
+    ) -> PyResult<crate::streaming::PyFileWriter> {
+        let h = self.handle()?;
+        let path_for_writer = path.clone();
+        let writer = Self::guarded_block_on(py, async move {
+            crate::streaming::sdk_create_writer(
+                h.ctx.clone(),
+                path,
+                write_type,
+                block_size_bytes,
+                recursive,
+            )
+            .await
+        })?;
+        Ok(crate::streaming::PyFileWriter::from_sdk(
+            writer,
+            path_for_writer,
+        ))
+    }
+
     // ── Lifecycle ───────────────────────────────────────────────────────────
 
     /// `fs.close()` — release master + worker connections.

@@ -39,6 +39,7 @@ mod filesystem;
 mod options;
 mod runtime;
 mod status;
+mod streaming;
 mod sync_fs;
 mod types;
 
@@ -73,8 +74,13 @@ fn _goosefs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // P3 ── sync wrapper.
     m.add_class::<sync_fs::PyGoosefs>()?;
 
-    // Subsequent stages will register additional classes here, e.g.:
-    //   m.add_class::<FileReader>()?;     // P5
+    // P5 ── streaming reader / writer (async + sync).
+    m.add_class::<streaming::PyAsyncFileReader>()?;
+    m.add_class::<streaming::PyAsyncFileWriter>()?;
+    m.add_class::<streaming::PyFileReader>()?;
+    m.add_class::<streaming::PyFileWriter>()?;
+
+    // Subsequent stages will register additional classes here.
 
     Ok(())
 }

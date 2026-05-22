@@ -359,6 +359,61 @@ impl PyAsyncGoosefs {
         })
     }
 
+    // ── Streaming open / create (P5) ────────────────────────────────────────
+
+    /// `await fs.open_file(path)` → `AsyncFileReader`.
+    ///
+    /// Opens a seekable streaming reader. The returned object holds onto
+    /// the shared context, so closing the parent `AsyncGoosefs` is safe
+    /// — the reader keeps the connection alive until *its own* `close()`
+    /// or garbage collection.
+    fn open_file<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
+        let h = self.handle()?;
+        future_into_py(py, async move {
+            let stream = crate::streaming::sdk_open_in_stream(h.ctx.clone(), path).await?;
+            Python::attach(|py| {
+                Py::new(py, crate::streaming::PyAsyncFileReader::from_sdk(stream))
+                    .map(|p| p.into_any())
+            })
+        })
+    }
+
+    /// `await fs.create_file(path, *, write_type=None, block_size_bytes=None, recursive=False)` → `AsyncFileWriter`.
+    ///
+    /// Opens a streaming writer. Caller is expected to `close()` (or use
+    /// `async with`) to commit the file. Unhandled exceptions inside the
+    /// `async with` block trigger `cancel()` instead, so half-written
+    /// data is not finalised.
+    #[pyo3(signature = (path, *, write_type=None, block_size_bytes=None, recursive=false))]
+    fn create_file<'py>(
+        &self,
+        py: Python<'py>,
+        path: String,
+        write_type: Option<crate::types::PyWriteType>,
+        block_size_bytes: Option<i64>,
+        recursive: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let h = self.handle()?;
+        let path_for_writer = path.clone();
+        future_into_py(py, async move {
+            let writer = crate::streaming::sdk_create_writer(
+                h.ctx.clone(),
+                path,
+                write_type,
+                block_size_bytes,
+                recursive,
+            )
+            .await?;
+            Python::attach(|py| {
+                Py::new(
+                    py,
+                    crate::streaming::PyAsyncFileWriter::from_sdk(writer, path_for_writer),
+                )
+                .map(|p| p.into_any())
+            })
+        })
+    }
+
     // ── Lifecycle ───────────────────────────────────────────────────────────
 
     /// `await fs.close()` — shut down master + worker connections.

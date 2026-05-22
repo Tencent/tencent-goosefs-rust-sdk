@@ -32,10 +32,14 @@ import sys as _sys
 # Re-export everything the native extension exposes.
 from ._goosefs import *  # noqa: F401,F403
 from ._goosefs import (  # noqa: F401
+    AsyncFileReader,
+    AsyncFileWriter,
     AsyncGoosefs,
     Config,
     CreateFileOptions,
     DeleteOptions,
+    FileReader,
+    FileWriter,
     Goosefs,
     OpenFileOptions,
     ReadType,
@@ -52,10 +56,14 @@ from ._goosefs import (  # noqa: F401
 _sys.modules[__name__ + ".exceptions"] = exceptions
 
 __all__ = [
+    "AsyncFileReader",
+    "AsyncFileWriter",
     "AsyncGoosefs",
     "Config",
     "CreateFileOptions",
     "DeleteOptions",
+    "FileReader",
+    "FileWriter",
     "Goosefs",
     "OpenFileOptions",
     "ReadType",
