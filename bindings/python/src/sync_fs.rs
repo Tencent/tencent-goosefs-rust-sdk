@@ -244,6 +244,89 @@ impl PyGooseFs {
         })
     }
 
+    // ── High-level read / write ─────────────────────────────────────────────
+
+    /// `fs.read_file(path)` → `bytes` (full file contents).
+    ///
+    /// Synchronous counterpart of [`PyAsyncGooseFs::read_file`]; same caveats
+    /// about full materialisation in RAM apply (Review #17.1: documented).
+    fn read_file<'py>(
+        &self,
+        py: Python<'py>,
+        path: String,
+    ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        let h = self.handle()?;
+        // We must collect into an owned `Vec<u8>` inside the blocking section
+        // because the resulting `PyBytes` can only be constructed once the
+        // GIL is re-acquired by `guarded_block_on`'s caller. We *cannot* hold
+        // a `Python<'py>` reference inside the future passed to `block_on`,
+        // so we copy the bytes out first and then wrap them.
+        let buf: Vec<u8> = Self::guarded_block_on(py, async move {
+            let bytes = goosefs_sdk::io::GoosefsFileReader::read_file_with_context(
+                h.ctx.clone(),
+                &path,
+            )
+            .await
+            .map_err(map_err)?;
+            // `Bytes::to_vec` is a single copy; same overhead as the async
+            // path (which copies through `PyBytes::new`).
+            Ok(bytes.to_vec())
+        })?;
+        Ok(pyo3::types::PyBytes::new(py, &buf))
+    }
+
+    /// `fs.read_range(path, offset, length)` → `bytes`.
+    fn read_range<'py>(
+        &self,
+        py: Python<'py>,
+        path: String,
+        offset: u64,
+        length: u64,
+    ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        let h = self.handle()?;
+        let buf: Vec<u8> = Self::guarded_block_on(py, async move {
+            let bytes = goosefs_sdk::io::GoosefsFileReader::read_range_with_context(
+                h.ctx.clone(),
+                &path,
+                offset,
+                length,
+            )
+            .await
+            .map_err(map_err)?;
+            Ok(bytes.to_vec())
+        })?;
+        Ok(pyo3::types::PyBytes::new(py, &buf))
+    }
+
+    /// `fs.write_file(path, data, *, write_type=None, block_size_bytes=None, recursive=False)` → `int`.
+    ///
+    /// Synchronous counterpart of [`PyAsyncGooseFs::write_file`].
+    #[pyo3(signature = (path, data, *, write_type=None, block_size_bytes=None, recursive=false))]
+    fn write_file(
+        &self,
+        py: Python<'_>,
+        path: String,
+        data: &Bound<'_, PyAny>,
+        write_type: Option<crate::types::PyWriteType>,
+        block_size_bytes: Option<i64>,
+        recursive: bool,
+    ) -> PyResult<u64> {
+        let h = self.handle()?;
+        let payload = crate::filesystem::extract_bytes_like(data)?;
+        let proto_opts =
+            crate::filesystem::build_create_file_options(write_type, block_size_bytes, recursive);
+        Self::guarded_block_on(py, async move {
+            goosefs_sdk::io::GoosefsFileWriter::write_file_with_context_and_options(
+                h.ctx.clone(),
+                &path,
+                &payload,
+                proto_opts,
+            )
+            .await
+            .map_err(map_err)
+        })
+    }
+
     // ── Lifecycle ───────────────────────────────────────────────────────────
 
     /// `fs.close()` — release master + worker connections.

@@ -44,7 +44,7 @@ GOOSEFS_MASTER_ADDR = os.environ.get("GOOSEFS_MASTER_ADDR")
 collect_ignore_glob = (
     []
     if GOOSEFS_MASTER_ADDR
-    else ["test_metadata.py", "test_errors.py", "test_sync.py"]
+    else ["test_metadata.py", "test_errors.py", "test_sync.py", "test_read_write.py"]
 )
 
 
