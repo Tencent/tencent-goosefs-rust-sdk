@@ -31,7 +31,7 @@ from typing import AsyncIterator
 import pytest
 import pytest_asyncio
 
-from goosefs import AsyncGooseFs, Config
+from goosefs import AsyncGooseFs, Config, GooseFs
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +42,9 @@ GOOSEFS_MASTER_ADDR = os.environ.get("GOOSEFS_MASTER_ADDR")
 
 # Collection-time skip: avoid even constructing fixtures when unconfigured.
 collect_ignore_glob = (
-    [] if GOOSEFS_MASTER_ADDR else ["test_metadata.py", "test_errors.py"]
+    []
+    if GOOSEFS_MASTER_ADDR
+    else ["test_metadata.py", "test_errors.py", "test_sync.py"]
 )
 
 
@@ -106,6 +108,50 @@ async def tmp_dir(async_fs: AsyncGooseFs) -> AsyncIterator[str]:
         # itself (e.g. a test that exercises `delete`).
         try:
             await async_fs.delete(path, recursive=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Sync fixtures (for ``test_sync.py``)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def sync_fs(config: Config):
+    """A blocking :class:`GooseFs` connected for the duration of the test.
+
+    Constructed inside the test thread (no asyncio loop running) so the
+    runtime guards in ``GooseFs`` accept the call. ``close()`` runs in a
+    ``try/finally`` to release the connection even on test failure.
+    """
+    fs = GooseFs(config)
+    try:
+        yield fs
+    finally:
+        # ``close()`` is idempotent.
+        fs.close()
+
+
+@pytest.fixture
+def sync_tmp_dir(sync_fs: GooseFs):
+    """Sync analogue of :func:`tmp_dir`. Creates and recursively cleans up
+    a uuid-stamped scratch directory.
+    """
+    base = "/tmp/pygoosefs-tests"
+    try:
+        sync_fs.mkdir(base, recursive=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+    name = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
+    path = f"{base}/{name}"
+    sync_fs.mkdir(path, recursive=True)
+    try:
+        yield path
+    finally:
+        try:
+            sync_fs.delete(path, recursive=True)
         except Exception:  # noqa: BLE001
             pass
 

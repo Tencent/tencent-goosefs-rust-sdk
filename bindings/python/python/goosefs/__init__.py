@@ -14,6 +14,14 @@ Quick start::
 
     asyncio.run(main())
 
+For synchronous (blocking) workflows, use ``GooseFs``::
+
+    from goosefs import GooseFs, Config
+
+    with GooseFs(Config("127.0.0.1:9200")) as fs:
+        fs.mkdir("/tmp/p3", recursive=True)
+        assert fs.exists("/tmp/p3")
+
 The native extension module is named ``goosefs._goosefs`` and is built from
 ``bindings/python/src/lib.rs``. End users should import from ``goosefs``
 directly; the underscore-prefixed module is an implementation detail.
@@ -28,6 +36,7 @@ from ._goosefs import (  # noqa: F401
     Config,
     CreateFileOptions,
     DeleteOptions,
+    GooseFs,
     OpenFileOptions,
     ReadType,
     URIStatus,
@@ -47,6 +56,7 @@ __all__ = [
     "Config",
     "CreateFileOptions",
     "DeleteOptions",
+    "GooseFs",
     "OpenFileOptions",
     "ReadType",
     "URIStatus",

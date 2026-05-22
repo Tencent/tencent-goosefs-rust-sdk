@@ -39,6 +39,7 @@ mod filesystem;
 mod options;
 mod runtime;
 mod status;
+mod sync_fs;
 mod types;
 
 use pyo3::prelude::*;
@@ -69,8 +70,10 @@ fn _goosefs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<options::PyDeleteOptions>()?;
     m.add_class::<filesystem::PyAsyncGooseFs>()?;
 
+    // P3 ── sync wrapper.
+    m.add_class::<sync_fs::PyGooseFs>()?;
+
     // Subsequent stages will register additional classes here, e.g.:
-    //   m.add_class::<GooseFs>()?;        // P3
     //   m.add_class::<FileReader>()?;     // P5
 
     Ok(())
