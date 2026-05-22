@@ -501,11 +501,11 @@ impl GoosefsFileInStream {
             self.block_in_stream_block_id = block_id;
         }
 
-        // Read from the sequential stream
+        // Read from the sequential stream. The helper itself advances
+        // `self.pos` by the *chunk* size it pulled from the worker (not by
+        // `n`) so that `self.pos` always reflects bytes consumed from the
+        // chunk reader — including any overflow parked in `carry_over`.
         let n = self.read_from_sequential_stream(buf).await?;
-        if n > 0 {
-            self.pos += n as i64;
-        }
         Ok(n)
     }
 
@@ -871,6 +871,13 @@ impl GoosefsFileInStream {
                         "chunk larger than caller buffer — overflow parked in carry_over"
                     );
                 }
+
+                // Advance `self.pos` by the *full* chunk length — every byte
+                // delivered by the chunk reader has been consumed from the
+                // worker's perspective, even those parked in `carry_over`.
+                // The caller-visible position (`pos()`) compensates by
+                // subtracting `carry_over.len()`.
+                self.pos += data.len() as i64;
 
                 // If stream is complete after this chunk, drop it.
                 if stream.is_complete() {
