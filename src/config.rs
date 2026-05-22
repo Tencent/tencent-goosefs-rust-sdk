@@ -1124,6 +1124,27 @@ impl GoosefsConfig {
         self
     }
 
+    /// Set the per-heartbeat RPC timeout.
+    ///
+    /// The timeout caps how long a single `MetricsHeartbeat` RPC is allowed
+    /// to run before being aborted, preventing a stuck/slow Master from
+    /// causing the periodic task to pile up in-flight requests.
+    ///
+    /// Recommended range: `interval / 3 ..= interval / 2`. The hard
+    /// constraints (`>= 1 s` and `< metrics_heartbeat_interval`) are
+    /// re-checked by [`Self::validate`].
+    ///
+    /// # Panics
+    /// Panics if `timeout` is less than 1 second.
+    pub fn with_metrics_heartbeat_timeout(mut self, timeout: Duration) -> Self {
+        assert!(
+            timeout >= Duration::from_secs(1),
+            "metrics_heartbeat_timeout must be >= 1 s"
+        );
+        self.metrics_heartbeat_timeout = timeout;
+        self
+    }
+
     /// Set the application ID used as the metric source identifier.
     pub fn with_app_id(mut self, app_id: impl Into<String>) -> Self {
         self.app_id = Some(app_id.into());
@@ -1382,6 +1403,27 @@ impl GoosefsConfig {
             return Err(format!(
                 "metrics_heartbeat_interval must be >= {}ms (got {}ms)",
                 MIN_METRICS_HEARTBEAT_INTERVAL_MS,
+                self.metrics_heartbeat_interval.as_millis()
+            ));
+        }
+        // The heartbeat RPC timeout must be:
+        //   1. >= 1 s, to tolerate ordinary GC / network jitter without
+        //      generating false timeouts that retry and double-count.
+        //   2. <  metrics_heartbeat_interval, otherwise periodic ticks
+        //      can fire while the previous RPC is still in flight,
+        //      letting requests pile up against a slow / dead Master
+        //      (the very situation the timeout is meant to prevent).
+        if self.metrics_heartbeat_timeout < Duration::from_secs(1) {
+            return Err(format!(
+                "metrics_heartbeat_timeout must be >= 1000ms (got {}ms)",
+                self.metrics_heartbeat_timeout.as_millis()
+            ));
+        }
+        if self.metrics_heartbeat_timeout >= self.metrics_heartbeat_interval {
+            return Err(format!(
+                "metrics_heartbeat_timeout ({}ms) must be < metrics_heartbeat_interval ({}ms) \
+                 to prevent in-flight RPCs from piling up across ticks",
+                self.metrics_heartbeat_timeout.as_millis(),
                 self.metrics_heartbeat_interval.as_millis()
             ));
         }
@@ -2505,11 +2547,84 @@ goosefs.user.network.data.transfer.chunk.size=1MB
 
     #[test]
     fn metrics_interval_1000ms_accepted() {
+        // interval = 1 s is the minimum, but the heartbeat timeout must be
+        // strictly less than the interval — at exactly 1 s interval there is
+        // no valid timeout >= 1 s, so we use 2 s here to keep the original
+        // boundary check on the interval lower bound while satisfying the
+        // timeout < interval invariant.
         let cfg = GoosefsConfig {
-            metrics_heartbeat_interval: Duration::from_millis(1000),
+            metrics_heartbeat_interval: Duration::from_millis(2000),
+            metrics_heartbeat_timeout: Duration::from_secs(1),
             ..Default::default()
         };
         assert!(cfg.validate().is_ok());
+
+        // The strict 1 s interval lower bound is still verified by the
+        // `metrics_interval_999ms_rejected` test above.
+    }
+
+    #[test]
+    fn metrics_heartbeat_timeout_below_one_second_rejected() {
+        let cfg = GoosefsConfig {
+            metrics_heartbeat_timeout: Duration::from_millis(500),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("metrics_heartbeat_timeout"),
+            "error should mention field name: {err}"
+        );
+    }
+
+    #[test]
+    fn metrics_heartbeat_timeout_equal_to_interval_rejected() {
+        // timeout == interval would still allow ticks to overlap on slow RPCs.
+        let cfg = GoosefsConfig {
+            metrics_heartbeat_interval: Duration::from_secs(10),
+            metrics_heartbeat_timeout: Duration::from_secs(10),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("must be < metrics_heartbeat_interval"),
+            "error should explain ordering rule: {err}"
+        );
+    }
+
+    #[test]
+    fn metrics_heartbeat_timeout_greater_than_interval_rejected() {
+        let cfg = GoosefsConfig {
+            metrics_heartbeat_interval: Duration::from_secs(2),
+            metrics_heartbeat_timeout: Duration::from_secs(5),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn metrics_heartbeat_timeout_just_below_interval_accepted() {
+        let cfg = GoosefsConfig {
+            metrics_heartbeat_interval: Duration::from_secs(10),
+            metrics_heartbeat_timeout: Duration::from_millis(9_999),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn with_metrics_heartbeat_timeout_setter_works() {
+        let cfg = GoosefsConfig::new("127.0.0.1:9200")
+            .with_metrics_heartbeat_interval(Duration::from_secs(8))
+            .with_metrics_heartbeat_timeout(Duration::from_secs(3));
+        assert_eq!(cfg.metrics_heartbeat_timeout, Duration::from_secs(3));
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    #[should_panic(expected = "metrics_heartbeat_timeout must be >= 1 s")]
+    fn with_metrics_heartbeat_timeout_panics_below_one_second() {
+        let _ = GoosefsConfig::new("127.0.0.1:9200")
+            .with_metrics_heartbeat_timeout(Duration::from_millis(500));
     }
 
     #[test]

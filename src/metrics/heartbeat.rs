@@ -127,16 +127,20 @@ impl HeartbeatTask {
     ///
     /// # Arguments
     ///
-    /// - `client`   — shared `MetricsMasterClient` for the heartbeat RPC
-    /// - `reporter` — shared `ClientMetricsReporter` that computes metric diffs
-    /// - `app_id`   — source identifier written into `ClientMetrics.source`
-    /// - `interval` — period between heartbeats (≥ 1s, enforced by config)
-    /// - `closed`   — shared flag; set to `true` by the caller on shutdown
+    /// - `client`     — shared `MetricsMasterClient` for the heartbeat RPC
+    /// - `reporter`   — shared `ClientMetricsReporter` that computes metric diffs
+    /// - `app_id`     — source identifier written into `ClientMetrics.source`
+    /// - `interval`   — period between heartbeats (≥ 1s, enforced by config)
+    /// - `rpc_timeout` — upper bound on a single heartbeat RPC; must be
+    ///   `< interval` so a slow / hung Master cannot let in-flight calls
+    ///   pile up across ticks (enforced by config)
+    /// - `closed`     — shared flag; set to `true` by the caller on shutdown
     pub fn spawn(
         client: Arc<dyn MetricsClient>,
         reporter: Arc<ClientMetricsReporter>,
         app_id: String,
         interval: Duration,
+        rpc_timeout: Duration,
         closed: Arc<AtomicBool>,
     ) -> Self {
         let (flush_tx, mut flush_rx) = mpsc::channel::<()>(1);
@@ -172,7 +176,14 @@ impl HeartbeatTask {
                 }
 
                 // Execute the beat (even if closed — this is the final flush).
-                Self::do_heartbeat(client.as_ref(), &reporter, &app_id, &warn_sampler).await;
+                Self::do_heartbeat(
+                    client.as_ref(),
+                    &reporter,
+                    &app_id,
+                    rpc_timeout,
+                    &warn_sampler,
+                )
+                .await;
 
                 // Exit after the flush beat if closed.
                 if closed.load(Ordering::SeqCst) {
@@ -200,10 +211,19 @@ impl HeartbeatTask {
     /// If `snapshot()` returns an empty list (no changed counters, no gauges)
     /// the RPC is skipped entirely — aligned with Java
     /// `ClientMasterSync.heartbeat():L90-L93`.
+    ///
+    /// The RPC itself is wrapped in [`tokio::time::timeout`] so a stuck or
+    /// slow Master cannot keep this call alive past `rpc_timeout`. Timeouts
+    /// are treated the same as RPC errors: WARN-rate-limited, never
+    /// propagated. The reporter has already been advanced by `snapshot()`,
+    /// so a timeout means the corresponding deltas are dropped (the next
+    /// beat reports fresh deltas) — this matches Java's fire-and-forget
+    /// heartbeat semantics.
     async fn do_heartbeat(
         client: &dyn MetricsClient,
         reporter: &ClientMetricsReporter,
         app_id: &str,
+        rpc_timeout: Duration,
         warn_sampler: &LogSampler,
     ) {
         let metrics = reporter.snapshot();
@@ -212,19 +232,49 @@ impl HeartbeatTask {
             return;
         }
 
+        // Java `MetricsStore.putReportedMetrics` skips any Metric whose
+        // `source` is null. Mirror Java's behaviour by stamping each Metric
+        // with the same per-process identifier already used for the outer
+        // ClientMetrics.source, so the Master records the counters instead
+        // of silently dropping them.
+        let metrics: Vec<crate::proto::grpc::Metric> = metrics
+            .into_iter()
+            .map(|mut m| {
+                if m.source.is_none() {
+                    m.source = Some(app_id.to_string());
+                }
+                m
+            })
+            .collect();
+
         let payload = ClientMetrics {
             source: Some(app_id.to_string()),
             metrics,
         };
 
-        if let Err(e) = client.heartbeat(vec![payload]).await {
-            // Aligned with Java: heartbeat errors are WARN only and never
-            // propagate to the caller. Rate-limit to one WARN per 30 seconds
-            // to avoid log spam during sustained outages.
-            if warn_sampler.should_log() {
-                warn!(error = %e, "metrics heartbeat failed (further errors suppressed for 30s)");
-            } else {
-                debug!(error = %e, "metrics heartbeat failed (suppressed)");
+        match tokio::time::timeout(rpc_timeout, client.heartbeat(vec![payload])).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                // RPC returned an error within the deadline.
+                if warn_sampler.should_log() {
+                    warn!(error = %e, "metrics heartbeat failed (further errors suppressed for 30s)");
+                } else {
+                    debug!(error = %e, "metrics heartbeat failed (suppressed)");
+                }
+            }
+            Err(_elapsed) => {
+                // Deadline elapsed before the RPC produced a response.
+                if warn_sampler.should_log() {
+                    warn!(
+                        timeout_ms = rpc_timeout.as_millis() as u64,
+                        "metrics heartbeat timed out (further timeouts suppressed for 30s)"
+                    );
+                } else {
+                    debug!(
+                        timeout_ms = rpc_timeout.as_millis() as u64,
+                        "metrics heartbeat timed out (suppressed)"
+                    );
+                }
             }
         }
     }
@@ -416,6 +466,7 @@ mod tests {
             reporter,
             "test-app".into(),
             Duration::from_secs(5), // interval
+            Duration::from_secs(2), // rpc_timeout (< interval)
             closed,
         );
 
@@ -460,6 +511,7 @@ mod tests {
             reporter,
             "flush-app".into(),
             Duration::from_secs(60), // very long interval — tick never fires
+            Duration::from_secs(5),  // rpc_timeout (< interval)
             closed,
         );
 
@@ -514,7 +566,14 @@ mod tests {
         let reporter = crate::metrics::reporter::ClientMetricsReporter::default();
         let sampler = LogSampler::new(Duration::from_secs(30));
 
-        HeartbeatTask::do_heartbeat(&mock, &reporter, "my-node-id", &sampler).await;
+        HeartbeatTask::do_heartbeat(
+            &mock,
+            &reporter,
+            "my-node-id",
+            Duration::from_secs(5),
+            &sampler,
+        )
+        .await;
 
         // RPC should have been called (snapshot is non-empty because of counter inc above).
         assert_eq!(
@@ -553,7 +612,14 @@ mod tests {
         let reporter = crate::metrics::reporter::ClientMetricsReporter::default();
         let sampler = LogSampler::new(Duration::from_secs(30));
 
-        HeartbeatTask::do_heartbeat(&mock, &reporter, "envelope-app", &sampler).await;
+        HeartbeatTask::do_heartbeat(
+            &mock,
+            &reporter,
+            "envelope-app",
+            Duration::from_secs(5),
+            &sampler,
+        )
+        .await;
 
         let received = rx.try_recv().expect("metrics must have been forwarded");
         // All metrics must be packed into a single ClientMetrics struct.
@@ -575,6 +641,96 @@ mod tests {
         assert!(
             metrics_names.contains(&"test_do_hb_envelope_c2"),
             "c2 must be in the payload"
+        );
+    }
+
+    // ── SlowMockMetricsClient ─────────────────────────────────────────────────
+
+    /// Mock that blocks each `heartbeat()` call for `delay`, simulating a slow
+    /// or hung Master.  Used to verify the RPC timeout behaviour.
+    struct SlowMockMetricsClient {
+        delay: Duration,
+        call_count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl SlowMockMetricsClient {
+        fn new(delay: Duration) -> (Self, Arc<std::sync::atomic::AtomicUsize>) {
+            let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            (
+                Self {
+                    delay,
+                    call_count: call_count.clone(),
+                },
+                call_count,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::client::metrics_master::MetricsClient for SlowMockMetricsClient {
+        async fn heartbeat(
+            &self,
+            _client_metrics: Vec<crate::proto::grpc::metric::ClientMetrics>,
+        ) -> crate::error::Result<()> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Block for `delay` so the heartbeat task's outer `tokio::time::timeout`
+            // is forced to fire.  We deliberately return Ok afterwards so the
+            // test can prove that the *outer* timeout (not an inner error)
+            // is what cut the call short.
+            tokio::time::sleep(self.delay).await;
+            Ok(())
+        }
+    }
+
+    /// `do_heartbeat` must abandon the RPC once `rpc_timeout` elapses, even if
+    /// the inner `heartbeat()` call never returns within the deadline.  No
+    /// error is propagated to the caller (heartbeat is fire-and-forget).
+    #[tokio::test]
+    async fn do_heartbeat_cancels_rpc_on_timeout() {
+        tokio::time::pause();
+
+        // The slow client takes 30 s, the timeout is 1 s — must cancel.
+        let (slow, call_count) = SlowMockMetricsClient::new(Duration::from_secs(30));
+
+        // Counter must be non-empty so the snapshot triggers an actual RPC
+        // (otherwise the empty-skip path short-circuits before `timeout`).
+        let c = crate::metrics::registry::counter("test_do_hb_timeout_counter");
+        c.inc(1);
+
+        let reporter = crate::metrics::reporter::ClientMetricsReporter::default();
+        let sampler = LogSampler::new(Duration::from_secs(30));
+
+        // Drive the call to completion: do_heartbeat will await timeout(1s, sleep(30s)).
+        // With paused time, advancing 1s makes the outer timeout fire.
+        let fut = HeartbeatTask::do_heartbeat(
+            &slow,
+            &reporter,
+            "timeout-app",
+            Duration::from_secs(1),
+            &sampler,
+        );
+
+        // Run the future and the time advance concurrently. We expect `fut`
+        // to finish (return ()) once 1s of paused time has elapsed.
+        tokio::select! {
+            _ = fut => {}
+            _ = async {
+                // Yield once so do_heartbeat can register its sleep on the timer.
+                tokio::task::yield_now().await;
+                tokio::time::advance(Duration::from_secs(2)).await;
+                // Wait long enough that the test fails if `fut` never wakes.
+                tokio::time::sleep(Duration::from_secs(120)).await;
+            } => {
+                panic!("do_heartbeat did not return within timeout — RPC was not cancelled");
+            }
+        }
+
+        // The mock's heartbeat() was entered exactly once.
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "do_heartbeat must invoke heartbeat() exactly once"
         );
     }
 }

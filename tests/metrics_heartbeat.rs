@@ -96,6 +96,7 @@ async fn pipeline_counter_inc_reaches_heartbeat_payload() {
         reporter,
         "integ-app-id".into(),
         Duration::from_secs(60), // long interval — only fires via shutdown flush
+        Duration::from_secs(5),  // rpc_timeout (< interval)
         closed,
     );
 
@@ -156,6 +157,7 @@ async fn pipeline_second_beat_carries_only_delta() {
         reporter.clone(),
         "delta-app".into(),
         Duration::from_secs(60),
+        Duration::from_secs(5),
         closed1,
     );
     task1.shutdown().await;
@@ -184,6 +186,7 @@ async fn pipeline_second_beat_carries_only_delta() {
         reporter,
         "delta-app".into(),
         Duration::from_secs(60),
+        Duration::from_secs(5),
         closed2,
     );
     task2.shutdown().await;
@@ -257,6 +260,7 @@ async fn empty_flush_on_shutdown_does_not_panic() {
         reporter,
         "empty-flush".into(),
         Duration::from_secs(60),
+        Duration::from_secs(5),
         closed,
     );
 

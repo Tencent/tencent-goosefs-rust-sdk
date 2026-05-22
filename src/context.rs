@@ -425,6 +425,7 @@ impl FileSystemContext {
         debug!(
             app_id = %app_id,
             interval_ms = self.config.metrics_heartbeat_interval.as_millis(),
+            timeout_ms = self.config.metrics_heartbeat_timeout.as_millis(),
             "starting metrics heartbeat task"
         );
 
@@ -433,6 +434,7 @@ impl FileSystemContext {
             reporter,
             app_id,
             self.config.metrics_heartbeat_interval,
+            self.config.metrics_heartbeat_timeout,
             self.closed.clone(),
         ));
         *self.metrics_heartbeat.lock().await = Some(task);

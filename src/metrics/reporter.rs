@@ -94,12 +94,25 @@ impl ClientMetricsReporter {
 
             if diff != 0 {
                 out.push(Metric {
-                    // instance and source are intentionally left empty here.
-                    // The caller wraps these Metrics in a ClientMetrics struct
-                    // and sets ClientMetrics.source = app_id there.
-                    instance: None,
+                    // `instance` must equal a Java `MetricsSystem.InstanceType`
+                    // enum value (case-insensitive). For client-side reporting
+                    // this is always "Client". The Master rejects the whole
+                    // heartbeat with `IllegalArgumentException: No constant
+                    // with text  found` if this is left empty.
+                    instance: Some(INSTANCE_CLIENT.to_string()),
+                    // `source` is filled in by the caller (HeartbeatTask) from
+                    // the resolved `app_id` so that every Metric carries the
+                    // same per-process identifier the Master uses as a key.
+                    // `MetricsStore.putReportedMetrics` silently drops any
+                    // Metric whose `source` is null, so this MUST be non-empty
+                    // by the time the RPC is issued.
                     source: None,
-                    name: Some(name),
+                    // `name` must be the bare metric name (without the
+                    // `Client.` prefix). Java's `MetricsStore` registers its
+                    // ClusterCounterKey with `MetricKey.getMetricName()`
+                    // which strips the instance prefix; matching that exactly
+                    // is required for the master-side counter lookup to hit.
+                    name: Some(strip_instance_prefix(&name).to_string()),
                     value: Some(diff as f64),
                     // metric_type is a required i32 field; use the enum discriminant.
                     metric_type: MetricType::Counter as i32,
@@ -111,7 +124,8 @@ impl ClientMetricsReporter {
         // --- Gauges: report current value directly (no diff) ---
         for entry in registry.gauges.iter() {
             out.push(Metric {
-                name: Some(entry.key().clone()),
+                instance: Some(INSTANCE_CLIENT.to_string()),
+                name: Some(strip_instance_prefix(entry.key()).to_string()),
                 value: Some(entry.value().get() as f64),
                 metric_type: MetricType::Gauge as i32,
                 ..Default::default()
@@ -119,6 +133,29 @@ impl ClientMetricsReporter {
         }
 
         out
+    }
+}
+
+/// Java `MetricsSystem.InstanceType.CLIENT.toString()` value.
+/// The Master matches this case-insensitively via `InstanceType.fromString`.
+const INSTANCE_CLIENT: &str = "Client";
+
+/// Strip the leading `<InstanceType>.` prefix from a fully-qualified metric
+/// name, mirroring Java `MetricKey.getMetricName()`:
+///
+/// ```text
+/// "Client.BytesReadLocal" -> "BytesReadLocal"
+/// "Client.BytesWrittenLocal" -> "BytesWrittenLocal"
+/// "BytesReadLocal" -> "BytesReadLocal"   (no prefix: returned as-is)
+/// ```
+///
+/// This is required because the Master's `MetricsStore` indexes its cluster
+/// counter table by the bare metric name (per `MetricsStore.initCounterKeys`
+/// which uses `MetricKey.getMetricName()`).
+fn strip_instance_prefix(full: &str) -> &str {
+    match full.split_once('.') {
+        Some((_instance, rest)) => rest,
+        None => full,
     }
 }
 
@@ -281,7 +318,10 @@ mod tests {
 
     #[test]
     fn name_constants_round_trip() {
-        // Smoke-test: inc via well-known name constants; verify they appear in snapshot
+        // Smoke-test: inc via well-known name constants; verify the snapshot
+        // emits each metric with `instance="Client"` and the bare metric name
+        // (the `Client.` prefix stripped to match Java's
+        // `MetricKey.getMetricName()`).
         let reporter = ClientMetricsReporter::default();
 
         counter(name::CLIENT_BYTES_READ_LOCAL).inc(1024);
@@ -289,10 +329,41 @@ mod tests {
         counter(name::CLIENT_BYTES_WRITTEN_UFS).inc(512);
 
         let snap = reporter.snapshot();
-        let names: Vec<&str> = snap.iter().filter_map(|m| m.name.as_deref()).collect();
 
-        assert!(names.contains(&name::CLIENT_BYTES_READ_LOCAL));
-        assert!(names.contains(&name::CLIENT_BYTES_WRITTEN_LOCAL));
-        assert!(names.contains(&name::CLIENT_BYTES_WRITTEN_UFS));
+        for bare in &["BytesReadLocal", "BytesWrittenLocal", "BytesWrittenUfs"] {
+            let m = snap
+                .iter()
+                .find(|m| m.name.as_deref() == Some(*bare))
+                .unwrap_or_else(|| panic!("metric {} missing from snapshot", bare));
+            assert_eq!(
+                m.instance.as_deref(),
+                Some(INSTANCE_CLIENT),
+                "metric {} must carry instance=\"Client\"",
+                bare
+            );
+            assert_eq!(m.metric_type, MetricType::Counter as i32);
+        }
+    }
+
+    #[test]
+    fn strip_instance_prefix_behaviour() {
+        // Java `MetricKey.getMetricName()` parity: keep the part after the
+        // first dot, return the input unchanged when there is no dot.
+        assert_eq!(
+            strip_instance_prefix("Client.BytesReadLocal"),
+            "BytesReadLocal"
+        );
+        assert_eq!(
+            strip_instance_prefix("Worker.BytesReadAlluxio"),
+            "BytesReadAlluxio"
+        );
+        // Multi-dot names: only the first segment is treated as the instance.
+        assert_eq!(
+            strip_instance_prefix("Client.BytesReadPerUfs.s3a"),
+            "BytesReadPerUfs.s3a"
+        );
+        // Bare names round-trip unchanged.
+        assert_eq!(strip_instance_prefix("BytesReadLocal"), "BytesReadLocal");
+        assert_eq!(strip_instance_prefix(""), "");
     }
 }
