@@ -27,8 +27,8 @@
 //! - **P1 — config + exceptions (this commit)**: registers `Config`,
 //!   `goosefs.exceptions.*` with full `map_err` coverage of the SDK error
 //!   enum, and the shared Tokio runtime.
-//! - P2 — async metadata API (`AsyncGooseFs`).
-//! - P3 — sync wrapper (`GooseFs`).
+//! - P2 — async metadata API (`AsyncGoosefs`).
+//! - P3 — sync wrapper (`Goosefs`).
 //! - P4 — high-level `read_file` / `write_file` / `read_range`.
 //! - P5 — streaming `FileReader` / `FileWriter`.
 
@@ -68,10 +68,10 @@ fn _goosefs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<options::PyOpenFileOptions>()?;
     m.add_class::<options::PyCreateFileOptions>()?;
     m.add_class::<options::PyDeleteOptions>()?;
-    m.add_class::<filesystem::PyAsyncGooseFs>()?;
+    m.add_class::<filesystem::PyAsyncGoosefs>()?;
 
     // P3 ── sync wrapper.
-    m.add_class::<sync_fs::PyGooseFs>()?;
+    m.add_class::<sync_fs::PyGoosefs>()?;
 
     // Subsequent stages will register additional classes here, e.g.:
     //   m.add_class::<FileReader>()?;     // P5

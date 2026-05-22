@@ -33,7 +33,7 @@ import os
 import pytest
 import pytest_asyncio
 
-from goosefs import AsyncGooseFs, Config, GooseFs, WriteType
+from goosefs import AsyncGoosefs, Config, Goosefs, WriteType
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +84,7 @@ def _make_payload(seed: str, size: int) -> bytes:
 @pytest.mark.parametrize("size_label,size", PAYLOAD_SIZES, ids=[s[0] for s in PAYLOAD_SIZES])
 @pytest.mark.asyncio
 async def test_async_round_trip(
-    async_fs: AsyncGooseFs,
+    async_fs: AsyncGoosefs,
     tmp_dir: str,
     wt_label: str,
     wt: WriteType,
@@ -111,7 +111,7 @@ async def test_async_round_trip(
 
 @pytest.mark.asyncio
 async def test_async_read_range_arbitrary_offsets(
-    async_fs: AsyncGooseFs, tmp_dir: str
+    async_fs: AsyncGoosefs, tmp_dir: str
 ) -> None:
     """Spot-check ``read_range`` on three offset+length combinations."""
     path = f"{tmp_dir}/read-range.bin"
@@ -135,7 +135,7 @@ async def test_async_read_range_arbitrary_offsets(
 
 @pytest.mark.asyncio
 async def test_async_write_accepts_bytes_like_objects(
-    async_fs: AsyncGooseFs, tmp_dir: str
+    async_fs: AsyncGoosefs, tmp_dir: str
 ) -> None:
     """``write_file`` should accept ``bytes`` / ``bytearray`` / ``memoryview``
     interchangeably (PyO3's ``&[u8]`` extractor handles the buffer protocol)."""
@@ -154,7 +154,7 @@ async def test_async_write_accepts_bytes_like_objects(
 
 @pytest.mark.asyncio
 async def test_async_write_rejects_non_bytes(
-    async_fs: AsyncGooseFs, tmp_dir: str
+    async_fs: AsyncGoosefs, tmp_dir: str
 ) -> None:
     """A plain ``str`` must be rejected with ``TypeError``."""
     with pytest.raises(TypeError):
@@ -164,7 +164,7 @@ async def test_async_write_rejects_non_bytes(
 
 @pytest.mark.asyncio
 async def test_async_write_default_write_type_is_inherit(
-    async_fs: AsyncGooseFs, tmp_dir: str
+    async_fs: AsyncGoosefs, tmp_dir: str
 ) -> None:
     """Omitting ``write_type`` should make the SDK fall back to xattr
     inheritance (and ultimately the cluster default). Verify the file is
@@ -184,7 +184,7 @@ async def test_async_write_default_write_type_is_inherit(
 @pytest.mark.parametrize("wt_label,wt", WRITE_TYPES, ids=[w[0] for w in WRITE_TYPES])
 @pytest.mark.parametrize("size_label,size", PAYLOAD_SIZES, ids=[s[0] for s in PAYLOAD_SIZES])
 def test_sync_round_trip(
-    sync_fs: GooseFs,
+    sync_fs: Goosefs,
     sync_tmp_dir: str,
     wt_label: str,
     wt: WriteType,
@@ -207,7 +207,7 @@ def test_sync_round_trip(
 
 
 def test_sync_read_range_arbitrary_offsets(
-    sync_fs: GooseFs, sync_tmp_dir: str
+    sync_fs: Goosefs, sync_tmp_dir: str
 ) -> None:
     path = f"{sync_tmp_dir}/sync-read-range.bin"
     payload = _make_payload("sync-read-range", 4096)
@@ -218,13 +218,13 @@ def test_sync_read_range_arbitrary_offsets(
     assert sync_fs.read_range(path, 4000, 1024) == payload[4000:4096]
 
 
-def test_sync_write_rejects_non_bytes(sync_fs: GooseFs, sync_tmp_dir: str) -> None:
+def test_sync_write_rejects_non_bytes(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
     with pytest.raises(TypeError):
         sync_fs.write_file(f"{sync_tmp_dir}/bad.bin", "not bytes")  # type: ignore[arg-type]
 
 
 def test_sync_write_inside_asyncio_loop_is_refused(
-    sync_fs: GooseFs, sync_tmp_dir: str
+    sync_fs: Goosefs, sync_tmp_dir: str
 ) -> None:
     """The deadlock guard from P3 (Review #17.1) must keep applying to the
     new write/read methods."""

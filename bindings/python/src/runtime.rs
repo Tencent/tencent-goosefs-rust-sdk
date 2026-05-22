@@ -19,7 +19,7 @@
 //!
 //! [`block_on`] **must not** be called from inside a Tokio worker thread
 //! (e.g. from the body of a future already running on this runtime), or
-//! from a Python `asyncio` event loop. The sync `GooseFs` class is
+//! from a Python `asyncio` event loop. The sync `Goosefs` class is
 //! responsible for guarding against the latter case (see P3 §17.1).
 
 use tokio::runtime::Runtime;
@@ -31,7 +31,7 @@ use tokio::runtime::Runtime;
 /// kept here so the rest of the binding does not have to depend on the
 /// exact spelling of that crate path.
 //
-// Allowed because the first call site lands in P2 (`AsyncGooseFs::connect`).
+// Allowed because the first call site lands in P2 (`AsyncGoosefs::connect`).
 #[allow(dead_code)]
 #[inline]
 pub fn runtime() -> &'static Runtime {
@@ -41,10 +41,10 @@ pub fn runtime() -> &'static Runtime {
 /// Block the current thread until `fut` completes, driving it on the shared
 /// runtime.
 ///
-/// Used by the synchronous `GooseFs` class. The async `AsyncGooseFs` class
+/// Used by the synchronous `Goosefs` class. The async `AsyncGoosefs` class
 /// does not call this — it returns Python coroutines directly.
 //
-// Allowed because the first call site lands in P3 (sync `GooseFs::__new__`).
+// Allowed because the first call site lands in P3 (sync `Goosefs::__new__`).
 #[allow(dead_code)]
 #[inline]
 pub fn block_on<F: std::future::Future>(fut: F) -> F::Output {

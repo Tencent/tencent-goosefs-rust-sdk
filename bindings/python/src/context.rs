@@ -2,14 +2,14 @@
 //! pair driving every Python-facing call.
 //!
 //! This module is not exposed to Python — it exists so that P2's
-//! `AsyncGooseFs`, P3's sync `GooseFs`, and P5's `FileReader` /
+//! `AsyncGoosefs`, P3's sync `Goosefs`, and P5's `FileReader` /
 //! `FileWriter` all share the same lifecycle hooks (`close`, drop) and
 //! Arc-based connection sharing.
 //!
 //! ```text
-//! AsyncGooseFs ─┐
+//! AsyncGoosefs ─┐
 //!               ├──> Arc<PyFsHandle> ──> Arc<FileSystemContext>
-//! GooseFs    ─┘                          │
+//! Goosefs    ─┘                          │
 //!                                        └─> Arc<BaseFileSystem>
 //! ```
 

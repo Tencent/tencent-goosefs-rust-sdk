@@ -1,4 +1,4 @@
-//! `AsyncGooseFs` — coroutine-returning Goosefs client.
+//! `AsyncGoosefs` — coroutine-returning Goosefs client.
 //!
 //! Every method returns a Python `awaitable`. Internally the future is run on
 //! the shared Tokio runtime (`crate::runtime`) via
@@ -7,7 +7,7 @@
 //! ## Lifecycle
 //!
 //! ```python
-//! async with await AsyncGooseFs.connect(cfg) as fs:
+//! async with await AsyncGoosefs.connect(cfg) as fs:
 //!     await fs.mkdir("/tmp/p2", recursive=True)
 //!     status = await fs.get_status("/tmp/p2")
 //! # `close()` runs on `__aexit__`, releasing master/worker connections.
@@ -15,11 +15,11 @@
 //!
 //! ## Thread-safety
 //!
-//! `AsyncGooseFs` holds an `Arc<FileSystemContext>` + `Arc<BaseFileSystem>`,
+//! `AsyncGoosefs` holds an `Arc<FileSystemContext>` + `Arc<BaseFileSystem>`,
 //! so it is `Send + Sync` and a single instance can be shared across
 //! `asyncio` tasks.
 //!
-//! P3 (sync `GooseFs`) and P4/P5 (read/write/streaming) will reuse the same
+//! P3 (sync `Goosefs`) and P4/P5 (read/write/streaming) will reuse the same
 //! `PyFsHandle` lower-half.
 
 use std::sync::Mutex;
@@ -88,8 +88,8 @@ pub(crate) fn build_create_file_options(
 }
 
 /// Async Goosefs filesystem client.
-#[pyclass(module = "goosefs._goosefs", name = "AsyncGooseFs")]
-pub struct PyAsyncGooseFs {
+#[pyclass(module = "goosefs._goosefs", name = "AsyncGoosefs")]
+pub struct PyAsyncGoosefs {
     /// `None` after `close()` — every subsequent op raises `RuntimeError`.
     ///
     /// `std::sync::Mutex` is fine here because the lock is never held across
@@ -97,7 +97,7 @@ pub struct PyAsyncGooseFs {
     handle: Mutex<Option<PyFsHandle>>,
 }
 
-impl PyAsyncGooseFs {
+impl PyAsyncGoosefs {
     fn handle(&self) -> PyResult<PyFsHandle> {
         let guard = self
             .handle
@@ -105,13 +105,13 @@ impl PyAsyncGooseFs {
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("handle mutex poisoned"))?;
         guard
             .clone()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("AsyncGooseFs is closed"))
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("AsyncGoosefs is closed"))
     }
 }
 
 #[pymethods]
-impl PyAsyncGooseFs {
-    /// `await AsyncGooseFs.connect(cfg)` → connected client.
+impl PyAsyncGoosefs {
+    /// `await AsyncGoosefs.connect(cfg)` → connected client.
     ///
     /// Bootstrap is async because it performs the initial Master+Worker
     /// handshake. `cfg` is cloned, so the caller may keep using it for
@@ -125,7 +125,7 @@ impl PyAsyncGooseFs {
             Python::attach(|py| {
                 Py::new(
                     py,
-                    PyAsyncGooseFs {
+                    PyAsyncGoosefs {
                         handle: Mutex::new(Some(handle)),
                     },
                 )
@@ -411,10 +411,10 @@ impl PyAsyncGooseFs {
     fn __repr__(&self) -> String {
         match self.handle.lock() {
             Ok(g) => match g.as_ref() {
-                Some(h) => format!("AsyncGooseFs(master={:?})", h.ctx.config().master_addr),
-                None => "AsyncGooseFs(<closed>)".to_string(),
+                Some(h) => format!("AsyncGoosefs(master={:?})", h.ctx.config().master_addr),
+                None => "AsyncGoosefs(<closed>)".to_string(),
             },
-            Err(_) => "AsyncGooseFs(<poisoned>)".to_string(),
+            Err(_) => "AsyncGoosefs(<poisoned>)".to_string(),
         }
     }
 }

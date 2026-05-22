@@ -16,7 +16,7 @@ a live cluster:
 The remaining classes (``PermissionDenied``, ``AuthenticationFailed``,
 ``MasterUnavailable``, ``RpcError``, ``IoError``, ``FileIncomplete``,
 ``IsADirectory``, ``NoWorkerAvailable``, ``ConfigError``,
-``GooseFsError``) cover internal SDK conditions that cannot be reliably
+``GoosefsError``) cover internal SDK conditions that cannot be reliably
 provoked from the public API surface in P2; their *registration* and
 *subclass relationship* is verified statically below.
 """
@@ -25,14 +25,14 @@ from __future__ import annotations
 
 import pytest
 
-from goosefs import AsyncGooseFs
+from goosefs import AsyncGoosefs
 from goosefs.exceptions import (
     AlreadyExists,
     AuthenticationFailed,
     ConfigError,
     DirectoryNotEmpty,
     FileIncomplete,
-    GooseFsError,
+    GoosefsError,
     InvalidArgument,
     IoError,
     IsADirectory,
@@ -73,8 +73,8 @@ _ALL_EXCEPTIONS = (
 @pytest.mark.filterwarnings("ignore::pytest.PytestWarning")
 def test_all_exceptions_subclass_goosefs_error() -> None:
     for cls in _ALL_EXCEPTIONS:
-        assert issubclass(cls, GooseFsError), f"{cls.__name__} must subclass GooseFsError"
-    assert issubclass(GooseFsError, Exception)
+        assert issubclass(cls, GoosefsError), f"{cls.__name__} must subclass GoosefsError"
+    assert issubclass(GoosefsError, Exception)
 
 
 @pytest.mark.filterwarnings("ignore::pytest.PytestWarning")
@@ -82,7 +82,7 @@ def test_exceptions_module_attribute_matches() -> None:
     """The ``__module__`` should be ``goosefs.exceptions`` (not the underscore
     extension), so user tracebacks read naturally.
     """
-    for cls in _ALL_EXCEPTIONS + (GooseFsError,):
+    for cls in _ALL_EXCEPTIONS + (GoosefsError,):
         assert cls.__module__ == "goosefs.exceptions", cls.__name__
 
 
@@ -91,21 +91,21 @@ def test_exceptions_module_attribute_matches() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_notfound_on_missing_path(async_fs: AsyncGooseFs, tmp_dir: str) -> None:
+async def test_notfound_on_missing_path(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     with pytest.raises(NotFound):
         await async_fs.get_status(f"{tmp_dir}/never-created")
 
 
 async def test_notfound_is_catchable_as_goosefs_error(
-    async_fs: AsyncGooseFs, tmp_dir: str
+    async_fs: AsyncGoosefs, tmp_dir: str
 ) -> None:
-    """Users who want a single catch-all should be able to use ``GooseFsError``."""
-    with pytest.raises(GooseFsError):
+    """Users who want a single catch-all should be able to use ``GoosefsError``."""
+    with pytest.raises(GoosefsError):
         await async_fs.get_status(f"{tmp_dir}/missing")
 
 
 async def test_already_exists_on_rename_to_existing_target(
-    async_fs: AsyncGooseFs, tmp_dir: str
+    async_fs: AsyncGoosefs, tmp_dir: str
 ) -> None:
     """``AlreadyExists`` is reachable through ``rename``: the destination path
     must not pre-exist. (``mkdir`` is idempotent because the SDK hard-wires
@@ -115,32 +115,32 @@ async def test_already_exists_on_rename_to_existing_target(
     dst = f"{tmp_dir}/rename-dst"
     await async_fs.mkdir(src)
     await async_fs.mkdir(dst)
-    with pytest.raises((AlreadyExists, GooseFsError)):
+    with pytest.raises((AlreadyExists, GoosefsError)):
         await async_fs.rename(src, dst)
 
 
-async def test_invalid_argument_on_empty_path(async_fs: AsyncGooseFs) -> None:
+async def test_invalid_argument_on_empty_path(async_fs: AsyncGoosefs) -> None:
     """An empty path is rejected by the server / SDK as ``InvalidArgument``
     or ``InvalidPath``; both map to the same Python class.
     """
-    with pytest.raises((InvalidArgument, GooseFsError)):
+    with pytest.raises((InvalidArgument, GoosefsError)):
         await async_fs.get_status("")
 
 
 async def test_directory_not_empty_on_non_recursive_delete(
-    async_fs: AsyncGooseFs, tmp_dir: str
+    async_fs: AsyncGoosefs, tmp_dir: str
 ) -> None:
     parent = f"{tmp_dir}/non-empty"
     await async_fs.mkdir(f"{parent}/child", recursive=True)
-    # Server may return DirectoryNotEmpty or a more generic GooseFsError;
+    # Server may return DirectoryNotEmpty or a more generic GoosefsError;
     # both are acceptable as long as the call fails without losing data.
-    with pytest.raises((DirectoryNotEmpty, GooseFsError)):
+    with pytest.raises((DirectoryNotEmpty, GoosefsError)):
         await async_fs.delete(parent)
     assert await async_fs.exists(parent), "delete must not have partially succeeded"
 
 
 async def test_use_after_close_raises_runtime_error(
-    async_fs: AsyncGooseFs, tmp_dir: str
+    async_fs: AsyncGoosefs, tmp_dir: str
 ) -> None:
     """``close()`` followed by any operation must raise ``RuntimeError``
     (not silently hang or return None).

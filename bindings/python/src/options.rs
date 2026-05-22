@@ -2,7 +2,7 @@
 //!
 //! Each Python class is a thin builder around the SDK type. Conversions back
 //! into the SDK happen via `into_sdk()` private helpers (consumed by the
-//! `AsyncGooseFs` / `GooseFs` methods in `filesystem.rs`).
+//! `AsyncGoosefs` / `Goosefs` methods in `filesystem.rs`).
 //!
 //! ## Why `__repr__` everywhere?
 //!

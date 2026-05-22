@@ -31,7 +31,7 @@ from typing import AsyncIterator
 import pytest
 import pytest_asyncio
 
-from goosefs import AsyncGooseFs, Config, GooseFs
+from goosefs import AsyncGoosefs, Config, Goosefs
 
 
 # ---------------------------------------------------------------------------
@@ -68,13 +68,13 @@ def config(master_addr: str) -> Config:
 
 
 @pytest_asyncio.fixture
-async def async_fs(config: Config) -> AsyncIterator[AsyncGooseFs]:
-    """An :class:`AsyncGooseFs` connected for the duration of the test.
+async def async_fs(config: Config) -> AsyncIterator[AsyncGoosefs]:
+    """An :class:`AsyncGoosefs` connected for the duration of the test.
 
     Each test gets its own connection so a hung close in one test cannot
     poison the next.
     """
-    fs = await AsyncGooseFs.connect(config)
+    fs = await AsyncGoosefs.connect(config)
     try:
         yield fs
     finally:
@@ -84,7 +84,7 @@ async def async_fs(config: Config) -> AsyncIterator[AsyncGooseFs]:
 
 
 @pytest_asyncio.fixture
-async def tmp_dir(async_fs: AsyncGooseFs) -> AsyncIterator[str]:
+async def tmp_dir(async_fs: AsyncGoosefs) -> AsyncIterator[str]:
     """A unique scratch directory under ``/tmp/pygoosefs-tests/``.
 
     Cleaned up recursively at teardown. The path is safe to use even if a
@@ -119,13 +119,13 @@ async def tmp_dir(async_fs: AsyncGooseFs) -> AsyncIterator[str]:
 
 @pytest.fixture
 def sync_fs(config: Config):
-    """A blocking :class:`GooseFs` connected for the duration of the test.
+    """A blocking :class:`Goosefs` connected for the duration of the test.
 
     Constructed inside the test thread (no asyncio loop running) so the
-    runtime guards in ``GooseFs`` accept the call. ``close()`` runs in a
+    runtime guards in ``Goosefs`` accept the call. ``close()`` runs in a
     ``try/finally`` to release the connection even on test failure.
     """
-    fs = GooseFs(config)
+    fs = Goosefs(config)
     try:
         yield fs
     finally:
@@ -134,7 +134,7 @@ def sync_fs(config: Config):
 
 
 @pytest.fixture
-def sync_tmp_dir(sync_fs: GooseFs):
+def sync_tmp_dir(sync_fs: Goosefs):
     """Sync analogue of :func:`tmp_dir`. Creates and recursively cleans up
     a uuid-stamped scratch directory.
     """

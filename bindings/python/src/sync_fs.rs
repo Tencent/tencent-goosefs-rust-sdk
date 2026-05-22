@@ -1,4 +1,4 @@
-//! `GooseFs` — synchronous wrapper around `AsyncGooseFs`.
+//! `Goosefs` — synchronous wrapper around `AsyncGoosefs`.
 //!
 //! This is the blocking façade for users who do not want to deal with
 //! `asyncio`. Internally every method calls
@@ -9,9 +9,9 @@
 //! ## Lifecycle
 //!
 //! ```python
-//! from goosefs import GooseFs, Config
+//! from goosefs import Goosefs, Config
 //!
-//! with GooseFs(Config("127.0.0.1:9200")) as fs:
+//! with Goosefs(Config("127.0.0.1:9200")) as fs:
 //!     fs.mkdir("/tmp/p3", recursive=True)
 //!     assert fs.exists("/tmp/p3")
 //! ```
@@ -30,7 +30,7 @@
 //!
 //! 2. **Fork-after-connect** (Review #17.4). gRPC connections, Tokio
 //!    runtime worker threads and tonic channels are *not* fork-safe. If
-//!    the process forks after `GooseFs(...)` was created and the child
+//!    the process forks after `Goosefs(...)` was created and the child
 //!    tries to reuse the inherited handle, we abort with `RuntimeError`.
 //!    The user must reconnect in the child.
 
@@ -52,16 +52,16 @@ use crate::status::PyURIStatus;
 
 /// Synchronous (blocking) Goosefs filesystem client.
 ///
-/// `GooseFs` is the convenient counterpart to `AsyncGooseFs` for
+/// `Goosefs` is the convenient counterpart to `AsyncGoosefs` for
 /// scripts, REPL sessions and any code that does not run inside an
 /// `asyncio` event loop.
 ///
-/// **Do not** instantiate or call `GooseFs` from inside a coroutine — use
-/// `AsyncGooseFs` instead. Calling sync methods while an asyncio loop is
+/// **Do not** instantiate or call `Goosefs` from inside a coroutine — use
+/// `AsyncGoosefs` instead. Calling sync methods while an asyncio loop is
 /// running on the same thread will raise `RuntimeError` rather than
 /// dead-lock.
-#[pyclass(module = "goosefs._goosefs", name = "GooseFs")]
-pub struct PyGooseFs {
+#[pyclass(module = "goosefs._goosefs", name = "Goosefs")]
+pub struct PyGoosefs {
     /// `None` after `close()` — every subsequent op raises `RuntimeError`.
     handle: Mutex<Option<PyFsHandle>>,
     /// PID of the process that created this handle.
@@ -72,7 +72,7 @@ pub struct PyGooseFs {
     creator_pid: u32,
 }
 
-impl PyGooseFs {
+impl PyGoosefs {
     /// Acquire a clone of the inner handle, enforcing the close + fork
     /// invariants on every call.
     fn handle(&self) -> PyResult<PyFsHandle> {
@@ -81,7 +81,7 @@ impl PyGooseFs {
         let pid = std::process::id();
         if pid != self.creator_pid {
             return Err(PyRuntimeError::new_err(format!(
-                "GooseFs cannot be used after fork (created in pid={}, now in pid={}); \
+                "Goosefs cannot be used after fork (created in pid={}, now in pid={}); \
                  reconnect in the child process",
                 self.creator_pid, pid
             )));
@@ -93,7 +93,7 @@ impl PyGooseFs {
             .map_err(|_| PyRuntimeError::new_err("handle mutex poisoned"))?;
         guard
             .clone()
-            .ok_or_else(|| PyRuntimeError::new_err("GooseFs is closed"))
+            .ok_or_else(|| PyRuntimeError::new_err("Goosefs is closed"))
     }
 
     /// Run `fut` to completion on the shared Tokio runtime, releasing the
@@ -110,8 +110,8 @@ impl PyGooseFs {
         //    to ask "am I on a worker thread right now?".
         if tokio::runtime::Handle::try_current().is_ok() {
             return Err(PyRuntimeError::new_err(
-                "GooseFs sync methods cannot be invoked from inside a Tokio runtime; \
-                 use `AsyncGooseFs` from your async code instead",
+                "Goosefs sync methods cannot be invoked from inside a Tokio runtime; \
+                 use `AsyncGoosefs` from your async code instead",
             ));
         }
 
@@ -122,8 +122,8 @@ impl PyGooseFs {
         let asyncio = py.import("asyncio")?;
         if asyncio.call_method0("get_running_loop").is_ok() {
             return Err(PyRuntimeError::new_err(
-                "GooseFs sync methods cannot be invoked from inside an asyncio event loop; \
-                 use `AsyncGooseFs` and `await` instead",
+                "Goosefs sync methods cannot be invoked from inside an asyncio event loop; \
+                 use `AsyncGoosefs` and `await` instead",
             ));
         }
 
@@ -134,8 +134,8 @@ impl PyGooseFs {
 }
 
 #[pymethods]
-impl PyGooseFs {
-    /// `GooseFs(config)` — synchronous connect.
+impl PyGoosefs {
+    /// `Goosefs(config)` — synchronous connect.
     ///
     /// Performs the master + worker handshake on the shared Tokio runtime
     /// and returns once the connection is ready. Raises `RuntimeError`
@@ -146,7 +146,7 @@ impl PyGooseFs {
         let ctx = Self::guarded_block_on(py, async move {
             FileSystemContext::connect(cfg).await.map_err(map_err)
         })?;
-        Ok(PyGooseFs {
+        Ok(PyGoosefs {
             handle: Mutex::new(Some(PyFsHandle::new(ctx))),
             creator_pid: std::process::id(),
         })
@@ -248,7 +248,7 @@ impl PyGooseFs {
 
     /// `fs.read_file(path)` → `bytes` (full file contents).
     ///
-    /// Synchronous counterpart of [`PyAsyncGooseFs::read_file`]; same caveats
+    /// Synchronous counterpart of [`PyAsyncGoosefs::read_file`]; same caveats
     /// about full materialisation in RAM apply (Review #17.1: documented).
     fn read_file<'py>(
         &self,
@@ -300,7 +300,7 @@ impl PyGooseFs {
 
     /// `fs.write_file(path, data, *, write_type=None, block_size_bytes=None, recursive=False)` → `int`.
     ///
-    /// Synchronous counterpart of [`PyAsyncGooseFs::write_file`].
+    /// Synchronous counterpart of [`PyAsyncGoosefs::write_file`].
     #[pyo3(signature = (path, data, *, write_type=None, block_size_bytes=None, recursive=false))]
     fn write_file(
         &self,
@@ -339,7 +339,7 @@ impl PyGooseFs {
         let pid = std::process::id();
         if pid != self.creator_pid {
             return Err(PyRuntimeError::new_err(format!(
-                "GooseFs cannot be used after fork (created in pid={}, now in pid={})",
+                "Goosefs cannot be used after fork (created in pid={}, now in pid={})",
                 self.creator_pid, pid
             )));
         }
@@ -384,10 +384,10 @@ impl PyGooseFs {
     fn __repr__(&self) -> String {
         match self.handle.lock() {
             Ok(g) => match g.as_ref() {
-                Some(h) => format!("GooseFs(master={:?})", h.ctx.config().master_addr),
-                None => "GooseFs(<closed>)".to_string(),
+                Some(h) => format!("Goosefs(master={:?})", h.ctx.config().master_addr),
+                None => "Goosefs(<closed>)".to_string(),
             },
-            Err(_) => "GooseFs(<poisoned>)".to_string(),
+            Err(_) => "Goosefs(<poisoned>)".to_string(),
         }
     }
 }

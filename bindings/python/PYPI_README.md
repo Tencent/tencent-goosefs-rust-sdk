@@ -27,10 +27,10 @@ Windows wheels are best-effort and may be added in a later release.
 ## Quick start
 
 ```python
-from goosefs import Config, GooseFs
+from goosefs import Config, Goosefs
 
 cfg = Config("127.0.0.1:9200")
-with GooseFs(cfg) as fs:
+with Goosefs(cfg) as fs:
     fs.mkdir("/data", recursive=True)
     fs.write_file("/data/hello.txt", b"hello, goosefs")
     print(fs.read_file("/data/hello.txt"))
@@ -40,10 +40,10 @@ For asynchronous code:
 
 ```python
 import asyncio
-from goosefs import AsyncGooseFs, Config
+from goosefs import AsyncGoosefs, Config
 
 async def main() -> None:
-    async with await AsyncGooseFs.connect(Config("127.0.0.1:9200")) as fs:
+    async with await AsyncGoosefs.connect(Config("127.0.0.1:9200")) as fs:
         await fs.mkdir("/data", recursive=True)
         await fs.write_file("/data/x.bin", b"...", write_type="MUST_CACHE")
         data = await fs.read_file("/data/x.bin")

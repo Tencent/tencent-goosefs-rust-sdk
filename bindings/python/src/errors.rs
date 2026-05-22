@@ -1,6 +1,6 @@
 //! Python exception hierarchy for GooseFS errors.
 //!
-//! Mirrors the design of OpenDAL's Python binding: a single `GooseFsError`
+//! Mirrors the design of OpenDAL's Python binding: a single `GoosefsError`
 //! base class with one subclass per *category* of failure so users can write
 //!
 //! ```python
@@ -8,7 +8,7 @@
 //!     fs.get_status("/missing")
 //! except NotFound:
 //!     ...
-//! except GooseFsError:           # catch-all
+//! except GoosefsError:           # catch-all
 //!     ...
 //! ```
 //!
@@ -28,22 +28,22 @@ use pyo3::prelude::*;
 // `goosefs.exceptions.NotFound` in tracebacks rather than the underscore-
 // prefixed `_goosefs.exceptions.NotFound`.
 // ---------------------------------------------------------------------------
-create_exception!(goosefs.exceptions, GooseFsError, PyException);
-create_exception!(goosefs.exceptions, NotFound, GooseFsError);
-create_exception!(goosefs.exceptions, AlreadyExists, GooseFsError);
-create_exception!(goosefs.exceptions, PermissionDenied, GooseFsError);
-create_exception!(goosefs.exceptions, InvalidArgument, GooseFsError);
-create_exception!(goosefs.exceptions, FileIncomplete, GooseFsError);
-create_exception!(goosefs.exceptions, DirectoryNotEmpty, GooseFsError);
-create_exception!(goosefs.exceptions, IsADirectory, GooseFsError);
-create_exception!(goosefs.exceptions, AuthenticationFailed, GooseFsError);
-create_exception!(goosefs.exceptions, NoWorkerAvailable, GooseFsError);
-create_exception!(goosefs.exceptions, MasterUnavailable, GooseFsError);
-create_exception!(goosefs.exceptions, RpcError, GooseFsError);
+create_exception!(goosefs.exceptions, GoosefsError, PyException);
+create_exception!(goosefs.exceptions, NotFound, GoosefsError);
+create_exception!(goosefs.exceptions, AlreadyExists, GoosefsError);
+create_exception!(goosefs.exceptions, PermissionDenied, GoosefsError);
+create_exception!(goosefs.exceptions, InvalidArgument, GoosefsError);
+create_exception!(goosefs.exceptions, FileIncomplete, GoosefsError);
+create_exception!(goosefs.exceptions, DirectoryNotEmpty, GoosefsError);
+create_exception!(goosefs.exceptions, IsADirectory, GoosefsError);
+create_exception!(goosefs.exceptions, AuthenticationFailed, GoosefsError);
+create_exception!(goosefs.exceptions, NoWorkerAvailable, GoosefsError);
+create_exception!(goosefs.exceptions, MasterUnavailable, GoosefsError);
+create_exception!(goosefs.exceptions, RpcError, GoosefsError);
 // `IoError` covers SDK `BlockIoError` — Review §17.8 made this its own class
 // so callers can distinguish transient block I/O failures from generic ones.
-create_exception!(goosefs.exceptions, IoError, GooseFsError);
-create_exception!(goosefs.exceptions, ConfigError, GooseFsError);
+create_exception!(goosefs.exceptions, IoError, GoosefsError);
+create_exception!(goosefs.exceptions, ConfigError, GoosefsError);
 
 /// Register all exception classes under the `goosefs.exceptions` submodule.
 ///
@@ -51,7 +51,7 @@ create_exception!(goosefs.exceptions, ConfigError, GooseFsError);
 pub fn register_exceptions(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let sub = PyModule::new(py, "exceptions")?;
 
-    sub.add("GooseFsError", py.get_type::<GooseFsError>())?;
+    sub.add("GoosefsError", py.get_type::<GoosefsError>())?;
     sub.add("NotFound", py.get_type::<NotFound>())?;
     sub.add("AlreadyExists", py.get_type::<AlreadyExists>())?;
     sub.add("PermissionDenied", py.get_type::<PermissionDenied>())?;
@@ -78,7 +78,7 @@ pub fn register_exceptions(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyRe
 /// compiler will fail the build (no `_` arm) — this is intentional, see
 /// Review §17.1.
 //
-// Allowed because the first call site lands in P2 (`AsyncGooseFs::*` methods).
+// Allowed because the first call site lands in P2 (`AsyncGoosefs::*` methods).
 #[allow(dead_code)]
 pub fn map_err(e: goosefs_sdk::error::Error) -> PyErr {
     use goosefs_sdk::error::Error as E;
@@ -100,10 +100,10 @@ pub fn map_err(e: goosefs_sdk::error::Error) -> PyErr {
         // through to the catch-all. Handle them explicitly so the Python
         // exception type carries the correct semantics.
         E::MissingField { field } => {
-            GooseFsError::new_err(format!("missing field in response: {field}"))
+            GoosefsError::new_err(format!("missing field in response: {field}"))
         }
         E::BlockIoError { message } => IoError::new_err(format!("block IO error: {message}")),
-        E::Internal { message, .. } => GooseFsError::new_err(format!("internal error: {message}")),
+        E::Internal { message, .. } => GoosefsError::new_err(format!("internal error: {message}")),
     }
 }
 

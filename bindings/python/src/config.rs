@@ -32,7 +32,7 @@ use crate::errors::ConfigError;
 /// Python-visible configuration object.
 ///
 /// Wraps an owned `GoosefsConfig`; cloned cheaply when passed to
-/// `AsyncGooseFs.connect` / `GooseFs(...)` (P2/P3).
+/// `AsyncGoosefs.connect` / `Goosefs(...)` (P2/P3).
 #[pyclass(module = "goosefs._goosefs", name = "Config")]
 #[derive(Clone)]
 pub struct PyConfig {
