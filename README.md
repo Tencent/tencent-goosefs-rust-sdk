@@ -49,6 +49,9 @@ This is a standalone Rust gRPC client crate (Layer 3) in the **Lance → OpenDAL
 │  ├──────────────────────────────────────────────────────────┤  │
 │  │  GrpcBlockReader — streaming + positioned read           │  │
 │  │  GrpcBlockWriter — bidirectional streaming write         │  │
+│  ├──────────────────────────────────────────────────────────┤  │
+│  │  Metrics Registry — global counters / gauges             │  │
+│  │  HeartbeatTask    — periodic delta report → Master       │  │
 │  └──────────────────────────────────────────────────────────┘  │
 └────────────────────────────────────────────────────────────────┘
 ```
@@ -289,6 +292,83 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 }
 ```
 
+### Example: Client Metrics & Heartbeat
+
+The SDK ships a built-in client-metrics pipeline. When `metrics_enabled = true`
+(the default), each `FileSystemContext` spawns a background `HeartbeatTask`
+that periodically reports **incremental counter deltas** to the GooseFS Master
+via the `MetricsHeartbeat` RPC. The `io` layer auto-increments well-known
+counters (`Client.BytesReadLocal`, `Client.BytesWrittenLocal`), and your
+application can register additional counters/gauges via the global registry.
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+
+use goosefs_sdk::config::GoosefsConfig;
+use goosefs_sdk::context::FileSystemContext;
+use goosefs_sdk::io::{GoosefsFileReader, GoosefsFileWriter};
+use goosefs_sdk::metrics;
+
+#[tokio::main]
+async fn main() -> goosefs_sdk::error::Result<()> {
+    // 1. Build a config with metrics enabled (default = true).
+    //    Tune the heartbeat interval / timeout and tag the client with an app_id.
+    let config = GoosefsConfig::new("127.0.0.1:9200")
+        .with_metrics_enabled(true)
+        .with_metrics_heartbeat_interval(Duration::from_secs(10)) // min = 1 s
+        .with_metrics_heartbeat_timeout(Duration::from_secs(3))   // < interval
+        .with_app_id("my-app");
+
+    // 2. Connecting the context spawns the HeartbeatTask in the background.
+    let ctx: Arc<FileSystemContext> = FileSystemContext::connect(config).await?;
+
+    // 3. Drive some I/O — the SDK auto-increments Client.BytesReadLocal /
+    //    Client.BytesWrittenLocal during file read/write.
+    GoosefsFileWriter::write_file_with_context(ctx.clone(), "/demo.bin", b"hello").await?;
+    let _ = GoosefsFileReader::read_file_with_context(ctx.clone(), "/demo.bin").await?;
+
+    // 4. Register and increment a custom counter — the heartbeat picks it
+    //    up automatically (only non-zero deltas are reported).
+    let app_ops = metrics::counter("Client.DemoOpsCount");
+    app_ops.inc(1);
+
+    // 5. Read SDK-managed counters at any time (process-global registry).
+    let read_local = metrics::counter(metrics::name::CLIENT_BYTES_READ_LOCAL).get();
+    let written_local = metrics::counter(metrics::name::CLIENT_BYTES_WRITTEN_LOCAL).get();
+    println!("read_local = {}, written_local = {}", read_local, written_local);
+
+    // 6. close() performs a final heartbeat flush before shutdown.
+    ctx.close().await?;
+    Ok(())
+}
+```
+
+To disable the entire metrics pipeline (no background task, no RPC overhead):
+
+```rust
+let config = GoosefsConfig::new("127.0.0.1:9200")
+    .with_metrics_enabled(false);
+```
+
+**Configuration knobs**
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `metrics_enabled` | `true` | Master switch — when `false` the heartbeat task is not spawned. |
+| `metrics_heartbeat_interval` | `10 s` | Period between heartbeat reports. Must be `>= 1 s`. |
+| `metrics_heartbeat_timeout` | `3 s` | Per-RPC timeout. Must be `>= 1 s` and `< metrics_heartbeat_interval`. |
+| `metrics_max_batch_size` | `512` | Max number of metric entries packed into a single heartbeat. |
+| `app_id` | `None` | Optional client tag attached to every heartbeat (useful for grouping in Master logs). |
+
+**Built-in counter names** (re-exported from `goosefs_sdk::metrics::name`):
+
+- `Client.BytesReadLocal` — bytes read via local short-circuit (auto-incremented by the `io` layer).
+- `Client.BytesWrittenLocal` — bytes written via local short-circuit (auto-incremented).
+- `Client.BytesWrittenUfs` — bytes written directly to UFS (bypassing the cache).
+
+> **Tip:** Run `cargo run --example metrics_heartbeat` for an end-to-end demo that exercises both `metrics_enabled = true` and `metrics_enabled = false`. Set `RUST_LOG=info` to see the SDK's heartbeat / flush logs.
+
 ### Example: Authentication
 
 ```rust
@@ -473,6 +553,8 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 | `io::GrpcBlockWriter` | Low-level streaming block writer with chunk splitting and flush |
 | `config::GoosefsConfig` | Connection configuration — 30+ settings including properties file parsing, YAML auto-config, `ConfigRefresher` hot-reload, `TransparentAccelerationSwitch`, timeouts, block/chunk size, write/read types, auth, multi-master, worker routing |
 | `WritePType` | Write type enum — `MustCache`, `TryCache`, `CacheThrough`, `Through`, `AsyncThrough`, `None` |
+| `metrics::registry` | **Global metrics registry** — process-wide thread-safe `Counter` / `Gauge` factories (`metrics::counter(name)`, `metrics::gauge(name)`) plus the `metrics::name::*` constants for SDK-managed counters. |
+| `metrics::HeartbeatTask` | **Background heartbeat task** — owned by `FileSystemContext`, periodically computes counter deltas via `ClientMetricsReporter` and ships them to the Master through `MetricsHeartbeat`. Honors `metrics_heartbeat_interval` / `metrics_heartbeat_timeout` / `metrics_max_batch_size` and performs a final flush on `close()`. |
 | `error::Error` | Unified error type with domain-specific variants (`FileIncomplete`, `DirectoryNotEmpty`, `OpenDirectory`, `InvalidPath`, `AuthenticationFailed`) mapped from Java server exceptions |
 
 ## gRPC Services
@@ -526,6 +608,11 @@ goosefs-client-rust/
 │   │   ├── file_writer.rs  # GoosefsFileWriter (cancel/close state machine)
 │   │   ├── reader.rs       # GrpcBlockReader (streaming + positioned)
 │   │   └── writer.rs       # GrpcBlockWriter (low-level)
+│   ├── metrics/            # ★ Client metrics & heartbeat pipeline
+│   │   ├── mod.rs          # Module root + public re-exports
+│   │   ├── registry.rs     # Global Counter/Gauge registry + name constants
+│   │   ├── reporter.rs     # ClientMetricsReporter (snapshot + delta calc)
+│   │   └── heartbeat.rs    # HeartbeatTask (periodic MetricsHeartbeat RPC)
 │   └── generated/          # prost/tonic generated code (checked-in; shipped with the crate)
 ├── examples/
 │   ├── highlevel_file_rw.rs     # ★ High-level file read/write (recommended)
@@ -535,6 +622,7 @@ goosefs-client-rust/
 │   ├── write_types.rs           # ★ WriteType comparison
 │   ├── ha_multi_master.rs       # ★ Multi-master mode
 │   ├── auth_demo.rs             # ★ Authentication demo (NOSASL / SIMPLE)
+│   ├── metrics_heartbeat.rs     # ★ Client metrics & heartbeat demo
 │   ├── lowlevel_block_read.rs   # Low-level block streaming read
 │   ├── lowlevel_create_file.rs  # Low-level file creation (metadata only)
 │   ├── metadata_crud.rs         # File/directory metadata CRUD
