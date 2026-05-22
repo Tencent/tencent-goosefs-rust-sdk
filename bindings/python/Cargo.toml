@@ -1,0 +1,47 @@
+[package]
+name = "goosefs-python"
+version = "0.1.2"
+edition = "2021"
+license = "Apache-2.0"
+description = "PyO3 binding for the goosefs-sdk Rust crate (powers the `goosefs` PyPI package)"
+publish = false                       # not published to crates.io; only produces wheels via maturin
+rust-version = "1.75"
+
+[lib]
+# Decision 1.A (refined to align with Apache OpenDAL's binding):
+#   - `cdylib` is required for the Python wheel.
+#   - `rlib`   is kept so `cargo test -p goosefs-python` can build and run
+#              the in-tree `#[cfg(test)]` modules (errors / config). This
+#              adds <2s to a clean build and zero cost to wheel size.
+# fluss-rust uses `cdylib` only; OpenDAL uses both. We follow OpenDAL.
+crate-type = ["cdylib", "rlib"]
+# Must match `[tool.maturin].module-name = "goosefs._goosefs"` in pyproject.toml.
+name = "_goosefs"
+doc = false
+
+[features]
+default = ["abi3"]
+# abi3-py39 — one wheel per platform covers CPython 3.9+.
+abi3 = ["pyo3/abi3-py39"]
+
+[dependencies]
+# Path dependency to the workspace root SDK crate.
+# Note (Review §17.2): we deliberately omit `version = "="` here because path
+# dependencies always win locally; CI will instead enforce that this crate's
+# version matches the root `Cargo.toml` (see DEPENDENCIES.rust.tsv in P8).
+goosefs-sdk = { path = "../.." }
+
+pyo3 = { version = "0.27", features = ["generate-import-lib"] }
+pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"] }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+bytes = "1"
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+strip = true
+debug = false
