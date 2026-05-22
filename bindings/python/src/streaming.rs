@@ -37,24 +37,19 @@
 //! `array.array("B", …)`, NumPy `uint8`) through
 //! [`crate::filesystem::extract_bytes_like`], which also rejects `str` to
 //! avoid silent Latin-1 round-trips.
-
-//! ## SDK short-read workaround (T-2026-05-22)
 //!
-//! [`GoosefsFileInStream::read`] silently drops bytes when the caller's `buf`
-//! is smaller than the chunk the worker happens to return
-//! (`io/file_in_stream.rs::read_from_sequential_stream` warns then discards
-//! `data.len() - buf.len()` bytes). The chunk size is server-driven, not
-//! `buf.len()`-driven, so the safe contract is *"always pass a buffer at
-//! least `chunk_size` long"*. Python callers naturally want short reads
-//! (`r.read(33 * 1024)` → 33 KiB), so to bridge the gap we keep a per-stream
-//! [`ReaderState::leftover`] byte buffer and **always issue SDK reads with
-//! `max(chunk_size, requested)` capacity**, copying out only what the
-//! caller wants and parking the rest in `leftover` for the next call.
-//! That makes the binding's `read(n)` behave like a normal Python file
-//! object regardless of the underlying SDK chunk size.
+//! ## Read-until-filled helper
 //!
-//! TODO upstream: fix `GoosefsFileInStream::read` to expose its own
-//! per-stream remainder buffer so this band-aid can be removed.
+//! The SDK's [`GoosefsFileInStream::read`] is loss-less but may return
+//! fewer bytes than requested in a single call (each call corresponds to
+//! at most one worker chunk plus any carry-over from a previous oversized
+//! chunk). Python callers expect `r.read(n)` to return up to `n` bytes
+//! — short reads are legal but inconvenient when streaming through a
+//! tight loop. We therefore wrap the SDK in a tiny [`pull_n`] helper that
+//! re-enters `stream.read` until the requested length is satisfied or the
+//! stream hits EOF. Zero band-aid: the helper relies on the SDK's own
+//! correctness guarantees for byte preservation, ordering, and EOF
+//! detection.
 
 use std::io::SeekFrom;
 use std::sync::Arc;
@@ -74,131 +69,44 @@ use crate::filesystem::{build_create_file_options, extract_bytes_like};
 use crate::runtime::block_on;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Reader state — wraps the SDK stream with a leftover-byte buffer so that
-// short Python reads do not lose data on the SDK's variable-size chunk path.
+// Read helpers — thin wrappers over the SDK that satisfy Python's
+// `read(n)` "return up to n bytes" expectation by looping over the
+// SDK's chunk-bounded reads. The SDK guarantees byte preservation, so
+// these helpers carry no state of their own.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Default lower bound for the SDK read buffer. Workers may emit chunks of
-/// up to `GoosefsConfig::chunk_size` (default 1 MiB), so we mirror that as
-/// the floor — anything smaller risks the SDK's silent-truncation path.
-const MIN_SDK_READ_BUF: usize = 1024 * 1024;
-
-/// Combined state held inside the `Arc<AsyncMutex<Option<…>>>`. Putting the
-/// leftover buffer next to the stream means the binding's `read()` is
-/// internally consistent under contention — the same lock that protects the
-/// SDK's `&mut self` also protects the residual bytes.
-struct ReaderState {
-    stream: GoosefsFileInStream,
-    /// Bytes already pulled from the SDK but not yet handed to Python.
-    /// Drained from index 0; refilled when empty.
-    leftover: Vec<u8>,
+/// Read up to `want` bytes from `stream`, looping over the SDK's
+/// chunk-bounded `read()` until either `want` bytes have been collected
+/// or EOF is reached. May return fewer than `want` bytes only at EOF.
+///
+/// Implementation notes:
+/// - We size the scratch buffer to the *remaining* file length capped
+///   by `want`, so each loop turn requests as much as the caller still
+///   wants — the SDK trims internally to its own chunk boundary.
+/// - A zero-byte return from the SDK means the underlying chunk reader
+///   reached EOF; we break unconditionally to avoid spinning.
+async fn pull_n(stream: &mut GoosefsFileInStream, want: usize) -> PyResult<Vec<u8>> {
+    if want == 0 {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(want);
+    while out.len() < want {
+        let need = want - out.len();
+        let mut tmp = vec![0u8; need];
+        let n = stream.read(&mut tmp).await.map_err(map_err)?;
+        if n == 0 {
+            break; // EOF
+        }
+        tmp.truncate(n);
+        out.extend_from_slice(&tmp);
+    }
+    Ok(out)
 }
 
-impl ReaderState {
-    fn new(stream: GoosefsFileInStream) -> Self {
-        Self {
-            stream,
-            leftover: Vec::new(),
-        }
-    }
-
-    /// Logical position visible to the user. Equal to `stream.pos()` minus
-    /// the bytes still parked in `leftover` (those have been pulled from the
-    /// SDK but the user hasn't consumed them yet).
-    fn logical_pos(&self) -> i64 {
-        self.stream.pos() - self.leftover.len() as i64
-    }
-
-    /// Logical bytes the user can still read before EOF.
-    fn logical_remaining(&self) -> i64 {
-        self.stream.remaining() + self.leftover.len() as i64
-    }
-
-    /// Read up to `want` bytes, draining the leftover buffer first and
-    /// pulling fresh data from the SDK with a chunk-safe buffer if needed.
-    /// May return fewer than `want` bytes only at EOF.
-    async fn read_chunked(&mut self, want: usize) -> PyResult<Vec<u8>> {
-        if want == 0 {
-            return Ok(Vec::new());
-        }
-
-        let mut out = Vec::with_capacity(want);
-
-        // 1) Drain leftover first.
-        if !self.leftover.is_empty() {
-            let take = self.leftover.len().min(want);
-            out.extend_from_slice(&self.leftover[..take]);
-            self.leftover.drain(..take);
-            if out.len() == want {
-                return Ok(out);
-            }
-        }
-
-        // 2) Pull from SDK using a chunk-safe buffer.
-        while out.len() < want {
-            if self.stream.remaining() <= 0 {
-                break; // EOF
-            }
-            let need = want - out.len();
-            // Always request at least MIN_SDK_READ_BUF so the SDK can deliver
-            // a full chunk without truncation. Cap by the file's remaining
-            // length to avoid over-allocating on tiny tail reads.
-            let cap = need
-                .max(MIN_SDK_READ_BUF)
-                .min(self.stream.remaining() as usize);
-            let mut tmp = vec![0u8; cap];
-            let n = self.stream.read(&mut tmp).await.map_err(map_err)?;
-            if n == 0 {
-                break;
-            }
-            tmp.truncate(n);
-            // Move at most `need` bytes to caller, park the rest.
-            if n <= need {
-                out.extend_from_slice(&tmp);
-            } else {
-                out.extend_from_slice(&tmp[..need]);
-                self.leftover = tmp[need..].to_vec();
-            }
-        }
-        Ok(out)
-    }
-
-    /// Read all remaining bytes (up to logical EOF).
-    async fn read_all_chunked(&mut self) -> PyResult<Vec<u8>> {
-        let total = self.logical_remaining().max(0) as usize;
-        self.read_chunked(total).await
-    }
-
-    /// Positioned read — does **not** affect `pos`/`leftover`.
-    async fn read_at(&mut self, offset: i64, length: usize) -> PyResult<Vec<u8>> {
-        let bytes = self
-            .stream
-            .read_at(offset, length)
-            .await
-            .map_err(map_err)?;
-        Ok(bytes.to_vec())
-    }
-
-    /// Seek. Invalidates the leftover buffer because the SDK's internal
-    /// chunk reader is repositioned.
-    ///
-    /// **Critical**: `SeekFrom::Current(d)` MUST be resolved against
-    /// [`Self::logical_pos`] — the user-visible position — not against the
-    /// SDK's internal `stream.pos()`, which may have been pushed past the
-    /// logical cursor by a prior chunked read that parked extra bytes in
-    /// `leftover`. We rewrite `Current(d)` into an absolute `Start(...)`
-    /// before delegating to the SDK so the two views stay consistent.
-    async fn seek_from(&mut self, from: SeekFrom) -> PyResult<i64> {
-        let absolute = match from {
-            SeekFrom::Current(delta) => {
-                let target = self.logical_pos().saturating_add(delta);
-                SeekFrom::Start(target.max(0) as u64)
-            }
-            other => other,
-        };
-        self.leftover.clear();
-        self.stream.seek_from(absolute).await.map_err(map_err)
-    }
+/// Read every remaining byte from the current position to EOF.
+async fn pull_all(stream: &mut GoosefsFileInStream) -> PyResult<Vec<u8>> {
+    let bytes = stream.read_all().await.map_err(map_err)?;
+    Ok(bytes.to_vec())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -276,7 +184,7 @@ where
 /// ```
 #[pyclass(module = "goosefs._goosefs", name = "AsyncFileReader")]
 pub struct PyAsyncFileReader {
-    inner: Arc<AsyncMutex<Option<ReaderState>>>,
+    inner: Arc<AsyncMutex<Option<GoosefsFileInStream>>>,
     /// Cached file length so `__len__` / `tell` do not need to acquire
     /// the mutex (and hence cannot deadlock with an in-flight read).
     file_length: i64,
@@ -287,7 +195,7 @@ impl PyAsyncFileReader {
     pub(crate) fn from_sdk(stream: GoosefsFileInStream) -> Self {
         let file_length = stream.len();
         Self {
-            inner: Arc::new(AsyncMutex::new(Some(ReaderState::new(stream)))),
+            inner: Arc::new(AsyncMutex::new(Some(stream))),
             file_length,
         }
     }
@@ -304,13 +212,13 @@ impl PyAsyncFileReader {
         let inner = Arc::clone(&self.inner);
         future_into_py(py, async move {
             let mut guard = inner.lock().await;
-            let state = guard
+            let stream = guard
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("AsyncFileReader is closed"))?;
             let buf = if size < 0 {
-                state.read_all_chunked().await?
+                pull_all(stream).await?
             } else {
-                state.read_chunked(size as usize).await?
+                pull_n(stream, size as usize).await?
             };
             Python::attach(|py| Ok(PyBytes::new(py, &buf).unbind()))
         })
@@ -332,10 +240,10 @@ impl PyAsyncFileReader {
         let inner = Arc::clone(&self.inner);
         future_into_py(py, async move {
             let mut guard = inner.lock().await;
-            let state = guard
+            let stream = guard
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("AsyncFileReader is closed"))?;
-            let bytes = state.read_at(offset, length).await?;
+            let bytes = stream.read_at(offset, length).await.map_err(map_err)?;
             Python::attach(|py| Ok(PyBytes::new(py, &bytes).unbind()))
         })
     }
@@ -352,10 +260,10 @@ impl PyAsyncFileReader {
         let inner = Arc::clone(&self.inner);
         future_into_py(py, async move {
             let mut guard = inner.lock().await;
-            let state = guard
+            let stream = guard
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("AsyncFileReader is closed"))?;
-            let pos = state.seek_from(from).await?;
+            let pos = stream.seek_from(from).await.map_err(map_err)?;
             Ok(pos)
         })
     }
@@ -368,7 +276,7 @@ impl PyAsyncFileReader {
     fn tell(&self) -> PyResult<i64> {
         match self.inner.try_lock() {
             Ok(guard) => match guard.as_ref() {
-                Some(s) => Ok(s.logical_pos()),
+                Some(s) => Ok(s.pos()),
                 None => Err(PyRuntimeError::new_err("AsyncFileReader is closed")),
             },
             Err(_) => Err(PyRuntimeError::new_err(
@@ -533,7 +441,7 @@ pub struct PyFileReader {
     // We keep the same `Arc<AsyncMutex<…>>` shape so a future evolution
     // could share state with the async type. For now access is always
     // serialised by the GIL since sync methods never yield.
-    inner: Arc<AsyncMutex<Option<ReaderState>>>,
+    inner: Arc<AsyncMutex<Option<GoosefsFileInStream>>>,
     file_length: i64,
 }
 
@@ -541,7 +449,7 @@ impl PyFileReader {
     pub(crate) fn from_sdk(stream: GoosefsFileInStream) -> Self {
         let file_length = stream.len();
         Self {
-            inner: Arc::new(AsyncMutex::new(Some(ReaderState::new(stream)))),
+            inner: Arc::new(AsyncMutex::new(Some(stream))),
             file_length,
         }
     }
@@ -554,13 +462,13 @@ impl PyFileReader {
         let inner = Arc::clone(&self.inner);
         let buf: Vec<u8> = guarded_block_on(py, async move {
             let mut guard = inner.lock().await;
-            let state = guard
+            let stream = guard
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("FileReader is closed"))?;
             if size < 0 {
-                state.read_all_chunked().await
+                pull_all(stream).await
             } else {
-                state.read_chunked(size as usize).await
+                pull_n(stream, size as usize).await
             }
         })?;
         Ok(PyBytes::new(py, &buf))
@@ -578,10 +486,11 @@ impl PyFileReader {
         let inner = Arc::clone(&self.inner);
         let buf: Vec<u8> = guarded_block_on(py, async move {
             let mut guard = inner.lock().await;
-            let state = guard
+            let stream = guard
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("FileReader is closed"))?;
-            state.read_at(offset, length).await
+            let bytes = stream.read_at(offset, length).await.map_err(map_err)?;
+            Ok(bytes.to_vec())
         })?;
         Ok(PyBytes::new(py, &buf))
     }
@@ -592,17 +501,17 @@ impl PyFileReader {
         let inner = Arc::clone(&self.inner);
         guarded_block_on(py, async move {
             let mut guard = inner.lock().await;
-            let state = guard
+            let stream = guard
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("FileReader is closed"))?;
-            state.seek_from(from).await
+            stream.seek_from(from).await.map_err(map_err)
         })
     }
 
     fn tell(&self) -> PyResult<i64> {
         match self.inner.try_lock() {
             Ok(guard) => match guard.as_ref() {
-                Some(s) => Ok(s.logical_pos()),
+                Some(s) => Ok(s.pos()),
                 None => Err(PyRuntimeError::new_err("FileReader is closed")),
             },
             Err(_) => Err(PyRuntimeError::new_err(
