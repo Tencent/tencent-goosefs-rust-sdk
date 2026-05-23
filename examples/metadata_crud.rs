@@ -120,15 +120,15 @@ async fn main() -> Result<()> {
         println!("  - {}", entry.path.as_deref().unwrap_or("unknown"));
     }
 
-    // // 删除文件
-    // println!("\n8. 删除文件...");
+    // // Delete the file
+    // println!("\n8. Deleting the file...");
     // master.delete("/test-demo/world.txt", false).await?;
-    // println!("文件删除成功");
+    // println!("File deleted successfully");
     //
-    // // 删除目录
-    // println!("\n9. 删除目录...");
+    // // Delete the directory
+    // println!("\n9. Deleting the directory...");
     // master.delete("/test-demo", true).await?;
-    // println!("目录删除成功");
+    // println!("Directory deleted successfully");
 
     println!("\n✅ All file operation tests complete!");
     Ok(())

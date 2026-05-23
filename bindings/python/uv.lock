@@ -326,6 +326,12 @@ arrow = [
     { name = "pyarrow", version = "21.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "pyarrow", version = "24.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
 ]
+examples = [
+    { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "pandas", version = "3.0.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pyarrow", version = "21.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+    { name = "pyarrow", version = "24.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+]
 pandas = [
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pandas", version = "3.0.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -358,11 +364,13 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "pandas", marker = "extra == 'examples'", specifier = ">=2.0" },
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.0" },
     { name = "pyarrow", marker = "extra == 'arrow'", specifier = ">=10.0" },
+    { name = "pyarrow", marker = "extra == 'examples'", specifier = ">=10.0" },
     { name = "pyarrow", marker = "extra == 'pandas'", specifier = ">=10.0" },
 ]
-provides-extras = ["arrow", "pandas"]
+provides-extras = ["arrow", "examples", "pandas"]
 
 [package.metadata.requires-dev]
 dev = [

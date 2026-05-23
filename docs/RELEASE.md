@@ -1,86 +1,86 @@
 # Release Guide
 
-本文档描述如何打包并发布 `goosefs-sdk` 到 Cargo 仓库（crates.io 或腾讯内部 Cargo Registry）。
+This document describes how to package and publish `goosefs-sdk` to a Cargo registry (crates.io or the Tencent internal Cargo Registry).
 
-## 前置条件
+## Prerequisites
 
-确保已安装以下工具：
+Make sure the following tools are installed:
 
 ```bash
-# Rust 工具链
+# Rust toolchain
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# 确认 cargo 可用
+# Confirm cargo is available
 cargo --version
 ```
 
-## 发布前检查
+## Pre-Release Checks
 
-在发布之前，请确保完成以下检查：
+Before publishing, please make sure the following checks are completed:
 
 ```bash
-# 1. 运行测试
+# 1. Run tests
 cargo test
 
-# 2. 检查文档是否有警告
+# 2. Check the docs for warnings
 cargo doc --no-deps
 
-# 3. 检查打包内容（不实际上传）
+# 3. Check the package contents (without actually uploading)
 cargo publish --dry-run
 
-# 4. 查看将要打包的文件列表
+# 4. List the files that will be packaged
 cargo package --list
 ```
 
 ---
 
-## 方案一：发布到官方 crates.io
+## Option 1: Publish to the Official crates.io
 
-### 上传命令
+### Upload Command
 
 ```bash
 cargo publish --token <your-crates-io-token>
 ```
 
-### 安装验证
+### Install Verification
 
 ```bash
 cargo add goosefs-sdk
 ```
 
-### 项目地址
+### Project URL
 
 - https://crates.io/crates/goosefs-sdk
 
 ---
 
-## 方案二：发布到腾讯内部 Cargo Registry
+## Option 2: Publish to the Tencent Internal Cargo Registry
 
-### 配置 Registry
+### Configure the Registry
 
-在 `~/.cargo/config.toml` 中添加：
+Add to `~/.cargo/config.toml`:
 
 ```toml
 [registries.tencent]
-index = "TODO: 腾讯内部 Cargo Registry 地址"
+index = "TODO: Tencent internal Cargo Registry URL"
 ```
 
-### 上传命令
+### Upload Command
 
 ```bash
 cargo publish --registry tencent --token <your-token>
 ```
 
-### 安装验证
+### Install Verification
 
-在项目的 `Cargo.toml` 中添加依赖：
+Add the dependency to your project's `Cargo.toml`:
 
 ```toml
 [dependencies]
 goosefs-sdk = { version = "0.1", registry = "tencent" }
 ```
 
-或通过 `.cargo/config.toml` 全局配置默认 registry 后直接使用：
+Or, after configuring the default registry globally via `.cargo/config.toml`, use it directly:
 
 ```toml
 [dependencies]
@@ -89,47 +89,47 @@ goosefs-sdk = "0.1"
 
 ---
 
-## 参数说明
+## Argument Reference
 
-| 参数 | 说明 |
-|------|------|
-| `--token` | 访问令牌（crates.io 在 https://crates.io/settings/tokens 创建） |
-| `--registry` | 目标 registry 名称（省略则默认为 crates.io） |
-| `--dry-run` | 仅模拟发布，不实际上传 |
-| `--allow-dirty` | 允许在有未提交更改时发布（不推荐） |
+| Argument | Description |
+|----------|-------------|
+| `--token` | Access token (for crates.io, create one at https://crates.io/settings/tokens) |
+| `--registry` | Target registry name (defaults to crates.io when omitted) |
+| `--dry-run` | Simulate the publish only, do not actually upload |
+| `--allow-dirty` | Allow publishing with uncommitted changes (not recommended) |
 
-## 完整发布流程
+## Full Release Flow
 
 ```bash
-# 1. 确认版本号已更新（Cargo.toml 中的 version 字段）
+# 1. Confirm the version number is updated (the `version` field in Cargo.toml)
 grep '^version' Cargo.toml
 
-# 2. 确认所有测试通过
+# 2. Confirm all tests pass
 cargo test
 
-# 3. 确认文档无警告
+# 3. Confirm the docs have no warnings
 cargo doc --no-deps
 
-# 4. 模拟发布，检查打包内容
+# 4. Simulate the publish and inspect package contents
 cargo publish --dry-run
 
-# 5a. 发布到官方 crates.io
+# 5a. Publish to the official crates.io
 cargo publish --token <your-crates-io-token>
 
-# 5b. 或发布到腾讯内部 registry
+# 5b. Or publish to the Tencent internal registry
 cargo publish --registry tencent --token <your-token>
 
-# 6. 创建 Git Tag
+# 6. Create a Git tag
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-## 注意事项
+## Notes
 
-1. 发布新版本前，务必更新 `Cargo.toml` 中的 `version` 字段
-2. crates.io **不允许删除或覆盖已发布的版本**，只能 yank（标记为不推荐）
-3. 发布到 crates.io 后，crate 包内的源码将公开可见（即使 Git 仓库是私有的）
-4. 建议在发布前运行 `cargo publish --dry-run` 验证
-5. 妥善保管 Token，切勿提交到代码仓库
-6. crates.io Token 可在 https://crates.io/settings/tokens 创建和管理
-7. 如果不希望源码公开，请使用腾讯内部 Cargo Registry（方案二）
+1. Before releasing a new version, always update the `version` field in `Cargo.toml`.
+2. crates.io **does not allow deleting or overwriting published versions**; you can only yank (mark as not recommended).
+3. After publishing to crates.io, the source code inside the crate package becomes publicly visible (even if the Git repository is private).
+4. It is recommended to run `cargo publish --dry-run` for verification before releasing.
+5. Keep tokens safe and never commit them to a code repository.
+6. crates.io tokens can be created and managed at https://crates.io/settings/tokens.
+7. If you do not want the source code to be publicly visible, use the Tencent internal Cargo Registry (Option 2).

@@ -1047,7 +1047,10 @@ mod tests {
         assert!(!stream.is_eof(), "carry_over still has bytes — not EOF");
 
         stream.carry_over.clear();
-        assert!(stream.is_eof(), "chunk reader done and carry_over drained — EOF");
+        assert!(
+            stream.is_eof(),
+            "chunk reader done and carry_over drained — EOF"
+        );
     }
 
     /// Verify that legacy mode sets worker_pool to None.

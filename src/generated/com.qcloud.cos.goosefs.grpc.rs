@@ -87,7 +87,7 @@ pub struct NetAddress {
     pub host: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(int32, optional, tag = "2")]
     pub rpc_port: ::core::option::Option<i32>,
-    /// 支持腾讯云 VPC 通过 vip 访问托管在 underlay 环境的物理机的 Host 和 Port
+    /// Host and Port for accessing the physical machine hosted in the underlay environment via VIP through Tencent Cloud VPC.
     #[prost(string, optional, tag = "3")]
     pub tencent_cloud_vpc_mapping_host: ::core::option::Option<
         ::prost::alloc::string::String,

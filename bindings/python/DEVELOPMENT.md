@@ -1,59 +1,59 @@
-# 开发指引
+# Development Guide
 
-`goosefs` Python binding 的本地构建、测试与发布流程。
+Local build, test, and release flow for the `goosefs` Python binding.
 
-## 前置工具
+## Prerequisites
 
-| 工具 | 推荐版本 | 用途 |
+| Tool | Recommended Version | Purpose |
 | --- | --- | --- |
-| **Rust** | 1.86+ stable | 通过 `rustup` 安装，cargo 即随附 |
-| **Python** | 3.9+ | 推荐 3.10/3.11/3.12，与 CI 矩阵保持一致 |
-| **uv** | 0.5+ | 项目锁定的 Python 包管理器；不要混用 pip / poetry |
-| **maturin** | 1.5+ | 通过 `dev` 依赖组拉取，无需手动安装 |
+| **Rust** | 1.86+ stable | Install via `rustup`; cargo is bundled. |
+| **Python** | 3.9+ | 3.10/3.11/3.12 recommended, matching the CI matrix. |
+| **uv** | 0.5+ | The project's pinned Python package manager; do not mix in pip / poetry. |
+| **maturin** | 1.5+ | Pulled in via the `dev` dependency group, no manual install required. |
 
-仓库根目录已有 `rust-toolchain.toml` 锁定 Rust 版本；本目录通过 `pyproject.toml` 的 `[dependency-groups]` 锁定 Python 工具链。
+The repository root has `rust-toolchain.toml` pinning the Rust version; this directory pins the Python toolchain via `[dependency-groups]` in `pyproject.toml`.
 
-## 一次性环境准备
+## One-Time Environment Setup
 
 ```bash
 cd bindings/python
 uv sync --all-extras --group dev --group test
 ```
 
-这一步会：
-* 创建 `.venv/`
-* 安装运行时依赖
-* 安装 dev 工具（`maturin` / `ruff` / `mypy`）
-* 安装测试依赖（`pytest` / `pytest-asyncio` / `pytest-timeout` / `mypy.stubtest` 用的 `mypy>=1.19.1`）
-* 安装 examples 依赖（`pyarrow` / `pandas`，因为 `--all-extras` 包含 `[examples]`）
+This step will:
+* Create `.venv/`
+* Install runtime dependencies
+* Install dev tools (`maturin` / `ruff` / `mypy`)
+* Install test dependencies (`pytest` / `pytest-asyncio` / `pytest-timeout` / the `mypy>=1.19.1` used by `mypy.stubtest`)
+* Install example dependencies (`pyarrow` / `pandas`, since `--all-extras` includes `[examples]`)
 
-## 本地开发循环
+## Local Development Loop
 
-### 1. 编辑 + 构建
+### 1. Edit + Build
 
 ```bash
-# 改完 Rust 后
+# After modifying Rust code
 uv run maturin develop --uv
 ```
 
-`maturin develop` 会编译 cdylib、把 abi3 wheel 安装为 editable，5–10 秒一轮。
+`maturin develop` compiles the cdylib and installs the abi3 wheel as editable, taking 5–10 seconds per round.
 
-### 2. 跑全量测试（需要活集群）
+### 2. Run the Full Test Suite (requires a live cluster)
 
 ```bash
-# 启动 GooseFS 集群（参考仓库根 README）
-# 然后：
+# Start a GooseFS cluster (see the README at the repository root)
+# Then:
 export GOOSEFS_MASTER_ADDR=127.0.0.1:9200
 uv run --group test pytest -q
 ```
 
-预期结果：**125 passed**（截至 P7）。
+Expected result: **125 passed** (as of P7).
 
-如果 `GOOSEFS_MASTER_ADDR` 未设置，conftest 会在 collection 阶段跳过依赖集群的用例，只跑 `test_errors.py`（异常层级）+ `test_tracing.py`（参数校验），约 13 个用例。
+If `GOOSEFS_MASTER_ADDR` is unset, conftest skips the cluster-dependent cases at collection time and only runs `test_errors.py` (exception hierarchy) + `test_tracing.py` (argument validation), about 13 cases.
 
-### 3. 跑 lint / 类型检查 / stub 一致性
+### 3. Run lint / Type Checks / Stub Consistency
 
-四件套，CI 会强制：
+The four-piece set, all enforced by CI:
 
 ```bash
 # Rust
@@ -67,78 +67,78 @@ uv run --group test mypy python/goosefs
 uv run --group test python -m mypy.stubtest goosefs
 ```
 
-### 4. 手动跑 5 个示例（活集群）
+### 4. Manually Run the 5 Examples (live cluster)
 
 ```bash
 export GOOSEFS_MASTER_ADDR=127.0.0.1:9200
 for f in examples/0*.py; do echo "==> $f"; uv run python "$f" || break; done
 ```
 
-## 项目结构速览
+## Project Structure At A Glance
 
 ```
 bindings/python/
-├── Cargo.toml          # cdylib + rlib，pyo3 0.27，依赖 ../../goosefs-sdk
-├── pyproject.toml      # maturin 配置 + uv 依赖组 + ruff/mypy/pytest 配置
-├── PYPI_README.md      # PyPI 长描述（用户视角）
-├── README.md           # 本目录入口（开发者 + 文档导航）
-├── DEVELOPMENT.md      # 本文档
-├── CHANGELOG.md        # 版本变更记录
+├── Cargo.toml          # cdylib + rlib, pyo3 0.27, depends on ../../goosefs-sdk
+├── pyproject.toml      # maturin config + uv dependency groups + ruff/mypy/pytest config
+├── PYPI_README.md      # Long description on PyPI (user perspective)
+├── README.md           # Entry point for this directory (developer + docs navigation)
+├── DEVELOPMENT.md      # This document
+├── CHANGELOG.md        # Version change log
 │
-├── src/                # PyO3 wrapper Rust 代码
-│   ├── lib.rs          # #[pymodule] 入口，注册所有 pyclass
+├── src/                # PyO3 wrapper Rust code
+│   ├── lib.rs          # #[pymodule] entry, registers all pyclasses
 │   ├── config.rs       # Config
-│   ├── context.rs      # 内部 PyFsHandle
-│   ├── errors.rs       # 14 个 Exception 子类 + map_err
+│   ├── context.rs      # Internal PyFsHandle
+│   ├── errors.rs       # 14 exception subclasses + map_err
 │   ├── filesystem.rs   # AsyncGoosefs
-│   ├── sync_fs.rs      # Goosefs（同步包装）
-│   ├── streaming.rs    # 4 个文件句柄类
+│   ├── sync_fs.rs      # Goosefs (sync wrapper)
+│   ├── streaming.rs    # 4 file handle classes
 │   ├── status.rs       # URIStatus
 │   ├── options.rs      # Open/Create/Delete Options
 │   ├── types.rs        # WriteType / ReadType
-│   ├── runtime.rs      # 共享 tokio runtime
+│   ├── runtime.rs      # Shared tokio runtime
 │   └── tracing.rs      # enable_tracing
 │
 ├── python/goosefs/
-│   ├── __init__.py     # 重新导出 + atexit 兜底 + sys.modules 注入
-│   ├── __init__.pyi    # 类型存根（541 行，stubtest 校验）
-│   ├── exceptions.pyi  # 14 个异常子类的存根
+│   ├── __init__.py     # Re-exports + atexit fallback + sys.modules injection
+│   ├── __init__.pyi    # Type stubs (541 lines, validated by stubtest)
+│   ├── exceptions.pyi  # Stubs for the 14 exception subclasses
 │   └── py.typed        # PEP 561 marker
 │
-├── examples/           # 5 个可运行示例
-└── tests/              # pytest 套件（含 conftest.py 控制集群门控）
+├── examples/           # 5 runnable examples
+└── tests/              # pytest suite (with conftest.py gating on the cluster)
 ```
 
-## Stub 维护
+## Stub Maintenance
 
-* 修了 Rust 端 pyclass / pyfunction → **必须**手动同步 `python/goosefs/__init__.pyi`
-* 修了运行时 Exception 子类 → 同步 `python/goosefs/exceptions.pyi`
-* `mypy.stubtest goosefs` 会强校验 stub 与实际签名一致
-* 不引入 `pyo3-stub-gen`：当前 PyO3 0.27 的生成器对我们用的 `#[pyclass(eq, eq_int, frozen, hash)]` / `#[pyo3(get)]` 支持不完整；手写让我们能精确表达 "Awaitable[T]" 与 "不跨任务/线程共享" 等约束。
+* Modified a Rust-side pyclass / pyfunction → you **must** manually sync `python/goosefs/__init__.pyi`.
+* Modified a runtime exception subclass → sync `python/goosefs/exceptions.pyi`.
+* `mypy.stubtest goosefs` strictly validates that the stubs match the real signatures.
+* We deliberately do not pull in `pyo3-stub-gen`: the current PyO3 0.27 generator does not fully support our use of `#[pyclass(eq, eq_int, frozen, hash)]` / `#[pyo3(get)]`; writing stubs by hand lets us precisely express constraints like "Awaitable[T]" and "not shareable across tasks/threads".
 
-## 调试技巧
+## Debugging Tips
 
 ```python
 import goosefs
-goosefs.enable_tracing(level="debug")  # SDK + binding 走 stderr
+goosefs.enable_tracing(level="debug")  # SDK + binding logs go to stderr
 ```
 
-也可以走 `RUST_LOG`，会覆盖 `enable_tracing` 的 `level` 参数：
+You can also use `RUST_LOG`, which overrides the `level` parameter of `enable_tracing`:
 
 ```bash
 RUST_LOG="debug,h2=warn,hyper=warn" python my_script.py
 ```
 
-## 性能基线
+## Performance Baseline
 
-性能 benchmark 留在 P9（灰度 + 回归）阶段，预计放在 `bench/` 目录：read/write 时延、吞吐与 Java SDK 对照，以及元数据 RPS。
+Performance benchmarks are **on hold** together with P9 (canary + regression); they will be restarted when the project finalizes a unified CI pipeline plan. They will live under the `bench/` directory and cover read/write latency, throughput (with reference targets to be decided: Java SDK / native Rust SDK / OpenDAL adapter), and metadata RPS.
 
-## 发布流程（P8 落地后补）
+## Release Flow (P8 on hold)
 
-详细发布流程将在 P8 引入 GitHub Actions / 公司流水线后补充。届时会：
-1. 由 `goosefs-sdk` 与 `goosefs-python` 的 `Cargo.toml` 版本对齐 check
-2. 5 个 target wheel（manylinux x86_64/aarch64、macOS x86_64/arm64、Windows x86_64）
-3. PyPI Trusted Publisher（OIDC）发布
-4. 内部 PyPI 镜像同步
+Cross-platform wheel builds and the PyPI release pipeline (P8) are **on hold**, awaiting decisions on the unified CI platform (GitHub Actions vs the company pipeline), PyPI account ownership, and the Windows support scope. Once restarted, it will cover:
+1. Version-alignment check between `goosefs-sdk` and `goosefs-python` `Cargo.toml`s.
+2. Five target wheels (manylinux x86_64/aarch64, macOS x86_64/arm64, Windows x86_64).
+3. PyPI Trusted Publisher (OIDC) release.
+4. Internal PyPI mirror sync.
 
-在那之前，本地手工发布请先咨询 GooseFS 团队。
+Until then, please consult the GooseFS team before publishing manually from a local machine; for local developer verification use `maturin develop`, and for producing a wheel use `maturin build --release`.

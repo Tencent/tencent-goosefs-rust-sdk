@@ -103,7 +103,7 @@ message TieredIdentity {
 message NetAddress {
   optional string host = 1;
   optional int32 rpcPort = 2;
-  // 支持腾讯云 VPC 通过 vip 访问托管在 underlay 环境的物理机的 Host 和 Port
+  // Host and Port for accessing the physical machine hosted in the underlay environment via VIP through Tencent Cloud VPC.
   optional string tencentCloudVPCMappingHost = 3;
   optional int32 tencentCloudVPCMappingPort = 4;
 }

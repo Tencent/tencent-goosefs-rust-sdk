@@ -79,7 +79,8 @@ async fn main() -> Result<()> {
         Ok(_) | Err(_) => {} // best-effort; OK if it already exists
     }
     {
-        let mut writer = GoosefsFileWriter::create_with_context(ctx.clone(), TEST_PATH, None).await?;
+        let mut writer =
+            GoosefsFileWriter::create_with_context(ctx.clone(), TEST_PATH, None).await?;
         writer.write(&payload).await?;
         writer.close().await?;
     }
@@ -102,15 +103,15 @@ async fn main() -> Result<()> {
         "copy reported {copied} bytes, expected {PAYLOAD_SIZE}"
     );
     assert_eq!(sink.len(), PAYLOAD_SIZE, "sink size mismatch");
-    assert!(verify_slice(&sink, 0), "byte-for-byte mismatch on full read");
+    assert!(
+        verify_slice(&sink, 0),
+        "byte-for-byte mismatch on full read"
+    );
     println!("    ok — copied {copied} bytes");
 
     // 4) Random access via `AsyncSeekExt::seek` + `AsyncReadExt::read_exact`.
     println!("[3] seek(Start(60_000)) + read_exact(4096) (random access via AsyncSeek)…");
-    let pos = reader
-        .seek(SeekFrom::Start(60_000))
-        .await
-        .map_err(io_err)?;
+    let pos = reader.seek(SeekFrom::Start(60_000)).await.map_err(io_err)?;
     assert_eq!(pos, 60_000, "seek reported wrong position");
     let mut chunk = vec![0u8; 4096];
     reader.read_exact(&mut chunk).await.map_err(io_err)?;

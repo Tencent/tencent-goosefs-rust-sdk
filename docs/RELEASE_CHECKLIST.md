@@ -1,91 +1,91 @@
-# 发布 Checklist
+# Release Checklist
 
-`goosefs-sdk` 发布前需要完成的事项清单。
+A pre-release task list for `goosefs-sdk`.
 
-## 一、Crate 元数据
+## 1. Crate Metadata
 
-| 事项 | 当前状态 | 操作 |
-|------|---------|------|
-| 包名 | `goosefs-sdk` | ✅ 最终包名已确认为 `goosefs-sdk` |
-| 版本号 | `0.1.0` | ✅ 首次发布保持 `0.1.0` |
-| description | 已有 | ✅ |
+| Item | Current Status | Action |
+|------|---------------|--------|
+| Package name | `goosefs-sdk` | ✅ Final package name confirmed as `goosefs-sdk` |
+| Version | `0.1.0` | ✅ First release stays at `0.1.0` |
+| description | Present | ✅ |
 | license | `Apache-2.0` | ✅ |
 | authors | `Goosefs Team` | ✅ |
-| repository | 缺失 | TODO: 填写仓库地址（如需公开） |
-| homepage | 缺失 | TODO: 填写项目主页 |
-| keywords | 缺失 | TODO: 建议 `["goosefs", "grpc", "storage", "distributed-filesystem", "cache"]` |
-| categories | 缺失 | TODO: 建议 `["network-programming", "filesystem"]` |
-| readme | 缺失 | TODO: 添加 `readme = "README.md"` |
+| repository | Missing | TODO: Fill in the repository URL (if going public) |
+| homepage | Missing | TODO: Fill in the project homepage |
+| keywords | Missing | TODO: Suggested `["goosefs", "grpc", "storage", "distributed-filesystem", "cache"]` |
+| categories | Missing | TODO: Suggested `["network-programming", "filesystem"]` |
+| readme | Missing | TODO: Add `readme = "README.md"` |
 
-## 二、文件检查
+## 2. File Checks
 
-- [ ] `README.md` 内容完整，包含基本用法示例
-- [ ] `LICENSE` 文件存在（Apache-2.0）
-- [ ] `.gitignore` 中排除了不需要的文件
-- [ ] 检查 `cargo package --list` 输出，确认打包文件合理
+- [ ] `README.md` content is complete with basic usage examples
+- [ ] `LICENSE` file is present (Apache-2.0)
+- [ ] `.gitignore` excludes unnecessary files
+- [ ] Inspect `cargo package --list` output and confirm the packaged file set is reasonable
 
-## 三、API 审查
+## 3. API Review
 
-| 模块 | 当前可见性 | 建议 | 决策 |
-|------|-----------|------|------|
-| `auth` | `pub` | 保持公开 | TODO |
-| `block` | `pub` | 考虑是否需要公开（底层 API） | TODO |
-| `client` | `pub` | 保持公开（Low-Level gRPC 客户端） | TODO |
-| `config` | `pub` | 保持公开 | TODO |
-| `error` | `pub` | 保持公开 | TODO |
-| `io` | `pub` | 保持公开（推荐的高层 API 入口） | TODO |
-| `retry` | `pub` | 考虑是否需要公开（内部实现） | TODO |
-| `proto` | `pub` | 考虑标注为不稳定 / `#[doc(hidden)]` | TODO |
+| Module | Current Visibility | Recommendation | Decision |
+|--------|-------------------|---------------|----------|
+| `auth` | `pub` | Keep public | TODO |
+| `block` | `pub` | Consider whether it needs to be public (low-level API) | TODO |
+| `client` | `pub` | Keep public (low-level gRPC client) | TODO |
+| `config` | `pub` | Keep public | TODO |
+| `error` | `pub` | Keep public | TODO |
+| `io` | `pub` | Keep public (recommended high-level API entry point) | TODO |
+| `retry` | `pub` | Consider whether it needs to be public (internal implementation) | TODO |
+| `proto` | `pub` | Consider marking as unstable / `#[doc(hidden)]` | TODO |
 
-## 四、Proto 生成代码
+## 4. Generated Proto Code
 
-- [ ] 确认 `src/generated/` 下的 protobuf 代码是否适合直接发布
-- [ ] 决定 `proto` 模块的公开策略：
-  - **方案 A**：保持 `pub mod proto`，文档标注为"高级用法 / 不保证稳定"
-  - **方案 B**：改为 `pub(crate) mod proto`，仅通过高层 API 暴露
-- [ ] 确认 `.proto` 源文件是否需要包含在 crate 包中（通过 `Cargo.toml` 的 `include`/`exclude` 控制）
+- [ ] Confirm whether the protobuf code under `src/generated/` is suitable for direct release
+- [ ] Decide on the visibility strategy for the `proto` module:
+  - **Option A**: Keep `pub mod proto`, document it as "advanced usage / no stability guarantee"
+  - **Option B**: Change to `pub(crate) mod proto`, only expose via the high-level API
+- [ ] Decide whether `.proto` source files should be included in the crate package (controlled via `include`/`exclude` in `Cargo.toml`)
 
-## 五、文档
+## 5. Documentation
 
-- [ ] `lib.rs` 顶层文档（crate-level doc）
-- [ ] 核心类型的 doc comment
-- [ ] 运行 `cargo doc --no-deps` 确认无警告
-- [ ] 示例代码可编译通过（`cargo test --doc`）
+- [ ] Top-level `lib.rs` documentation (crate-level doc)
+- [ ] Doc comments on core types
+- [ ] Run `cargo doc --no-deps` and confirm no warnings
+- [ ] Example code compiles successfully (`cargo test --doc`)
 
-## 六、质量保证
+## 6. Quality Assurance
 
-- [ ] `cargo test` 全部通过
-- [ ] `cargo clippy` 无警告
-- [ ] `cargo fmt --check` 格式检查通过
-- [ ] `cargo publish --dry-run` 模拟发布成功
+- [ ] `cargo test` all pass
+- [ ] `cargo clippy` no warnings
+- [ ] `cargo fmt --check` formatting check passes
+- [ ] `cargo publish --dry-run` simulated publish succeeds
 
-## 七、CI/CD
+## 7. CI/CD
 
-- [ ] TODO: 配置 CI 流水线（GitHub Actions / 工蜂流水线）
-- [ ] TODO: 配置 `CARGO_REGISTRY_TOKEN` Secret
-- [ ] TODO: 配置 release tag 触发自动发布（可选）
+- [ ] TODO: Set up CI pipeline (GitHub Actions / internal pipeline)
+- [ ] TODO: Configure the `CARGO_REGISTRY_TOKEN` secret
+- [ ] TODO: Configure release-tag-triggered auto publish (optional)
 
-## 八、发布执行
+## 8. Release Execution
 
 ```bash
-# 1. 最终确认
+# 1. Final verification
 cargo test
 cargo publish --dry-run
 
-# 2. 创建 Git Tag
+# 2. Create a Git tag
 git tag v0.1.0
 git push origin v0.1.0
 
-# 3. 发布
+# 3. Publish
 cargo publish --token <token>
 
-# 4. 验证
-# 等待几分钟后
-cargo add goosefs-sdk  # 或最终确定的包名
+# 4. Verify
+# After waiting a few minutes
+cargo add goosefs-sdk  # or the final package name
 ```
 
-## 九、发布后
+## 9. Post-Release
 
-- [ ] 验证 crate 可以正常安装和使用
-- [ ] TODO: 通知相关团队/用户
-- [ ] 更新内部文档中的依赖说明
+- [ ] Verify the crate can be installed and used normally
+- [ ] TODO: Notify relevant teams / users
+- [ ] Update dependency notes in internal documentation

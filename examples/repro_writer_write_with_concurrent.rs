@@ -1,44 +1,45 @@
-//! 复现 opendal `test_writer_write_with_concurrent` 失败：
+//! Reproducer for the opendal `test_writer_write_with_concurrent` failure:
 //!
 //!   "WriteBlock server error for block_id=...: status: Internal,
 //!    message: \"The file length is inconsistent with the amount of
 //!    data that has been written\""
 //!
-//! ## 关键复现条件（从 1.log 分析得出）
+//! ## Key reproduction conditions (derived from 1.log analysis)
 //!
-//! libtest_mimic 默认并行跑 behavior tests，从日志可以看到：
+//! libtest_mimic runs behavior tests in parallel by default. From the log:
 //!   15:40:19.713 path=A: write started
-//!   15:40:20.116 path=B: write started   <-- 在 A 还未 close 时
+//!   15:40:20.116 path=B: write started   <-- before A has closed
 //!   15:40:20.235 path=A: write close failed
 //!
-//! 也就是说：**多个 writer 共用同一个 FileSystemContext，并发写不同
-//! 文件**，才能触发服务端的 block 长度统计错乱。单 writer 串行跑无
-//! 法复现。
+//! In other words: **multiple writers sharing the same FileSystemContext
+//! and concurrently writing different files** is what triggers the
+//! server-side block-length accounting corruption. Running a single
+//! writer serially cannot reproduce it.
 //!
-//! 复现条件：
-//!   * 同一个 FileSystemContext
+//! Reproduction conditions:
+//!   * Same FileSystemContext
 //!   * write_type = MUST_CACHE
-//!   * N 个并发任务，每个任务执行 3 次 write（5..6 MiB 随机长度），
-//!     最后 close
-//!   * 路径放在根目录（与 opendal `op.write(uuid, ...)` 一致）
+//!   * N concurrent tasks, each performing 3 writes (5..6 MiB random size),
+//!     followed by close
+//!   * Paths placed at the root directory (matches opendal `op.write(uuid, ...)`)
 //!
-//! 用法：
+//! Usage:
 //!   cargo run --example repro_writer_write_with_concurrent
 //!   cargo run --example repro_writer_write_with_concurrent -- 20 8
-//!         # 20 轮，每轮 8 并发
+//!         # 20 rounds, 8 concurrent tasks per round
 //!
-//! 环境变量（对照实验）：
-//!   * SHARED=0|1   每个 task 是否共享 FileSystemContext（默认 1）
-//!   * ALIGN=0|1    数据是否严格对齐到 1 MiB（默认 0；ALIGN=1 时触发
-//!                  条件 2 失效，预期 0 失败）
+//! Environment variables (controlled experiments):
+//!   * SHARED=0|1   Whether each task shares the FileSystemContext (default 1)
+//!   * ALIGN=0|1    Whether to strictly align data to 1 MiB (default 0;
+//!                  with ALIGN=1, condition 2 is invalidated, expecting 0 failures)
 //!   * WP=must_cache|cache_through|through|async_through
-//!                  WritePType 模式对照（默认 must_cache）：
-//!                    - must_cache    仅 cache 流（GOOSEFS_BLOCK），命中 bug
-//!                    - cache_through cache + UFS 双流，命中 bug 且压力翻倍
-//!                    - through       仅 UFS 流（UFS_FILE），完全绕过 bug
-//!                    - async_through cache 流 + close 后异步 persist
+//!                  WritePType mode comparison (default must_cache):
+//!                    - must_cache    cache stream only (GOOSEFS_BLOCK), hits the bug
+//!                    - cache_through cache + UFS dual stream, hits the bug with doubled load
+//!                    - through       UFS stream only (UFS_FILE), fully bypasses the bug
+//!                    - async_through cache stream + async persist after close
 //!
-//! 前置：本机已启动 GooseFS 集群，Master 监听 127.0.0.1:9200。
+//! Prerequisite: a local GooseFS cluster is running with Master on 127.0.0.1:9200.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -54,8 +55,10 @@ use rand::Rng;
 
 const MIN_SIZE: usize = 5 * 1024 * 1024;
 const MAX_SIZE: usize = 6 * 1024 * 1024;
-// 通过环境变量 ALIGN=1 启用：写入总字节数严格对齐到 CHUNK_SIZE。
-// 默认（ALIGN=0）模拟 opendal 测试随机大小、最后一个 chunk 部分写入。
+// Enabled via the ALIGN=1 environment variable: total written bytes are
+// strictly aligned to CHUNK_SIZE.
+// Default (ALIGN=0) mimics the opendal test using random sizes with a
+// partial final chunk.
 const CHUNK_SIZE: usize = 1024 * 1024;
 
 fn gen_bytes_with_range(min: usize, max: usize) -> Vec<u8> {
@@ -74,8 +77,9 @@ fn gen_bytes_with_range(min: usize, max: usize) -> Vec<u8> {
 }
 
 fn make_root_path() -> String {
-    // 与 opendal TEST_FIXTURE.new_file_path() 等价：纯 UUID（根目录）
-    // 这里不引入 uuid 依赖，用 nanos+counter+pid 凑一个唯一名。
+    // Equivalent to opendal's TEST_FIXTURE.new_file_path(): a pure UUID at the root.
+    // We avoid pulling in a uuid dependency here and craft a unique name
+    // from nanos + counter + pid.
     static C: AtomicUsize = AtomicUsize::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -85,7 +89,7 @@ fn make_root_path() -> String {
     format!("/repro-{}-{}-{}.bin", std::process::id(), n, nanos)
 }
 
-/// 解析 WP 环境变量到 WritePType。默认 MUST_CACHE。
+/// Resolves the WP environment variable into a WritePType. Defaults to MUST_CACHE.
 fn resolve_write_ptype() -> (WritePType, &'static str) {
     match std::env::var("WP")
         .ok()
@@ -106,7 +110,7 @@ fn resolve_write_ptype() -> (WritePType, &'static str) {
     }
 }
 
-/// 模拟 opendal goosefs writer 的 tmp_path
+/// Mimics the tmp_path of the opendal goosefs writer.
 fn make_tmp_path(path: &str) -> String {
     let (dir, base) = match path.rfind('/') {
         Some(idx) => (&path[..idx], &path[idx + 1..]),
@@ -118,19 +122,20 @@ fn make_tmp_path(path: &str) -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     if dir.is_empty() {
-        // path 形如 "/foo"，rfind 命中开头的 '/'，dir=="" base=="foo"
+        // path looks like "/foo"; rfind hits the leading '/', so dir=="" and base=="foo".
         format!("/.opendal.tmp.{pid}.{nanos}.{base}")
     } else {
         format!("{dir}/.opendal.tmp.{pid}.{nanos}.{base}")
     }
 }
 
-/// 单个 worker：模拟 opendal `test_writer_write_with_concurrent` 一次完整流程：
-///   - tmp_path 上写 3 段
+/// A single worker: simulates one complete flow of opendal
+/// `test_writer_write_with_concurrent`:
+///   - Write 3 chunks on tmp_path
 ///   - close
-///   - rename 到最终 path
+///   - rename to the final path
 ///
-/// 如果 `shared_ctx` 为 None，则任务自己建 ctx（不与他人共享）。
+/// If `shared_ctx` is None, the task builds its own ctx (not shared with others).
 async fn one_writer_round(
     shared_ctx: Option<Arc<FileSystemContext>>,
     idx: usize,
@@ -177,13 +182,13 @@ async fn one_writer_round(
     }
 
     if let Err(e) = writer.close().await {
-        // 模拟 opendal 失败时清理 tmp
+        // Mimic opendal's behavior of cleaning up tmp on failure.
         let master = ctx.acquire_master();
         let _ = master.delete(&tmp, false).await;
         return Err((idx, format!("close failed (total={total}): {e}")));
     }
 
-    // 成功：rename tmp -> path（与 opendal finalize_rename 一致）
+    // On success: rename tmp -> path (matching opendal's finalize_rename).
     let master = ctx.acquire_master();
     if let Err(e) = master.rename(&tmp, &path).await {
         return Err((idx, format!("rename failed: {e}")));
@@ -197,7 +202,7 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let rounds: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(20);
     let concurrency: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
-    // SHARED=0 则每个任务自建 ctx；SHARED=1（默认）则共享一个 ctx。
+    // SHARED=0 means each task builds its own ctx; SHARED=1 (default) shares a single ctx.
     let shared = std::env::var("SHARED")
         .ok()
         .map(|v| v != "0")
@@ -270,7 +275,7 @@ async fn main() -> Result<()> {
             round_fails
         );
 
-        // 提前结束以加快诊断
+        // Stop early to speed up diagnosis.
         if total_fails >= 3 {
             println!("    >>> reached 3 failures, stopping early");
             break;
