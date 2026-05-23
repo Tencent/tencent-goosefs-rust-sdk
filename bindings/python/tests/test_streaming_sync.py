@@ -12,9 +12,7 @@ import asyncio
 import os
 
 import pytest
-
 from goosefs import FileReader, FileWriter, Goosefs, WriteType
-
 
 # ---------------------------------------------------------------------------
 # Round-trip basics
@@ -37,9 +35,7 @@ def test_sync_writer_then_reader_roundtrip(sync_fs: Goosefs, sync_tmp_dir: str):
     r.close()
 
 
-def test_sync_with_writer_commits_on_normal_exit(
-    sync_fs: Goosefs, sync_tmp_dir: str
-):
+def test_sync_with_writer_commits_on_normal_exit(sync_fs: Goosefs, sync_tmp_dir: str):
     path = f"{sync_tmp_dir}/with-commit.bin"
     with sync_fs.create_file(path) as w:
         w.write(b"committed")
@@ -96,9 +92,7 @@ def test_sync_reader_read_in_chunks(sync_fs: Goosefs, sync_tmp_dir: str):
         assert bytes(out) == body
 
 
-def test_sync_reader_read_at_does_not_move_cursor(
-    sync_fs: Goosefs, sync_tmp_dir: str
-):
+def test_sync_reader_read_at_does_not_move_cursor(sync_fs: Goosefs, sync_tmp_dir: str):
     path = f"{sync_tmp_dir}/sync-pread.bin"
     body = bytes(range(256)) * 16  # 4 KiB
     with sync_fs.create_file(path) as w:
@@ -181,9 +175,7 @@ def test_sync_read_after_close_raises(sync_fs: Goosefs, sync_tmp_dir: str):
 # ---------------------------------------------------------------------------
 
 
-def test_sync_methods_blocked_inside_running_event_loop(
-    sync_fs: Goosefs, sync_tmp_dir: str
-):
+def test_sync_methods_blocked_inside_running_event_loop(sync_fs: Goosefs, sync_tmp_dir: str):
     """A sync ``FileWriter`` / ``FileReader`` method called from inside a
     running asyncio loop must raise ``RuntimeError`` rather than deadlocking
     or silently scheduling a `block_on` on the loop's executor.

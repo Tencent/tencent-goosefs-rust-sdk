@@ -28,13 +28,9 @@ For each combination we assert:
 from __future__ import annotations
 
 import asyncio
-import os
 
 import pytest
-import pytest_asyncio
-
-from goosefs import AsyncGoosefs, Config, Goosefs, WriteType
-
+from goosefs import AsyncGoosefs, Goosefs, WriteType
 
 # ---------------------------------------------------------------------------
 # Parametrisation
@@ -110,9 +106,7 @@ async def test_async_round_trip(
 
 
 @pytest.mark.asyncio
-async def test_async_read_range_arbitrary_offsets(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_async_read_range_arbitrary_offsets(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     """Spot-check ``read_range`` on three offset+length combinations."""
     path = f"{tmp_dir}/read-range.bin"
     payload = _make_payload("read-range", 4096)
@@ -128,15 +122,11 @@ async def test_async_read_range_arbitrary_offsets(
 
     # 3) Range that *crosses* EOF: the SDK short-reads.
     chunk = await async_fs.read_range(path, 4000, 1024)
-    assert chunk == payload[4000:4096], (
-        "read_range past EOF should short-read, not raise"
-    )
+    assert chunk == payload[4000:4096], "read_range past EOF should short-read, not raise"
 
 
 @pytest.mark.asyncio
-async def test_async_write_accepts_bytes_like_objects(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_async_write_accepts_bytes_like_objects(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     """``write_file`` should accept ``bytes`` / ``bytearray`` / ``memoryview``
     interchangeably (PyO3's ``&[u8]`` extractor handles the buffer protocol)."""
     base = b"buffer-protocol"
@@ -153,12 +143,11 @@ async def test_async_write_accepts_bytes_like_objects(
 
 
 @pytest.mark.asyncio
-async def test_async_write_rejects_non_bytes(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_async_write_rejects_non_bytes(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     """A plain ``str`` must be rejected with ``TypeError``."""
     with pytest.raises(TypeError):
-        # noqa: type-checker — deliberate wrong type at the API boundary.
+        # Deliberate wrong type at the API boundary; the `# type: ignore`
+        # below silences mypy, the runtime ``TypeError`` is what we assert.
         await async_fs.write_file(f"{tmp_dir}/bad.bin", "not bytes")  # type: ignore[arg-type]
 
 
@@ -206,9 +195,7 @@ def test_sync_round_trip(
     assert st.is_completed()
 
 
-def test_sync_read_range_arbitrary_offsets(
-    sync_fs: Goosefs, sync_tmp_dir: str
-) -> None:
+def test_sync_read_range_arbitrary_offsets(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
     path = f"{sync_tmp_dir}/sync-read-range.bin"
     payload = _make_payload("sync-read-range", 4096)
     sync_fs.write_file(path, payload, write_type=WriteType.MustCache)
@@ -223,9 +210,7 @@ def test_sync_write_rejects_non_bytes(sync_fs: Goosefs, sync_tmp_dir: str) -> No
         sync_fs.write_file(f"{sync_tmp_dir}/bad.bin", "not bytes")  # type: ignore[arg-type]
 
 
-def test_sync_write_inside_asyncio_loop_is_refused(
-    sync_fs: Goosefs, sync_tmp_dir: str
-) -> None:
+def test_sync_write_inside_asyncio_loop_is_refused(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
     """The deadlock guard from P3 (Review #17.1) must keep applying to the
     new write/read methods."""
     path = f"{sync_tmp_dir}/should-not-write.bin"

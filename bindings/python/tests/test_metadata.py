@@ -8,7 +8,6 @@ isolated scratch directory provided by the ``tmp_dir`` fixture.
 from __future__ import annotations
 
 import pytest
-
 from goosefs import AsyncGoosefs, DeleteOptions, URIStatus
 from goosefs.exceptions import (
     DirectoryNotEmpty,
@@ -44,15 +43,11 @@ async def test_get_status_raises_notfound(async_fs: AsyncGoosefs, tmp_dir: str) 
         await async_fs.get_status(missing)
 
 
-async def test_exists_returns_false_for_missing(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_exists_returns_false_for_missing(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     assert await async_fs.exists(f"{tmp_dir}/missing") is False
 
 
-async def test_exists_returns_true_for_directory(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_exists_returns_true_for_directory(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     assert await async_fs.exists(tmp_dir) is True
 
 
@@ -77,9 +72,7 @@ async def test_mkdir_recursive_creates_intermediate_dirs(
     assert await async_fs.exists(deep)
 
 
-async def test_mkdir_existing_is_idempotent(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_mkdir_existing_is_idempotent(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     """``mkdir`` is idempotent (POSIX ``mkdir -p`` semantics).
 
     The underlying ``CreateDirectoryPOptions.allow_exists=true`` is hard-wired
@@ -99,16 +92,12 @@ async def test_mkdir_existing_is_idempotent(
 # ---------------------------------------------------------------------------
 
 
-async def test_list_status_empty_directory(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_list_status_empty_directory(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     items = await async_fs.list_status(tmp_dir)
     assert items == []
 
 
-async def test_list_status_returns_children(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_list_status_returns_children(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     for name in ("a", "b", "c"):
         await async_fs.mkdir(f"{tmp_dir}/{name}")
     items = await async_fs.list_status(tmp_dir)
@@ -118,9 +107,7 @@ async def test_list_status_returns_children(
         assert s.is_folder()
 
 
-async def test_list_status_recursive_walks_tree(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_list_status_recursive_walks_tree(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     await async_fs.mkdir(f"{tmp_dir}/x/y/z", recursive=True)
     items = await async_fs.list_status(tmp_dir, recursive=True)
     paths = {s.path for s in items}
@@ -167,18 +154,14 @@ async def test_delete_non_empty_without_recursive_raises(
         await async_fs.delete(parent)
 
 
-async def test_delete_recursive_removes_tree(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_delete_recursive_removes_tree(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     parent = f"{tmp_dir}/parent"
     await async_fs.mkdir(f"{parent}/a/b", recursive=True)
     await async_fs.delete(parent, recursive=True)
     assert not await async_fs.exists(parent)
 
 
-async def test_delete_with_options_object(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_delete_with_options_object(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     parent = f"{tmp_dir}/parent2"
     await async_fs.mkdir(f"{parent}/x", recursive=True)
     await async_fs.delete_with_options(parent, DeleteOptions(recursive=True))

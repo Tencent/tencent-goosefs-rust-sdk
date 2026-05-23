@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-
 from goosefs import Config, DeleteOptions, Goosefs, URIStatus
 from goosefs.exceptions import (
     AlreadyExists,
@@ -27,7 +26,6 @@ from goosefs.exceptions import (
     GoosefsError,
     NotFound,
 )
-
 
 # ---------------------------------------------------------------------------
 # get_status / exists
@@ -96,9 +94,7 @@ def test_sync_rename(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
     assert sync_fs.exists(dst)
 
 
-def test_sync_rename_to_existing_target_raises(
-    sync_fs: Goosefs, sync_tmp_dir: str
-) -> None:
+def test_sync_rename_to_existing_target_raises(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
     src = f"{sync_tmp_dir}/r-src"
     dst = f"{sync_tmp_dir}/r-dst"
     sync_fs.mkdir(src)
@@ -181,9 +177,7 @@ def test_sync_construct_inside_asyncio_loop_raises(config: Config) -> None:
     asyncio.run(attempt())
 
 
-def test_sync_method_call_inside_asyncio_loop_raises(
-    sync_fs: Goosefs, sync_tmp_dir: str
-) -> None:
+def test_sync_method_call_inside_asyncio_loop_raises(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
     """A pre-existing Goosefs instance, when used from inside an asyncio
     coroutine, must also raise. (We cannot deadlock the loop in tests.)
     """
@@ -212,7 +206,7 @@ def test_sync_fork_check_rejects_pid_mismatch(sync_fs: Goosefs) -> None:
 
     ctx = mp.get_context("fork")
 
-    def child(fs: Goosefs, queue: "mp.Queue[str]") -> None:
+    def child(fs: Goosefs, queue: mp.Queue[str]) -> None:
         try:
             fs.exists("/")
             queue.put("NO_ERROR")
@@ -221,7 +215,7 @@ def test_sync_fork_check_rejects_pid_mismatch(sync_fs: Goosefs) -> None:
         except Exception as e:  # noqa: BLE001
             queue.put(f"WRONG: {type(e).__name__}: {e}")
 
-    queue: "mp.Queue[str]" = ctx.Queue()
+    queue: mp.Queue[str] = ctx.Queue()
     proc = ctx.Process(target=child, args=(sync_fs, queue))
     proc.start()
     proc.join(timeout=10)

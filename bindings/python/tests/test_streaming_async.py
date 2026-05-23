@@ -22,15 +22,12 @@ import os
 import struct
 
 import pytest
-
 from goosefs import (
     AsyncFileReader,
     AsyncFileWriter,
     AsyncGoosefs,
     WriteType,
-    exceptions,
 )
-
 
 # ---------------------------------------------------------------------------
 # Round-trip basics
@@ -55,9 +52,7 @@ async def test_writer_then_reader_roundtrip(async_fs: AsyncGoosefs, tmp_dir: str
     assert got == payload
 
 
-async def test_writer_multiple_writes_concatenated(
-    async_fs: AsyncGoosefs, tmp_dir: str
-):
+async def test_writer_multiple_writes_concatenated(async_fs: AsyncGoosefs, tmp_dir: str):
     """Three sequential writes form a single contiguous file."""
     path = f"{tmp_dir}/concat.bin"
     chunks = [b"AAAA", b"BBBB", b"CCCC"]
@@ -99,9 +94,7 @@ async def test_reader_read_in_chunks(async_fs: AsyncGoosefs, tmp_dir: str):
         assert bytes(buf) == body
 
 
-async def test_reader_read_at_does_not_move_cursor(
-    async_fs: AsyncGoosefs, tmp_dir: str
-):
+async def test_reader_read_at_does_not_move_cursor(async_fs: AsyncGoosefs, tmp_dir: str):
     path = f"{tmp_dir}/positioned.bin"
     body = bytes(range(256)) * 16  # 4 KiB
     async with await async_fs.create_file(path) as w:
@@ -143,9 +136,7 @@ async def test_reader_seek_set_cur_end(async_fs: AsyncGoosefs, tmp_dir: str):
         assert r.tell() == 1000
 
 
-async def test_reader_invalid_whence_raises_value_error(
-    async_fs: AsyncGoosefs, tmp_dir: str
-):
+async def test_reader_invalid_whence_raises_value_error(async_fs: AsyncGoosefs, tmp_dir: str):
     path = f"{tmp_dir}/badseek.bin"
     async with await async_fs.create_file(path) as w:
         await w.write(b"abc")
@@ -156,9 +147,7 @@ async def test_reader_invalid_whence_raises_value_error(
             await r.seek(-1, 0)  # negative absolute offset
 
 
-async def test_reader_read_at_negative_offset_raises(
-    async_fs: AsyncGoosefs, tmp_dir: str
-):
+async def test_reader_read_at_negative_offset_raises(async_fs: AsyncGoosefs, tmp_dir: str):
     path = f"{tmp_dir}/badreadat.bin"
     async with await async_fs.create_file(path) as w:
         await w.write(b"x")
@@ -172,9 +161,7 @@ async def test_reader_read_at_negative_offset_raises(
 # ---------------------------------------------------------------------------
 
 
-async def test_async_with_writer_commits_on_normal_exit(
-    async_fs: AsyncGoosefs, tmp_dir: str
-):
+async def test_async_with_writer_commits_on_normal_exit(async_fs: AsyncGoosefs, tmp_dir: str):
     path = f"{tmp_dir}/commit.bin"
     async with await async_fs.create_file(path) as w:
         await w.write(b"committed")
@@ -183,9 +170,7 @@ async def test_async_with_writer_commits_on_normal_exit(
         assert (await r.read()) == b"committed"
 
 
-async def test_async_with_writer_cancels_on_exception(
-    async_fs: AsyncGoosefs, tmp_dir: str
-):
+async def test_async_with_writer_cancels_on_exception(async_fs: AsyncGoosefs, tmp_dir: str):
     """An unhandled exception inside the ``async with`` block triggers
     ``cancel()`` rather than ``close()``, so the file is not committed.
     """
@@ -206,9 +191,7 @@ async def test_async_with_writer_cancels_on_exception(
     assert not await async_fs.exists(path)
 
 
-async def test_writer_explicit_cancel_then_path_not_readable(
-    async_fs: AsyncGoosefs, tmp_dir: str
-):
+async def test_writer_explicit_cancel_then_path_not_readable(async_fs: AsyncGoosefs, tmp_dir: str):
     path = f"{tmp_dir}/explicit-cancel.bin"
     w = await async_fs.create_file(path)
     await w.write(b"discarded")
@@ -261,9 +244,7 @@ async def test_read_after_close_raises(async_fs: AsyncGoosefs, tmp_dir: str):
 # ---------------------------------------------------------------------------
 
 
-async def test_writer_accepts_bytearray_and_memoryview(
-    async_fs: AsyncGoosefs, tmp_dir: str
-):
+async def test_writer_accepts_bytearray_and_memoryview(async_fs: AsyncGoosefs, tmp_dir: str):
     path = f"{tmp_dir}/bufproto.bin"
     async with await async_fs.create_file(path) as w:
         await w.write(b"AAAA")

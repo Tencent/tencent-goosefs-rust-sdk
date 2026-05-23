@@ -26,13 +26,11 @@ import asyncio
 import os
 import time
 import uuid
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
-
 from goosefs import AsyncGoosefs, Config, Goosefs
-
 
 # ---------------------------------------------------------------------------
 # Skip everything when no cluster is configured.

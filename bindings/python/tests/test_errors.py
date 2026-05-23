@@ -24,7 +24,6 @@ provoked from the public API surface in P2; their *registration* and
 from __future__ import annotations
 
 import pytest
-
 from goosefs import AsyncGoosefs
 from goosefs.exceptions import (
     AlreadyExists,
@@ -37,8 +36,8 @@ from goosefs.exceptions import (
     IoError,
     IsADirectory,
     MasterUnavailable,
-    NoWorkerAvailable,
     NotFound,
+    NoWorkerAvailable,
     PermissionDenied,
     RpcError,
 )
@@ -96,9 +95,7 @@ async def test_notfound_on_missing_path(async_fs: AsyncGoosefs, tmp_dir: str) ->
         await async_fs.get_status(f"{tmp_dir}/never-created")
 
 
-async def test_notfound_is_catchable_as_goosefs_error(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_notfound_is_catchable_as_goosefs_error(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     """Users who want a single catch-all should be able to use ``GoosefsError``."""
     with pytest.raises(GoosefsError):
         await async_fs.get_status(f"{tmp_dir}/missing")
@@ -139,9 +136,7 @@ async def test_directory_not_empty_on_non_recursive_delete(
     assert await async_fs.exists(parent), "delete must not have partially succeeded"
 
 
-async def test_use_after_close_raises_runtime_error(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_use_after_close_raises_runtime_error(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     """``close()`` followed by any operation must raise ``RuntimeError``
     (not silently hang or return None).
     """
