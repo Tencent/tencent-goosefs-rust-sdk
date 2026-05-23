@@ -34,6 +34,9 @@ Repository = "https://git.woa.com/tencent-cloud-datalake/goosefs-client-rust"
 [project.optional-dependencies]
 arrow  = ["pyarrow>=10.0"]
 pandas = ["pandas>=2.0", "pyarrow>=10.0"]
+# Convenience meta-extra: ``pip install goosefs[examples]`` pulls every
+# library used by the scripts under ``bindings/python/examples/``.
+examples = ["pyarrow>=10.0", "pandas>=2.0"]
 
 [dependency-groups]
 dev = [
