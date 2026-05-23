@@ -2,9 +2,16 @@
 
 ![Experimental](https://img.shields.io/badge/status-experimental-orange)
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-blue)
+![Version](https://img.shields.io/badge/version-0.1.3-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-green)
 
 A native Rust client library that communicates directly with [Goosefs](https://cloud.tencent.com/document/product/1424) Master/Worker via gRPC (tonic/protobuf).
+
+## What's New in v0.1.3
+
+- **Concurrent writer fix** — Client-side mitigation for the GooseFS Worker `The file length is inconsistent with the amount of data that has been written` error that surfaced under concurrent writes with trailing partial chunks. `GoosefsFileWriter` now buffers a `pending_chunk` and only flushes a non-`chunk_size` tail at safe boundaries (explicit `flush()`, block-full, or `close_current_block()`), making every chunk sent to the worker strictly aligned to `chunk_size`. Verified post-fix: `MUST_CACHE` 200/200 and `CACHE_THROUGH` 60/60 passing in concurrent reproduction. See [`docs/bug/BUG_concurrent_writer_file_length_inconsistent.md`](docs/bug/BUG_concurrent_writer_file_length_inconsistent.md) for full root-cause analysis and reproduction recipes.
+- **Reproduction example** — New [`examples/repro_writer_write_with_concurrent.rs`](examples/repro_writer_write_with_concurrent.rs) covering `SHARED` / `ALIGN` / `WP` (`must_cache` / `cache_through` / `through` / `async_through`) dimensions for regression testing.
+- **No public API changes** — Drop-in upgrade from `0.1.2`; downstream `OpenDAL` / `Lance` integrations require no code changes.
 
 ## Why Goosefs?
 

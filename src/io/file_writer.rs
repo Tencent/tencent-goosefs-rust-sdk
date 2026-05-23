@@ -383,6 +383,11 @@ impl GoosefsFileWriter {
     /// to the worker and wait for an acknowledgment.  This does **not** close
     /// the current block or call `completeFile`.
     ///
+    /// Any trailing partial chunk held back by the chunk-coalescing
+    /// workaround is also drained here, because an explicit `flush()` is a
+    /// safe boundary (the user has asked for an ack and is fine with a
+    /// partial chunk landing on the wire).
+    ///
     /// # Java authority
     ///
     /// Mirrors `GoosefsFileOutStream.flush()` which calls
@@ -396,6 +401,14 @@ impl GoosefsFileWriter {
 
         if let Some(active) = self.current_block_writer.as_mut() {
             if active.bytes_written > 0 {
+                // Drain any held-back trailing partial chunk before flushing.
+                if !active.pending_chunk.is_empty() {
+                    let tail = Bytes::copy_from_slice(&active.pending_chunk);
+                    active.pending_chunk.clear();
+                    if let Err(e) = active.writer.write_chunk(tail).await {
+                        return self.handle_cache_write_exception(e).await;
+                    }
+                }
                 active.writer.flush().await?;
             }
         }
@@ -403,6 +416,15 @@ impl GoosefsFileWriter {
     }
 
     /// Append data to the per-block cache stream, slicing at block boundaries.
+    ///
+    /// To avoid the server-side concurrent-writer race in
+    /// `LocalFileBlockWriter.appendComposite` (see
+    /// `docs/BUG_concurrent_writer_file_length_inconsistent.md`), every chunk
+    /// pushed onto the gRPC stream is **exactly `chunk_size` bytes**, except
+    /// at safe boundaries (block end / explicit flush / block close), where a
+    /// trailing partial chunk is allowed because no further chunks follow on
+    /// the same stream. Sub-`chunk_size` tails are buffered in
+    /// `ActiveBlockWriter::pending_chunk` and merged with subsequent writes.
     async fn write_to_cache_stream(&mut self, data: &[u8]) -> Result<()> {
         let block_size = self
             .file_info
@@ -422,31 +444,38 @@ impl GoosefsFileWriter {
             let writer = self.current_block_writer.as_mut().unwrap();
             let remaining_in_block = writer.remaining() as usize;
             let remaining_data = data.len() - offset;
-            let to_write = std::cmp::min(remaining_in_block, remaining_data);
+            let to_accept = std::cmp::min(remaining_in_block, remaining_data);
+            let end = offset + to_accept;
 
-            // Stream data chunk-by-chunk (matching Java's chunk-level granularity)
-            let end = offset + to_write;
-            let mut chunk_offset = offset;
-            while chunk_offset < end {
-                let chunk_end = std::cmp::min(chunk_offset + chunk_size, end);
-                let chunk = Bytes::copy_from_slice(&data[chunk_offset..chunk_end]);
-                let chunk_len = chunk.len() as u64;
+            // Append the new bytes to the pending buffer first, then peel off
+            // as many full `chunk_size` chunks as possible. Anything left
+            // over (strictly < chunk_size) stays in `pending_chunk`.
+            writer.pending_chunk.extend_from_slice(&data[offset..end]);
+            writer.bytes_written += to_accept as u64;
+            offset = end;
 
-                match writer.writer.write_chunk(chunk).await {
-                    Ok(()) => {
-                        writer.bytes_written += chunk_len;
-                    }
-                    Err(e) => {
+            let block_full = writer.remaining() == 0;
+
+            // Drain full chunks from the pending buffer.
+            while writer.pending_chunk.len() >= chunk_size {
+                let chunk = Bytes::copy_from_slice(&writer.pending_chunk[..chunk_size]);
+                writer.pending_chunk.drain(..chunk_size);
+                if let Err(e) = writer.writer.write_chunk(chunk).await {
+                    return self.handle_cache_write_exception(e).await;
+                }
+            }
+
+            // If this fills the block, also flush any trailing partial chunk
+            // (block boundary is a safe place for a partial chunk because the
+            // stream is about to be closed).
+            if block_full {
+                if !writer.pending_chunk.is_empty() {
+                    let tail = Bytes::copy_from_slice(&writer.pending_chunk);
+                    writer.pending_chunk.clear();
+                    if let Err(e) = writer.writer.write_chunk(tail).await {
                         return self.handle_cache_write_exception(e).await;
                     }
                 }
-                chunk_offset = chunk_end;
-            }
-
-            offset = end;
-
-            // If block is full, flush and close it
-            if writer.remaining() == 0 {
                 self.close_current_block().await?;
             }
         }
@@ -559,6 +588,7 @@ impl GoosefsFileWriter {
             block_size,
             bytes_written: 0,
             worker_addr,
+            pending_chunk: Vec::with_capacity(self.config.chunk_size as usize),
         });
 
         Ok(())
@@ -571,9 +601,23 @@ impl GoosefsFileWriter {
         if let Some(active) = self.current_block_writer.take() {
             let block_id = active.block_id;
             let bytes_written = active.bytes_written;
+            let mut pending_chunk = active.pending_chunk;
             let mut writer = active.writer;
 
             if bytes_written > 0 {
+                // Drain any held-back trailing partial chunk: closing the
+                // block is a safe boundary because no further chunks follow
+                // on this stream.
+                if !pending_chunk.is_empty() {
+                    let tail = Bytes::copy_from_slice(&pending_chunk);
+                    pending_chunk.clear();
+                    if let Err(e) = writer.write_chunk(tail).await {
+                        // Best-effort cancel: tear the stream down and bubble up.
+                        writer.cancel().await;
+                        return Err(e);
+                    }
+                }
+
                 // Flush to ensure data is persisted on the worker
                 let ack_offset = writer.flush().await?;
                 debug!(
@@ -1125,6 +1169,27 @@ fn compute_block_id(file_id: i64, block_index: u64) -> i64 {
 /// Holds the `GrpcBlockWriter` and tracks how many bytes have been
 /// streamed to it. This enables chunk-level streaming (matching Java's
 /// `BlockOutStream` pattern) instead of whole-block buffering.
+///
+/// # Trailing partial-chunk coalescing (workaround for server-side BUG)
+///
+/// To work around a GooseFS Worker race in
+/// `LocalFileBlockWriter.appendComposite(CompositeByteBuf)` (which uses a
+/// position-relative gathering write on a shared `FileChannel` and is unsafe
+/// under concurrent stream pressure when chunks are not `chunk_size`-aligned;
+/// see `docs/BUG_concurrent_writer_file_length_inconsistent.md`), this struct
+/// keeps a `pending_chunk` buffer. Bytes are accumulated until exactly one
+/// `chunk_size`-aligned chunk can be sent; any trailing remainder is held
+/// back and merged with subsequent writes. The buffer is force-flushed only
+/// at safe boundaries:
+///
+/// 1. an explicit user `flush()` call;
+/// 2. the block becomes full (`remaining == 0`);
+/// 3. `close_current_block()` (end of block / file close).
+///
+/// At these boundaries the trailing partial chunk is fine because either no
+/// further chunks follow on this stream, or the stream is about to be torn
+/// down — so the server-side `mLocalFileChannel.size()` and accumulated
+/// `mPosition` cannot drift any further before `commitBlock`.
 struct ActiveBlockWriter {
     /// The underlying gRPC streaming writer.
     writer: GrpcBlockWriter,
@@ -1132,10 +1197,17 @@ struct ActiveBlockWriter {
     block_id: i64,
     /// Total block capacity.
     block_size: u64,
-    /// Bytes written to this block so far.
+    /// Bytes accepted into this writer (sent + still pending). This is the
+    /// authoritative byte counter for block-fullness checks; it advances as
+    /// soon as bytes enter `pending_chunk`.
     bytes_written: u64,
     /// Worker address (for failure tracking).
     worker_addr: String,
+    /// Trailing partial chunk buffer — at all times its length is strictly
+    /// less than `chunk_size`. Holds the unaligned tail of the most recent
+    /// write so it can be merged with subsequent data. Drained only at safe
+    /// boundaries (see struct-level docs).
+    pending_chunk: Vec<u8>,
 }
 
 impl ActiveBlockWriter {
