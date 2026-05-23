@@ -40,17 +40,40 @@ For asynchronous code:
 
 ```python
 import asyncio
-from goosefs import AsyncGoosefs, Config
+from goosefs import AsyncGoosefs, Config, WriteType
 
 async def main() -> None:
     async with await AsyncGoosefs.connect(Config("127.0.0.1:9200")) as fs:
         await fs.mkdir("/data", recursive=True)
-        await fs.write_file("/data/x.bin", b"...", write_type="MUST_CACHE")
+        await fs.write_file("/data/x.bin", b"...", write_type=WriteType.MustCache)
         data = await fs.read_file("/data/x.bin")
         print(len(data), "bytes")
 
 asyncio.run(main())
 ```
+
+## Type stubs
+
+The package ships PEP 561-compliant type stubs (`goosefs/*.pyi`) and a
+`py.typed` marker, so `mypy` and `pyright` get full IntelliSense out of
+the box. Stubs are kept in lock-step with the runtime by
+`mypy.stubtest` in CI:
+
+```bash
+cd bindings/python
+uv run python -m mypy.stubtest goosefs
+```
+
+## Thread / process safety
+
+- `Goosefs` and `AsyncGoosefs` are **safe to share across threads**.
+- Both are **NOT safe across `os.fork()`** — child processes must
+  reconnect.
+- `Goosefs` synchronous methods refuse to run from inside a Tokio worker
+  or asyncio event loop and raise `RuntimeError` instead of deadlocking.
+- File handles (`FileReader` / `FileWriter` / their async siblings)
+  are **NOT safe to share across threads or tasks** — open one per
+  worker.
 
 ## License
 
