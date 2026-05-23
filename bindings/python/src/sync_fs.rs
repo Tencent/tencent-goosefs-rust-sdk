@@ -60,7 +60,7 @@ use crate::status::PyURIStatus;
 /// `AsyncGoosefs` instead. Calling sync methods while an asyncio loop is
 /// running on the same thread will raise `RuntimeError` rather than
 /// dead-lock.
-#[pyclass(module = "goosefs._goosefs", name = "Goosefs")]
+#[pyclass(module = "goosefs._goosefs", name = "Goosefs", weakref)]
 pub struct PyGoosefs {
     /// `None` after `close()` — every subsequent op raises `RuntimeError`.
     handle: Mutex<Option<PyFsHandle>>,

@@ -88,7 +88,7 @@ pub(crate) fn build_create_file_options(
 }
 
 /// Async Goosefs filesystem client.
-#[pyclass(module = "goosefs._goosefs", name = "AsyncGoosefs")]
+#[pyclass(module = "goosefs._goosefs", name = "AsyncGoosefs", weakref)]
 pub struct PyAsyncGoosefs {
     /// `None` after `close()` — every subsequent op raises `RuntimeError`.
     ///
