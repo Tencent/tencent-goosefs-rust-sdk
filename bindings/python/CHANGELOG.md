@@ -61,7 +61,7 @@
 
 #### 文档与示例
 
-- 5 个可运行示例：`01_quickstart.py` / `02_async.py` / `03_streaming.py` / `04_with_pyarrow.py` / `05_pandas_csv.py`
+- 5 个可运行示例：`quickstart.py` / `async_demo.py` / `streaming.py` / `with_pyarrow.py` / `pandas_csv.py`
 - 完整类型存根（PEP 561）：`python/goosefs/__init__.pyi`（541 行）+ `python/goosefs/exceptions.pyi`（105 行）+ `py.typed` marker
 - `mypy.stubtest` 在 CI 强校验存根与运行时签名一致
 - 文档：`README.md` / `PYPI_README.md` / `DEVELOPMENT.md` / `CHANGELOG.md`（本文件）

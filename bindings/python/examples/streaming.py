@@ -12,13 +12,13 @@ read patterns:
 * ``seek`` + ``read`` from the middle
 * random ``read_at(offset, length)`` without moving the cursor
 
-Prerequisites — same as ``01_quickstart.py``::
+Prerequisites — same as ``quickstart.py``::
 
     export GOOSEFS_MASTER_ADDR=127.0.0.1:9200
 
 Run::
 
-    python examples/03_streaming.py
+    python examples/streaming.py
 """
 
 from __future__ import annotations

@@ -15,7 +15,7 @@ Prerequisites
 
 Run::
 
-    python examples/05_pandas_csv.py
+    python examples/pandas_csv.py
 """
 
 from __future__ import annotations

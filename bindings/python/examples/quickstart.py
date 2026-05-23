@@ -19,7 +19,7 @@ Prerequisites
 Run
 ---
 
-    python examples/01_quickstart.py
+    python examples/quickstart.py
 """
 
 from __future__ import annotations

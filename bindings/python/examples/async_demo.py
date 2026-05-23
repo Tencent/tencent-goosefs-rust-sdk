@@ -4,13 +4,13 @@ Demonstrates ``AsyncGoosefs`` and how to fan out many small operations
 concurrently with ``asyncio.gather``. This is the shape most service
 code wants: a long-lived connection shared across many tasks.
 
-Prerequisites — same as ``01_quickstart.py``::
+Prerequisites — same as ``quickstart.py``::
 
     export GOOSEFS_MASTER_ADDR=127.0.0.1:9200
 
 Run::
 
-    python examples/02_async.py
+    python examples/async_demo.py
 """
 
 from __future__ import annotations

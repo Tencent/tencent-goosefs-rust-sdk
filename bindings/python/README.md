@@ -18,11 +18,11 @@
 
 - **PyPI 用户首屏文档**：[`PYPI_README.md`](./PYPI_README.md) — 安装、quickstart、线程/fork 安全、类型存根
 - **可运行的 5 个示例**：[`examples/`](./examples/)
-  - [`01_quickstart.py`](./examples/01_quickstart.py) — 同步一页流：connect → mkdir → write → read → delete
-  - [`02_async.py`](./examples/02_async.py) — `AsyncGoosefs` + `asyncio.gather` 并发扇出
-  - [`03_streaming.py`](./examples/03_streaming.py) — 流式 reader/writer：分块读写 + seek + read_at
-  - [`04_with_pyarrow.py`](./examples/04_with_pyarrow.py) — Arrow Table → Parquet → GooseFS 往返
-  - [`05_pandas_csv.py`](./examples/05_pandas_csv.py) — pandas DataFrame ↔ CSV 往返
+  - [`quickstart.py`](./examples/quickstart.py) — 同步一页流：connect → mkdir → write → read → delete
+  - [`async_demo.py`](./examples/async_demo.py) — `AsyncGoosefs` + `asyncio.gather` 并发扇出
+  - [`streaming.py`](./examples/streaming.py) — 流式 reader/writer：分块读写 + seek + read_at
+  - [`with_pyarrow.py`](./examples/with_pyarrow.py) — Arrow Table → Parquet → GooseFS 往返
+  - [`pandas_csv.py`](./examples/pandas_csv.py) — pandas DataFrame ↔ CSV 往返
 - **开发指引（构建、测试、release）**：[`DEVELOPMENT.md`](./DEVELOPMENT.md)
 - **变更日志**：[`CHANGELOG.md`](./CHANGELOG.md)
 - **完整开发跟踪**：[`docs/PYTHON_BINDING_PROGRESS.md`](../../docs/PYTHON_BINDING_PROGRESS.md)

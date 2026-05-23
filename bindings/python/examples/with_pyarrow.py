@@ -15,7 +15,7 @@ Prerequisites
 
 Run::
 
-    python examples/04_with_pyarrow.py
+    python examples/with_pyarrow.py
 """
 
 from __future__ import annotations
@@ -77,7 +77,7 @@ def main() -> None:
         # or any Python file-like object. We use an ``io.BytesIO`` so we
         # can hand the resulting buffer to ``write_file`` in one shot.
         # For very large tables you'd want to stream chunks via
-        # ``Goosefs.create_file`` instead — see ``03_streaming.py``.
+        # ``Goosefs.create_file`` instead — see ``streaming.py``.
         buf = io.BytesIO()
         pq.write_table(table, buf, compression="snappy")
         encoded = buf.getvalue()
