@@ -19,13 +19,23 @@
 //! - [`GoosefsFileWriter`] — Orchestrates the full write pipeline.
 //!
 //! The high-level APIs are the recommended entry point for most users.
+//!
+//! ## Trait-style adapter
+//!
+//! - [`GoosefsAsyncReader`] — `tokio::io::AsyncRead + AsyncSeek` adapter
+//!   over [`GoosefsFileInStream`]. Use it when you want to plug a Goosefs
+//!   stream into ecosystem tools that take any `AsyncRead` (e.g.
+//!   `tokio::io::copy`, `tokio::io::BufReader`, `tokio_util::io::ReaderStream`,
+//!   the future opendal `goosefs` adapter, JNI / C bindings).
 
+pub mod async_reader;
 pub mod file_in_stream;
 pub mod file_reader;
 pub mod file_writer;
 pub mod reader;
 pub mod writer;
 
+pub use async_reader::GoosefsAsyncReader;
 pub use file_in_stream::GoosefsFileInStream;
 pub use file_reader::GoosefsFileReader;
 pub use file_writer::GoosefsFileWriter;
