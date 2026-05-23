@@ -41,6 +41,7 @@ mod runtime;
 mod status;
 mod streaming;
 mod sync_fs;
+mod tracing;
 mod types;
 
 use pyo3::prelude::*;
@@ -79,6 +80,9 @@ fn _goosefs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<streaming::PyAsyncFileWriter>()?;
     m.add_class::<streaming::PyFileReader>()?;
     m.add_class::<streaming::PyFileWriter>()?;
+
+    // P7 ── opt-in tracing bridge (Review §17.7).
+    m.add_function(wrap_pyfunction!(tracing::enable_tracing, m)?)?;
 
     // Subsequent stages will register additional classes here.
 

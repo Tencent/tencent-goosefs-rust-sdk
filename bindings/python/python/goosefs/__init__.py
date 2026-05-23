@@ -46,6 +46,7 @@ from ._goosefs import (  # noqa: F401
     URIStatus,
     WriteType,
     __version__,
+    enable_tracing,
     exceptions,
 )
 
@@ -70,5 +71,6 @@ __all__ = [
     "URIStatus",
     "WriteType",
     "__version__",
+    "enable_tracing",
     "exceptions",
 ]

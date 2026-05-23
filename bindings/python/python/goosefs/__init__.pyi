@@ -38,6 +38,40 @@ from goosefs import exceptions as exceptions
 
 __version__: str
 
+# ──────────────────────────────────────────────────────────────────────────
+# Module-level helpers
+# ──────────────────────────────────────────────────────────────────────────
+
+def enable_tracing(level: str = ..., *, target: str = ...) -> None:
+    """Install a stderr ``tracing`` subscriber for ``goosefs-sdk`` events.
+
+    Off by default — importing ``goosefs`` does not configure logging.
+    Call this once near the top of your program to opt in.
+
+    Args:
+        level: One of ``"trace"``, ``"debug"``, ``"info"``, ``"warn"``,
+            ``"error"`` (case-insensitive). Used only when the
+            ``RUST_LOG`` environment variable is **not** set; if it is
+            set, ``RUST_LOG`` wins and ``level`` is ignored.
+        target: Sink for log lines. Only ``"stderr"`` is supported in
+            this release. ``"stdout"`` and ``"logging"`` are reserved
+            and currently raise ``ValueError``.
+
+    Raises:
+        ValueError: ``level`` or ``target`` is not one of the accepted
+            values.
+        RuntimeError: Another ``tracing`` subscriber is already active
+            in the process (e.g. from ``pyo3-log`` or a host
+            application). The first call wins; this function will not
+            replace an existing subscriber.
+
+    Notes:
+        Calling :func:`enable_tracing` more than once is a silent no-op
+        on every call after the first — it does **not** reconfigure the
+        already-installed subscriber.
+    """
+    ...
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Enums
 # ─────────────────────────────────────────────────────────────────────────────
@@ -531,5 +565,6 @@ __all__ = [
     "URIStatus",
     "WriteType",
     "__version__",
+    "enable_tracing",
     "exceptions",
 ]
