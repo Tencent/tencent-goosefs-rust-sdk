@@ -187,8 +187,8 @@ impl RetryPolicy for ExponentialBackoffRetry {
 
 /// Add a random jitter of 0–10 % to a duration.
 fn add_jitter(base: Duration) -> Duration {
-    let mut rng = rand::thread_rng();
-    let jitter_fraction: f64 = rng.gen_range(0.0..0.1);
+    let mut rng = rand::rng();
+    let jitter_fraction: f64 = rng.random_range(0.0..0.1);
     let jitter = base.mul_f64(jitter_fraction);
     base + jitter
 }
