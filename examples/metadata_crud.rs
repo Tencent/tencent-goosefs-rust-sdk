@@ -20,17 +20,20 @@
 //! Usage:
 //!   cargo run --example metadata_crud
 
-use goosefs_sdk::client::MasterClient;
+use std::sync::Arc;
+
 use goosefs_sdk::config::GoosefsConfig;
+use goosefs_sdk::context::FileSystemContext;
 use goosefs_sdk::error::Result;
 use goosefs_sdk::proto::grpc::file::CreateFilePOptions;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Connect to Goosefs Master
+    // Connect to Goosefs via FileSystemContext (loads goosefs-site.properties automatically)
     println!("Connecting to Goosefs Master...");
     let config = GoosefsConfig::new("127.0.0.1:9200");
-    let master = MasterClient::connect(&config).await?;
+    let ctx: Arc<FileSystemContext> = FileSystemContext::connect(config).await?;
+    let master = ctx.acquire_master();
     println!("Connected!");
 
     // Clean up existing test directory
@@ -131,5 +134,8 @@ async fn main() -> Result<()> {
     // println!("Directory deleted successfully");
 
     println!("\n✅ All file operation tests complete!");
+
+    ctx.close().await?;
+
     Ok(())
 }

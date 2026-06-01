@@ -20,6 +20,7 @@
 //! ```
 
 pub(crate) mod heartbeat;
+pub mod pushgateway;
 pub mod registry;
 pub mod reporter;
 

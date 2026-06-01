@@ -25,7 +25,7 @@ fn main() -> Result<()> {
     }
 
     // Opt-in path: regenerate protobuf code in-tree. Requires `protoc`.
-    tonic_build::configure()
+    tonic_prost_build::configure()
         .build_server(false)
         .build_client(true)
         // Output all generated code into src/generated/ so it can be

@@ -251,6 +251,27 @@ impl Error {
         matches!(self, Error::AuthenticationFailed { .. })
     }
 
+    /// Returns `true` if the error represents a gRPC UNAVAILABLE or transport failure.
+    ///
+    /// This indicates the remote endpoint is not reachable — useful for
+    /// metrics classification (distinguish from auth errors).
+    pub fn is_unavailable(&self) -> bool {
+        match self {
+            Error::GrpcError { source, .. } => {
+                matches!(source.as_ref().code(), tonic::Code::Unavailable)
+            }
+            Error::TransportError { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// Alias for [`is_authentication_failed`](Self::is_authentication_failed).
+    ///
+    /// Used by metrics classification to distinguish UNAUTHENTICATED errors.
+    pub fn is_authentication_error(&self) -> bool {
+        self.is_authentication_failed()
+    }
+
     /// Returns `true` if the error is a permission / authentication problem.
     ///
     /// This covers both `PermissionDenied` (authorisation) and

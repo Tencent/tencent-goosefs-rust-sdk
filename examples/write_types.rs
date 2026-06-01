@@ -26,8 +26,8 @@ async fn main() -> Result<()> {
     println!("Goosefs WriteType Demo");
     println!("=======================");
 
-    let ctx: Arc<FileSystemContext> =
-        FileSystemContext::connect(GoosefsConfig::new("127.0.0.1:9200")).await?;
+    let config = GoosefsConfig::new("127.0.0.1:9200");
+    let ctx: Arc<FileSystemContext> = FileSystemContext::connect(config).await?;
 
     // Initialize: cleanup & create test directory
     let master = ctx.acquire_master();

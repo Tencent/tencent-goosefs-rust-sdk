@@ -75,6 +75,10 @@ impl GrpcBlockReader {
             .read_block(block_id, offset, length, chunk_size, open_ufs_block_options)
             .await?;
 
+        // Instrument: track concurrent block reads
+        crate::metrics::gauge(name::CLIENT_BLOCKS_READ_IN_PROGRESS)
+            .set(crate::metrics::gauge(name::CLIENT_BLOCKS_READ_IN_PROGRESS).get() + 1);
+
         debug!(
             block_id = block_id,
             offset = offset,
@@ -151,6 +155,11 @@ impl GrpcBlockReader {
         while let Some(chunk) = self.read_chunk().await? {
             buf.extend_from_slice(&chunk);
         }
+
+        // Instrument: block read completed
+        crate::metrics::counter(name::CLIENT_BLOCKS_READ_TOTAL).inc(1);
+        crate::metrics::gauge(name::CLIENT_BLOCKS_READ_IN_PROGRESS)
+            .set((crate::metrics::gauge(name::CLIENT_BLOCKS_READ_IN_PROGRESS).get() - 1).max(0));
 
         Ok(buf.freeze())
     }

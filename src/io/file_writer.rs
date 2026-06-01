@@ -432,6 +432,10 @@ impl GoosefsFileWriter {
             .unwrap_or(self.config.block_size as i64) as u64;
         let chunk_size = self.config.chunk_size as usize;
 
+        // Instrument: record cache-path bytes written.
+        crate::metrics::counter(crate::metrics::name::CLIENT_BYTES_WRITTEN_LOCAL)
+            .inc(data.len() as i64);
+
         let mut offset = 0usize;
         while offset < data.len() {
             // Ensure we have an active block writer
@@ -501,6 +505,9 @@ impl GoosefsFileWriter {
             Ok(()) => {
                 // Track total UFS bytes written (for completeFile's ufsLength).
                 self.total_bytes_written += total as u64;
+                // Instrument: record UFS-path bytes written.
+                crate::metrics::counter(crate::metrics::name::CLIENT_BYTES_WRITTEN_UFS)
+                    .inc(total as i64);
                 Ok(())
             }
             Err(e) => self.handle_ufs_write_exception(e).await,

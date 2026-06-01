@@ -220,6 +220,19 @@ impl MasterClient {
             match f(client).await {
                 Ok(result) => return Ok(result),
                 Err(err) => {
+                    // Instrument: count RPC errors
+                    crate::metrics::counter(crate::metrics::name::CLIENT_RPC_ERRORS_TOTAL).inc(1);
+                    // Classify the error
+                    if err.is_authentication_error() {
+                        crate::metrics::counter(crate::metrics::name::CLIENT_RPC_AUTH_ERRORS)
+                            .inc(1);
+                    } else if err.is_unavailable() {
+                        crate::metrics::counter(
+                            crate::metrics::name::CLIENT_RPC_UNAVAILABLE_ERRORS,
+                        )
+                        .inc(1);
+                    }
+
                     if err.is_retriable() && attempt < MAX_RPC_RETRIES {
                         warn!(
                             op = op_name,
@@ -250,22 +263,29 @@ impl MasterClient {
     /// Get the file/directory status (equivalent to `stat` / `head`).
     #[instrument(skip(self), fields(path = %path))]
     pub async fn get_status(&self, path: &str) -> Result<FileInfo> {
+        let start = std::time::Instant::now();
         let path = path.to_string();
-        self.with_retry("get_status", |mut client| {
-            let path = path.clone();
-            async move {
-                let req = GetStatusPRequest {
-                    path: Some(path),
-                    options: Some(GetStatusPOptions::default()),
-                    request_id: None,
-                };
-                let resp = client.get_status(req).await?;
-                resp.into_inner()
-                    .file_info
-                    .ok_or_else(|| Error::missing_field("file_info"))
-            }
-        })
-        .await
+        let result = self
+            .with_retry("get_status", |mut client| {
+                let path = path.clone();
+                async move {
+                    let req = GetStatusPRequest {
+                        path: Some(path),
+                        options: Some(GetStatusPOptions::default()),
+                        request_id: None,
+                    };
+                    let resp = client.get_status(req).await?;
+                    resp.into_inner()
+                        .file_info
+                        .ok_or_else(|| Error::missing_field("file_info"))
+                }
+            })
+            .await;
+        // Instrument: ops count and latency
+        crate::metrics::counter(crate::metrics::name::CLIENT_GET_STATUS_OPS).inc(1);
+        crate::metrics::counter(crate::metrics::name::CLIENT_GET_STATUS_LATENCY_US)
+            .inc(start.elapsed().as_micros() as i64);
+        result
     }
 
     /// List the contents of a directory. Returns all FileInfo entries.
@@ -275,47 +295,57 @@ impl MasterClient {
     /// of `FileInfo`.
     #[instrument(skip(self), fields(path = %path))]
     pub async fn list_status(&self, path: &str, recursive: bool) -> Result<Vec<FileInfo>> {
+        let start = std::time::Instant::now();
         let path = path.to_string();
-        self.with_retry("list_status", |mut client| {
-            let path = path.clone();
-            async move {
-                let req = ListStatusPRequest {
-                    path: Some(path),
-                    options: Some(ListStatusPOptions {
-                        recursive: Some(recursive),
-                        ..Default::default()
-                    }),
-                    request_id: None,
-                };
-                let mut stream = client.list_status(req).await?.into_inner();
-                let mut result = Vec::new();
-                while let Some(resp) = stream.message().await? {
-                    result.extend(resp.file_infos);
+        let result = self
+            .with_retry("list_status", |mut client| {
+                let path = path.clone();
+                async move {
+                    let req = ListStatusPRequest {
+                        path: Some(path),
+                        options: Some(ListStatusPOptions {
+                            recursive: Some(recursive),
+                            ..Default::default()
+                        }),
+                        request_id: None,
+                    };
+                    let mut stream = client.list_status(req).await?.into_inner();
+                    let mut result = Vec::new();
+                    while let Some(resp) = stream.message().await? {
+                        result.extend(resp.file_infos);
+                    }
+                    Ok(result)
                 }
-                Ok(result)
-            }
-        })
-        .await
+            })
+            .await;
+        // Instrument: ops count and latency
+        crate::metrics::counter(crate::metrics::name::CLIENT_LIST_STATUS_OPS).inc(1);
+        crate::metrics::counter(crate::metrics::name::CLIENT_LIST_STATUS_LATENCY_US)
+            .inc(start.elapsed().as_micros() as i64);
+        result
     }
 
     /// Create a new file. Returns the `FileInfo` of the created file.
     #[instrument(skip(self, options), fields(path = %path))]
     pub async fn create_file(&self, path: &str, options: CreateFilePOptions) -> Result<FileInfo> {
         let path = path.to_string();
-        self.with_retry("create_file", |mut client| {
-            let path = path.clone();
-            async move {
-                let req = CreateFilePRequest {
-                    path: Some(path),
-                    options: Some(options),
-                };
-                let resp = client.create_file(req).await?;
-                resp.into_inner()
-                    .file_info
-                    .ok_or_else(|| Error::missing_field("file_info"))
-            }
-        })
-        .await
+        let result = self
+            .with_retry("create_file", |mut client| {
+                let path = path.clone();
+                async move {
+                    let req = CreateFilePRequest {
+                        path: Some(path),
+                        options: Some(options),
+                    };
+                    let resp = client.create_file(req).await?;
+                    resp.into_inner()
+                        .file_info
+                        .ok_or_else(|| Error::missing_field("file_info"))
+                }
+            })
+            .await;
+        crate::metrics::counter(crate::metrics::name::CLIENT_CREATE_FILE_OPS).inc(1);
+        result
     }
 
     /// Mark a file as completed (called after all blocks are written).
@@ -448,14 +478,17 @@ impl MasterClient {
     /// directly.
     #[instrument(skip(self), fields(path = %path, recursive = %recursive))]
     pub async fn delete(&self, path: &str, recursive: bool) -> Result<()> {
-        self.delete_with_options(
-            path,
-            DeleteOptions {
-                recursive,
-                ..Default::default()
-            },
-        )
-        .await
+        let result = self
+            .delete_with_options(
+                path,
+                DeleteOptions {
+                    recursive,
+                    ..Default::default()
+                },
+            )
+            .await;
+        crate::metrics::counter(crate::metrics::name::CLIENT_DELETE_OPS).inc(1);
+        result
     }
 
     /// Rename (move) a file or directory.
@@ -463,20 +496,23 @@ impl MasterClient {
     pub async fn rename(&self, src: &str, dst: &str) -> Result<()> {
         let src = src.to_string();
         let dst = dst.to_string();
-        self.with_retry("rename", |mut client| {
-            let src = src.clone();
-            let dst = dst.clone();
-            async move {
-                let req = RenamePRequest {
-                    path: Some(src),
-                    dst_path: Some(dst),
-                    options: Some(RenamePOptions::default()),
-                };
-                client.rename(req).await?;
-                Ok(())
-            }
-        })
-        .await
+        let result = self
+            .with_retry("rename", |mut client| {
+                let src = src.clone();
+                let dst = dst.clone();
+                async move {
+                    let req = RenamePRequest {
+                        path: Some(src),
+                        dst_path: Some(dst),
+                        options: Some(RenamePOptions::default()),
+                    };
+                    client.rename(req).await?;
+                    Ok(())
+                }
+            })
+            .await;
+        crate::metrics::counter(crate::metrics::name::CLIENT_RENAME_OPS).inc(1);
+        result
     }
 
     /// Create a directory (recursive by default).
@@ -486,23 +522,26 @@ impl MasterClient {
     #[instrument(skip(self), fields(path = %path))]
     pub async fn create_directory(&self, path: &str, recursive: bool) -> Result<()> {
         let path = path.to_string();
-        self.with_retry("create_directory", |mut client| {
-            let path = path.clone();
-            async move {
-                let req = CreateDirectoryPRequest {
-                    path: Some(path),
-                    options: Some(CreateDirectoryPOptions {
-                        recursive: Some(recursive),
-                        allow_exists: Some(true),
-                        mode: Some(default_dir_mode()),
-                        ..Default::default()
-                    }),
-                };
-                client.create_directory(req).await?;
-                Ok(())
-            }
-        })
-        .await
+        let result = self
+            .with_retry("create_directory", |mut client| {
+                let path = path.clone();
+                async move {
+                    let req = CreateDirectoryPRequest {
+                        path: Some(path),
+                        options: Some(CreateDirectoryPOptions {
+                            recursive: Some(recursive),
+                            allow_exists: Some(true),
+                            mode: Some(default_dir_mode()),
+                            ..Default::default()
+                        }),
+                    };
+                    client.create_directory(req).await?;
+                    Ok(())
+                }
+            })
+            .await;
+        crate::metrics::counter(crate::metrics::name::CLIENT_CREATE_DIR_OPS).inc(1);
+        result
     }
 
     /// Schedule asynchronous persistence for a file.

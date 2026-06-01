@@ -130,6 +130,8 @@ pub fn gauge(name: &str) -> std::sync::Arc<Gauge> {
 /// Metric name constants, aligned with Java's MetricKey definitions.
 /// Only metrics with `isClusterAggregated=true` should be reported in heartbeat.
 pub mod name {
+    // ── Throughput counters (cluster aggregated) ─────────────────────────────
+
     /// Local short-circuit read bytes (client reads from local Alluxio worker).
     /// Cluster aggregated: true
     pub const CLIENT_BYTES_READ_LOCAL: &str = "Client.BytesReadLocal";
@@ -141,6 +143,88 @@ pub mod name {
     /// Client direct UFS write bytes (bypass Alluxio layer).
     /// Cluster aggregated: true
     pub const CLIENT_BYTES_WRITTEN_UFS: &str = "Client.BytesWrittenUfs";
+
+    // ── RPC operation counters ───────────────────────────────────────────────
+
+    /// Total number of file read operations (open + stream fully consumed or closed).
+    pub const CLIENT_READ_OPS_TOTAL: &str = "Client.ReadOpsTotal";
+
+    /// Total number of file write operations (create + complete).
+    pub const CLIENT_WRITE_OPS_TOTAL: &str = "Client.WriteOpsTotal";
+
+    /// Total number of getStatus RPCs to Master.
+    pub const CLIENT_GET_STATUS_OPS: &str = "Client.GetStatusOps";
+
+    /// Total number of listStatus RPCs to Master.
+    pub const CLIENT_LIST_STATUS_OPS: &str = "Client.ListStatusOps";
+
+    /// Total number of createFile RPCs to Master.
+    pub const CLIENT_CREATE_FILE_OPS: &str = "Client.CreateFileOps";
+
+    /// Total number of createDirectory RPCs to Master.
+    pub const CLIENT_CREATE_DIR_OPS: &str = "Client.CreateDirOps";
+
+    /// Total number of delete (remove) RPCs to Master.
+    pub const CLIENT_DELETE_OPS: &str = "Client.DeleteOps";
+
+    /// Total number of rename RPCs to Master.
+    pub const CLIENT_RENAME_OPS: &str = "Client.RenameOps";
+
+    // ── Error / failure counters ─────────────────────────────────────────────
+
+    /// Total RPC failures (all types: network, timeout, server error).
+    pub const CLIENT_RPC_ERRORS_TOTAL: &str = "Client.RpcErrorsTotal";
+
+    /// RPC failures broken down by type — UNAUTHENTICATED errors.
+    pub const CLIENT_RPC_AUTH_ERRORS: &str = "Client.RpcAuthErrors";
+
+    /// RPC failures — connection refused / unavailable.
+    pub const CLIENT_RPC_UNAVAILABLE_ERRORS: &str = "Client.RpcUnavailableErrors";
+
+    /// Block read failures (stream error, incomplete, etc.).
+    pub const CLIENT_READ_FAILURES: &str = "Client.ReadFailures";
+
+    /// Block write failures.
+    pub const CLIENT_WRITE_FAILURES: &str = "Client.WriteFailures";
+
+    // ── Latency counters (cumulative microseconds, divide by ops for avg) ───
+
+    /// Cumulative read latency in microseconds (from open stream to close/eof).
+    pub const CLIENT_READ_LATENCY_US: &str = "Client.ReadLatencyUs";
+
+    /// Cumulative write latency in microseconds (from create to complete).
+    pub const CLIENT_WRITE_LATENCY_US: &str = "Client.WriteLatencyUs";
+
+    /// Cumulative getStatus RPC latency in microseconds.
+    pub const CLIENT_GET_STATUS_LATENCY_US: &str = "Client.GetStatusLatencyUs";
+
+    /// Cumulative listStatus RPC latency in microseconds.
+    pub const CLIENT_LIST_STATUS_LATENCY_US: &str = "Client.ListStatusLatencyUs";
+
+    // ── Connection pool gauges ───────────────────────────────────────────────
+
+    /// Number of active (cached) worker connections in the pool.
+    pub const CLIENT_WORKER_CONNECTIONS_ACTIVE: &str = "Client.WorkerConnectionsActive";
+
+    /// Total number of worker reconnects performed (counter).
+    pub const CLIENT_WORKER_RECONNECTS_TOTAL: &str = "Client.WorkerReconnectsTotal";
+
+    /// Total number of reconnects that were coalesced (deduplicated).
+    pub const CLIENT_WORKER_RECONNECTS_COALESCED: &str = "Client.WorkerReconnectsCoalesced";
+
+    // ── Block / data path gauges ─────────────────────────────────────────────
+
+    /// Number of blocks currently being read concurrently (gauge).
+    pub const CLIENT_BLOCKS_READ_IN_PROGRESS: &str = "Client.BlocksReadInProgress";
+
+    /// Number of blocks currently being written concurrently (gauge).
+    pub const CLIENT_BLOCKS_WRITTEN_IN_PROGRESS: &str = "Client.BlocksWrittenInProgress";
+
+    /// Total blocks successfully read (counter).
+    pub const CLIENT_BLOCKS_READ_TOTAL: &str = "Client.BlocksReadTotal";
+
+    /// Total blocks successfully written (counter).
+    pub const CLIENT_BLOCKS_WRITTEN_TOTAL: &str = "Client.BlocksWrittenTotal";
 }
 
 #[cfg(test)]
@@ -242,5 +326,72 @@ mod tests {
         assert_eq!(name::CLIENT_BYTES_READ_LOCAL, "Client.BytesReadLocal");
         assert_eq!(name::CLIENT_BYTES_WRITTEN_LOCAL, "Client.BytesWrittenLocal");
         assert_eq!(name::CLIENT_BYTES_WRITTEN_UFS, "Client.BytesWrittenUfs");
+    }
+
+    #[test]
+    fn name_constants_rpc_ops() {
+        assert_eq!(name::CLIENT_READ_OPS_TOTAL, "Client.ReadOpsTotal");
+        assert_eq!(name::CLIENT_WRITE_OPS_TOTAL, "Client.WriteOpsTotal");
+        assert_eq!(name::CLIENT_GET_STATUS_OPS, "Client.GetStatusOps");
+        assert_eq!(name::CLIENT_LIST_STATUS_OPS, "Client.ListStatusOps");
+        assert_eq!(name::CLIENT_CREATE_FILE_OPS, "Client.CreateFileOps");
+        assert_eq!(name::CLIENT_CREATE_DIR_OPS, "Client.CreateDirOps");
+        assert_eq!(name::CLIENT_DELETE_OPS, "Client.DeleteOps");
+        assert_eq!(name::CLIENT_RENAME_OPS, "Client.RenameOps");
+    }
+
+    #[test]
+    fn name_constants_errors() {
+        assert_eq!(name::CLIENT_RPC_ERRORS_TOTAL, "Client.RpcErrorsTotal");
+        assert_eq!(name::CLIENT_RPC_AUTH_ERRORS, "Client.RpcAuthErrors");
+        assert_eq!(
+            name::CLIENT_RPC_UNAVAILABLE_ERRORS,
+            "Client.RpcUnavailableErrors"
+        );
+        assert_eq!(name::CLIENT_READ_FAILURES, "Client.ReadFailures");
+        assert_eq!(name::CLIENT_WRITE_FAILURES, "Client.WriteFailures");
+    }
+
+    #[test]
+    fn name_constants_latency() {
+        assert_eq!(name::CLIENT_READ_LATENCY_US, "Client.ReadLatencyUs");
+        assert_eq!(name::CLIENT_WRITE_LATENCY_US, "Client.WriteLatencyUs");
+        assert_eq!(
+            name::CLIENT_GET_STATUS_LATENCY_US,
+            "Client.GetStatusLatencyUs"
+        );
+        assert_eq!(
+            name::CLIENT_LIST_STATUS_LATENCY_US,
+            "Client.ListStatusLatencyUs"
+        );
+    }
+
+    #[test]
+    fn name_constants_pool_and_blocks() {
+        assert_eq!(
+            name::CLIENT_WORKER_CONNECTIONS_ACTIVE,
+            "Client.WorkerConnectionsActive"
+        );
+        assert_eq!(
+            name::CLIENT_WORKER_RECONNECTS_TOTAL,
+            "Client.WorkerReconnectsTotal"
+        );
+        assert_eq!(
+            name::CLIENT_WORKER_RECONNECTS_COALESCED,
+            "Client.WorkerReconnectsCoalesced"
+        );
+        assert_eq!(
+            name::CLIENT_BLOCKS_READ_IN_PROGRESS,
+            "Client.BlocksReadInProgress"
+        );
+        assert_eq!(
+            name::CLIENT_BLOCKS_WRITTEN_IN_PROGRESS,
+            "Client.BlocksWrittenInProgress"
+        );
+        assert_eq!(name::CLIENT_BLOCKS_READ_TOTAL, "Client.BlocksReadTotal");
+        assert_eq!(
+            name::CLIENT_BLOCKS_WRITTEN_TOTAL,
+            "Client.BlocksWrittenTotal"
+        );
     }
 }

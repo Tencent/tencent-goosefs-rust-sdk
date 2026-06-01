@@ -61,6 +61,7 @@ use crate::client::{
 use crate::config::{ConfigRefresher, GoosefsConfig, TransparentAccelerationSwitch};
 use crate::error::{Error, Result};
 use crate::metrics::heartbeat::{resolve_app_id, HeartbeatTask};
+use crate::metrics::pushgateway::{PushgatewayConfig, PushgatewayTask};
 use crate::metrics::reporter::ClientMetricsReporter;
 
 /// How often the background refresh loop checks whether the worker list is stale.
@@ -125,6 +126,11 @@ pub struct FileSystemContext {
     /// `None` when `config.metrics_enabled = false`.
     /// Shut down gracefully (with final flush) in `close()`.
     metrics_heartbeat: Mutex<Option<Arc<HeartbeatTask>>>,
+
+    /// Prometheus Pushgateway background push task.
+    /// `None` when `config.pushgateway_enabled = false`.
+    /// Shut down gracefully (with final flush) in `close()`.
+    pushgateway_task: Mutex<Option<PushgatewayTask>>,
 }
 
 impl FileSystemContext {
@@ -183,6 +189,7 @@ impl FileSystemContext {
             worker_refresh_task: Mutex::new(None),
             config_refresh_task: Mutex::new(None),
             metrics_heartbeat: Mutex::new(None),
+            pushgateway_task: Mutex::new(None),
         });
 
         // Start the background worker-list refresh loop.
@@ -191,6 +198,8 @@ impl FileSystemContext {
         ctx.clone().start_config_refresh_task().await;
         // Start the metrics heartbeat task (no-op when metrics_enabled = false).
         ctx.clone().start_metrics_heartbeat_task().await?;
+        // Start the Pushgateway push task (no-op when pushgateway_enabled = false).
+        ctx.clone().start_pushgateway_task().await;
 
         Ok(ctx)
     }
@@ -271,6 +280,12 @@ impl FileSystemContext {
         if let Some(task) = self.metrics_heartbeat.lock().await.take() {
             task.shutdown().await;
             debug!("metrics heartbeat task shut down");
+        }
+
+        // Gracefully shut down the Pushgateway push task (performs final push).
+        if let Some(task) = self.pushgateway_task.lock().await.take() {
+            task.shutdown().await;
+            debug!("pushgateway task shut down");
         }
 
         Ok(())
@@ -439,6 +454,101 @@ impl FileSystemContext {
         ));
         *self.metrics_heartbeat.lock().await = Some(task);
         Ok(())
+    }
+
+    // ── Pushgateway ────────────────────────────────────────────────────────
+
+    /// Start the Prometheus Pushgateway background push task.
+    ///
+    /// If the initial config has `pushgateway_enabled = false`, this method
+    /// will attempt to auto-discover pushgateway settings from the properties
+    /// file (via `GoosefsConfig::from_properties_auto()`).  This ensures that
+    /// callers using `GoosefsConfig::new(addr)` still get pushgateway reporting
+    /// when the properties file has it enabled.
+    ///
+    /// Does nothing only when **both** the initial config and the properties
+    /// file have pushgateway disabled (or no properties file is found).
+    async fn start_pushgateway_task(self: Arc<Self>) {
+        // Determine the effective pushgateway config: prefer the initial config
+        // if it already has pushgateway enabled; otherwise try auto-discovery.
+        let effective_config = if self.config.pushgateway_enabled {
+            // Caller explicitly enabled pushgateway — use their settings.
+            None
+        } else {
+            // Try loading from properties file to see if pushgateway is enabled there.
+            match GoosefsConfig::from_properties_auto() {
+                Ok(file_cfg) if file_cfg.pushgateway_enabled => {
+                    debug!(
+                        "pushgateway not enabled in initial config, \
+                         but enabled in properties file — using file config"
+                    );
+                    Some(file_cfg)
+                }
+                _ => {
+                    debug!("pushgateway disabled — push task not started");
+                    return;
+                }
+            }
+        };
+
+        // Use the effective config (either initial or from properties file).
+        let cfg = effective_config.as_ref().unwrap_or(&self.config);
+
+        let mut pg_config = PushgatewayConfig::new(
+            cfg.pushgateway_endpoint.clone(),
+            cfg.pushgateway_job.clone(),
+        )
+        .with_push_interval(cfg.pushgateway_push_interval);
+
+        if let Some(ref instance) = cfg.pushgateway_instance {
+            pg_config = pg_config.with_instance(instance.clone());
+        } else {
+            // Auto-generate a unique instance identifier using "ip:pid"
+            // so that multiple client processes on the same machine do not
+            // overwrite each other's metrics in Pushgateway.
+            // Using IP is more intuitive and aligns with Prometheus conventions.
+            let pid = std::process::id();
+            let ip = Self::resolve_local_ip();
+            let auto_instance = format!("{}:{}", ip, pid);
+            debug!(auto_instance = %auto_instance, "auto-generated pushgateway instance");
+            pg_config = pg_config.with_instance(auto_instance);
+        }
+
+        debug!(
+            endpoint = %cfg.pushgateway_endpoint,
+            job = %cfg.pushgateway_job,
+            interval_ms = cfg.pushgateway_push_interval.as_millis(),
+            "starting pushgateway push task"
+        );
+
+        let task = PushgatewayTask::spawn(pg_config);
+        *self.pushgateway_task.lock().await = Some(task);
+    }
+
+    // ── Helpers ────────────────────────────────────────────────────────────
+
+    /// Resolve the local outbound IP address.
+    ///
+    /// Uses a UDP socket trick: connect to a public address (without actually
+    /// sending data) and read back the local address the OS chose.  This gives
+    /// the correct outbound IP even on multi-homed machines.
+    ///
+    /// Falls back to `"127.0.0.1"` if detection fails.
+    fn resolve_local_ip() -> String {
+        use std::net::UdpSocket;
+        match UdpSocket::bind("0.0.0.0:0") {
+            Ok(socket) => {
+                // Connect to a well-known external address (Google DNS).
+                // No actual traffic is sent — this just triggers route lookup.
+                if socket.connect("8.8.8.8:80").is_ok() {
+                    if let Ok(addr) = socket.local_addr() {
+                        return addr.ip().to_string();
+                    }
+                }
+                "127.0.0.1".to_string()
+            }
+            Err(_) => "127.0.0.1".to_string(),
+        }
     }
 }
 

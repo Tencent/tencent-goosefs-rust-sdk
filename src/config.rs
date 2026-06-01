@@ -246,6 +246,43 @@ impl PropertiesMap {
             }
         }
 
+        // Pushgateway enabled: goosefs.metrics.pushgateway.enabled
+        if let Some(val) = self.get("goosefs.metrics.pushgateway.enabled") {
+            if let Ok(b) = val.to_lowercase().parse::<bool>() {
+                cfg.pushgateway_enabled = b;
+            }
+        }
+
+        // Pushgateway endpoint: goosefs.metrics.pushgateway.endpoint
+        if let Some(val) = self.get("goosefs.metrics.pushgateway.endpoint") {
+            if !val.is_empty() {
+                cfg.pushgateway_endpoint = val.to_string();
+            }
+        }
+
+        // Pushgateway push interval: goosefs.metrics.pushgateway.push.interval (unit: ms)
+        if let Some(ms_str) = self.get("goosefs.metrics.pushgateway.push.interval") {
+            if let Ok(ms) = ms_str.parse::<u64>() {
+                if ms >= MIN_METRICS_HEARTBEAT_INTERVAL_MS {
+                    cfg.pushgateway_push_interval = Duration::from_millis(ms);
+                }
+            }
+        }
+
+        // Pushgateway job: goosefs.metrics.pushgateway.job
+        if let Some(val) = self.get("goosefs.metrics.pushgateway.job") {
+            if !val.is_empty() {
+                cfg.pushgateway_job = val.to_string();
+            }
+        }
+
+        // Pushgateway instance: goosefs.metrics.pushgateway.instance
+        if let Some(val) = self.get("goosefs.metrics.pushgateway.instance") {
+            if !val.is_empty() {
+                cfg.pushgateway_instance = Some(val.to_string());
+            }
+        }
+
         cfg
     }
 }
@@ -366,6 +403,10 @@ const DEFAULT_METRICS_HEARTBEAT_TIMEOUT_MS: u64 = 5_000;
 const MIN_METRICS_HEARTBEAT_INTERVAL_MS: u64 = 1_000;
 /// Default maximum metric entries per heartbeat batch.
 const DEFAULT_METRICS_MAX_BATCH_SIZE: usize = 1024;
+/// Default: Pushgateway disabled (opt-in).
+const DEFAULT_PUSHGATEWAY_ENABLED: bool = false;
+/// Default Pushgateway push interval: 10 s.
+const DEFAULT_PUSHGATEWAY_PUSH_INTERVAL_MS: u64 = 10_000;
 
 // ── Storage option key constants ─────────────────────────────
 //
@@ -481,6 +522,32 @@ pub const ENV_METRICS_HEARTBEAT_INTERVAL_MS: &str = "GOOSEFS_USER_METRICS_HEARTB
 ///
 /// Mirrors Java's `goosefs.user.app.id`.
 pub const ENV_APP_ID: &str = "GOOSEFS_USER_APP_ID";
+
+/// Environment variable: whether to enable Pushgateway metrics push.
+///
+/// Accepted values: `"true"`, `"false"` (case-insensitive).
+/// When enabled, the client periodically pushes metrics to the configured Pushgateway endpoint.
+pub const ENV_PUSHGATEWAY_ENABLED: &str = "GOOSEFS_METRICS_PUSHGATEWAY_ENABLED";
+
+/// Environment variable: Pushgateway endpoint URL.
+///
+/// Example: `"http://10.0.0.1:9091"`.
+pub const ENV_PUSHGATEWAY_ENDPOINT: &str = "GOOSEFS_METRICS_PUSHGATEWAY_ENDPOINT";
+
+/// Environment variable: Pushgateway push interval in **milliseconds**.
+///
+/// Must parse as a positive integer ≥ 1000. Example: `"10000"` → 10 s.
+pub const ENV_PUSHGATEWAY_PUSH_INTERVAL_MS: &str = "GOOSEFS_METRICS_PUSHGATEWAY_PUSH_INTERVAL_MS";
+
+/// Environment variable: Pushgateway job label.
+///
+/// Defaults to `"goosefs_client"` if not set.
+pub const ENV_PUSHGATEWAY_JOB: &str = "GOOSEFS_METRICS_PUSHGATEWAY_JOB";
+
+/// Environment variable: Pushgateway instance label.
+///
+/// When not set, the Pushgateway auto-assigns based on the client IP.
+pub const ENV_PUSHGATEWAY_INSTANCE: &str = "GOOSEFS_METRICS_PUSHGATEWAY_INSTANCE";
 
 /// Storage option key for config manager RPC addresses.
 pub const STORAGE_OPT_CONFIG_MANAGER_RPC_ADDRESSES: &str = "goosefs_config_manager_rpc_addresses";
@@ -845,6 +912,56 @@ pub struct GoosefsConfig {
     /// subsequent ones once earlier entries have been flushed.
     #[serde(default = "default_metrics_max_batch_size")]
     pub metrics_max_batch_size: usize,
+
+    // ── Pushgateway configuration ────────────────────────────────────────
+    /// Whether to enable Prometheus Pushgateway metrics push (default: `false`).
+    ///
+    /// When `true`, the client spawns a background task that periodically pushes
+    /// all metrics from the global Registry to the configured Pushgateway endpoint.
+    ///
+    /// Environment variable: `GOOSEFS_METRICS_PUSHGATEWAY_ENABLED`
+    /// Properties key: `goosefs.metrics.pushgateway.enabled`
+    #[serde(default)]
+    pub pushgateway_enabled: bool,
+
+    /// Pushgateway endpoint URL (default: `"http://127.0.0.1:9091"`).
+    ///
+    /// Only effective when [`pushgateway_enabled`](Self::pushgateway_enabled) is `true`.
+    ///
+    /// Environment variable: `GOOSEFS_METRICS_PUSHGATEWAY_ENDPOINT`
+    /// Properties key: `goosefs.metrics.pushgateway.endpoint`
+    #[serde(default = "default_pushgateway_endpoint")]
+    pub pushgateway_endpoint: String,
+
+    /// Pushgateway push interval (default: 10 s).
+    ///
+    /// Controls how often the background task pushes metrics to the Pushgateway.
+    ///
+    /// Environment variable: `GOOSEFS_METRICS_PUSHGATEWAY_PUSH_INTERVAL_MS` (unit: ms)
+    /// Properties key: `goosefs.metrics.pushgateway.push.interval` (unit: ms)
+    #[serde(default = "default_pushgateway_push_interval")]
+    pub pushgateway_push_interval: Duration,
+
+    /// Pushgateway job label (default: `"goosefs_client"`).
+    ///
+    /// Maps to `/metrics/job/{job}` in the Pushgateway URL.
+    ///
+    /// Environment variable: `GOOSEFS_METRICS_PUSHGATEWAY_JOB`
+    /// Properties key: `goosefs.metrics.pushgateway.job`
+    #[serde(default = "default_pushgateway_job")]
+    pub pushgateway_job: String,
+
+    /// Pushgateway instance label (default: `None`).
+    ///
+    /// When set, adds `/instance/{instance}` to the Pushgateway URL.
+    /// When `None`, an instance identifier is auto-generated as
+    /// `"{local_ip}:{pid}"` to prevent multiple client processes on the
+    /// same machine from overwriting each other's metrics.
+    ///
+    /// Environment variable: `GOOSEFS_METRICS_PUSHGATEWAY_INSTANCE`
+    /// Properties key: `goosefs.metrics.pushgateway.instance`
+    #[serde(default)]
+    pub pushgateway_instance: Option<String>,
 }
 
 fn default_master_inquire_max_duration() -> Duration {
@@ -889,6 +1006,15 @@ fn default_metrics_heartbeat_timeout() -> Duration {
 fn default_metrics_max_batch_size() -> usize {
     DEFAULT_METRICS_MAX_BATCH_SIZE
 }
+fn default_pushgateway_endpoint() -> String {
+    "http://127.0.0.1:9091".to_string()
+}
+fn default_pushgateway_push_interval() -> Duration {
+    Duration::from_millis(DEFAULT_PUSHGATEWAY_PUSH_INTERVAL_MS)
+}
+fn default_pushgateway_job() -> String {
+    "goosefs_client".to_string()
+}
 
 impl Default for GoosefsConfig {
     fn default() -> Self {
@@ -920,6 +1046,11 @@ impl Default for GoosefsConfig {
             metrics_heartbeat_timeout: default_metrics_heartbeat_timeout(),
             app_id: None,
             metrics_max_batch_size: default_metrics_max_batch_size(),
+            pushgateway_enabled: DEFAULT_PUSHGATEWAY_ENABLED,
+            pushgateway_endpoint: default_pushgateway_endpoint(),
+            pushgateway_push_interval: default_pushgateway_push_interval(),
+            pushgateway_job: default_pushgateway_job(),
+            pushgateway_instance: None,
         }
     }
 }
@@ -1151,6 +1282,50 @@ impl GoosefsConfig {
         self
     }
 
+    // ── Pushgateway builder methods ─────────────────────────────────────────
+
+    /// Enable or disable Pushgateway metrics push.
+    ///
+    /// When enabled, the `FileSystemContext` will automatically spawn a background
+    /// task pushing metrics to the configured Pushgateway endpoint.
+    pub fn with_pushgateway_enabled(mut self, enabled: bool) -> Self {
+        self.pushgateway_enabled = enabled;
+        self
+    }
+
+    /// Set the Pushgateway endpoint URL.
+    ///
+    /// Example: `"http://10.0.0.1:9091"`
+    pub fn with_pushgateway_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.pushgateway_endpoint = endpoint.into();
+        self
+    }
+
+    /// Set the Pushgateway push interval.
+    ///
+    /// # Panics
+    /// Panics if `interval` is less than 1 second.
+    pub fn with_pushgateway_push_interval(mut self, interval: Duration) -> Self {
+        assert!(
+            interval >= Duration::from_secs(1),
+            "pushgateway_push_interval must be >= 1 s"
+        );
+        self.pushgateway_push_interval = interval;
+        self
+    }
+
+    /// Set the Pushgateway job label.
+    pub fn with_pushgateway_job(mut self, job: impl Into<String>) -> Self {
+        self.pushgateway_job = job.into();
+        self
+    }
+
+    /// Set the Pushgateway instance label.
+    pub fn with_pushgateway_instance(mut self, instance: impl Into<String>) -> Self {
+        self.pushgateway_instance = Some(instance.into());
+        self
+    }
+
     /// Load configuration from environment variables.
     ///
     /// Reads the following variables (all optional):
@@ -1304,6 +1479,43 @@ impl GoosefsConfig {
         if let Ok(id) = env::var(ENV_APP_ID) {
             if !id.is_empty() {
                 self.app_id = Some(id);
+            }
+        }
+
+        // Pushgateway enabled
+        if let Ok(val) = env::var(ENV_PUSHGATEWAY_ENABLED) {
+            if let Ok(b) = val.to_lowercase().parse::<bool>() {
+                self.pushgateway_enabled = b;
+            }
+        }
+
+        // Pushgateway endpoint
+        if let Ok(val) = env::var(ENV_PUSHGATEWAY_ENDPOINT) {
+            if !val.is_empty() {
+                self.pushgateway_endpoint = val;
+            }
+        }
+
+        // Pushgateway push interval (unit: milliseconds)
+        if let Ok(ms_str) = env::var(ENV_PUSHGATEWAY_PUSH_INTERVAL_MS) {
+            if let Ok(ms) = ms_str.parse::<u64>() {
+                if ms >= MIN_METRICS_HEARTBEAT_INTERVAL_MS {
+                    self.pushgateway_push_interval = Duration::from_millis(ms);
+                }
+            }
+        }
+
+        // Pushgateway job
+        if let Ok(val) = env::var(ENV_PUSHGATEWAY_JOB) {
+            if !val.is_empty() {
+                self.pushgateway_job = val;
+            }
+        }
+
+        // Pushgateway instance
+        if let Ok(val) = env::var(ENV_PUSHGATEWAY_INSTANCE) {
+            if !val.is_empty() {
+                self.pushgateway_instance = Some(val);
             }
         }
 

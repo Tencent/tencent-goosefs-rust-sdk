@@ -606,6 +606,11 @@ impl WorkerClientPool {
                         current = client.generation,
                         "reconnect coalesced — another task already refreshed this channel"
                     );
+                    // Instrument: coalesced reconnect
+                    crate::metrics::counter(
+                        crate::metrics::name::CLIENT_WORKER_RECONNECTS_COALESCED,
+                    )
+                    .inc(1);
                     return Ok(client.clone());
                 }
             }
@@ -618,6 +623,8 @@ impl WorkerClientPool {
             stale_generation = stale_generation,
             "performing single-flight reconnect"
         );
+        // Instrument: actual reconnect performed
+        crate::metrics::counter(crate::metrics::name::CLIENT_WORKER_RECONNECTS_TOTAL).inc(1);
         {
             let mut cache = self.clients.write().await;
             cache.remove(addr);

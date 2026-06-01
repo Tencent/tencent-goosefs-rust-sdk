@@ -1,6 +1,6 @@
 [package]
 name = "goosefs-sdk"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Goosefs Rust gRPC Client - Direct gRPC client for Goosefs Master/Worker"
 license = "Apache-2.0"
@@ -11,7 +11,7 @@ homepage = "https://git.woa.com/tencent-cloud-datalake/goosefs-client-rust"
 documentation = "https://docs.rs/goosefs-sdk"
 keywords = ["goosefs", "grpc", "storage", "filesystem", "cache"]
 categories = ["network-programming", "filesystem"]
-rust-version = "1.75"
+rust-version = "1.88"
 exclude = [
     ".idea/*",
     ".codebuddy/*",
@@ -31,9 +31,10 @@ exclude = [
 name = "goosefs_sdk"
 
 [dependencies]
-tonic = { version = "0.12", features = ["tls"] }
-prost = "0.13"
-prost-types = "0.13"
+tonic = { version = "0.14", features = ["transport"] }
+tonic-prost = "0.14"
+prost = "0.14"
+prost-types = "0.14"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 bytes = "1"
@@ -45,9 +46,10 @@ async-trait = "0.1"
 rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
 hostname = "0.3"
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 
 [build-dependencies]
-tonic-build = { version = "0.12", features = ["prost"] }
+tonic-prost-build = "0.14"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

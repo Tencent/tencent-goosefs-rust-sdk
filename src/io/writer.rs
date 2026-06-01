@@ -43,9 +43,11 @@ use crate::proto::grpc::block::{write_request, Chunk, WriteRequest, WriteRequest
 ///
 /// # Metrics instrumentation
 ///
-/// `write_chunk()` increments `Client.BytesWrittenLocal` to count cache-path
-/// writes. UFS direct-write instrumentation is deferred to the high-level
-/// `GoosefsFileWriter` where the write strategy is known.
+/// `GrpcBlockWriter` itself does **not** increment any byte-level metrics.
+/// Metrics are recorded at the `GoosefsFileWriter` level where the write
+/// strategy is known:
+/// - Cache stream writes → `Client.BytesWrittenLocal`
+/// - UFS stream writes   → `Client.BytesWrittenUfs`
 pub struct GrpcBlockWriter {
     /// Block being written.
     block_id: i64,
@@ -73,6 +75,10 @@ impl GrpcBlockWriter {
             .write_block(block_id, space_to_reserve, options)
             .await?;
 
+        // Instrument: track concurrent block writes
+        crate::metrics::gauge(name::CLIENT_BLOCKS_WRITTEN_IN_PROGRESS)
+            .set(crate::metrics::gauge(name::CLIENT_BLOCKS_WRITTEN_IN_PROGRESS).get() + 1);
+
         debug!(
             block_id = block_id,
             space_to_reserve = space_to_reserve,
@@ -88,7 +94,9 @@ impl GrpcBlockWriter {
 
     /// Write a data chunk to the block.
     ///
-    /// Increments the `Client.BytesWrittenLocal` counter.
+    /// Note: byte-level metrics are NOT recorded here; the caller
+    /// (`GoosefsFileWriter`) is responsible for incrementing the appropriate
+    /// counter (`BytesWrittenLocal` or `BytesWrittenUfs`).
     pub async fn write_chunk(&mut self, data: Bytes) -> Result<()> {
         let chunk_len = data.len() as i64;
 
@@ -113,9 +121,6 @@ impl GrpcBlockWriter {
             total_written = self.bytes_written,
             "wrote chunk"
         );
-
-        // Instrument: increment written bytes counter (cache path).
-        crate::metrics::counter(name::CLIENT_BYTES_WRITTEN_LOCAL).inc(chunk_len);
 
         Ok(())
     }
@@ -186,6 +191,11 @@ impl GrpcBlockWriter {
         // of the stream, triggering server-side onCompleted → commitBlock.
         self.handle.close().await?;
 
+        // Instrument: block write completed
+        crate::metrics::counter(name::CLIENT_BLOCKS_WRITTEN_TOTAL).inc(1);
+        crate::metrics::gauge(name::CLIENT_BLOCKS_WRITTEN_IN_PROGRESS)
+            .set((crate::metrics::gauge(name::CLIENT_BLOCKS_WRITTEN_IN_PROGRESS).get() - 1).max(0));
+
         debug!(
             block_id = block_id,
             bytes_written = bytes_written,
@@ -220,12 +230,15 @@ impl GrpcBlockWriter {
 mod tests {
     use super::*;
 
-    /// Verify that metrics instrumentation in write_chunk is sound.
+    /// Verify that metrics counters used by the write path are accessible.
     /// (Full write path testing is integration-level; here we just verify
-    /// that the metrics counter is accessible and callable.)
+    /// that the metrics counters are accessible and callable.)
     #[test]
     fn metrics_counter_accessible() {
-        let _counter = crate::metrics::counter(name::CLIENT_BYTES_WRITTEN_LOCAL);
+        let local = crate::metrics::counter(name::CLIENT_BYTES_WRITTEN_LOCAL);
+        let ufs = crate::metrics::counter(name::CLIENT_BYTES_WRITTEN_UFS);
         // Just verifying no panics during counter access.
+        local.inc(0);
+        ufs.inc(0);
     }
 }

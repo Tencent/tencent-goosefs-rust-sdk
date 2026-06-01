@@ -57,7 +57,7 @@ fn verify_slice(slice: &[u8], offset: usize) -> bool {
 async fn main() -> Result<()> {
     let master_addr =
         std::env::var("GOOSEFS_MASTER_ADDR").unwrap_or_else(|_| "127.0.0.1:9200".to_string());
-    let config = GoosefsConfig::new(master_addr.as_str());
+    let config = GoosefsConfig::new(&master_addr);
 
     println!("== async_read_trait demo ==");
     println!("master: {master_addr}");
