@@ -1,6 +1,6 @@
 //! Prometheus Pushgateway reporter.
 //!
-//! Periodically collects all metrics from the global [`Registry`](super::registry::Registry)
+//! Periodically collects all metrics from the global `Registry`
 //! and pushes them to a Prometheus Pushgateway endpoint via HTTP POST using the
 //! [Prometheus text exposition format](https://prometheus.io/docs/instrumenting/exposition_formats/).
 //!
