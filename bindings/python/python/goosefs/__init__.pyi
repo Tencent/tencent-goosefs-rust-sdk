@@ -522,6 +522,24 @@ class AsyncGoosefs:
     def get_status(self, path: str) -> Awaitable[URIStatus]: ...
     def list_status(self, path: str, *, recursive: bool = ...) -> Awaitable[list[URIStatus]]: ...
     def exists(self, path: str) -> Awaitable[bool]: ...
+    def batch_get_status(self, paths: list[str]) -> Awaitable[list[URIStatus]]:
+        """Concurrent ``get_status`` for every path (single PyO3 crossing).
+
+        Results are returned in input order. Concurrency is bounded
+        internally (at most 64 RPCs in flight) so passing thousands of
+        paths will *not* fan out thousands of simultaneous gRPC streams
+        to the master.
+
+        The whole batch fails on the first error (e.g. a ``NotFound`` for
+        any path). Note that a failed batch does *not* cancel the RPCs
+        that are already in flight — the early return only stops feeding
+        new requests into the buffer."""
+        ...
+    def batch_exists(self, paths: list[str]) -> Awaitable[list[bool]]:
+        """Concurrent ``exists`` for every path; booleans in input order.
+
+        Concurrency is bounded internally (at most 64 RPCs in flight)."""
+        ...
     def mkdir(self, path: str, *, recursive: bool = ...) -> Awaitable[None]: ...
     def delete(
         self,
@@ -638,6 +656,23 @@ class Goosefs:
     def get_status(self, path: str) -> URIStatus: ...
     def list_status(self, path: str, *, recursive: bool = ...) -> list[URIStatus]: ...
     def exists(self, path: str) -> bool: ...
+    def batch_get_status(self, paths: list[str]) -> list[URIStatus]:
+        """Concurrent ``get_status`` for every path (single GIL release).
+
+        Results are returned in input order. Concurrency is bounded
+        internally (at most 64 RPCs in flight) so passing thousands of
+        paths will *not* fan out thousands of simultaneous gRPC streams
+        to the master.
+
+        The whole batch fails on the first error (e.g. a ``NotFound`` for
+        any path). Note that a failed batch does *not* cancel the RPCs
+        that are already in flight."""
+        ...
+    def batch_exists(self, paths: list[str]) -> list[bool]:
+        """Concurrent ``exists`` for every path; booleans in input order.
+
+        Concurrency is bounded internally (at most 64 RPCs in flight)."""
+        ...
     def mkdir(self, path: str, *, recursive: bool = ...) -> None: ...
     def delete(
         self,

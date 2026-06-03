@@ -186,6 +186,61 @@ impl PyGoosefs {
         })
     }
 
+    // ── Batch metadata (Phase 2.1) ───────────────────────────────────────────
+    //
+    // Synchronous counterparts to `AsyncGoosefs.batch_*`. A single
+    // `guarded_block_on` drives all N RPCs concurrently with a bounded
+    // `stream::iter(..).buffered(BATCH_CONCURRENCY_LIMIT)`, so the GIL is
+    // released once for the whole batch rather than once per op, while the
+    // master is shielded from unbounded fan-out (a 10k-path caller will
+    // never start 10k simultaneous RPCs).
+
+    /// `fs.batch_get_status(paths)` → `list[URIStatus]`.
+    ///
+    /// Concurrent `get_status` for every path with bounded concurrency
+    /// (at most `BATCH_CONCURRENCY_LIMIT` RPCs in flight); results in
+    /// input order. The
+    /// whole batch fails on the first error.
+    fn batch_get_status(
+        &self,
+        py: Python<'_>,
+        paths: Vec<String>,
+    ) -> PyResult<Vec<PyURIStatus>> {
+        let h = self.handle()?;
+        Self::guarded_block_on(py, async move {
+            use futures::stream::{self, StreamExt};
+            let fs = h.fs.clone();
+            stream::iter(paths.into_iter().map(move |p| {
+                let fs = fs.clone();
+                async move { fs.get_status(&p).await.map_err(map_err) }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .map(|r| r.map(PyURIStatus::new))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<Vec<_>>>()
+        })
+    }
+
+    /// `fs.batch_exists(paths)` → `list[bool]`.
+    fn batch_exists(&self, py: Python<'_>, paths: Vec<String>) -> PyResult<Vec<bool>> {
+        let h = self.handle()?;
+        Self::guarded_block_on(py, async move {
+            use futures::stream::{self, StreamExt};
+            let fs = h.fs.clone();
+            stream::iter(paths.into_iter().map(move |p| {
+                let fs = fs.clone();
+                async move { fs.exists(&p).await.map_err(map_err) }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<Vec<bool>>>()
+        })
+    }
+
     // ── Mutations ───────────────────────────────────────────────────────────
 
     /// `fs.mkdir(path, recursive=False)`.
@@ -256,23 +311,19 @@ impl PyGoosefs {
         path: String,
     ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
         let h = self.handle()?;
-        // We must collect into an owned `Vec<u8>` inside the blocking section
-        // because the resulting `PyBytes` can only be constructed once the
-        // GIL is re-acquired by `guarded_block_on`'s caller. We *cannot* hold
-        // a `Python<'py>` reference inside the future passed to `block_on`,
-        // so we copy the bytes out first and then wrap them.
-        let buf: Vec<u8> = Self::guarded_block_on(py, async move {
-            let bytes = goosefs_sdk::io::GoosefsFileReader::read_file_with_context(
+        // Carry the SDK's `Bytes` (ref-counted, contiguous) out of the
+        // blocking section, then build `PyBytes` from `as_ref()` once the GIL
+        // is back. This is a single copy into Python memory — the previous
+        // `to_vec()` intermediate is gone (Phase 1.4).
+        let bytes: bytes::Bytes = Self::guarded_block_on(py, async move {
+            goosefs_sdk::io::GoosefsFileReader::read_file_with_context(
                 h.ctx.clone(),
                 &path,
             )
             .await
-            .map_err(map_err)?;
-            // `Bytes::to_vec` is a single copy; same overhead as the async
-            // path (which copies through `PyBytes::new`).
-            Ok(bytes.to_vec())
+            .map_err(map_err)
         })?;
-        Ok(pyo3::types::PyBytes::new(py, &buf))
+        Ok(pyo3::types::PyBytes::new(py, bytes.as_ref()))
     }
 
     /// `fs.read_range(path, offset, length)` → `bytes`.
@@ -284,18 +335,17 @@ impl PyGoosefs {
         length: u64,
     ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
         let h = self.handle()?;
-        let buf: Vec<u8> = Self::guarded_block_on(py, async move {
-            let bytes = goosefs_sdk::io::GoosefsFileReader::read_range_with_context(
+        let bytes: bytes::Bytes = Self::guarded_block_on(py, async move {
+            goosefs_sdk::io::GoosefsFileReader::read_range_with_context(
                 h.ctx.clone(),
                 &path,
                 offset,
                 length,
             )
             .await
-            .map_err(map_err)?;
-            Ok(bytes.to_vec())
+            .map_err(map_err)
         })?;
-        Ok(pyo3::types::PyBytes::new(py, &buf))
+        Ok(pyo3::types::PyBytes::new(py, bytes.as_ref()))
     }
 
     /// `fs.write_file(path, data, *, write_type=None, block_size_bytes=None, recursive=False)` → `int`.

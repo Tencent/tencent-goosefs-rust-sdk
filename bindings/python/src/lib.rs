@@ -55,6 +55,12 @@ use pyo3::prelude::*;
 /// wrap blocking operations in `py.allow_threads(...)`.
 #[pymodule(gil_used = false)]
 fn _goosefs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Phase 2.2 — install the custom Tokio runtime builder *first*, before any
+    // class is constructed or any `connect()` lazily builds the runtime. This
+    // is a no-op if called after the runtime is already built, so ordering
+    // matters: keep it at the very top of module init.
+    runtime::init_custom_runtime();
+
     // Crate version — keep in sync with `bindings/python/Cargo.toml` and the
     // root `goosefs-sdk` crate. CI will enforce this in P8.
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

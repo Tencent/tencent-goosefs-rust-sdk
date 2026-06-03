@@ -72,6 +72,13 @@ pub(crate) fn extract_bytes_like(data: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
              Encode it explicitly with `s.encode(\"utf-8\")` first.",
         ));
     }
+    // NOTE (Phase 3, deferred): the `PyBuffer` zero-extract fast path from the
+    // optimization analysis is NOT viable here. `pyo3::buffer` is gated behind
+    // `not(Py_LIMITED_API)` OR `Py_3_11`, and this crate builds with
+    // `abi3-py39` (one wheel for CPython 3.9+). Adopting `PyBuffer` would force
+    // the abi3 floor up to py311 and drop 3.9/3.10 support — too steep a price
+    // for a marginal (+5-10%) write-path gain. Revisit only if the abi3 floor
+    // is bumped to 3.11. For now keep the portable `extract::<Vec<u8>>()` path.
     data.extract::<Vec<u8>>().map_err(|_| {
         pyo3::exceptions::PyTypeError::new_err(
             "`data` must be a bytes-like object (bytes, bytearray, memoryview)",
@@ -185,6 +192,82 @@ impl PyAsyncGoosefs {
         future_into_py(py, async move {
             let b = h.fs.exists(&path).await.map_err(map_err)?;
             Ok(b)
+        })
+    }
+
+    // ── Batch metadata (Phase 2.1) ───────────────────────────────────────────
+    //
+    // These collapse N independent metadata RPCs into a *single* PyO3 boundary
+    // crossing. The futures are driven concurrently on the Tokio runtime via
+    // `stream::iter(..).buffered(BATCH_CONCURRENCY_LIMIT)`, so they are
+    // in-flight at the same time instead of being serialised one-by-one at
+    // the GIL. This is the lever for "application queries many paths at once":
+    // it bypasses the per-op GIL-contention ceiling that single-op calls hit
+    // under high thread concurrency (see analysis §3.1 / scheme 1).
+    //
+    // The concurrency cap (`BATCH_CONCURRENCY_LIMIT`, see `crate::context`)
+    // bounds how many RPCs can be in flight per batch; this protects the
+    // master from a `paths.len() == 10_000` caller starting ten thousand
+    // simultaneous gRPC requests. `buffered` (rather than `buffer_unordered`)
+    // also preserves input order without an explicit sort.
+
+    /// `await fs.batch_get_status(paths)` → `list[URIStatus]`.
+    ///
+    /// Issues `get_status` per path with bounded concurrency (at most
+    /// `BATCH_CONCURRENCY_LIMIT` RPCs in flight) and returns the results
+    /// in input order. The whole batch fails on the first error (e.g. a
+    /// `NotFound` for any path) — use individual `get_status` calls if you
+    /// need per-path error isolation.
+    ///
+    /// **Note**: a failed batch does *not* cancel the in-flight RPCs that
+    /// have already been dispatched — the early return only stops feeding
+    /// new requests into the buffer. Callers should not rely on "all other
+    /// requests are aborted" semantics.
+    fn batch_get_status<'py>(
+        &self,
+        py: Python<'py>,
+        paths: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let h = self.handle()?;
+        future_into_py(py, async move {
+            use futures::stream::{self, StreamExt};
+            let fs = h.fs.clone();
+            stream::iter(paths.into_iter().map(move |p| {
+                let fs = fs.clone();
+                async move { fs.get_status(&p).await.map_err(map_err) }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .map(|r| r.map(PyURIStatus::new))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<Vec<_>>>()
+        })
+    }
+
+    /// `await fs.batch_exists(paths)` → `list[bool]`.
+    ///
+    /// Issues `exists` per path with bounded concurrency (at most
+    /// `BATCH_CONCURRENCY_LIMIT` RPCs in flight) and returns the booleans
+    /// in input order.
+    fn batch_exists<'py>(
+        &self,
+        py: Python<'py>,
+        paths: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let h = self.handle()?;
+        future_into_py(py, async move {
+            use futures::stream::{self, StreamExt};
+            let fs = h.fs.clone();
+            stream::iter(paths.into_iter().map(move |p| {
+                let fs = fs.clone();
+                async move { fs.exists(&p).await.map_err(map_err) }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<Vec<bool>>>()
         })
     }
 

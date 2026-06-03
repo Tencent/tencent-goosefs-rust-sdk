@@ -50,6 +50,37 @@ def test_sync_exists_true_and_false(sync_fs: Goosefs, sync_tmp_dir: str) -> None
 
 
 # ---------------------------------------------------------------------------
+# batch_get_status / batch_exists (Phase 2.1)
+# ---------------------------------------------------------------------------
+
+
+def test_sync_batch_exists_mixed(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
+    sub = f"{sync_tmp_dir}/sub"
+    sync_fs.mkdir(sub)
+    results = sync_fs.batch_exists([sync_tmp_dir, sub, f"{sync_tmp_dir}/missing"])
+    assert results == [True, True, False]
+
+
+def test_sync_batch_exists_empty(sync_fs: Goosefs) -> None:
+    assert sync_fs.batch_exists([]) == []
+
+
+def test_sync_batch_get_status_returns_in_order(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
+    a = f"{sync_tmp_dir}/a"
+    b = f"{sync_tmp_dir}/b"
+    sync_fs.mkdir(a)
+    sync_fs.mkdir(b)
+    statuses = sync_fs.batch_get_status([a, b, sync_tmp_dir])
+    assert [s.path for s in statuses] == [a, b, sync_tmp_dir]
+    assert all(isinstance(s, URIStatus) for s in statuses)
+
+
+def test_sync_batch_get_status_fails_on_missing(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
+    with pytest.raises(NotFound):
+        sync_fs.batch_get_status([sync_tmp_dir, f"{sync_tmp_dir}/missing"])
+
+
+# ---------------------------------------------------------------------------
 # mkdir / list_status / rename / delete
 # ---------------------------------------------------------------------------
 

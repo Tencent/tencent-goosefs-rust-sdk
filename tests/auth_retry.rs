@@ -81,10 +81,7 @@ fn grpc_unauthenticated_triggers_auth_retry_path() {
         err.is_authentication_failed(),
         "UNAUTHENTICATED must map to AuthenticationFailed for auth-retry"
     );
-    assert!(
-        err.is_retriable(),
-        "AuthenticationFailed must be retriable"
-    );
+    assert!(err.is_retriable(), "AuthenticationFailed must be retriable");
 }
 
 // ── Cluster integration tests (require live Goosefs master + worker) ─────

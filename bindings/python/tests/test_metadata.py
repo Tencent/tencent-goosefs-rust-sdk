@@ -52,6 +52,42 @@ async def test_exists_returns_true_for_directory(async_fs: AsyncGoosefs, tmp_dir
 
 
 # ---------------------------------------------------------------------------
+# batch_get_status / batch_exists (Phase 2.1)
+# ---------------------------------------------------------------------------
+
+
+async def test_batch_exists_mixed(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
+    sub = f"{tmp_dir}/sub"
+    await async_fs.mkdir(sub)
+    paths = [tmp_dir, sub, f"{tmp_dir}/missing"]
+    results = await async_fs.batch_exists(paths)
+    assert results == [True, True, False]
+
+
+async def test_batch_exists_empty(async_fs: AsyncGoosefs) -> None:
+    assert await async_fs.batch_exists([]) == []
+
+
+async def test_batch_get_status_returns_in_order(
+    async_fs: AsyncGoosefs, tmp_dir: str
+) -> None:
+    a = f"{tmp_dir}/a"
+    b = f"{tmp_dir}/b"
+    await async_fs.mkdir(a)
+    await async_fs.mkdir(b)
+    statuses = await async_fs.batch_get_status([a, b, tmp_dir])
+    assert [s.path for s in statuses] == [a, b, tmp_dir]
+    assert all(isinstance(s, URIStatus) for s in statuses)
+
+
+async def test_batch_get_status_fails_whole_batch_on_missing(
+    async_fs: AsyncGoosefs, tmp_dir: str
+) -> None:
+    with pytest.raises(NotFound):
+        await async_fs.batch_get_status([tmp_dir, f"{tmp_dir}/missing"])
+
+
+# ---------------------------------------------------------------------------
 # mkdir
 # ---------------------------------------------------------------------------
 

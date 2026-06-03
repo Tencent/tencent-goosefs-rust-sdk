@@ -396,7 +396,10 @@ mod tests {
             message: "connection refused".to_string(),
             source: Box::new(tonic::Status::unavailable("worker unreachable")),
         };
-        assert!(!unavailable_err.is_authentication_failed(), "Unavailable must NOT be auth-failed");
+        assert!(
+            !unavailable_err.is_authentication_failed(),
+            "Unavailable must NOT be auth-failed"
+        );
         assert!(unavailable_err.is_retriable());
 
         // TransportError is retriable but NOT auth-failed
@@ -407,11 +410,16 @@ mod tests {
             message: "deadline exceeded".to_string(),
             source: Box::new(tonic::Status::deadline_exceeded("timed out")),
         };
-        assert!(!deadline_err.is_authentication_failed(), "DeadlineExceeded must NOT be auth-failed");
+        assert!(
+            !deadline_err.is_authentication_failed(),
+            "DeadlineExceeded must NOT be auth-failed"
+        );
         assert!(deadline_err.is_retriable());
 
         // Non-retriable errors are never auth-failed
-        let not_found = Error::NotFound { path: "/foo".to_string() };
+        let not_found = Error::NotFound {
+            path: "/foo".to_string(),
+        };
         assert!(!not_found.is_authentication_failed());
         assert!(!not_found.is_retriable());
 

@@ -1,6 +1,6 @@
 [package]
 name = "goosefs-python"
-version = "0.1.2"
+version = "0.1.4"
 edition = "2021"
 license = "Apache-2.0"
 description = "PyO3 binding for the goosefs-sdk Rust crate (powers the `goosefs` PyPI package)"

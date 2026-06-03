@@ -351,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "goosefs-python"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "bytes",
  "futures",

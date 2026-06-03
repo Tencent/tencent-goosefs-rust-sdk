@@ -89,24 +89,31 @@ async fn pull_n(stream: &mut GoosefsFileInStream, want: usize) -> PyResult<Vec<u
     if want == 0 {
         return Ok(Vec::new());
     }
-    let mut out = Vec::with_capacity(want);
-    while out.len() < want {
-        let need = want - out.len();
-        let mut tmp = vec![0u8; need];
-        let n = stream.read(&mut tmp).await.map_err(map_err)?;
+    // Optimization (Phase 1.1): allocate the destination buffer once and read
+    // straight into it. The SDK's `read` writes into the provided slice, so
+    // each loop turn fills `out[filled..]` in place — no per-iteration `tmp`
+    // allocation and no `extend_from_slice` copy. This removes O(N) extra
+    // allocations + memcpys for short-read loops.
+    let mut out = vec![0u8; want];
+    let mut filled = 0;
+    while filled < want {
+        let n = stream.read(&mut out[filled..]).await.map_err(map_err)?;
         if n == 0 {
             break; // EOF
         }
-        tmp.truncate(n);
-        out.extend_from_slice(&tmp);
+        filled += n;
     }
+    out.truncate(filled);
     Ok(out)
 }
 
 /// Read every remaining byte from the current position to EOF.
-async fn pull_all(stream: &mut GoosefsFileInStream) -> PyResult<Vec<u8>> {
-    let bytes = stream.read_all().await.map_err(map_err)?;
-    Ok(bytes.to_vec())
+///
+/// Returns the SDK's `Bytes` directly (Phase 1.2): the caller constructs
+/// `PyBytes` from `as_ref()`, so there is a single copy into Python-owned
+/// memory instead of the previous `Bytes -> Vec<u8> -> PyBytes` double copy.
+async fn pull_all(stream: &mut GoosefsFileInStream) -> PyResult<bytes::Bytes> {
+    stream.read_all().await.map_err(map_err)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -215,12 +222,16 @@ impl PyAsyncFileReader {
             let stream = guard
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("AsyncFileReader is closed"))?;
-            let buf = if size < 0 {
-                pull_all(stream).await?
+            // Two branches build `PyBytes` from their own buffer kind to keep
+            // each path single-copy: `pull_all` hands back the SDK's `Bytes`
+            // (copied once via `as_ref()`), `pull_n` fills a pre-sized `Vec`.
+            if size < 0 {
+                let bytes = pull_all(stream).await?;
+                Python::attach(|py| Ok(PyBytes::new(py, bytes.as_ref()).unbind()))
             } else {
-                pull_n(stream, size as usize).await?
-            };
-            Python::attach(|py| Ok(PyBytes::new(py, &buf).unbind()))
+                let buf = pull_n(stream, size as usize).await?;
+                Python::attach(|py| Ok(PyBytes::new(py, &buf).unbind()))
+            }
         })
     }
 
@@ -460,7 +471,10 @@ impl PyFileReader {
     #[pyo3(signature = (size=-1))]
     fn read<'py>(&self, py: Python<'py>, size: i64) -> PyResult<Bound<'py, PyBytes>> {
         let inner = Arc::clone(&self.inner);
-        let buf: Vec<u8> = guarded_block_on(py, async move {
+        // `pull_all` returns `Bytes`, `pull_n` returns `Vec<u8>`; we normalise
+        // to `Bytes` so both branches share a single `PyBytes` construction
+        // (one copy into Python-owned memory).
+        let bytes: bytes::Bytes = guarded_block_on(py, async move {
             let mut guard = inner.lock().await;
             let stream = guard
                 .as_mut()
@@ -468,10 +482,10 @@ impl PyFileReader {
             if size < 0 {
                 pull_all(stream).await
             } else {
-                pull_n(stream, size as usize).await
+                pull_n(stream, size as usize).await.map(bytes::Bytes::from)
             }
         })?;
-        Ok(PyBytes::new(py, &buf))
+        Ok(PyBytes::new(py, bytes.as_ref()))
     }
 
     fn read_at<'py>(
@@ -484,15 +498,16 @@ impl PyFileReader {
             return Err(PyValueError::new_err("offset must be non-negative"));
         }
         let inner = Arc::clone(&self.inner);
-        let buf: Vec<u8> = guarded_block_on(py, async move {
+        // Return the SDK's `Bytes` directly (Phase 1.3) and build `PyBytes`
+        // once via `as_ref()`, dropping the previous `to_vec()` intermediate.
+        let bytes: bytes::Bytes = guarded_block_on(py, async move {
             let mut guard = inner.lock().await;
             let stream = guard
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("FileReader is closed"))?;
-            let bytes = stream.read_at(offset, length).await.map_err(map_err)?;
-            Ok(bytes.to_vec())
+            stream.read_at(offset, length).await.map_err(map_err)
         })?;
-        Ok(PyBytes::new(py, &buf))
+        Ok(PyBytes::new(py, bytes.as_ref()))
     }
 
     #[pyo3(signature = (offset, whence=0))]
