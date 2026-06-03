@@ -22,6 +22,19 @@ For synchronous (blocking) workflows, use ``Goosefs``::
         fs.mkdir("/tmp/p3", recursive=True)
         assert fs.exists("/tmp/p3")
 
+Worker block direct positioned read (``goosefs >= 0.1.3``)::
+
+    # High-level one-liner: resolve URI -> pick block -> route -> direct
+    # WorkerClient::read_block_positioned -> bytes (one PyO3 copy).
+    data = await fs.positioned_read("/data/blob.bin",
+                                    block_index=0,
+                                    offset=0,
+                                    length=64 * 1024)
+
+    # Low-level escape hatch when you already know the block_id:
+    async with await fs.acquire_worker_for_block(block_id) as wc:
+        data = await wc.read_block_positioned(block_id, 0, 64 * 1024)
+
 The native extension module is named ``goosefs._goosefs`` and is built from
 ``bindings/python/src/lib.rs``. End users should import from ``goosefs``
 directly; the underscore-prefixed module is an implementation detail.
@@ -40,6 +53,7 @@ from ._goosefs import (  # noqa: F401
     AsyncFileReader,
     AsyncFileWriter,
     AsyncGoosefs,
+    AsyncWorkerClient,
     Config,
     CreateFileOptions,
     DeleteOptions,
@@ -65,6 +79,7 @@ __all__ = [
     "AsyncFileReader",
     "AsyncFileWriter",
     "AsyncGoosefs",
+    "AsyncWorkerClient",
     "Config",
     "CreateFileOptions",
     "DeleteOptions",

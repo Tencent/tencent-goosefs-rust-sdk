@@ -368,4 +368,76 @@ mod tests {
         assert!(perm.is_access_denied());
         assert!(auth.is_access_denied());
     }
+
+    // ── Auth-retry error classification tests ────────────────────────────
+    //
+    // The auth-retry decision in GoosefsFileReader / GoosefsFileInStream
+    // hinges on `is_authentication_failed()` returning true.  These tests
+    // lock down the classification so a refactor can't silently break the
+    // retry trigger.
+
+    /// Verify that `Error::AuthenticationFailed` is the **only** retriable
+    /// error that also satisfies `is_authentication_failed()`.  This is the
+    /// key discriminant for the auth-retry path: the reader retries the RPC
+    /// only when `is_authentication_failed()` is true, not for generic
+    /// unavailable or transport errors.
+    #[test]
+    fn test_auth_retry_error_classification() {
+        // AuthenticationFailed is retriable AND auth-failed
+        let auth_err = Error::AuthenticationFailed {
+            message: "SASL token expired".to_string(),
+        };
+        assert!(auth_err.is_authentication_failed());
+        assert!(auth_err.is_retriable());
+        assert!(!auth_err.is_unavailable());
+
+        // GrpcError(Unavailable) is retriable but NOT auth-failed
+        let unavailable_err = Error::GrpcError {
+            message: "connection refused".to_string(),
+            source: Box::new(tonic::Status::unavailable("worker unreachable")),
+        };
+        assert!(!unavailable_err.is_authentication_failed(), "Unavailable must NOT be auth-failed");
+        assert!(unavailable_err.is_retriable());
+
+        // TransportError is retriable but NOT auth-failed
+        // (Constructing a tonic::transport::Error directly is not possible
+        // without a real transport failure; we verify via the From impl instead.)
+        // Instead, verify that a DeadlineExceeded GrpcError is NOT auth-failed:
+        let deadline_err = Error::GrpcError {
+            message: "deadline exceeded".to_string(),
+            source: Box::new(tonic::Status::deadline_exceeded("timed out")),
+        };
+        assert!(!deadline_err.is_authentication_failed(), "DeadlineExceeded must NOT be auth-failed");
+        assert!(deadline_err.is_retriable());
+
+        // Non-retriable errors are never auth-failed
+        let not_found = Error::NotFound { path: "/foo".to_string() };
+        assert!(!not_found.is_authentication_failed());
+        assert!(!not_found.is_retriable());
+
+        let internal = Error::Internal {
+            message: "oops".to_string(),
+            source: None,
+        };
+        assert!(!internal.is_authentication_failed());
+        assert!(!internal.is_retriable());
+    }
+
+    /// Verify that a tonic `UNAUTHENTICATED` status maps to
+    /// `Error::AuthenticationFailed` — this is the gateway trigger for
+    /// auth-retry.  If the mapping breaks, the reader won't recognize auth
+    /// failures and won't retry.
+    #[test]
+    fn test_grpc_unauthenticated_maps_correctly_for_auth_retry() {
+        let status = tonic::Status::unauthenticated("SASL handshake rejected");
+        let err = Error::from(status);
+        assert!(
+            err.is_authentication_failed(),
+            "UNAUTHENTICATED must map to AuthenticationFailed for auth-retry to work"
+        );
+        assert!(
+            err.is_retriable(),
+            "AuthenticationFailed must be retriable so the reader retries after reconnect"
+        );
+    }
 }

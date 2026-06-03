@@ -416,9 +416,95 @@ class FileWriter:
         traceback: Any | None = ...,
     ) -> bool: ...
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────
+# Low-level Worker block client
+# ─────────────────────────────────────────────────────────────────────────
+
+@final
+class AsyncWorkerClient:
+    """Low-level coroutine-based block reader for a single Goosefs Worker.
+
+    Wraps ``goosefs_sdk::client::WorkerClient``. Each instance owns one
+    authenticated gRPC channel to one Worker (``host:port``). Use this
+    class when you already know which Worker holds the block you want to
+    read — typically benchmarks, custom routing experiments, or
+    re-implementations of GooseFS-stress' ``--transport block`` mode.
+
+    For ordinary file reads prefer the high-level
+    ``AsyncGoosefs.open_file`` / ``read_range`` (or the
+    ``AsyncGoosefs.positioned_read`` / ``acquire_worker_for_block``
+    helpers added in stage B), which transparently select the right
+    Worker via ``WorkerRouter`` and reuse the shared
+    ``WorkerClientPool``.
+
+    The handle is safe to share across coroutines; the underlying
+    ``WorkerClient`` is ``Clone`` and concurrent
+    ``read_block_positioned`` calls will multiplex on the same gRPC
+    channel. Calling ``close()`` invalidates the handle — any subsequent
+    method raises ``RuntimeError``.
+    """
+
+    @staticmethod
+    def connect(addr: str, config: Config) -> Awaitable[AsyncWorkerClient]:
+        """Open an authenticated gRPC channel to ``addr`` (``host:port``).
+
+        The handshake follows ``config.auth_type``; pass the same
+        ``Config`` you would give to ``AsyncGoosefs.connect``.
+        """
+        ...
+    @staticmethod
+    def connect_simple(
+        addr: str, connect_timeout_ms: int = ...
+    ) -> Awaitable[AsyncWorkerClient]:
+        """Connect without SASL authentication — test workers only.
+
+        .. deprecated::
+            ``connect_simple`` bypasses SASL authentication and is only
+            suitable for NOSASL test workers. Production code should use
+            :meth:`connect` with a proper :class:`Config`. Emits
+            ``DeprecationWarning`` on every call.
+        """
+        ...
+    def read_block_positioned(
+        self,
+        block_id: int,
+        offset: int,
+        length: int,
+        chunk_size: int = ...,
+    ) -> Awaitable[bytes]:
+        """One-shot positioned read against a single block.
+
+        Sends ``position_short = true`` so the Worker skips prefetch and
+        closes the response stream after delivering exactly ``length``
+        bytes. Returns the requested byte range as a single ``bytes``
+        object (one copy across the PyO3 boundary).
+
+        ``chunk_size`` defaults to 1 MiB, matching
+        ``goosefs.user.streaming.reader.chunk.size.bytes``.
+
+        Raises ``ValueError`` for negative offset/length or non-positive
+        chunk_size; ``RuntimeError`` if the handle was already closed;
+        ``IoError`` / ``RpcError`` for transport failures.
+        """
+        ...
+    @property
+    def addr(self) -> str:
+        """The ``host:port`` this client is connected to."""
+        ...
+    def close(self) -> Awaitable[None]:
+        """Idempotent. Subsequent reads raise ``RuntimeError``."""
+        ...
+    def __aenter__(self) -> Awaitable[AsyncWorkerClient]: ...
+    def __aexit__(
+        self,
+        exc_type: type[BaseException] | None = ...,
+        exc_value: BaseException | None = ...,
+        traceback: Any | None = ...,
+    ) -> Awaitable[None]: ...
+
+# ─────────────────────────────────────────────────────────────────────────
 # Filesystem facade — async
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────
 
 @final
 class AsyncGoosefs:
@@ -471,6 +557,46 @@ class AsyncGoosefs:
         block_size_bytes: int | None = ...,
         recursive: bool = ...,
     ) -> Awaitable[AsyncFileWriter]: ...
+
+    # ── Worker block direct-read (P6 stage B)
+    def acquire_worker_for_block(
+        self,
+        block_id: int,
+    ) -> Awaitable[AsyncWorkerClient]:
+        """Pick the responsible Worker for ``block_id`` (router + pool acquire).
+
+        Returns a binding-level wrapper around the *pooled*
+        ``WorkerClient`` — closing it only releases the wrapper, the
+        underlying authenticated channel stays in the
+        ``FileSystemContext``'s pool.
+        """
+        ...
+    def positioned_read(
+        self,
+        path: str,
+        *,
+        block_index: int = ...,
+        offset: int = ...,
+        length: int = ...,
+        chunk_size: int = ...,
+    ) -> Awaitable[bytes]:
+        """High-level Worker block direct read.
+
+        Resolves ``path`` → picks ``block_ids[block_index]`` → routes to
+        the responsible Worker via the shared ``WorkerRouter`` →
+        positioned-reads the requested byte range from that block in a
+        single round-trip. ``length=-1`` (default) reads from ``offset``
+        to the end of the chosen block.
+
+        **Note on last-block ``length=-1``**: for the last block of a
+        file the actual block size may be smaller than
+        ``block_size_bytes`` reported by master, so ``length=-1``
+        returns only the remaining bytes of that block (which may be
+        < ``block_size_bytes``).
+
+        Mirrors the Rust SDK's ``examples/lowlevel_block_read.rs``.
+        """
+        ...
 
     # ── Lifecycle
     def close(self) -> Awaitable[None]: ...
@@ -548,6 +674,40 @@ class Goosefs:
         recursive: bool = ...,
     ) -> FileWriter: ...
 
+    # ── Worker block direct-read (P6 stage B)
+    def acquire_worker_for_block(
+        self,
+        block_id: int,
+    ) -> AsyncWorkerClient:
+        """Pick the responsible Worker for ``block_id``.
+
+        The returned object is still an :class:`AsyncWorkerClient` — its
+        ``read_block_positioned`` method must be ``await``-ed from an
+        async context. Pure-sync callers should prefer
+        :meth:`positioned_read` which wraps the whole sequence in a
+        synchronous ``block_on``.
+        """
+        ...
+    def positioned_read(
+        self,
+        path: str,
+        *,
+        block_index: int = ...,
+        offset: int = ...,
+        length: int = ...,
+        chunk_size: int = ...,
+    ) -> bytes:
+        """Synchronous counterpart of
+        :meth:`AsyncGoosefs.positioned_read`. Blocks the calling thread.
+
+        **Note on last-block ``length=-1``**: for the last block of a
+        file the actual block size may be smaller than
+        ``block_size_bytes`` reported by master, so ``length=-1``
+        returns only the remaining bytes of that block (which may be
+        < ``block_size_bytes``).
+        """
+        ...
+
     # ── Lifecycle
     def close(self) -> None: ...
     def __enter__(self) -> Self: ...
@@ -562,6 +722,7 @@ __all__ = [
     "AsyncFileReader",
     "AsyncFileWriter",
     "AsyncGoosefs",
+    "AsyncWorkerClient",
     "Config",
     "CreateFileOptions",
     "DeleteOptions",

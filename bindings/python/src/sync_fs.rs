@@ -366,6 +366,107 @@ impl PyGoosefs {
         ))
     }
 
+    // ── Worker block direct-read (P6 stage B) ───────────────────────────────
+
+    /// `fs.acquire_worker_for_block(block_id)` → `AsyncWorkerClient`.
+    ///
+    /// Synchronous counterpart of [`PyAsyncGoosefs::acquire_worker_for_block`].
+    ///
+    /// The returned object is **still an `AsyncWorkerClient`** — direct
+    /// `read_block_positioned` calls on it must be awaited from an async
+    /// context. For purely synchronous code use
+    /// [`Self::positioned_read`] which wraps the whole sequence in a
+    /// `block_on`. We deliberately do not expose a sync `WorkerClient`
+    /// class because the only sensible thing to do on the binding
+    /// boundary is the one-shot positioned read, which we already
+    /// provide as `positioned_read(path, ...)`.
+    fn acquire_worker_for_block(
+        &self,
+        py: Python<'_>,
+        block_id: i64,
+    ) -> PyResult<crate::worker::PyAsyncWorkerClient> {
+        let h = self.handle()?;
+        Self::guarded_block_on(py, async move {
+            let worker_info = h.ctx.acquire_router().select_worker(block_id).await.map_err(map_err)?;
+            let net_addr = worker_info
+                .address
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err("selected worker has no address"))?;
+            let worker_addr = crate::filesystem::format_worker_addr(net_addr);
+            let client = h.ctx.acquire_worker_pool().acquire(&worker_addr).await.map_err(map_err)?;
+            Ok(crate::worker::PyAsyncWorkerClient::from_sdk(client))
+        })
+    }
+
+    /// `fs.positioned_read(path, *, block_index=0, offset=0, length=-1, chunk_size=1<<20)` → `bytes`.
+    ///
+    /// Synchronous counterpart of [`PyAsyncGoosefs::positioned_read`].
+    /// See that method's docstring for full semantics; this version
+    /// blocks the calling thread on the shared Tokio runtime via
+    /// [`Self::guarded_block_on`].
+    ///
+    /// **Note on last-block `length=-1`**: for the last block of a file
+    /// the actual block size may be smaller than `block_size_bytes`
+    /// reported by master, so `length=-1` returns only the remaining
+    /// bytes of that block (which may be < `block_size_bytes`).
+    #[pyo3(signature = (path, *, block_index=0, offset=0, length=-1, chunk_size=crate::positioned_read::DEFAULT_CHUNK_SIZE))]
+    fn positioned_read<'py>(
+        &self,
+        py: Python<'py>,
+        path: String,
+        block_index: usize,
+        offset: i64,
+        length: i64,
+        chunk_size: i64,
+    ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        if offset < 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "offset must be non-negative",
+            ));
+        }
+        if chunk_size <= 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "chunk_size must be positive",
+            ));
+        }
+        let h = self.handle()?;
+        let buf: Vec<u8> = Self::guarded_block_on(py, async move {
+            // 1. Resolve URIStatus → block_id + block_size via shared helper.
+            let status = h.fs.get_status(&path).await.map_err(map_err)?;
+            let (block_id, block_size) =
+                crate::positioned_read::resolve_block_id(&status, block_index, &path)?;
+            if offset >= block_size {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "offset={} >= block_size_bytes={}",
+                    offset, block_size
+                )));
+            }
+            let effective_length = if length < 0 {
+                block_size - offset
+            } else {
+                length.min(block_size - offset)
+            };
+            if effective_length == 0 {
+                return Ok(Vec::new());
+            }
+
+            // 2–4. Route + acquire + read with SASL auth-failure retry.
+            //       Delegated to `positioned_read_with_reauth` so both
+            //       async and sync paths share the same retry logic
+            //       (Critical #1 fix: sync was previously missing this).
+            let bytes = crate::positioned_read::positioned_read_with_reauth(
+                h.ctx,
+                block_id,
+                offset,
+                effective_length,
+                chunk_size,
+            )
+            .await?;
+            Ok(bytes)
+        })?;
+        Ok(pyo3::types::PyBytes::new(py, &buf))
+    }
+
     // ── Lifecycle ───────────────────────────────────────────────────────────
 
     /// `fs.close()` — release master + worker connections.

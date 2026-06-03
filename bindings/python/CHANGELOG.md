@@ -20,6 +20,53 @@ This document records all notable changes to the `goosefs` Python binding. The f
 
 ---
 
+## [0.1.3] — 2026-05-28
+
+### Added
+
+- **`AsyncWorkerClient`** — low-level coroutine-based block reader for a
+  single Goosefs Worker. Wraps `goosefs_sdk::client::WorkerClient`. The
+  Python side gets a thin one-shot positioned-read coroutine that
+  delegates to `goosefs_sdk::io::GrpcBlockReader::positioned_read` and
+  takes a single `PyBytes::new` copy across the PyO3 boundary; raw
+  `(request_tx, response_stream)` is intentionally not exposed.
+  - `AsyncWorkerClient.connect(addr, config)` — full SASL handshake.
+  - `AsyncWorkerClient.connect_simple(addr, connect_timeout_ms=10_000)` —
+    deprecated NOSASL escape hatch for test workers.
+  - `AsyncWorkerClient.read_block_positioned(block_id, offset, length, chunk_size=1<<20)`
+    → `bytes`.
+  - `AsyncWorkerClient.addr` / `AsyncWorkerClient.close()` /
+    `__aenter__` / `__aexit__`.
+- **`AsyncGoosefs.acquire_worker_for_block(block_id)`** —
+  router-driven worker selection on the shared `WorkerClientPool`.
+  Returns an `AsyncWorkerClient` that wraps the *pooled*
+  `WorkerClient` (no extra TCP+SASL handshake).
+- **`AsyncGoosefs.positioned_read(path, *, block_index=0, offset=0, length=-1, chunk_size=1<<20)`**
+  — high-level Worker block direct read. One-line Python equivalent of
+  `examples/lowlevel_block_read.rs`; resolves URI → picks
+  `block_ids[block_index]` → routes via `WorkerRouter` → drains a
+  positioned-read stream into a single `bytes`.
+- **`Goosefs.acquire_worker_for_block` / `Goosefs.positioned_read`** —
+  synchronous counterparts of the above two methods, sharing the same
+  deadlock + fork guards as the rest of the sync surface.
+- New module `bindings/python/src/worker.rs` + companion type stubs in
+  `python/goosefs/__init__.pyi`.
+
+### Changed
+
+- The Python stress tool (`tmp/goosefs_stress_python`) no longer
+  silently falls back from `--transport=block` to the `fs` path and no
+  longer emits `"BlockTransport"` in `summary.missingOperations`.
+  `bench/worker.py::_positioned_read` now branches on transport: `block`
+  goes through `AsyncGoosefs.positioned_read` (true direct Worker read),
+  `fs` keeps the old `read_at` path as a control group.
+
+### Fixed
+
+- None yet
+
+---
+
 ## [0.1.2] — 2026-05-23
 
 The first internally usable alpha release. Covers all milestones from P0 through P7.

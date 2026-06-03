@@ -785,4 +785,189 @@ mod tests {
         assert!(g1 < g2, "gen {} not less than {}", g1, g2);
         assert!(g2 < g3, "gen {} not less than {}", g2, g3);
     }
+
+    // ── Auth-retry regression tests ──────────────────────────────────────
+    //
+    // These tests verify the core sequence of the auth-retry path:
+    //   1. acquire() returns a cached (stale) WorkerClient
+    //   2. RPC on that client fails with AuthenticationFailed
+    //   3. Caller invokes reconnect_if_stale() or reconnect()
+    //   4. Pool returns a fresh client (either already installed by another
+    //      task, or via a new TCP+SASL handshake)
+    //   5. Caller retries the RPC on the fresh client
+    //
+    // Steps 1–4 are testable at the pool level without a real server (using
+    // test_install to simulate reconnect outcomes).  Step 5 requires a real
+    // Goosefs cluster and is covered by `tests/auth_retry.rs` integration
+    // tests.
+
+    /// **Auth-retry recovery point 1** (RPC failure → single-flight reconnect):
+    ///
+    /// Simulate the full auth-retry sequence at the pool level:
+    /// 1. `acquire()` returns a cached client with generation N
+    /// 2. An RPC on that client fails with `AuthenticationFailed`
+    /// 3. Another concurrent reader has already reconnected (installed gen N+1)
+    /// 4. `reconnect_if_stale(addr, N)` returns the already-installed fresh
+    ///    client without a redundant TCP+SASL handshake
+    ///
+    /// This mirrors the code path in `GoosefsFileReader::read_next_block()`
+    /// and `GoosefsFileInStream::read()` / `read_at()`:
+    /// ```ignore
+    /// Err(e) if e.is_authentication_failed() => {
+    ///     let fresh = self.reconnect_worker(&addr, Some(worker_generation)).await?;
+    ///     // retry RPC with fresh client
+    /// }
+    /// ```
+    #[tokio::test]
+    async fn test_auth_retry_reconnect_if_stale_returns_fresh_after_rpc_failure() {
+        let pool = WorkerClientPool::new(GoosefsConfig::new("127.0.0.1:9200"));
+        let addr = "test-worker:9203";
+
+        // Step 1: Install and acquire a cached client (SASL-stale, but pool
+        // doesn't know that yet — the client is valid from the pool's POV).
+        pool.test_install(addr, fake_client(addr)).await;
+        let stale_client = pool.acquire(addr).await.unwrap();
+        let stale_gen = stale_client.generation();
+
+        // Step 2: Simulate that another concurrent reader already detected the
+        // auth failure and triggered a reconnect — a fresh client with a higher
+        // generation is now cached.
+        pool.test_install(addr, fake_client(addr)).await;
+        let expected_fresh_gen = pool.test_current_generation(addr).await.unwrap();
+        assert!(
+            expected_fresh_gen > stale_gen,
+            "fresh gen must exceed stale gen"
+        );
+
+        // Step 3: This caller's RPC failed with AuthenticationFailed; it calls
+        // reconnect_if_stale(addr, stale_gen) for single-flight reconnect.
+        // The pool sees generation has already advanced and returns the
+        // existing client — no redundant TCP+SASL handshake.
+        let fresh_client = pool
+            .reconnect_if_stale(addr, stale_gen)
+            .await
+            .expect("reconnect_if_stale must return Ok when generation advanced");
+
+        assert_eq!(
+            fresh_client.generation(),
+            expected_fresh_gen,
+            "must return the already-installed fresh client (coalesced reconnect)"
+        );
+        assert!(
+            fresh_client.generation() > stale_gen,
+            "fresh client generation ({}) must be > stale generation ({})",
+            fresh_client.generation(),
+            stale_gen
+        );
+
+        // Verify pool generation didn't advance further (no duplicate reconnect)
+        assert_eq!(
+            pool.test_current_generation(addr).await,
+            Some(expected_fresh_gen),
+            "pool generation must not advance for a coalesced reconnect"
+        );
+    }
+
+    /// **Auth-retry recovery point 2** (acquire failure → unconditional reconnect):
+    ///
+    /// When `acquire()` itself fails with `AuthenticationFailed` (e.g. the
+    /// connect+auth step returned UNAUTHENTICATED), no `WorkerClient` was
+    /// produced and there is no generation to coalesce against.  The caller
+    /// falls back to the unconditional `reconnect()` path.
+    ///
+    /// `reconnect()` is implemented as `reconnect_if_stale(addr, u64::MAX)`.
+    /// Since no generation can ever exceed `u64::MAX`, this ALWAYS falls
+    /// through to a real `WorkerClient::connect()` — it cannot coalesce.
+    /// This is by design: the caller has no WorkerClient to compare
+    /// generations against, so a fresh connection is always required.
+    ///
+    /// This test verifies the `u64::MAX` semantics — that `reconnect_if_stale`
+    /// with `u64::MAX` does NOT short-circuit even when a client with a
+    /// valid generation exists in the pool.
+    ///
+    /// Note: Testing the actual reconnect requires a real Goosefs server.
+    /// See `tests/auth_retry.rs` for integration test stubs.
+    #[tokio::test]
+    async fn test_auth_retry_unconditional_reconnect_never_short_circuits() {
+        let pool = WorkerClientPool::new(GoosefsConfig::new("127.0.0.1:9200"));
+        let addr = "test-worker:9203";
+
+        // Install a client with some generation
+        pool.test_install(addr, fake_client(addr)).await;
+        let current_gen = pool.test_current_generation(addr).await.unwrap();
+
+        // reconnect_if_stale(addr, u64::MAX) must NOT short-circuit,
+        // because current_gen can never exceed u64::MAX.
+        // It will try to connect to the real server (which doesn't exist),
+        // so we expect a transport error, NOT a successful return of the
+        // existing client.
+        let result = pool.reconnect_if_stale(addr, u64::MAX).await;
+        assert!(
+            result.is_err(),
+            "reconnect_if_stale(addr, u64::MAX) must NOT short-circuit \
+             when generation ({}) < u64::MAX — expected real connect attempt",
+            current_gen
+        );
+    }
+
+    /// **Auth-retry thundering-herd collapse**:
+    ///
+    /// When a SASL stream expires server-side, N concurrent readers on the
+    /// same cached channel will all observe `AuthenticationFailed`
+    /// simultaneously.  Without single-flight reconnect, each would
+    /// independently invoke `reconnect`, producing N TCP+SASL handshakes.
+    ///
+    /// With single-flight (`reconnect_if_stale`), only the first observer
+    /// of generation N triggers a real reconnect; all other observers with
+    /// the same (or older) generation receive the already-replaced client.
+    ///
+    /// This test simulates: stale gen N → first observer reconnects
+    /// (installs N+1) → second observer with stale gen N gets N+1.
+    #[tokio::test]
+    async fn test_auth_retry_multiple_observers_collapse_to_one_reconnect() {
+        let pool = WorkerClientPool::new(GoosefsConfig::new("127.0.0.1:9200"));
+        let addr = "test-worker:9203";
+
+        // Install initial client (SASL-stale)
+        pool.test_install(addr, fake_client(addr)).await;
+        let stale_gen = pool.test_current_generation(addr).await.unwrap();
+
+        // First observer detects auth failure, triggers reconnect.
+        // (In reality this would call reconnect_if_stale which does
+        // WorkerClient::connect; we simulate the outcome with test_install.)
+        pool.test_install(addr, fake_client(addr)).await;
+        let fresh_gen = pool.test_current_generation(addr).await.unwrap();
+        assert!(fresh_gen > stale_gen);
+
+        // Second observer with the same stale generation must get the
+        // already-installed fresh client — NO duplicate reconnect.
+        let client = pool
+            .reconnect_if_stale(addr, stale_gen)
+            .await
+            .expect("coalesced reconnect must succeed");
+        assert_eq!(
+            client.generation(),
+            fresh_gen,
+            "second observer must get the already-installed fresh client"
+        );
+
+        // Pool generation must not advance further (no duplicate reconnect)
+        assert_eq!(
+            pool.test_current_generation(addr).await,
+            Some(fresh_gen),
+            "generation must not advance for a coalesced observer"
+        );
+
+        // Third observer with an even older generation (0 = never-pooled)
+        // must also get the fresh client
+        let client_old = pool
+            .reconnect_if_stale(addr, 0)
+            .await
+            .expect("observer with gen=0 must also get coalesced client");
+        assert_eq!(
+            client_old.generation(),
+            fresh_gen,
+            "observer with stale gen=0 must get the same fresh client"
+        );
+    }
 }

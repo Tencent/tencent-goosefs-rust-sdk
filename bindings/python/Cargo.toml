@@ -40,6 +40,11 @@ futures = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[dev-dependencies]
+# tonic is needed by #[cfg(test)] modules to construct fake WorkerClients
+# and verify gRPC status-code → Error classification (auth-retry tests).
+tonic = "0.14"
+
 [profile.release]
 codegen-units = 1
 lto = "fat"

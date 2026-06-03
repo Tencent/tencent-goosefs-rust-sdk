@@ -35,7 +35,27 @@ use crate::config::PyConfig;
 use crate::context::PyFsHandle;
 use crate::errors::map_err;
 use crate::options::PyDeleteOptions;
+use crate::positioned_read::{positioned_read_with_reauth, resolve_block_id, DEFAULT_CHUNK_SIZE};
 use crate::status::PyURIStatus;
+use crate::worker::PyAsyncWorkerClient;
+
+/// Build a `\"host:port\"` worker address from a `WorkerNetAddress`.
+///
+/// Mirrors the canonical formatting used by the SDK in
+/// `GoosefsFileInStream::connect_worker` so binding-side direct-block reads
+/// land on exactly the same gRPC endpoint as the high-level `read_at` /
+/// streaming paths.
+///
+/// **Note**: Worker `BlockWorker` gRPC service listens on `rpc_port` (9203
+/// by default); `data_port` is only used by the Netty short-circuit path,
+/// which the Rust SDK does not implement.
+pub(crate) fn format_worker_addr(addr: &goosefs_sdk::proto::grpc::WorkerNetAddress) -> String {
+    format!(
+        "{}:{}",
+        addr.host.as_deref().unwrap_or("127.0.0.1"),
+        addr.rpc_port.unwrap_or(9203)
+    )
+}
 
 /// Extract a bytes-like Python object into an owned `Vec<u8>`.
 ///
@@ -410,6 +430,166 @@ impl PyAsyncGoosefs {
                     crate::streaming::PyAsyncFileWriter::from_sdk(writer, path_for_writer),
                 )
                 .map(|p| p.into_any())
+            })
+        })
+    }
+
+    // ── Worker block direct-read (P6 stage B) ───────────────────────────────
+
+    /// `await fs.acquire_worker_for_block(block_id)` → `AsyncWorkerClient`.
+    ///
+    /// One-stop helper that performs the three steps every direct-block
+    /// caller would otherwise have to repeat by hand:
+    ///
+    /// 1. Pick the responsible worker for `block_id` via the shared
+    ///    `WorkerRouter` (consistent hash + local-worker preference +
+    ///    failure filtering).
+    /// 2. Format the worker's `host:rpc_port` address.
+    /// 3. Acquire an authenticated `WorkerClient` from the shared
+    ///    `WorkerClientPool` — connection reuse and single-flight reconnect
+    ///    on SASL expiry come for free.
+    ///
+    /// The returned [`AsyncWorkerClient`] wraps the same pooled
+    /// [`goosefs_sdk::client::WorkerClient`] used internally by
+    /// `read_at` / streaming readers, so direct-block reads issued through
+    /// this handle share TCP channels with the rest of the SDK.
+    ///
+    /// Closing the returned `AsyncWorkerClient` only releases the binding-
+    /// level wrapper; the underlying pooled connection stays in the
+    /// `FileSystemContext`'s pool for the next caller.
+    fn acquire_worker_for_block<'py>(
+        &self,
+        py: Python<'py>,
+        block_id: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let h = self.handle()?;
+        future_into_py(py, async move {
+            // 1. Route.
+            let worker_info = h.ctx.acquire_router().select_worker(block_id).await.map_err(map_err)?;
+            let net_addr = worker_info
+                .address
+                .as_ref()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
+                    "selected worker has no address",
+                ))?;
+            let worker_addr = format_worker_addr(net_addr);
+
+            // 2. Acquire pooled, authenticated WorkerClient.
+            let client = h.ctx.acquire_worker_pool().acquire(&worker_addr).await.map_err(map_err)?;
+
+            // 3. Wrap and hand to Python. We use `from_sdk` (not the
+            //    `connect` factory) so we don't perform another TCP+SASL
+            //    handshake on top of the already-pooled channel.
+            Python::attach(|py| {
+                let wrapper = PyAsyncWorkerClient::from_sdk(client);
+                Ok(Py::new(py, wrapper)?.into_any())
+            })
+        })
+    }
+
+    /// `await fs.positioned_read(path, block_index=0, offset=0, length=-1, chunk_size=1<<20)` → `bytes`.
+    ///
+    /// High-level "Worker block direct read" — the Python equivalent of
+    /// `examples/lowlevel_block_read.rs` in the Rust SDK.
+    ///
+    /// Steps performed internally (see also
+    /// [`acquire_worker_for_block`](Self::acquire_worker_for_block)):
+    ///
+    /// 1. `MasterClient::get_status(path)` → resolve `URIStatus`.
+    /// 2. Pick `block_ids[block_index]` (defaults to the first block).
+    /// 3. Route + pool-acquire `WorkerClient` for that block.
+    /// 4. [`GrpcBlockReader::positioned_read`] with `position_short = true`
+    ///    → drain the stream into a single `Bytes`.
+    /// 5. Single `PyBytes::new` copy across the PyO3 boundary.
+    ///
+    /// Arguments:
+    ///   path        — Goosefs path.
+    ///   block_index — which block of the file to read (0-based; default 0).
+    ///   offset      — byte offset *inside the chosen block* (default 0).
+    ///   length      — bytes to read; `-1` (default) reads from `offset` to
+    ///                 the end of the chosen block (clamped to block size).
+    ///                 For the **last block** of a file, the actual block size
+    ///                 may be smaller than `block_size_bytes`, so `length=-1`
+    ///                 returns only the remaining bytes of that block (which
+    ///                 may be < `block_size_bytes`).
+    ///   chunk_size  — gRPC chunk size, default 1 MiB. Smaller values give
+    ///                 finer flow-control granularity at the cost of more
+    ///                 ACK round-trips.
+    ///
+    /// Returns the requested byte range; may be shorter than `length` only
+    /// at end-of-block.
+    ///
+    /// Raises:
+    ///   ValueError — invalid block_index / negative offset / chunk_size <= 0.
+    ///   NotFound   — `path` does not exist.
+    ///   IoError / RpcError — block I/O or gRPC failures.
+    #[pyo3(signature = (path, *, block_index=0, offset=0, length=-1, chunk_size=DEFAULT_CHUNK_SIZE))]
+    fn positioned_read<'py>(
+        &self,
+        py: Python<'py>,
+        path: String,
+        block_index: usize,
+        offset: i64,
+        length: i64,
+        chunk_size: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if offset < 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "offset must be non-negative",
+            ));
+        }
+        if chunk_size <= 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "chunk_size must be positive",
+            ));
+        }
+        let h = self.handle()?;
+        future_into_py(py, async move {
+            // 1. Resolve URIStatus → block_id + block_size via shared helper.
+            //    Prefers `file_block_infos` over `block_ids` for freshly-
+            //    written files — see `positioned_read::resolve_block_id` docs.
+            let status = h.fs.get_status(&path).await.map_err(map_err)?;
+            let (block_id, block_size) = resolve_block_id(&status, block_index, &path)?;
+            if offset >= block_size {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "offset={} >= block_size_bytes={}",
+                    offset, block_size
+                )));
+            }
+            // -1 ⇒ "read to end of block" (clamped at block size). The SDK
+            // also clamps at block boundary, but checking up-front lets us
+            // surface a clean ValueError instead of an obscure RPC error.
+            //
+            // Note: for the **last block** of a file the actual block size
+            // may be smaller than `block_size_bytes` reported by master,
+            // so `effective_length` may be larger than the real data. The
+            // SDK's short-read handling returns only the available bytes.
+            let effective_length = if length < 0 {
+                block_size - offset
+            } else {
+                length.min(block_size - offset)
+            };
+            if effective_length == 0 {
+                return Python::attach(|py| {
+                    Ok(pyo3::types::PyBytes::new(py, &[]).unbind())
+                });
+            }
+
+            // 2–4. Route + acquire + read with SASL auth-failure retry.
+            //       Delegated to `positioned_read_with_reauth` so both
+            //       async and sync paths share the same retry logic.
+            let bytes = positioned_read_with_reauth(
+                h.ctx,
+                block_id,
+                offset,
+                effective_length,
+                chunk_size,
+            )
+            .await?;
+
+            // 5. Single copy across the PyO3 boundary.
+            Python::attach(|py| {
+                Ok(pyo3::types::PyBytes::new(py, &bytes).unbind())
             })
         })
     }

@@ -37,12 +37,14 @@ mod context;
 mod errors;
 mod filesystem;
 mod options;
+mod positioned_read;
 mod runtime;
 mod status;
 mod streaming;
 mod sync_fs;
 mod tracing;
 mod types;
+mod worker;
 
 use pyo3::prelude::*;
 
@@ -80,6 +82,11 @@ fn _goosefs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<streaming::PyAsyncFileWriter>()?;
     m.add_class::<streaming::PyFileReader>()?;
     m.add_class::<streaming::PyFileWriter>()?;
+
+    // P6 ── low-level Worker block client (stage A of the
+    // "Worker block 直连" feature; see
+    // `docs/GooseFS_Python_SDK问题与解决方案.md` §3.1).
+    m.add_class::<worker::PyAsyncWorkerClient>()?;
 
     // P7 ── opt-in tracing bridge (Review §17.7).
     m.add_function(wrap_pyfunction!(tracing::enable_tracing, m)?)?;
