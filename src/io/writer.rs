@@ -108,6 +108,13 @@ impl GrpcBlockWriter {
 
         self.handle
             .request_tx
+            .as_ref()
+            .ok_or_else(|| Error::BlockIoError {
+                message: format!(
+                    "write channel already closed for block_id={}",
+                    self.block_id
+                ),
+            })?
             .send(req)
             .await
             .map_err(|_| Error::BlockIoError {
@@ -155,6 +162,13 @@ impl GrpcBlockWriter {
 
         self.handle
             .request_tx
+            .as_ref()
+            .ok_or_else(|| Error::BlockIoError {
+                message: format!(
+                    "flush channel already closed for block_id={}",
+                    self.block_id
+                ),
+            })?
             .send(flush_req)
             .await
             .map_err(|_| Error::BlockIoError {

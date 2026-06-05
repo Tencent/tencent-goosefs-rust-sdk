@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use tracing_subscriber::{EnvFilter, fmt};
+use tracing_subscriber::{fmt, EnvFilter};
 
 /// Tracks whether `enable_tracing` has already installed a global
 /// subscriber. We use `OnceLock<bool>` (rather than `Once`) so we can
@@ -103,16 +103,13 @@ pub fn enable_tracing(level: &str, target: &str) -> PyResult<()> {
     // `warn` so enabling DEBUG on goosefs doesn't drown the user in
     // tonic / hyper noise.
     let filter = if std::env::var_os("RUST_LOG").is_some() {
-        EnvFilter::try_from_default_env().map_err(|e| {
-            PyValueError::new_err(format!("invalid RUST_LOG value: {e}"))
-        })?
+        EnvFilter::try_from_default_env()
+            .map_err(|e| PyValueError::new_err(format!("invalid RUST_LOG value: {e}")))?
     } else {
         let directive =
             format!("warn,goosefs_sdk={normalized_level},goosefs_python={normalized_level}");
         EnvFilter::try_new(&directive).map_err(|e| {
-            PyValueError::new_err(format!(
-                "failed to build EnvFilter from {directive:?}: {e}",
-            ))
+            PyValueError::new_err(format!("failed to build EnvFilter from {directive:?}: {e}",))
         })?
     };
 

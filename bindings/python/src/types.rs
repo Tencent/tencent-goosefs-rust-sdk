@@ -22,7 +22,14 @@ use goosefs_sdk::fs::ReadType as SdkReadType;
 ///
 /// Integer values match the protobuf wire format exactly (1..=5) so they can
 /// be stored in `Config.write_type` without translation.
-#[pyclass(module = "goosefs._goosefs", name = "WriteType", eq, eq_int, frozen, hash)]
+#[pyclass(
+    module = "goosefs._goosefs",
+    name = "WriteType",
+    eq,
+    eq_int,
+    frozen,
+    hash
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(i32)]
 pub enum PyWriteType {
@@ -97,7 +104,14 @@ impl From<PyWriteType> for SdkWriteType {
 ///
 /// Only `NoCache (1)` and `Cache (2)` are exposed; other proto values are
 /// reserved by the server.
-#[pyclass(module = "goosefs._goosefs", name = "ReadType", eq, eq_int, frozen, hash)]
+#[pyclass(
+    module = "goosefs._goosefs",
+    name = "ReadType",
+    eq,
+    eq_int,
+    frozen,
+    hash
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(i32)]
 pub enum PyReadType {

@@ -59,7 +59,10 @@ pub fn register_exceptions(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyRe
     sub.add("FileIncomplete", py.get_type::<FileIncomplete>())?;
     sub.add("DirectoryNotEmpty", py.get_type::<DirectoryNotEmpty>())?;
     sub.add("IsADirectory", py.get_type::<IsADirectory>())?;
-    sub.add("AuthenticationFailed", py.get_type::<AuthenticationFailed>())?;
+    sub.add(
+        "AuthenticationFailed",
+        py.get_type::<AuthenticationFailed>(),
+    )?;
     sub.add("NoWorkerAvailable", py.get_type::<NoWorkerAvailable>())?;
     sub.add("MasterUnavailable", py.get_type::<MasterUnavailable>())?;
     sub.add("RpcError", py.get_type::<RpcError>())?;
@@ -120,30 +123,42 @@ mod tests {
     #[test]
     fn map_err_never_panics_for_each_variant() {
         let cases: Vec<E> = vec![
-            E::NotFound {
-                path: "/x".into(),
+            E::NotFound { path: "/x".into() },
+            E::AlreadyExists { path: "/x".into() },
+            E::PermissionDenied {
+                message: "p".into(),
             },
-            E::AlreadyExists {
-                path: "/x".into(),
+            E::InvalidArgument {
+                message: "i".into(),
             },
-            E::PermissionDenied { message: "p".into() },
-            E::InvalidArgument { message: "i".into() },
             E::InvalidPath {
                 path: "/bad".into(),
             },
-            E::FileIncomplete { message: "f".into() },
-            E::DirectoryNotEmpty { message: "d".into() },
-            E::OpenDirectory {
-                path: "/d".into(),
+            E::FileIncomplete {
+                message: "f".into(),
             },
-            E::AuthenticationFailed { message: "a".into() },
-            E::NoWorkerAvailable { message: "w".into() },
-            E::MasterUnavailable { message: "m".into() },
-            E::ConfigError { message: "c".into() },
+            E::DirectoryNotEmpty {
+                message: "d".into(),
+            },
+            E::OpenDirectory { path: "/d".into() },
+            E::AuthenticationFailed {
+                message: "a".into(),
+            },
+            E::NoWorkerAvailable {
+                message: "w".into(),
+            },
+            E::MasterUnavailable {
+                message: "m".into(),
+            },
+            E::ConfigError {
+                message: "c".into(),
+            },
             E::MissingField {
                 field: "block_id".into(),
             },
-            E::BlockIoError { message: "io".into() },
+            E::BlockIoError {
+                message: "io".into(),
+            },
             E::Internal {
                 message: "boom".into(),
                 source: None,

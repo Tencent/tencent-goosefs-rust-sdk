@@ -2,19 +2,19 @@
 
 ![Experimental](https://img.shields.io/badge/status-experimental-orange)
 ![Rust](https://img.shields.io/badge/rust-1.88%2B-blue)
-![Version](https://img.shields.io/badge/version-0.1.4-blue)
+![Version](https://img.shields.io/badge/version-0.1.5-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-green)
 
 A native Rust client library that communicates directly with [Goosefs](https://cloud.tencent.com/document/product/1424) Master/Worker via gRPC (tonic/protobuf).
 
-## What's New in v0.1.4
+## What's New in v0.1.5
 
 - **Prometheus Pushgateway support** — New `PushgatewayTask` periodically pushes all client metrics (counters & gauges) to a Prometheus Pushgateway endpoint via HTTP POST in the standard text exposition format. Configure with `PushgatewayConfig::new(endpoint, job)` and spawn a background task. See [`docs/METRICS.md`](docs/METRICS.md) for architecture and usage.
 - **Python SDK bindings** — New `bindings/python/` sub-crate providing a full-featured Python client (`goosefs` package) built on PyO3 + maturin. Supports sync/async APIs, streaming I/O, metrics, and tracing. See [`bindings/python/README.md`](bindings/python/README.md).
 - **AsyncRead/AsyncSeek** — `GoosefsAsyncReader` now implements `tokio::io::AsyncRead` + `tokio::io::AsyncSeek`, enabling seamless integration with the tokio ecosystem.
 - **FileInStream read fix** — Fixed a bug where `GoosefsFileInStream::read` could drop bytes when the caller-supplied buffer was smaller than the available chunk data.
 - **Dependency updates** — Pinned dependency versions (prost 0.14.1, tokio 1.23+, rand 0.9.1, reqwest 0.12 with `rustls-tls`). Adapted to rand 0.9 API changes (`thread_rng` → `rng`, `gen_range` → `random_range`).
-- **No breaking API changes** — Drop-in upgrade from `0.1.3`; downstream `OpenDAL` / `Lance` integrations require no code changes.
+- **No breaking API changes** — Drop-in upgrade from `0.1.3` / `0.1.4`; downstream `OpenDAL` / `Lance` integrations require no code changes.
 
 ## Why Goosefs?
 

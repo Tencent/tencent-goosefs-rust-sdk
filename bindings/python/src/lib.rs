@@ -93,6 +93,10 @@ fn _goosefs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // "Worker block 直连" feature; see
     // `docs/GooseFS_Python_SDK问题与解决方案.md` §3.1).
     m.add_class::<worker::PyAsyncWorkerClient>()?;
+    // Sync escape hatch — mirrors `AsyncWorkerClient` for callers that
+    // already know the worker address and want a one-shot blocking
+    // positioned read without going through `Goosefs.positioned_read`.
+    m.add_class::<worker::PyWorkerClient>()?;
 
     // P7 ── opt-in tracing bridge (Review §17.7).
     m.add_function(wrap_pyfunction!(tracing::enable_tracing, m)?)?;

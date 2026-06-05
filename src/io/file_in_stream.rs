@@ -369,10 +369,18 @@ impl GoosefsFileInStream {
         if seek_dist < TRANSFER_POSITIONED_READ_THRESHOLD && same_block {
             // Small forward seek within the same block — skip bytes in the
             // existing sequential stream
-            if let Some(ref mut stream) = self.block_in_stream {
+            if self.block_in_stream.is_some() {
                 if target > self.pos {
                     let skip = (target - self.pos) as usize;
-                    Self::skip_bytes(stream, skip).await?;
+                    self.skip_bytes(skip).await?;
+                    // `skip_bytes` may have over-pulled a chunk and parked
+                    // the trailing bytes (those beyond `target`) into
+                    // `self.carry_over` so they will be delivered on the
+                    // next read. Internal `self.pos` therefore advances by
+                    // `skip + carry_over.len()` to preserve the invariant
+                    //   `pos() == self.pos - self.carry_over.len() == target`.
+                    self.pos = target + self.carry_over.len() as i64;
+                    return Ok(target);
                 } else {
                     // Backward seek within threshold but same block — still
                     // need to close and re-open (can't seek backwards in gRPC stream)
@@ -580,8 +588,31 @@ impl GoosefsFileInStream {
                 Err(e) => return Err(e),
             };
 
+            // H2 fix: advance the cursor by the *actual* number of bytes
+            // delivered, not by the requested `length`. `positioned_read` /
+            // `read_all` may return fewer bytes if the server half-closes
+            // mid-stream (`ChunkAction::Eof` arm); advancing by `length`
+            // would silently skip the missing range and return mis-aligned
+            // data to the caller. With `cur += data.len()`, the outer
+            // `while cur < end` loop will naturally re-issue another
+            // positioned read with the adjusted (offset, length) pair.
+            //
+            // Defensive: if the worker delivered zero bytes for a non-zero
+            // request, treat it as a real EOF / corruption and surface an
+            // error instead of looping forever.
+            let advanced = data.len() as i64;
             result.extend_from_slice(&data);
-            cur += length;
+            if advanced == 0 {
+                return Err(Error::Internal {
+                    message: format!(
+                        "read_at: positioned_read returned 0 bytes for block {} \
+                         offset_in_block {} length {} (cur={}, end={})",
+                        block_id, offset_in_block, length, cur, end
+                    ),
+                    source: None,
+                });
+            }
+            cur += advanced;
         }
 
         Ok(result.freeze())
@@ -823,13 +854,35 @@ impl GoosefsFileInStream {
     }
 
     /// Drain `skip` bytes from the current sequential stream.
-    async fn skip_bytes(stream: &mut GrpcBlockReader, mut skip: usize) -> Result<()> {
+    ///
+    /// IMPORTANT: chunks come from the worker in fixed sizes (typically 1 MiB).
+    /// When the next chunk is **larger than the remaining `skip`**, the bytes
+    /// past `skip` MUST NOT be discarded — the stream's internal position has
+    /// already advanced past them, and dropping them would cause the next
+    /// `read()` to return data from a position **after** the user's seek
+    /// target (silent data corruption / loss).
+    ///
+    /// We park those trailing bytes into `self.carry_over` so that a
+    /// subsequent `read()` delivers them first, and the caller-visible
+    /// position (`pos()`) stays anchored at the seek target.
+    async fn skip_bytes(&mut self, mut skip: usize) -> Result<()> {
+        let stream = match self.block_in_stream.as_mut() {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         while skip > 0 {
-            let chunk = stream.read_chunk().await?;
-            match chunk {
+            match stream.read_chunk().await? {
                 Some(data) => {
-                    let consumed = data.len().min(skip);
-                    skip -= consumed;
+                    if data.len() > skip {
+                        // Park the bytes beyond the skip target. Caller of
+                        // `seek` clears `carry_over` first and bails into
+                        // the slow path on backward seeks, so `carry_over`
+                        // is empty when we get here.
+                        self.carry_over.extend_from_slice(&data[skip..]);
+                        skip = 0;
+                    } else {
+                        skip -= data.len();
+                    }
                 }
                 None => break,
             }

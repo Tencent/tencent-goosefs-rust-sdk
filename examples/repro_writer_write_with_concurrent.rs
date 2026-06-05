@@ -62,8 +62,8 @@ const MAX_SIZE: usize = 6 * 1024 * 1024;
 const CHUNK_SIZE: usize = 1024 * 1024;
 
 fn gen_bytes_with_range(min: usize, max: usize) -> Vec<u8> {
-    let mut rng = rand::thread_rng();
-    let mut size = rng.gen_range(min..max);
+    let mut rng = rand::rng();
+    let mut size = rng.random_range(min..max);
     let align = std::env::var("ALIGN").ok().as_deref() == Some("1");
     if align {
         size -= size % CHUNK_SIZE;

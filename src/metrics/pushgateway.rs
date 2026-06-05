@@ -324,25 +324,35 @@ fn sanitize_metric_name(name: &str) -> String {
     let mut result = String::with_capacity(name.len() + 8);
     result.push_str("goosefs_");
 
+    // Track the previous character (the one already pushed onto `result`)
+    // so we can do an O(1) "is preceded by '.' / uppercase" check, instead
+    // of `name.chars().nth(i - 1)` which scans from the start of the input
+    // every iteration → O(n²).
     let mut prev_was_upper = false;
-    for (i, ch) in name.chars().enumerate() {
+    let mut prev_char: Option<char> = None;
+    for ch in name.chars() {
         if ch == '.' {
             result.push('_');
             prev_was_upper = false;
+            prev_char = Some('.');
         } else if ch.is_uppercase() {
             // Insert underscore before uppercase letter if not at start of a word
-            // and not following another uppercase or the start
-            if i > 0 && !prev_was_upper && name.chars().nth(i - 1) != Some('.') {
+            // and not following another uppercase or a '.'.
+            if prev_char.is_some() && !prev_was_upper && prev_char != Some('.') {
                 result.push('_');
             }
-            result.push(ch.to_lowercase().next().unwrap_or(ch));
+            let lowered = ch.to_lowercase().next().unwrap_or(ch);
+            result.push(lowered);
             prev_was_upper = true;
+            prev_char = Some(ch);
         } else if ch.is_alphanumeric() || ch == '_' || ch == ':' {
             result.push(ch);
             prev_was_upper = false;
+            prev_char = Some(ch);
         } else {
             result.push('_');
             prev_was_upper = false;
+            prev_char = Some(ch);
         }
     }
 

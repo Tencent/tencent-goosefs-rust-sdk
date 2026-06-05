@@ -212,6 +212,29 @@ impl MasterClient {
         let mut last_err: Option<Error> = None;
 
         for attempt in 0..=MAX_RPC_RETRIES {
+            // For retry attempts (attempt > 0) we know the previous call hit
+            // a retriable error, which usually means the channel is dead.
+            // Reconnect *before* re-sending — sending on a stale channel
+            // just burns `request_timeout` for no gain. If the reconnect
+            // itself fails, skip this attempt (the next iteration will try
+            // reconnect again) so we don't consume retries on a known-bad
+            // connection.
+            if attempt > 0 {
+                if let Err(reconnect_err) = self.reconnect().await {
+                    warn!(
+                        op = op_name,
+                        attempt = attempt + 1,
+                        error = %reconnect_err,
+                        "reconnect failed; will retry reconnect on next attempt"
+                    );
+                    last_err = Some(Error::Internal {
+                        message: format!("master reconnect failed: {}", reconnect_err),
+                        source: None,
+                    });
+                    continue;
+                }
+            }
+
             let client: AuthenticatedFsClient = {
                 let inner = self.inner.read().await;
                 inner.clone()
@@ -239,17 +262,12 @@ impl MasterClient {
                             attempt = attempt + 1,
                             max = MAX_RPC_RETRIES,
                             error = %err,
-                            "retriable error, reconnecting and retrying"
+                            "retriable error; will reconnect and retry"
                         );
-                        if let Err(reconnect_err) = self.reconnect().await {
-                            warn!(error = %reconnect_err, "reconnect failed");
-                            last_err = Some(err);
-                            continue;
-                        }
+                        last_err = Some(err);
                     } else {
                         return Err(err);
                     }
-                    last_err = Some(err);
                 }
             }
         }

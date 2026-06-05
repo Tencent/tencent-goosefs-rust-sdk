@@ -61,6 +61,7 @@ use crate::client::{
 use crate::config::{ConfigRefresher, GoosefsConfig, TransparentAccelerationSwitch};
 use crate::error::{Error, Result};
 use crate::metrics::heartbeat::{resolve_app_id, HeartbeatTask};
+#[cfg(feature = "metrics-pushgateway")]
 use crate::metrics::pushgateway::{PushgatewayConfig, PushgatewayTask};
 use crate::metrics::reporter::ClientMetricsReporter;
 
@@ -130,6 +131,7 @@ pub struct FileSystemContext {
     /// Prometheus Pushgateway background push task.
     /// `None` when `config.pushgateway_enabled = false`.
     /// Shut down gracefully (with final flush) in `close()`.
+    #[cfg(feature = "metrics-pushgateway")]
     pushgateway_task: Mutex<Option<PushgatewayTask>>,
 }
 
@@ -189,6 +191,7 @@ impl FileSystemContext {
             worker_refresh_task: Mutex::new(None),
             config_refresh_task: Mutex::new(None),
             metrics_heartbeat: Mutex::new(None),
+            #[cfg(feature = "metrics-pushgateway")]
             pushgateway_task: Mutex::new(None),
         });
 
@@ -199,6 +202,7 @@ impl FileSystemContext {
         // Start the metrics heartbeat task (no-op when metrics_enabled = false).
         ctx.clone().start_metrics_heartbeat_task().await?;
         // Start the Pushgateway push task (no-op when pushgateway_enabled = false).
+        #[cfg(feature = "metrics-pushgateway")]
         ctx.clone().start_pushgateway_task().await;
 
         Ok(ctx)
@@ -283,6 +287,7 @@ impl FileSystemContext {
         }
 
         // Gracefully shut down the Pushgateway push task (performs final push).
+        #[cfg(feature = "metrics-pushgateway")]
         if let Some(task) = self.pushgateway_task.lock().await.take() {
             task.shutdown().await;
             debug!("pushgateway task shut down");
@@ -468,6 +473,7 @@ impl FileSystemContext {
     ///
     /// Does nothing only when **both** the initial config and the properties
     /// file have pushgateway disabled (or no properties file is found).
+    #[cfg(feature = "metrics-pushgateway")]
     async fn start_pushgateway_task(self: Arc<Self>) {
         // Determine the effective pushgateway config: prefer the initial config
         // if it already has pushgateway enabled; otherwise try auto-discovery.
@@ -534,6 +540,7 @@ impl FileSystemContext {
     /// the correct outbound IP even on multi-homed machines.
     ///
     /// Falls back to `"127.0.0.1"` if detection fails.
+    #[cfg(feature = "metrics-pushgateway")]
     fn resolve_local_ip() -> String {
         use std::net::UdpSocket;
         match UdpSocket::bind("0.0.0.0:0") {

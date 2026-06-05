@@ -503,6 +503,66 @@ class AsyncWorkerClient:
     ) -> Awaitable[None]: ...
 
 # ─────────────────────────────────────────────────────────────────────────
+# Sync mirror — WorkerClient
+# ─────────────────────────────────────────────────────────────────────────
+
+@final
+class WorkerClient:
+    """Synchronous (blocking) low-level Worker block client.
+
+    Sync mirror of :class:`AsyncWorkerClient`. Drives the shared Tokio
+    runtime via ``block_on``, so it must NOT be called from inside an
+    asyncio loop or a Tokio worker thread (same constraint as the
+    sync :class:`Goosefs` class).
+
+    Most callers should prefer :meth:`Goosefs.positioned_read` which
+    routes via the master and reuses the shared connection pool — this
+    class is the escape hatch for already-known worker addresses
+    (benchmarks, custom routing experiments).
+    """
+
+    addr: str
+    @staticmethod
+    def connect(addr: str, config: Config) -> WorkerClient:
+        """Open an authenticated gRPC channel to ``addr`` (``host:port``).
+
+        The handshake follows ``config.auth_type``; pass the same
+        ``Config`` you would give to ``Goosefs(...)``.
+        """
+        ...
+    @staticmethod
+    def connect_simple(addr: str, connect_timeout_ms: int = ...) -> WorkerClient:
+        """Connect without SASL authentication — test workers only.
+
+        .. deprecated::
+            Bypasses SASL auth; only suitable for NOSASL test workers.
+            Production code should use :meth:`connect` with a proper
+            :class:`Config`. Emits ``DeprecationWarning`` on every call.
+        """
+        ...
+    def read_block_positioned(
+        self,
+        block_id: int,
+        offset: int,
+        length: int,
+        chunk_size: int = ...,
+    ) -> bytes:
+        """One-shot positioned read — sync counterpart of
+        :meth:`AsyncWorkerClient.read_block_positioned`.
+        """
+        ...
+    def close(self) -> None:
+        """Idempotent. Subsequent reads raise ``RuntimeError``."""
+        ...
+    def __enter__(self) -> WorkerClient: ...
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None = ...,
+        exc_value: BaseException | None = ...,
+        traceback: Any | None = ...,
+    ) -> None: ...
+
+# ─────────────────────────────────────────────────────────────────────────
 # Filesystem facade — async
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -767,6 +827,7 @@ __all__ = [
     "OpenFileOptions",
     "ReadType",
     "URIStatus",
+    "WorkerClient",
     "WriteType",
     "__version__",
     "enable_tracing",

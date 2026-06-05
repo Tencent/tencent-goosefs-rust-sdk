@@ -259,7 +259,32 @@ pub(crate) async fn positioned_read_with_reauth(
     chunk_size: i64,
 ) -> PyResult<Vec<u8>> {
     // 1. Route to the responsible worker.
-    let worker_info = ctx.acquire_router().select_worker(block_id).await.map_err(map_err)?;
+    //
+    // NOTE on auth-retry routing strategy: the auth-failure retry below
+    // (steps 2 + 3) intentionally does **not** re-route to a different
+    // worker.  The failure mode being recovered from (SASL stream
+    // expiry on a long-lived cached channel) is a *channel-level*
+    // problem on the same worker, not a worker-availability problem —
+    // calling `reconnect_if_stale(worker_addr, ...)` rebuilds a fresh
+    // TCP+SASL handshake against the **same** address, which is exactly
+    // what the SDK reader-path policy does (`file_reader.rs` /
+    // `file_in_stream.rs`) and what the server is prepared for.
+    //
+    // Re-running `select_worker(block_id)` between the failure and the
+    // retry would risk landing on a worker that does not host the block
+    // (block_id → worker mapping is consistent-hashed, so the same call
+    // would also tend to return the same worker), and would not fix any
+    // SASL-level failure.  Worker-availability problems (e.g. a worker
+    // marked failed by a concurrent task) are handled by the SDK
+    // reader-path's *separate* worker-failover branch in
+    // `file_reader.rs`, which `positioned_read` does not need to
+    // duplicate because the binding-layer pool already provides
+    // single-flight reconnect.
+    let worker_info = ctx
+        .acquire_router()
+        .select_worker(block_id)
+        .await
+        .map_err(map_err)?;
     let net_addr = worker_info
         .address
         .as_ref()
@@ -273,11 +298,8 @@ pub(crate) async fn positioned_read_with_reauth(
     // local cache) returns the stale client. On `is_authentication_failed`,
     // request a single reconnect and retry once.
     let pool = ctx.acquire_worker_pool();
-    let client = acquire_with_auth_retry(
-        pool.acquire(&worker_addr),
-        pool.reconnect(&worker_addr),
-    )
-    .await?;
+    let client =
+        acquire_with_auth_retry(pool.acquire(&worker_addr), pool.reconnect(&worker_addr)).await?;
     let stale_generation = client.generation();
 
     // 3. Positioned read — auth-failure retry (inlined).
@@ -426,16 +448,13 @@ mod tests {
         let original_client = fake_client("worker:9203");
         let expected_addr = original_client.addr().to_string();
 
-        let result = acquire_with_auth_retry(
-            async { Ok(original_client.clone()) },
-            {
-                let count = reconnect_count.clone();
-                async move {
-                    count.fetch_add(1, Ordering::SeqCst);
-                    Ok(fake_client("never-called:9203"))
-                }
-            },
-        )
+        let result = acquire_with_auth_retry(async { Ok(original_client.clone()) }, {
+            let count = reconnect_count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(fake_client("never-called:9203"))
+            }
+        })
         .await;
 
         let client = result.expect("acquire must succeed on first try");
@@ -504,8 +523,11 @@ mod tests {
                 let data = expected_data.clone();
                 move |fresh_client: WorkerClient| {
                     count.fetch_add(1, Ordering::SeqCst);
-                    assert_eq!(fresh_client.addr(), "worker:9203",
-                        "retry must receive the fresh client from reconnect");
+                    assert_eq!(
+                        fresh_client.addr(),
+                        "worker:9203",
+                        "retry must receive the fresh client from reconnect"
+                    );
                     Box::pin(async move { Ok(bytes::Bytes::from(data)) })
                 }
             },

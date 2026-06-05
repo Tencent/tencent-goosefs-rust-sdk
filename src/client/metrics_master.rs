@@ -199,6 +199,28 @@ impl MetricsMasterClient {
         let mut last_err: Option<Error> = None;
 
         for attempt in 0..=MAX_RPC_RETRIES {
+            // Before any attempt > 0, reconnect to obtain a fresh channel.
+            // The previous iteration only reaches here on a retriable error,
+            // so the cached channel is presumed dead. If reconnect itself
+            // fails, skip the RPC for this attempt — sending on a stale
+            // channel would just burn `request_timeout` for no gain. The
+            // next iteration will retry the reconnect.
+            if attempt > 0 {
+                if let Err(reconnect_err) = self.reconnect().await {
+                    warn!(
+                        op = op_name,
+                        attempt = attempt + 1,
+                        error = %reconnect_err,
+                        "metrics master reconnect failed; will retry reconnect on next attempt"
+                    );
+                    last_err = Some(Error::Internal {
+                        message: format!("metrics master reconnect failed: {}", reconnect_err),
+                        source: None,
+                    });
+                    continue;
+                }
+            }
+
             let client: AuthenticatedMetricsClient = self.inner.read().await.clone();
 
             match f(client).await {
@@ -210,18 +232,12 @@ impl MetricsMasterClient {
                             attempt = attempt + 1,
                             max = MAX_RPC_RETRIES,
                             error = %err,
-                            "retriable error on metrics RPC, reconnecting and retrying"
+                            "retriable error on metrics RPC; will reconnect and retry"
                         );
-                        if let Err(reconnect_err) = self.reconnect().await {
-                            warn!(
-                                error = %reconnect_err,
-                                "metrics master reconnect failed, will retry with stale channel"
-                            );
-                        }
+                        last_err = Some(err);
                     } else {
                         return Err(err);
                     }
-                    last_err = Some(err);
                 }
             }
         }

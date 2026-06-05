@@ -74,6 +74,7 @@ use goosefs_sdk::io::GrpcBlockReader;
 use crate::config::PyConfig;
 use crate::errors::map_err;
 use crate::positioned_read::DEFAULT_CHUNK_SIZE;
+use crate::runtime::block_on;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AsyncWorkerClient
@@ -334,5 +335,179 @@ impl PyAsyncWorkerClient {
             inner: Arc::new(AsyncMutex::new(Some(client))),
             addr,
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WorkerClient (sync escape hatch)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Synchronous (blocking) low-level Worker block client — sync mirror of
+/// [`PyAsyncWorkerClient`].
+///
+/// This is the sync escape hatch for advanced callers that already know the
+/// Worker address and want a one-shot positioned read without going through
+/// `Goosefs.positioned_read` (which routes via the master). Most users
+/// should prefer `Goosefs.positioned_read(path, offset, length)` — this
+/// class exists for benchmarking, custom routing experiments, and parity
+/// with the async API surface.
+///
+/// ```python
+/// from goosefs import WorkerClient, Config
+///
+/// def pos_read(addr: str, block_id: int, offset: int, length: int) -> bytes:
+///     cfg = Config("127.0.0.1:9200")
+///     with WorkerClient.connect(addr, cfg) as wc:
+///         return wc.read_block_positioned(block_id, offset, length)
+/// ```
+///
+/// All methods drive the shared Tokio runtime via `block_on` and therefore
+/// must NOT be called from inside an asyncio loop or a Tokio worker
+/// thread (same constraint as the sync `Goosefs` class).
+#[pyclass(module = "goosefs._goosefs", name = "WorkerClient")]
+pub struct PyWorkerClient {
+    inner: Arc<AsyncMutex<Option<WorkerClient>>>,
+    addr: String,
+}
+
+#[pymethods]
+impl PyWorkerClient {
+    /// `WorkerClient.connect(addr, config)` → `WorkerClient` (sync).
+    ///
+    /// Establishes a TCP+SASL handshake to the Worker at `addr`.
+    /// Synchronous counterpart of [`PyAsyncWorkerClient::connect`].
+    #[staticmethod]
+    fn connect(addr: String, config: PyConfig) -> PyResult<Self> {
+        if addr.is_empty() {
+            return Err(PyValueError::new_err(
+                "WorkerClient.connect: addr must not be empty",
+            ));
+        }
+        let sdk_cfg = config.inner.clone();
+        let addr_for_block = addr.clone();
+        let client = block_on(async move {
+            WorkerClient::connect(&addr_for_block, &sdk_cfg)
+                .await
+                .map_err(map_err)
+        })?;
+        Ok(PyWorkerClient {
+            inner: Arc::new(AsyncMutex::new(Some(client))),
+            addr,
+        })
+    }
+
+    /// `WorkerClient.connect_simple(addr, connect_timeout_ms=10_000)` (sync).
+    ///
+    /// **Deprecated escape hatch** — connects without SASL authentication.
+    /// Only useful for test workers configured with `auth_type=NOSASL`.
+    #[staticmethod]
+    #[pyo3(signature = (addr, connect_timeout_ms = 10_000))]
+    fn connect_simple(py: Python<'_>, addr: String, connect_timeout_ms: u64) -> PyResult<Self> {
+        if addr.is_empty() {
+            return Err(PyValueError::new_err(
+                "WorkerClient.connect_simple: addr must not be empty",
+            ));
+        }
+        let warnings = py.import("warnings")?;
+        let deprecation_warning = py.import("builtins")?.getattr("DeprecationWarning")?;
+        warnings.call_method1(
+            "warn",
+            (
+                "connect_simple is deprecated — use connect() with proper Config for production use",
+                deprecation_warning,
+                2,
+            ),
+        )?;
+        let timeout = Duration::from_millis(connect_timeout_ms);
+        let addr_for_block = addr.clone();
+        let client = block_on(async move {
+            WorkerClient::connect_simple(&addr_for_block, timeout)
+                .await
+                .map_err(map_err)
+        })?;
+        Ok(PyWorkerClient {
+            inner: Arc::new(AsyncMutex::new(Some(client))),
+            addr,
+        })
+    }
+
+    /// `wc.read_block_positioned(block_id, offset, length, chunk_size=1<<20)` → `bytes` (sync).
+    ///
+    /// One-shot positioned read against a single block. See
+    /// [`PyAsyncWorkerClient::read_block_positioned`] for full semantics.
+    #[pyo3(signature = (block_id, offset, length, chunk_size = DEFAULT_CHUNK_SIZE))]
+    fn read_block_positioned<'py>(
+        &self,
+        py: Python<'py>,
+        block_id: i64,
+        offset: i64,
+        length: i64,
+        chunk_size: i64,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        if offset < 0 {
+            return Err(PyValueError::new_err("offset must be non-negative"));
+        }
+        if length < 0 {
+            return Err(PyValueError::new_err("length must be non-negative"));
+        }
+        if chunk_size <= 0 {
+            return Err(PyValueError::new_err("chunk_size must be positive"));
+        }
+        if length == 0 {
+            return Ok(PyBytes::new(py, &[]));
+        }
+
+        let inner = Arc::clone(&self.inner);
+        let bytes = block_on(async move {
+            let worker = {
+                let guard = inner.lock().await;
+                guard
+                    .as_ref()
+                    .ok_or_else(|| PyRuntimeError::new_err("WorkerClient is closed"))?
+                    .clone()
+            };
+            GrpcBlockReader::positioned_read(
+                &worker, block_id, offset, length, chunk_size, /* ufs_opts */ None,
+            )
+            .await
+            .map_err(map_err)
+        })?;
+
+        Ok(PyBytes::new(py, &bytes))
+    }
+
+    /// `wc.addr` — the `host:port` address this client is connected to.
+    #[getter]
+    fn addr(&self) -> &str {
+        &self.addr
+    }
+
+    /// `wc.close()` — release the underlying gRPC channel. Idempotent.
+    fn close(&self) -> PyResult<()> {
+        let inner = Arc::clone(&self.inner);
+        block_on(async move {
+            let mut guard = inner.lock().await;
+            let _ = guard.take();
+        });
+        Ok(())
+    }
+
+    /// `with WorkerClient.connect(...) as wc: ...`
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[pyo3(signature = (_exc_type=None, _exc_value=None, _traceback=None))]
+    fn __exit__<'py>(
+        &self,
+        _exc_type: Option<Bound<'py, PyAny>>,
+        _exc_value: Option<Bound<'py, PyAny>>,
+        _traceback: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<()> {
+        self.close()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("WorkerClient(addr={:?})", self.addr)
     }
 }

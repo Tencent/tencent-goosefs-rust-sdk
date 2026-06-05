@@ -8,15 +8,212 @@ This document records all notable changes to the `goosefs` Python binding. The f
 
 ### Added
 
-- None yet
+- **`goosefs.WorkerClient`** — synchronous mirror of `AsyncWorkerClient`. New
+  blocking escape hatch for callers that already know a worker address and
+  want a one-shot `read_block_positioned` without going through
+  `Goosefs.positioned_read` (which routes via the master). Mirrors the async
+  surface 1:1: `WorkerClient.connect(addr, config)` static factory,
+  `WorkerClient.connect_simple(addr, ...)` (deprecated NOSASL), instance
+  methods `read_block_positioned` / `close`, `addr` getter, and a regular
+  `with` context manager. Same Tokio-runtime guarantees as the sync `Goosefs`
+  class — must not be called from inside an asyncio loop or a Tokio worker
+  thread.
+
+  ```python
+  from goosefs import WorkerClient, Config
+
+  with WorkerClient.connect("127.0.0.1:9203", Config("127.0.0.1:9200")) as wc:
+      data = wc.read_block_positioned(block_id, offset=0, length=64 * 1024)
+  ```
+
+  Exported from `goosefs._goosefs`, re-exported from `goosefs`, and listed
+  in `__all__` (top-level package + type stub).
 
 ### Changed
 
-- None yet
+- `tests/test_worker_block_direct.py` translated from Chinese to English;
+  the previously-`@pytest.mark.xfail`'d sync-`WorkerClient` export checks
+  are now regular passing tests guarding the new public surface.
 
 ### Fixed
 
-- None yet
+The Python binding inherits the following SDK-side correctness fixes
+from the same release. No Python API change is required to benefit from
+them — every Python read / write / metadata call already routes through
+the affected paths.
+
+- **HA primary discovery cancel-safety** (SDK C1). `PollingMasterInquireClient`
+  no longer wedges when the singleflight leader's `poll_for_primary` is
+  cancelled by an outer `timeout` / `select!` or panics: a new RAII
+  `LeaderGuard` always broadcasts a transient error to followers and
+  resets the gate so the next caller can become a fresh leader. Previously
+  followers fell into infinite recursion against a dead `watch::Receiver`.
+- **`WriteBlockHandle::Drop`** (SDK C3). Dropping a write handle on an
+  early-error path now aborts the background gRPC task instead of leaking
+  it as a detached future stuck on `stream.message().await`. Affects
+  every Python writer surface (`AsyncFileWriter`, `FileWriter`,
+  `write_file`).
+- **`GoosefsFileInStream::seek` short forward seek byte-loss** (SDK C4).
+  Small forward seeks within the same block (< 8 KiB) used to silently
+  drop the chunk-tail bytes beyond the seek target; the next read then
+  returned data from the wrong offset. Fixed by parking the over-pulled
+  bytes into the carry-over buffer.
+- **`GoosefsFileWriter::Drop` best-effort cleanup** (SDK C5). When a
+  writer is dropped without `close()` / `cancel()` (e.g. an early `?` on
+  the error path or a panic), Drop now spawns a best-effort cleanup task
+  that cancels in-flight cache / UFS streams and either calls
+  `master.remove_blocks` or falls back to `delete(unchecked=true)` so
+  that worker temp blocks and INCOMPLETE inodes are not left behind.
+- **`LogSampler` clock-jump safety** (SDK C6). Heartbeat WARN
+  rate-limiter now uses monotonic `Instant` instead of `SystemTime`;
+  NTP / administrator clock adjustments can no longer suppress all WARN
+  logs until the wall-clock catches up.
+- **`MetricsMasterClient::with_retry`** (SDK C2) — and its master
+  counterpart — now reconnect at the *top* of the next retry attempt and
+  skip the RPC if reconnect itself fails, instead of burning
+  `request_timeout` against the same known-dead channel.
+- **`WorkerClient::connect`** now sets `request_timeout` matching
+  master / metrics / worker-manager. Previously a half-open data-plane
+  connection could hang `read_block` / `write_block` indefinitely.
+- **`config::parse_byte_size` overflow** now surfaces an error instead
+  of silently wrapping in release builds (e.g. `"99999999999GB"` used to
+  parse to a tiny block size and cause hard-to-diagnose I/O misbehaviour).
+- **`WriteType::From<WritePType>`** removed (used to panic on
+  `Unspecified` / `None`, both legal proto values from the server).
+  Use `WriteType::try_from_proto` which returns `Result`.
+- **`block::WorkerRouter` performance**: the consistent-hash ring is now
+  pre-built once on `update_workers` (O(log N) `binary_search` per
+  request) rather than rebuilt-and-sorted per request; local-worker probe
+  is cached as `Option<Option<i64>>` so "no local worker" no longer
+  re-runs `hostname::get()` on every `select_worker`; `pick_any_worker`
+  uses `rand::Rng::random_range` rather than a `subsec_nanos()` modulo
+  for proper load spreading.
+- **`io::reader` short-read** on server-emitted empty / keep-alive frames.
+  An empty data frame in the middle of a block stream no longer
+  short-reads as EOF; the reader keeps draining until either the byte
+  budget is met or the server half-closes.
+- **`fs::base_filesystem::resolve_write_type`** now distinguishes
+  `NotFound` (silent fallback to config default) from other RPC errors
+  (warn before falling back), so transient master errors no longer
+  silently change the persistence semantics of newly-created files.
+- **`ExponentialBackoffRetry`** off-by-one — the second retry now uses
+  `base_sleep * 2` as documented (used to stay at `base_sleep`).
+- **`ExponentialTimeBoundedRetry::should_retry`** — `current_sleep * 2`
+  now uses `saturating_mul` and can no longer panic under pathological
+  configurations.
+
+---
+
+## [0.1.5] — 2026-06-04
+
+Aligned with `goosefs-sdk` 0.1.5. Underlying SDK adds Prometheus
+Pushgateway support, exposes `GoosefsAsyncReader` (`tokio::io::AsyncRead`
++ `AsyncSeek`), and fixes a `GoosefsFileInStream::read` short-read
+byte-loss edge case; the Python binding inherits these fixes
+transparently with no API change.
+
+### Changed
+
+- **Underlying SDK upgrade**: `goosefs-sdk` 0.1.3 → 0.1.5. Pinned
+  dependency versions (prost 0.14.1, tokio 1.23+, rand 0.9.1, reqwest
+  0.12 with `rustls-tls`); adapted to rand 0.9 API changes
+  (`thread_rng` → `rng`, `gen_range` → `random_range`).
+- `bindings/python/Cargo.toml` version `0.1.4` → `0.1.5`, kept in sync
+  with the root crate; `goosefs.__version__` now reports `0.1.5`.
+
+### Fixed
+
+- Inherits the SDK-side `GoosefsFileInStream::read` fix that prevented
+  bytes from being dropped when the caller-supplied buffer was smaller
+  than the available chunk data.
+
+### Notes
+
+- No breaking API changes — drop-in upgrade from `0.1.4` / `0.1.3`.
+- Public PyPI publication is still gated on P8 (CI/Wheel) and P9
+  (canary + regression); wheels in this directory continue to be
+  produced manually via `maturin build --release` for internal use.
+
+---
+
+## [0.1.4] — 2026-06-03
+
+Python-binding-only performance release. No public API additions to
+the underlying `goosefs-sdk` crate; all changes live under
+`bindings/python/`. Aligned with `goosefs-sdk` 0.1.4.
+
+### Added
+
+- **`AsyncGoosefs.batch_get_status(paths)` / `batch_exists(paths)`** —
+  coroutine-based batch metadata APIs. Each path is mapped to a
+  future sharing the same `Arc<BaseFileSystem>` and driven
+  concurrently via `futures::future::join_all`; results are returned
+  in input order, and the first error fails the whole batch. One
+  PyO3 boundary crossing per batch instead of N.
+- **`Goosefs.batch_get_status(paths)` / `batch_exists(paths)`** —
+  synchronous counterparts. Single `guarded_block_on` + `join_all`,
+  releasing the GIL only once for the entire batch.
+- **Custom Tokio runtime** — new `runtime::init_custom_runtime()`
+  registered via `pyo3_async_runtimes::tokio::init` at module init.
+  `worker_threads = available_parallelism().max(16)`,
+  `max_blocking_threads = 64`, `enable_all()`. Uses std
+  `available_parallelism` (no `num_cpus` dependency).
+- Type stubs (`python/goosefs/__init__.pyi`) updated with
+  `batch_get_status` / `batch_exists` signatures for both
+  `AsyncGoosefs` and `Goosefs`.
+
+### Changed
+
+- **Read-path copy elimination** (`streaming.rs` / `sync_fs.rs`):
+  - `pull_n`: pre-allocate `vec![0u8; want]` and fill in place via
+    `stream.read(&mut out[filled..])`, removing per-iteration `tmp`
+    allocation and `extend_from_slice` copy.
+  - `pull_all`: return type switched from `Vec<u8>` to `bytes::Bytes`,
+    dropping a `to_vec()`.
+  - Async `PyAsyncFileReader::read`: split into `size<0` (Bytes) /
+    `else` (Vec) branches, each with a single `PyBytes::new`.
+  - Sync `PyFileReader::read` / `read_at`: unified to `Bytes`,
+    carrying `Bytes` out of the blocking section.
+  - `Goosefs::read_file` / `read_range`: blocking section returns
+    `Bytes`; after GIL reacquire, `PyBytes::new(py, bytes.as_ref())`
+    eliminates the `to_vec()` double copy.
+- **Underlying SDK upgrade**: `goosefs-sdk` 0.1.3 → 0.1.4 (version
+  alignment; no public API change).
+- `bindings/python/Cargo.toml` version `0.1.2` → `0.1.4` to align with
+  the root crate; `goosefs.__version__` updated to `0.1.4`
+  accordingly.
+
+### Skipped / Deferred
+
+- **`extract_bytes_like` PyBuffer zero-copy** — attempted via
+  `PyBuffer<u8>`, but `pyo3::buffer` is cfg-gated out under
+  `abi3-py39` (`#![cfg(any(not(Py_LIMITED_API), Py_3_11))]`).
+  Enabling would require raising the abi3 floor to 3.11 and dropping
+  3.9/3.10 support — not worth it. Reverted to the portable
+  `extract::<Vec<u8>>()` path; the rationale and re-enable
+  condition are documented inline.
+- **Free-threaded Python 3.13+ / sync `tokio::sync::Mutex` removal** —
+  groundwork only (`#[pymodule(gil_used = false)]` is set), deferred
+  until the CPython / PyO3 ecosystem matures.
+
+### Verified
+
+- `cargo build -p goosefs-python`, `cargo clippy`, `read_lints` —
+  all clean.
+- `uv run maturin develop` produced
+  `goosefs-0.1.4-cp39-abi3-*.whl`; `goosefs.__version__` reports
+  `0.1.4`.
+- `uv run pytest -q` → 11 passed (cluster-dependent integration
+  tests gated by `GOOSEFS_MASTER_ADDR`).
+- Real-cluster benchmark (single-node GooseFS, 500 paths, 7 iters,
+  16 threads) — batch API median latency vs sequential loop:
+  - Sync `get_status`: 100.67 ms → **37.68 ms** (**2.67×**),
+    also faster than ThreadPool(16) at 45.67 ms.
+  - Sync `exists`: 88.46 ms → **36.51 ms** (**2.42×**).
+  - Async `get_status`: gather 41.15 ms → **36.23 ms** (**1.14×**).
+  - Read throughput baseline (Phase 1 copy-elimination):
+    4 KiB 2.9 MiB/s, 256 KiB 184 MiB/s, 4 MiB 701 MiB/s,
+    16 MiB **948 MiB/s**.
 
 ---
 

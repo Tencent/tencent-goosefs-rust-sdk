@@ -261,6 +261,9 @@ mod tests {
     fn open_file_default_uses_cache() {
         let py = PyOpenFileOptions::new(None);
         let sdk = py.into_sdk();
-        assert_eq!(sdk.in_stream_options.read_type, goosefs_sdk::fs::ReadType::Cache);
+        assert_eq!(
+            sdk.in_stream_options.read_type,
+            goosefs_sdk::fs::ReadType::Cache
+        );
     }
 }

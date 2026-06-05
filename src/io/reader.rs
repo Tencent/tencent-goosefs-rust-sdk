@@ -30,7 +30,7 @@ use tonic::Streaming;
 use tracing::{debug, trace, warn};
 
 use crate::client::WorkerClient;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::metrics::name;
 use crate::proto::grpc::block::{ReadRequest, ReadResponse};
 use crate::proto::proto::dataserver::OpenUfsBlockOptions;
@@ -52,6 +52,58 @@ pub struct GrpcBlockReader {
     request_tx: mpsc::Sender<ReadRequest>,
     /// Receiver for server → client responses (data chunks).
     response_rx: Streaming<ReadResponse>,
+}
+
+/// Decision of how the reader should treat a single `ReadResponse` (or its
+/// absence).
+///
+/// Extracted as a pure function so the empty-frame / EOF / data-deliver
+/// branches can be unit-tested without spinning up a real gRPC stream.
+#[derive(Debug, PartialEq, Eq)]
+enum ChunkAction {
+    /// The server has half-closed the stream — no more data is coming.
+    Eof,
+    /// The frame carries no data (keep-alive / header-only) but the stream
+    /// is still open. Caller must wait for the next frame; emitting `None`
+    /// here would silently truncate the read.
+    KeepReading,
+    /// A data frame: deliver these bytes to the caller.
+    Deliver(Bytes),
+}
+
+/// Classify a single response from the worker stream into one of three
+/// outcomes. Pure function — no I/O, no state, fully unit-testable.
+fn classify_response(resp: Option<ReadResponse>) -> ChunkAction {
+    match resp {
+        None => ChunkAction::Eof,
+        Some(r) => {
+            let data = r.chunk.and_then(|c| c.data).unwrap_or_default();
+            if data.is_empty() {
+                ChunkAction::KeepReading
+            } else {
+                ChunkAction::Deliver(Bytes::from(data))
+            }
+        }
+    }
+}
+
+/// Verify that a positioned-read stream delivered every requested byte.
+///
+/// Pure helper so the H2 short-read guard can be unit-tested without
+/// spinning up a real gRPC stream. Returns `Err(Error::Internal{..})`
+/// iff the server half-closed before `bytes_received == length`.
+fn check_positioned_read_complete(block_id: i64, bytes_received: i64, length: i64) -> Result<()> {
+    if bytes_received < length {
+        return Err(Error::Internal {
+            message: format!(
+                "short positioned read on block {}: received {} of {} bytes \
+                 (server half-closed early)",
+                block_id, bytes_received, length
+            ),
+            source: None,
+        });
+    }
+    Ok(())
 }
 
 impl GrpcBlockReader {
@@ -105,50 +157,83 @@ impl GrpcBlockReader {
             return Ok(None);
         }
 
-        match self.response_rx.message().await? {
-            Some(resp) => {
-                let data = resp.chunk.and_then(|c| c.data).unwrap_or_default();
-
-                if data.is_empty() {
-                    // Empty chunk signals end of data
+        // Loop instead of recursing: the server may emit several empty
+        // keep-alive / header-only frames in a row, and `Box::pin`-ing the
+        // recursive call would otherwise heap-allocate per empty frame.
+        loop {
+            match classify_response(self.response_rx.message().await?) {
+                ChunkAction::Eof => {
+                    debug!(
+                        block_id = self.block_id,
+                        bytes_received = self.bytes_received,
+                        "stream ended before all expected data received"
+                    );
                     return Ok(None);
                 }
-
-                self.bytes_received += data.len() as i64;
-                trace!(
-                    block_id = self.block_id,
-                    chunk_len = data.len(),
-                    total_received = self.bytes_received,
-                    "received chunk"
-                );
-
-                // Instrument: increment read bytes counter.
-                // TODO: Distinguish local vs. remote reads via worker address.
-                // For now, conservatively count all reads as local short-circuit.
-                crate::metrics::counter(name::CLIENT_BYTES_READ_LOCAL).inc(data.len() as i64);
-
-                // Send flow-control ACK
-                let ack = ReadRequest {
-                    offset_received: Some(self.offset + self.bytes_received),
-                    ..Default::default()
-                };
-                if self.request_tx.send(ack).await.is_err() {
-                    warn!(
+                ChunkAction::KeepReading => {
+                    // The server has sent an empty data frame but has not
+                    // closed the stream — typical for keep-alive /
+                    // header-only frames. Returning `None` here would be a
+                    // short-read for the caller (we'd lie about hitting
+                    // EOF before `bytes_received >= length`), which can
+                    // silently truncate user data. Wait for the next real
+                    // chunk. EOF is correctly detected at the top of this
+                    // function via the `bytes_received >= length` check,
+                    // or via the `Eof` arm above when the server half-closes.
+                    trace!(
                         block_id = self.block_id,
-                        "ACK channel closed (read may be complete)"
+                        bytes_received = self.bytes_received,
+                        expected = self.length,
+                        "received empty data frame, awaiting next chunk"
                     );
+                    continue;
                 }
+                ChunkAction::Deliver(data) => {
+                    self.bytes_received += data.len() as i64;
+                    trace!(
+                        block_id = self.block_id,
+                        chunk_len = data.len(),
+                        total_received = self.bytes_received,
+                        "received chunk"
+                    );
 
-                Ok(Some(Bytes::from(data)))
-            }
-            None => {
-                // Stream ended
-                Ok(None)
+                    // Instrument: increment read bytes counter.
+                    // TODO: Distinguish local vs. remote reads via worker address.
+                    // For now, conservatively count all reads as local short-circuit.
+                    crate::metrics::counter(name::CLIENT_BYTES_READ_LOCAL).inc(data.len() as i64);
+
+                    // Send flow-control ACK
+                    let ack = ReadRequest {
+                        offset_received: Some(self.offset + self.bytes_received),
+                        ..Default::default()
+                    };
+                    if self.request_tx.send(ack).await.is_err() {
+                        warn!(
+                            block_id = self.block_id,
+                            "ACK channel closed (read may be complete)"
+                        );
+                    }
+
+                    return Ok(Some(data));
+                }
             }
         }
     }
 
     /// Read all remaining data from this block and return it as a single `Bytes`.
+    ///
+    /// # H2 short-read guarantee
+    ///
+    /// `read_all` is the *positioned-read* tail (used by
+    /// [`Self::positioned_read`]). The caller has constrained `length` to a
+    /// range it knows is in-file, so a server-side half-close before
+    /// `bytes_received == length` indicates either a truncated stream or a
+    /// worker bug — surfacing it as `Error::Internal` lets the upper layer
+    /// (`GoosefsFileInStream::read_at`) decide whether to retry or propagate,
+    /// instead of returning misaligned data via a silent short read.
+    ///
+    /// The streaming sequential path uses [`Self::read_chunk`] directly and
+    /// is unaffected by this check.
     pub async fn read_all(&mut self) -> Result<Bytes> {
         let mut buf = BytesMut::with_capacity(self.length as usize);
 
@@ -160,6 +245,12 @@ impl GrpcBlockReader {
         crate::metrics::counter(name::CLIENT_BLOCKS_READ_TOTAL).inc(1);
         crate::metrics::gauge(name::CLIENT_BLOCKS_READ_IN_PROGRESS)
             .set((crate::metrics::gauge(name::CLIENT_BLOCKS_READ_IN_PROGRESS).get() - 1).max(0));
+
+        // H2: short-read guard. `read_chunk()` returns Ok(None) on either
+        // `bytes_received >= length` (the legitimate completion path) or
+        // server-half-close (`ChunkAction::Eof` before all bytes arrived).
+        // The latter must NOT be presented as a successful read.
+        check_positioned_read_complete(self.block_id, self.bytes_received, self.length)?;
 
         Ok(buf.freeze())
     }
@@ -240,6 +331,7 @@ impl GrpcBlockReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::grpc::block::Chunk;
 
     /// Verify that metrics instrumentation in read_chunk is sound.
     /// (Full read path testing is integration-level; here we just verify
@@ -248,5 +340,108 @@ mod tests {
     fn metrics_counter_accessible() {
         let _counter = crate::metrics::counter(name::CLIENT_BYTES_READ_LOCAL);
         // Just verifying no panics during counter access.
+    }
+
+    /// `None` from `Streaming::message()` means the server half-closed.
+    #[test]
+    fn classify_response_none_is_eof() {
+        assert_eq!(classify_response(None), ChunkAction::Eof);
+    }
+
+    /// **Regression**: a frame whose `chunk.data` is `None` or an empty
+    /// `Vec` MUST be treated as a keep-alive, NOT as EOF — the previous
+    /// implementation returned `None` here, which silently short-read user
+    /// data when the server emitted any header-only frame.
+    #[test]
+    fn classify_response_no_chunk_is_keep_reading() {
+        let resp = ReadResponse {
+            chunk: None,
+            ..Default::default()
+        };
+        assert_eq!(classify_response(Some(resp)), ChunkAction::KeepReading);
+    }
+
+    #[test]
+    fn classify_response_empty_chunk_is_keep_reading() {
+        let resp = ReadResponse {
+            chunk: Some(Chunk {
+                data: Some(Vec::new()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(classify_response(Some(resp)), ChunkAction::KeepReading);
+    }
+
+    #[test]
+    fn classify_response_chunk_with_none_data_is_keep_reading() {
+        let resp = ReadResponse {
+            chunk: Some(Chunk {
+                data: None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(classify_response(Some(resp)), ChunkAction::KeepReading);
+    }
+
+    /// Real data frames must be delivered byte-for-byte unchanged.
+    #[test]
+    fn classify_response_data_is_delivered() {
+        let payload = b"hello world".to_vec();
+        let resp = ReadResponse {
+            chunk: Some(Chunk {
+                data: Some(payload.clone()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        match classify_response(Some(resp)) {
+            ChunkAction::Deliver(b) => assert_eq!(b.as_ref(), payload.as_slice()),
+            other => panic!("expected Deliver, got {:?}", other),
+        }
+    }
+
+    /// **Regression for H2 (short positioned read)**: when the server
+    /// half-closes before delivering the full requested range,
+    /// `read_all()` MUST surface an `Error::Internal` instead of returning
+    /// a truncated `Bytes`. The pre-fix behaviour returned the partial
+    /// buffer silently, which combined with the buggy `cur += length` in
+    /// `GoosefsFileInStream::read_at` caused mis-aligned data on the
+    /// caller side (random-access read returning wrong bytes).
+    #[test]
+    fn check_positioned_read_complete_short_read_errors() {
+        // Received < expected → Error::Internal with descriptive message.
+        let err = check_positioned_read_complete(
+            /* block_id */ 16777216, /* bytes_received */ 1024, /* length */ 4096,
+        )
+        .unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("short positioned read on block 16777216"),
+            "expected short-read message, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("received 1024 of 4096"),
+            "expected received/length pair in message, got: {}",
+            msg
+        );
+    }
+
+    /// **Regression for H2**: the legitimate completion path
+    /// (`bytes_received == length`) MUST be Ok.
+    #[test]
+    fn check_positioned_read_complete_full_read_ok() {
+        assert!(check_positioned_read_complete(1, 4096, 4096).is_ok());
+    }
+
+    /// **Regression for H2**: any *over-read* (server delivered more than
+    /// asked — defensive check, should not happen in practice) is
+    /// **not** treated as a short read. Strictly `bytes_received < length`
+    /// is the failure condition.
+    #[test]
+    fn check_positioned_read_complete_over_read_ok() {
+        assert!(check_positioned_read_complete(1, 5000, 4096).is_ok());
     }
 }

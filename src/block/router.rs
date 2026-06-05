@@ -49,11 +49,27 @@ pub struct WorkerRouter {
     worker_refresh_ttl: Duration,
 
     // ── Local worker cache ──────────────────────────────────────────────────
-    /// The detected local worker ID, if any.
+    /// Cached result of local-worker detection.
     ///
-    /// Set on first call to `select_worker` after the worker list is populated.
-    /// `0` means "not yet detected" (worker IDs are always positive).
-    local_worker_id: RwLock<i64>,
+    /// - `None`              → not probed yet (next `select_worker` will probe)
+    /// - `Some(None)`        → probed and confirmed there is **no** local worker
+    /// - `Some(Some(id))`    → probed and found local worker with this ID
+    ///
+    /// The previous design used `i64 = 0` to mean both "not probed" and
+    /// "no local worker found", which forced `hostname::get()` and a write
+    /// lock acquisition on every `select_worker()` call when no local
+    /// worker was present. Distinguishing the two states eliminates that
+    /// hot-path overhead.
+    local_worker_id: RwLock<Option<Option<i64>>>,
+
+    // ── Pre-built consistent-hash ring ──────────────────────────────────────
+    /// Sorted `(hash, worker_index)` pairs across all virtual nodes.
+    ///
+    /// Built once in `update_workers` and shared via `Arc` so the hot
+    /// `select_worker` path does only an O(log N) `binary_search`.
+    /// Previously the ring was rebuilt + sorted on every call (O(N log N)
+    /// with N typically `VIRTUAL_NODES_PER_WORKER * worker_count`).
+    hash_ring: RwLock<Arc<Vec<(u64, usize)>>>,
 }
 
 impl WorkerRouter {
@@ -65,7 +81,8 @@ impl WorkerRouter {
             failure_ttl: DEFAULT_FAILURE_TTL,
             last_refresh: RwLock::new(Instant::now()),
             worker_refresh_ttl: DEFAULT_WORKER_REFRESH_TTL,
-            local_worker_id: RwLock::new(0),
+            local_worker_id: RwLock::new(None),
+            hash_ring: RwLock::new(Arc::new(Vec::new())),
         }
     }
 
@@ -77,7 +94,8 @@ impl WorkerRouter {
             failure_ttl,
             last_refresh: RwLock::new(Instant::now()),
             worker_refresh_ttl: DEFAULT_WORKER_REFRESH_TTL,
-            local_worker_id: RwLock::new(0),
+            local_worker_id: RwLock::new(None),
+            hash_ring: RwLock::new(Arc::new(Vec::new())),
         }
     }
 
@@ -89,22 +107,31 @@ impl WorkerRouter {
             failure_ttl,
             last_refresh: RwLock::new(Instant::now()),
             worker_refresh_ttl,
-            local_worker_id: RwLock::new(0),
+            local_worker_id: RwLock::new(None),
+            hash_ring: RwLock::new(Arc::new(Vec::new())),
         }
     }
 
     /// Update the full worker list (snapshot replace pattern).
     ///
     /// Also resets the TTL clock so the list won't be considered stale
-    /// immediately after an explicit update.
+    /// immediately after an explicit update, and **rebuilds the consistent
+    /// hash ring** so the hot `select_worker` path can do an O(log N)
+    /// lookup instead of rebuilding+sorting on every call.
     pub async fn update_workers(&self, workers: Vec<WorkerInfo>) {
+        // Pre-build the consistent-hash ring for the new worker list.
+        let new_ring = Arc::new(build_hash_ring(&workers));
         let new_snapshot = Arc::new(workers);
+
         let mut guard = self.workers.write().await;
         *guard = new_snapshot;
+        drop(guard);
+
+        *self.hash_ring.write().await = new_ring;
         // Reset refresh clock
         *self.last_refresh.write().await = Instant::now();
-        // Invalidate local worker cache so it is re-detected
-        *self.local_worker_id.write().await = 0;
+        // Invalidate local-worker cache so it is re-detected on next call.
+        *self.local_worker_id.write().await = None;
     }
 
     /// Get a snapshot of the current worker list.
@@ -225,19 +252,24 @@ impl WorkerRouter {
         // Clean up expired failures
         self.cleanup_expired_failures();
 
-        // Detect local worker on first call after list update
+        // Detect local worker on first call after list update.
+        // After a probe, the result is cached as `Some(Option<i64>)` so that
+        // a "no local worker" result no longer forces a re-probe (with the
+        // expensive `hostname::get()` call) on every subsequent
+        // `select_worker()`.
         {
-            let cached_id = *self.local_worker_id.read().await;
-            if cached_id == 0 {
-                let id = Self::detect_local_worker(&workers).await;
-                *self.local_worker_id.write().await = id;
+            let needs_probe = self.local_worker_id.read().await.is_none();
+            if needs_probe {
+                let detected = Self::detect_local_worker(&workers).await;
+                let cached_value = if detected > 0 { Some(detected) } else { None };
+                *self.local_worker_id.write().await = Some(cached_value);
             }
         }
 
         // Prefer local worker if available and not failed
         {
-            let local_id = *self.local_worker_id.read().await;
-            if local_id > 0 {
+            let cached = *self.local_worker_id.read().await;
+            if let Some(Some(local_id)) = cached {
                 if let Some(local_w) = workers.iter().find(|w| w.id == Some(local_id)) {
                     if let Some(addr) = &local_w.address {
                         if !self.is_failed(&worker_addr_key(addr)) {
@@ -248,30 +280,19 @@ impl WorkerRouter {
             }
         }
 
-        // Build hash ring and select from eligible workers
-        let eligible: Vec<&WorkerInfo> = workers
-            .iter()
-            .filter(|w| {
-                if let Some(addr) = w.address.as_ref() {
-                    let key = worker_addr_key(addr);
-                    !self.is_failed(&key)
-                } else {
-                    false
-                }
-            })
-            .collect();
-
-        if eligible.is_empty() {
-            // Fall back: try all workers ignoring failure state
-            return self
-                .consistent_hash_select(block_id, &workers)
-                .ok_or_else(|| Error::NoWorkerAvailable {
-                    message: "all workers are marked as failed".to_string(),
-                });
+        // Use the pre-built consistent-hash ring (rebuilt only on
+        // `update_workers`). The hot path is now O(log N) `binary_search`
+        // plus a small forward-walk to skip failed workers, instead of the
+        // previous O(N log N) rebuild-and-sort per request.
+        let ring = self.hash_ring.read().await.clone();
+        if let Some(w) = self.consistent_hash_select_with_ring(block_id, &workers, &ring, true) {
+            return Ok(w);
         }
 
-        let worker_infos: Vec<WorkerInfo> = eligible.into_iter().cloned().collect();
-        self.consistent_hash_select(block_id, &worker_infos)
+        // All eligible workers exhausted (every virtual node points to a
+        // failed worker). Fall back to ignoring the failure state — at
+        // worst we'll re-fail the same address and surface the error.
+        self.consistent_hash_select_with_ring(block_id, &workers, &ring, false)
             .ok_or_else(|| Error::NoWorkerAvailable {
                 message: format!("no suitable worker for block_id={}", block_id),
             })
@@ -333,12 +354,11 @@ impl WorkerRouter {
             });
         }
 
-        // Simple random pick using nanosecond jitter — no external RNG dep needed.
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos() as usize)
-            .unwrap_or(0);
-        let idx = nanos % pool.len();
+        // Random pick — `rand::rng()` is the project-standard RNG (already
+        // a dependency for retry jitter). Using `subsec_nanos() % len` is
+        // biased on the low bits and tends to repeat under tight loops,
+        // which defeated the load-spreading purpose of this function.
+        let idx = rand::Rng::random_range(&mut rand::rng(), 0..pool.len());
         Ok(pool[idx].clone())
     }
 
@@ -357,36 +377,73 @@ impl WorkerRouter {
             .retain(|_, v| v.elapsed() < self.failure_ttl);
     }
 
-    /// Consistent hash selection: hash(block_id) → closest virtual node.
-    fn consistent_hash_select(&self, block_id: i64, workers: &[WorkerInfo]) -> Option<WorkerInfo> {
-        if workers.is_empty() {
+    /// Consistent hash selection over a pre-built ring.
+    ///
+    /// `ring` is `(hash, worker_index)` sorted by `hash`, where `worker_index`
+    /// indexes into `workers`. We binary-search for the first virtual node
+    /// at or above `hash(block_id)`, then walk forward until we find an
+    /// eligible (or — when `skip_failed` is `false` — any) worker.
+    fn consistent_hash_select_with_ring(
+        &self,
+        block_id: i64,
+        workers: &[WorkerInfo],
+        ring: &[(u64, usize)],
+        skip_failed: bool,
+    ) -> Option<WorkerInfo> {
+        if ring.is_empty() || workers.is_empty() {
             return None;
         }
 
-        // Simple consistent hashing with virtual nodes
-        let mut ring: Vec<(u64, usize)> = Vec::new();
-        for (idx, worker) in workers.iter().enumerate() {
-            let worker_id = worker.id.unwrap_or(idx as i64);
-            let virtual_nodes = worker
-                .virtual_node_num
-                .unwrap_or(VIRTUAL_NODES_PER_WORKER as i32) as u32;
-            for vn in 0..virtual_nodes {
-                let hash = hash_key(&format!("{}:{}", worker_id, vn));
-                ring.push((hash, idx));
+        let target = hash_key(&block_id.to_string());
+        let start = ring
+            .binary_search_by_key(&target, |(h, _)| *h)
+            .unwrap_or_else(|p| p)
+            % ring.len();
+
+        // Walk forward at most `ring.len()` positions so we eventually
+        // probe every distinct virtual node before giving up.
+        for offset in 0..ring.len() {
+            let pos = (start + offset) % ring.len();
+            let worker_idx = ring[pos].1;
+            // Defensive: ring may reference an index outside `workers` if
+            // somehow stale (should not happen — ring is rebuilt with the
+            // same vector — but guard anyway).
+            let Some(w) = workers.get(worker_idx) else {
+                continue;
+            };
+            if !skip_failed {
+                return Some(w.clone());
+            }
+            if let Some(addr) = w.address.as_ref() {
+                if !self.is_failed(&worker_addr_key(addr)) {
+                    return Some(w.clone());
+                }
             }
         }
-        ring.sort_by_key(|(h, _)| *h);
-
-        let target = hash_key(&block_id.to_string());
-
-        // Find first node >= target (binary search)
-        let pos = ring
-            .binary_search_by_key(&target, |(h, _)| *h)
-            .unwrap_or_else(|pos| pos);
-        let pos = pos % ring.len();
-
-        Some(workers[ring[pos].1].clone())
+        None
     }
+}
+
+/// Build a sorted `(hash, worker_index)` ring for consistent hashing.
+///
+/// Called from [`WorkerRouter::update_workers`] so the hot `select_worker`
+/// path can do an O(log N) binary search instead of rebuilding+sorting on
+/// every request.
+fn build_hash_ring(workers: &[WorkerInfo]) -> Vec<(u64, usize)> {
+    let mut ring: Vec<(u64, usize)> =
+        Vec::with_capacity(workers.len() * VIRTUAL_NODES_PER_WORKER as usize);
+    for (idx, worker) in workers.iter().enumerate() {
+        let worker_id = worker.id.unwrap_or(idx as i64);
+        let virtual_nodes = worker
+            .virtual_node_num
+            .unwrap_or(VIRTUAL_NODES_PER_WORKER as i32) as u32;
+        for vn in 0..virtual_nodes {
+            let hash = hash_key(&format!("{}:{}", worker_id, vn));
+            ring.push((hash, idx));
+        }
+    }
+    ring.sort_by_key(|(h, _)| *h);
+    ring
 }
 
 impl Default for WorkerRouter {
@@ -627,9 +684,9 @@ mod tests {
         router
             .update_workers(vec![make_worker(1, "remote1", 9203)])
             .await;
-        // Trigger detection (populates cache with 0 / no-local).
+        // Trigger detection (populates cache with `Some(None)` = probed, no local).
         let _ = router.select_worker(1).await;
-        assert_eq!(*router.local_worker_id.read().await, 0);
+        assert_eq!(*router.local_worker_id.read().await, Some(None));
 
         // Second update — local worker arrives.
         router
@@ -638,8 +695,8 @@ mod tests {
                 make_worker(2, "127.0.0.1", 9203),
             ])
             .await;
-        // Cache should be reset to 0 (sentinel), re-detected on next select.
-        assert_eq!(*router.local_worker_id.read().await, 0);
+        // Cache should be reset to `None` (= not probed), re-detected on next select.
+        assert_eq!(*router.local_worker_id.read().await, None);
         let selected = router.select_worker(1).await.unwrap();
         assert_eq!(selected.id, Some(2), "new local worker should be preferred");
     }

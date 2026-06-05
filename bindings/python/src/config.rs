@@ -77,13 +77,11 @@ impl PyConfig {
         if let Some(props) = properties {
             let mut buf = String::new();
             for (k, v) in props.iter() {
-                let key: String = k.extract().map_err(|e| {
-                    ConfigError::new_err(format!("property key must be str: {e}"))
-                })?;
+                let key: String = k
+                    .extract()
+                    .map_err(|e| ConfigError::new_err(format!("property key must be str: {e}")))?;
                 let val: String = v.extract().map_err(|e| {
-                    ConfigError::new_err(format!(
-                        "property value for '{key}' must be str: {e}"
-                    ))
+                    ConfigError::new_err(format!("property value for '{key}' must be str: {e}"))
                 })?;
                 if key.contains('=') || key.contains('\n') {
                     return Err(ConfigError::new_err(format!(

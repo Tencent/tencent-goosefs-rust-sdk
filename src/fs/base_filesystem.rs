@@ -133,13 +133,36 @@ impl BaseFileSystem {
         }
 
         // 2. Parent xattr
+        //
+        // We must distinguish three cases:
+        // - parent exists, has xattr → use that WriteType
+        // - parent exists but no xattr → fall through to config default
+        // - parent does not exist (NotFound) → fall through to config default
+        // - any other RPC error (Unavailable, etc.) → also fall through but
+        //   log a warning, because silently using a different default on
+        //   transient network errors changes persistence semantics for the
+        //   newly created file.
         let parent = Self::parent_path(path);
         if let Some(parent_path) = parent {
             let master = self.master();
-            if let Ok(parent_info) = master.get_status(&parent_path).await {
-                let parent_status = URIStatus::from_proto(parent_info);
-                if let Some(wt) = get_write_type_from_xattr(&parent_status.xattr) {
-                    return wt;
+            match master.get_status(&parent_path).await {
+                Ok(parent_info) => {
+                    let parent_status = URIStatus::from_proto(parent_info);
+                    if let Some(wt) = get_write_type_from_xattr(&parent_status.xattr) {
+                        return wt;
+                    }
+                }
+                Err(e) if e.is_not_found() => {
+                    // Parent doesn't exist yet — totally fine, fall through.
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path,
+                        parent = %parent_path,
+                        error = %e,
+                        "resolve_write_type: failed to fetch parent xattr; \
+                         falling back to config default — file will be created with that WriteType"
+                    );
                 }
             }
         }

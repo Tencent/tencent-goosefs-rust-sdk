@@ -23,12 +23,13 @@ use goosefs_sdk::fs::BaseFileSystem;
 /// `batch_get_status` / `batch_exists` (sync + async) drive their futures
 /// through `stream::iter(..).buffered(BATCH_CONCURRENCY_LIMIT)`, so a caller
 /// passing `paths.len() == 10_000` will *not* open ten thousand simultaneous
-/// gRPC streams to the master. Sized to match the runtime's default
-/// `max_blocking_threads` (`runtime::init_custom_runtime`); empirically deep
-/// enough to saturate a single master while leaving headroom for non-batch
-/// traffic on the same client. Keep aligned with `runtime.rs` if either
-/// side is tuned.
-pub const BATCH_CONCURRENCY_LIMIT: usize = 64;
+/// gRPC streams to the master.
+///
+/// Re-exported from [`crate::runtime::RUNTIME_MAX_BLOCKING_THREADS`] so that
+/// the batch fan-out cannot drift away from the runtime's
+/// `max_blocking_threads` budget — both values are tuned together by
+/// editing the single source of truth in `runtime.rs`.
+pub const BATCH_CONCURRENCY_LIMIT: usize = crate::runtime::RUNTIME_MAX_BLOCKING_THREADS;
 
 /// Bundles a Goosefs context with the high-level filesystem façade.
 ///

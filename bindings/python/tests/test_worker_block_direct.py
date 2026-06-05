@@ -1,29 +1,36 @@
-"""P6 integration tests — worker block 直连入口守护.
+"""P6 integration tests — guards for the worker block direct entry points.
 
-设计目标
---------
-配套 P6 (``goosefs >= 0.1.3``) 暴露的两组新入口：
+Goal
+----
+These tests cover the two API surfaces shipped in P6 (``goosefs >= 0.1.3``):
 
-* 高层一行：``AsyncGoosefs.positioned_read`` / ``Goosefs.positioned_read``
-* 低层逃生口：``AsyncGoosefs.acquire_worker_for_block`` /
+* High-level one-liner: ``AsyncGoosefs.positioned_read`` /
+  ``Goosefs.positioned_read``
+* Low-level escape hatch: ``AsyncGoosefs.acquire_worker_for_block`` /
   ``Goosefs.acquire_worker_for_block`` / ``AsyncWorkerClient.connect`` /
   ``WorkerClient.connect``
 
-本文件分两层断言：
+This file asserts at two layers:
 
-1. **Import-time 守护** — 不依赖 cluster，始终运行。仅检查 binding namespace
-   有没有把 P6 类与方法导出。这一层是 binding API contract 防回退线。
-2. **Cluster 行为守护** — 依赖 ``GOOSEFS_MASTER_ADDR``。验证
-   ``AsyncWorkerClient`` 真的会 gRPC 握手到 worker 并在伪 ``block_id``
-   上得到 worker 端的 ``RpcError``，证明 binding 不再走 fs fallback。
+1. **Import-time guards** — always run, no cluster required. They check
+   that the Python binding namespace exports the P6 classes and methods.
+   This layer is the binding's API-contract regression line.
+2. **Cluster behavior guards** — depend on ``GOOSEFS_MASTER_ADDR``. They
+   verify that ``AsyncWorkerClient`` actually performs a gRPC handshake
+   to a worker and that a fake ``block_id`` produces a worker-side
+   ``RpcError`` — proving the binding no longer falls back to the high-
+   level filesystem path on the client side.
 
-第 2 层故意 **不** 依赖 ``URIStatus.block_ids`` —— 当前 dev cluster 在
-"UFS-only / no-tier-cache" 状态下，``status.block_ids`` 可能为空（master
-未收到 block report，详见 docs/GooseFS_Rust_Python_Java客户端Stress对比.md
-§3.4 Python 段）。即便如此，``AsyncWorkerClient.connect(...) +
-read_block_positioned(fake_id)`` 仍能 *端到端* 证明 binding 直连 worker，
-worker 会以 ``Failed to read block ID=... from tiered storage and UFS tier``
-拒绝，错误来源是 worker 而不是 client-side fallback。
+Layer 2 deliberately does **not** depend on ``URIStatus.block_ids`` —
+on a dev cluster running in "UFS-only / no-tier-cache" mode the master
+may not have received any block report yet, so ``status.block_ids`` can
+legitimately be empty (see the GooseFS Rust/Python/Java client stress
+comparison docs, §3.4 Python section, for the discussion). Even in that
+state, ``AsyncWorkerClient.connect(...) + read_block_positioned(fake_id)``
+is enough end-to-end evidence that the binding hits the worker directly:
+the worker rejects the request with a ``"Failed to read block ID=...
+from tiered storage and UFS tier"`` message, which can only have come
+from the worker — not from a client-side fallback.
 """
 
 from __future__ import annotations
@@ -40,7 +47,7 @@ import pytest
 
 
 def test_async_worker_client_is_exported() -> None:
-    """``goosefs.AsyncWorkerClient`` 必须存在且是个类型。"""
+    """``goosefs.AsyncWorkerClient`` must exist and be a class."""
     import goosefs
 
     assert hasattr(goosefs, "AsyncWorkerClient"), (
@@ -50,31 +57,23 @@ def test_async_worker_client_is_exported() -> None:
     assert inspect.isclass(goosefs.AsyncWorkerClient)
 
 
-@pytest.mark.xfail(
-    reason="Known P6 gap: sync `WorkerClient` top-level class not yet exposed by "
-    "the Rust extension (only `AsyncWorkerClient` is). Sync callers can still "
-    "reach worker direct via `Goosefs.positioned_read` / "
-    "`Goosefs.acquire_worker_for_block`. Tracked separately from this test "
-    "file's primary purpose (P6 regression guard).",
-    strict=False,
-)
 def test_sync_worker_client_is_exported() -> None:
-    """``goosefs.WorkerClient`` 必须存在（同步逃生口）。
+    """``goosefs.WorkerClient`` must exist (synchronous escape hatch).
 
-    Currently xfail: the Rust extension only exposes ``AsyncWorkerClient``;
-    the sync facade ``Goosefs`` exposes ``positioned_read`` /
-    ``acquire_worker_for_block`` but not a standalone ``WorkerClient`` class.
+    Sync mirror of ``AsyncWorkerClient`` — exposed to satisfy callers that
+    already know the worker address and want a one-shot blocking
+    ``read_block_positioned`` without going through ``Goosefs.positioned_read``.
     """
     import goosefs
 
     assert hasattr(goosefs, "WorkerClient"), (
-        "P6 gap: goosefs.WorkerClient missing — sync facade not exported"
+        "Regression: goosefs.WorkerClient missing — sync facade not exported"
     )
     assert inspect.isclass(goosefs.WorkerClient)
 
 
 def test_async_worker_client_has_connect_classmethod() -> None:
-    """``AsyncWorkerClient.connect(addr, config)`` 必须是 classmethod-style 入口。"""
+    """``AsyncWorkerClient.connect(addr, config)`` must be a classmethod-style entry point."""
     import goosefs
 
     assert hasattr(goosefs.AsyncWorkerClient, "connect"), (
@@ -89,22 +88,23 @@ def test_async_worker_client_has_connect_classmethod() -> None:
     )
 
 
-@pytest.mark.xfail(
-    reason="Known P6 gap: sync `WorkerClient` top-level class not yet exposed.",
-    strict=False,
-)
 def test_sync_worker_client_has_connect_classmethod() -> None:
-    """``WorkerClient.connect(addr, config)`` 同步对偶必须存在。"""
+    """``WorkerClient.connect(addr, config)`` — the sync counterpart must exist.
+
+    Sync-side API contract: it must mirror ``AsyncWorkerClient`` (``connect``
+    static factory + ``read_block_positioned`` method + ``addr`` getter).
+    """
     import goosefs
 
     assert hasattr(goosefs.WorkerClient, "connect"), "WorkerClient.connect missing"
     assert hasattr(goosefs.WorkerClient, "read_block_positioned"), (
         "WorkerClient.read_block_positioned missing"
     )
+    assert hasattr(goosefs.WorkerClient, "addr"), "WorkerClient.addr missing"
 
 
 def test_async_goosefs_high_level_positioned_read_is_exported() -> None:
-    """``AsyncGoosefs.positioned_read`` / ``acquire_worker_for_block`` 必须存在。"""
+    """``AsyncGoosefs.positioned_read`` / ``acquire_worker_for_block`` must exist."""
     import goosefs
 
     assert hasattr(goosefs.AsyncGoosefs, "positioned_read"), (
@@ -116,7 +116,7 @@ def test_async_goosefs_high_level_positioned_read_is_exported() -> None:
 
 
 def test_sync_goosefs_high_level_positioned_read_is_exported() -> None:
-    """``Goosefs.positioned_read`` / ``acquire_worker_for_block`` 必须存在。"""
+    """``Goosefs.positioned_read`` / ``acquire_worker_for_block`` must exist."""
     import goosefs
 
     assert hasattr(goosefs.Goosefs, "positioned_read"), (
@@ -128,13 +128,11 @@ def test_sync_goosefs_high_level_positioned_read_is_exported() -> None:
 
 
 def test_p6_classes_in_dunder_all() -> None:
-    """高层 namespace 的 ``__all__``（如果存在）应当列出 P6 已暴露的类。
+    """The top-level ``__all__`` (when present) must list the P6 classes.
 
-    只检查当前真正暴露的 ``AsyncWorkerClient``；同步 ``WorkerClient``
-    暂未暴露（见 ``test_sync_worker_client_is_exported`` 的 xfail 说明），
-    一旦补齐请把它加进 ``required`` 元组并删掉对应的 xfail 标记。
-
-    若包暂未维护 ``__all__``，这个用例会被 skip 而不是 fail。
+    Both ``AsyncWorkerClient`` and ``WorkerClient`` are now exposed.
+    If the package does not maintain ``__all__``, this case is skipped
+    rather than failing.
     """
     import goosefs
 
@@ -142,7 +140,7 @@ def test_p6_classes_in_dunder_all() -> None:
     if all_ is None:
         pytest.skip("goosefs.__all__ not maintained — skipping membership check")
 
-    required = ("AsyncWorkerClient",)
+    required = ("AsyncWorkerClient", "WorkerClient")
     missing = [name for name in required if name not in all_]
     assert not missing, (
         f"P6 classes missing from goosefs.__all__: {missing}; "
@@ -165,45 +163,56 @@ _MASTER = os.environ.get("GOOSEFS_MASTER_ADDR")
 async def test_async_worker_client_connect_real_handshake_then_rpc_error_on_fake_block(
     config,  # session-scope fixture from conftest.py
 ) -> None:
-    """端到端冒烟：``AsyncWorkerClient.connect`` 完成真实 gRPC + SASL 握手后，
-    用一个故意编造的 ``block_id`` 调用 ``read_block_positioned`` 必须收到
-    ``goosefs.exceptions.RpcError``，错误消息来自 worker（包含
-    ``"Failed to read block ID="`` 前缀），而不是 client-side fallback。
+    """End-to-end smoke test: after ``AsyncWorkerClient.connect`` finishes
+    a real gRPC + SASL handshake, calling ``read_block_positioned`` with a
+    deliberately-fake ``block_id`` must produce a
+    ``goosefs.exceptions.RpcError`` whose message comes from the worker
+    (it contains the ``"Failed to read block ID="`` prefix) and not from
+    a client-side fallback.
 
-    这是 "Python 真直连 worker，不再降级到 fs" 的最强证据：
+    This is the strongest evidence that "the Python binding really hits
+    the worker directly and no longer falls back to the fs path":
 
-    * 证据 1: ``AsyncWorkerClient.connect(...)`` 不抛异常 ⇒ gRPC 握手成功
-    * 证据 2: ``read_block_positioned(fake_id)`` 抛 ``RpcError`` 且消息含
-      "Failed to read block ID=" ⇒ worker 真的收到了请求并应答了错误
-    * 证据 3: 错误消息里 **没有** ``fallback`` / ``falling back`` /
-      ``high-level fs path`` 关键词 ⇒ binding 没在 client 侧降级
+    * Evidence 1: ``AsyncWorkerClient.connect(...)`` does not throw =>
+      gRPC handshake succeeded.
+    * Evidence 2: ``read_block_positioned(fake_id)`` raises ``RpcError``
+      whose message contains ``"Failed to read block ID="`` => the worker
+      really received the request and responded with an error.
+    * Evidence 3: the error message does **not** contain any of
+      ``fallback`` / ``falling back`` / ``high-level fs path`` => the
+      binding did not silently degrade on the client side.
     """
     import goosefs
 
-    # Worker addr 需要由测试调用方提供。开发机当前 layout 是 master:9200 /
-    # worker:9203，CI / 远端集群可通过 $GOOSEFS_WORKER_ADDR 覆盖。
+    # The worker addr must be supplied by the caller. The current dev box
+    # layout is master:9200 / worker:9203; CI / remote clusters can
+    # override via $GOOSEFS_WORKER_ADDR.
     worker_addr = os.environ.get("GOOSEFS_WORKER_ADDR", "127.0.0.1:9203")
 
-    # 一个绝对不会命中 worker tier 也不会在 UFS 里有对应 block 的伪 id。
-    # 用一个明显大于真实 block_id 空间的值，避免误命中。
+    # A fake id that cannot possibly hit a worker tier or have a matching
+    # block in UFS. We pick something obviously above the real block_id
+    # space to avoid accidental hits.
     fake_block_id = 9_999_999_999
 
     async with await goosefs.AsyncWorkerClient.connect(worker_addr, config) as wc:
-        # 证据 1: 握手成功后 .addr 必须等于我们传入的 worker_addr
+        # Evidence 1: after a successful handshake, .addr must equal the
+        # address we passed in.
         assert wc.addr == worker_addr, (
             f"AsyncWorkerClient.addr={wc.addr!r} != requested {worker_addr!r}"
         )
 
-        # 证据 2 + 证据 3: RPC 必须真实发出去并被 worker 拒绝
+        # Evidence 2 + Evidence 3: the RPC must really be sent and rejected
+        # by the worker.
         with pytest.raises(goosefs.exceptions.RpcError) as excinfo:
             await wc.read_block_positioned(fake_block_id, offset=0, length=64)
 
     msg = str(excinfo.value).lower()
-    # 证据 2 — worker 端拒绝消息里一定有 "block id=<fake>"
+    # Evidence 2: the worker-side rejection message must mention the fake
+    # block_id we asked for.
     assert str(fake_block_id) in msg, (
         f"worker error did not mention fake block_id; got: {excinfo.value!r}"
     )
-    # 证据 3 — 没有 client-side fallback 关键词
+    # Evidence 3: no client-side fallback keywords leaked into the error.
     fallback_keywords = (
         "fallback",
         "falling back",
@@ -224,12 +233,15 @@ async def test_async_worker_client_connect_real_handshake_then_rpc_error_on_fake
 async def test_acquire_worker_for_block_returns_async_worker_client(
     async_fs,  # uses conftest.py fixture
 ) -> None:
-    """``AsyncGoosefs.acquire_worker_for_block(fake_id)`` 即使 routing 指向
-    一个 worker 也至少能成功构造 ``AsyncWorkerClient`` 并暴露 ``.addr``。
+    """``AsyncGoosefs.acquire_worker_for_block(fake_id)`` — even when the
+    routing call points at a worker — must at least successfully construct
+    an ``AsyncWorkerClient`` instance and expose ``.addr``.
 
-    本用例对 routing 行为只做最弱断言：能拿到一个 ``AsyncWorkerClient``
-    实例。失败也只在 ``routing`` / ``master block lookup`` 抛异常时发生，
-    那就是 cluster 层的问题（与 binding 暴露无关），允许跳过。
+    This case makes only the weakest possible assertion about routing
+    behavior: that we can obtain an ``AsyncWorkerClient`` instance.
+    Failures only happen when ``routing`` / ``master block lookup`` raises
+    — those are cluster-level issues unrelated to what the binding
+    exposes, so the test is allowed to skip in that case.
     """
     import goosefs
 
@@ -237,8 +249,9 @@ async def test_acquire_worker_for_block_returns_async_worker_client(
     try:
         ctx = await async_fs.acquire_worker_for_block(fake_block_id)
     except goosefs.exceptions.RpcError as e:
-        # 集群对 fake block 的 master-side block lookup 直接拒绝是合理的
-        # —— 仍然走的是真 RPC，不是 client fallback。
+        # The cluster rejecting a master-side block lookup for a fake id
+        # is acceptable — that path still goes through real RPCs, not a
+        # client-side fallback.
         pytest.skip(f"cluster rejected master-side block lookup for fake id: {e}")
         return
 

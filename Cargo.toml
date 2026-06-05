@@ -1,6 +1,6 @@
 [package]
 name = "goosefs-sdk"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "Goosefs Rust gRPC Client - Direct gRPC client for Goosefs Master/Worker"
 license = "Apache-2.0"
@@ -22,7 +22,6 @@ exclude = [
     "docs/prompt/*",
     "docs/images/*",
     "docs/RELEASE.md",
-    "docs/RELEASE_CHECKLIST.md",
     "goosefs-client-rust.code-workspace",
     "target/*",
 ]
@@ -30,12 +29,34 @@ exclude = [
 [lib]
 name = "goosefs_sdk"
 
+[features]
+# Default features keep backward-compatible behaviour: pushgateway HTTP exporter
+# and the original `tokio = "full"` feature set used by examples/tests.
+default = ["metrics-pushgateway"]
+
+# Pushgateway exporter pulls in `reqwest` (HTTP/TLS stack). Disabling this
+# feature significantly shrinks the dependency graph for downstream crates
+# that only need the gRPC client.
+metrics-pushgateway = ["dep:reqwest"]
+
+# Opt-in re-generation of protobuf code from .proto files. Pulls in
+# `tonic-prost-build` (which depends on `prettyplease`, `proc-macro2`, etc.)
+# only when explicitly requested. Triggered together with the
+# `GOOSEFS_SDK_REGEN_PROTO=1` env var by build.rs.
+regen-proto = ["dep:tonic-prost-build"]
+
 [dependencies]
-tonic = { version = "0.14", features = ["transport"] }
+# `default-features = false` removes the `router` feature (and its `axum`,
+# `matchit`, `axum-core`, `tower-http` chain) which is server-side only.
+# We keep `transport` (Channel/Endpoint/Server types used by the SDK) and
+# `codegen` (required by tonic-prost generated client stubs).
+tonic = { version = "0.14", default-features = false, features = ["transport", "codegen"] }
 tonic-prost = "0.14"
 prost = "0.14.1"
 prost-types = "0.14.1"
-tokio = { version = "1.23", features = ["full"] }
+# Trim `tokio = "full"` to the concrete features actually used by the SDK
+# (runtime, sync primitives, IO, time, signal/process are NOT needed).
+tokio = { version = "1.23", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "io-util", "net", "fs"] }
 tokio-stream = "0.1.14"
 bytes = "1.11.1"
 thiserror = "2"
@@ -45,11 +66,16 @@ serde = { version = "1", features = ["derive"] }
 async-trait = "0.1"
 rand = "0.9.1"
 uuid = { version = "1.2", features = ["v4"] }
-hostname = "0.3"
-reqwest = { version = "^0.12", features = ["rustls-tls"], default-features = false }
+hostname = "0.4"
+# Used only by the metrics pushgateway exporter; gated behind a feature so
+# downstream gRPC-only consumers can opt out.
+reqwest = { version = "^0.12", features = ["rustls-tls"], default-features = false, optional = true }
 
 [build-dependencies]
-tonic-prost-build = "0.14"
+# Optional: only required when regenerating protobuf code in-tree.
+# See build.rs and the `regen-proto` feature.
+tonic-prost-build = { version = "0.14", optional = true }
 
 [dev-dependencies]
+# Tests/examples may rely on the broader tokio feature set.
 tokio = { version = "1.23", features = ["full", "test-util"] }

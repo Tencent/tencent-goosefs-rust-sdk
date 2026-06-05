@@ -32,11 +32,12 @@
 //!   to wait for the leader's result.
 
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::watch;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
@@ -123,7 +124,68 @@ enum PollResult {
 
 /// Singleflight gate: holds a `watch::Receiver` while a poll is in flight,
 /// or `None` when no poll is active.
-type PollGate = Mutex<Option<watch::Receiver<Option<PollResult>>>>;
+type PollGate = StdMutex<Option<watch::Receiver<Option<PollResult>>>>;
+
+// ---------------------------------------------------------------------------
+// LeaderGuard — RAII guard for the singleflight leader path
+// ---------------------------------------------------------------------------
+//
+// Problem this guard solves
+// -------------------------
+// The leader holds the singleflight `gate = Some(rx)` while it polls. If the
+// leader future is cancelled (outer `timeout` / `select!`), or if `poll_for_primary`
+// panics, the lines that broadcast the result and reset the gate to `None`
+// are never reached. Followers then observe `rx.changed().await.is_err()`,
+// recurse into `get_primary_rpc_address()`, and see the same dead `rx` again
+// → infinite recursion / permanent stall.
+//
+// `LeaderGuard` ensures that **even on cancel/panic**:
+//   1. the gate is reset to `None` so the next caller can become a fresh
+//      leader, and
+//   2. a sentinel `PollResult::Err("cancelled")` is broadcast on the watch
+//      channel so blocked followers wake up with a transient error
+//      (and naturally retry via `is_retriable`).
+//
+// On the happy path the leader calls `complete(...)` which broadcasts the
+// real result and disarms the guard so its `Drop` becomes a no-op.
+struct LeaderGuard {
+    gate: Arc<PollGate>,
+    tx: Option<watch::Sender<Option<PollResult>>>,
+}
+
+impl LeaderGuard {
+    /// Broadcast the real poll result and clear the gate.
+    /// Disarms the guard — `Drop` becomes a no-op.
+    fn complete(mut self, result: PollResult) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(Some(result));
+        }
+        if let Ok(mut gate) = self.gate.lock() {
+            *gate = None;
+        }
+    }
+}
+
+impl Drop for LeaderGuard {
+    fn drop(&mut self) {
+        // Only fires when `complete()` was NOT called — i.e. the leader
+        // future was cancelled or panicked. Broadcast a transient error so
+        // followers can retry instead of recursing on a dead channel, and
+        // clear the gate so the next caller can become a fresh leader.
+        if let Some(tx) = self.tx.take() {
+            warn!(
+                "singleflight leader cancelled or panicked before completion; \
+                 notifying followers and releasing gate"
+            );
+            let _ = tx.send(Some(PollResult::Err(
+                "primary master poll cancelled before completion".to_string(),
+            )));
+        }
+        if let Ok(mut gate) = self.gate.lock() {
+            *gate = None;
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // PollingMasterInquireClient
@@ -170,7 +232,7 @@ impl PollingMasterInquireClient {
             initial_sleep,
             max_sleep,
             polling_timeout,
-            poll_gate: Arc::new(Mutex::new(None)),
+            poll_gate: Arc::new(StdMutex::new(None)),
         }
     }
 
@@ -315,46 +377,61 @@ impl MasterInquireClient for PollingMasterInquireClient {
         // Try to become the **leader** (first caller to find the gate = None).
         // If another caller is already the leader, become a **follower** and
         // wait for the broadcast result.
+        //
+        // The gate is now backed by `std::sync::Mutex` so that the
+        // `LeaderGuard::Drop` impl can synchronously reset it on cancel /
+        // panic. The std `MutexGuard` is `!Send`, so we MUST drop it before
+        // any `.await` — we therefore decide leader-vs-follower under the
+        // lock, return a small `GateState` value, and only then await.
+        enum GateState {
+            Follower(watch::Receiver<Option<PollResult>>),
+            Leader(watch::Sender<Option<PollResult>>),
+        }
 
-        let rx_opt: Option<watch::Receiver<Option<PollResult>>> = {
-            let mut gate = self.poll_gate.lock().await;
+        let state = {
+            let mut gate = self.poll_gate.lock().unwrap_or_else(|e| e.into_inner());
             match &*gate {
                 Some(existing_rx) => {
-                    // Another goroutine is already polling — clone the receiver
-                    // and wait as a follower.
                     debug!("singleflight follower: waiting for in-flight poll");
-                    Some(existing_rx.clone())
+                    GateState::Follower(existing_rx.clone())
                 }
                 None => {
-                    // We are the leader.  Create the watch channel and
-                    // install the receiver in the gate before releasing
-                    // the lock so followers can attach.
                     let (tx, rx) = watch::channel::<Option<PollResult>>(None);
                     *gate = Some(rx);
-                    drop(gate); // Release the lock before the expensive poll.
-
-                    debug!("singleflight leader: starting primary poll");
-
-                    let result = self.poll_for_primary().await;
-
-                    // Broadcast result to all followers.
-                    let broadcast = match &result {
-                        Ok(addr) => PollResult::Ok(addr.clone()),
-                        Err(msg) => PollResult::Err(msg.clone()),
-                    };
-                    // `send` fails only when all receivers are gone, which is
-                    // harmless — nobody was waiting.
-                    let _ = tx.send(Some(broadcast));
-
-                    // Clear the gate so future callers start fresh.
-                    let mut gate2 = self.poll_gate.lock().await;
-                    *gate2 = None;
-
-                    return result.map_err(|msg| Error::Internal {
-                        message: msg,
-                        source: None,
-                    });
+                    GateState::Leader(tx)
                 }
+            }
+            // gate is dropped here at the end of this block — before any await.
+        };
+
+        let rx_opt: Option<watch::Receiver<Option<PollResult>>> = match state {
+            GateState::Follower(rx) => Some(rx),
+            GateState::Leader(tx) => {
+                debug!("singleflight leader: starting primary poll");
+
+                // Install the cancel/panic-safe guard. From here on, even if
+                // `poll_for_primary().await` is cancelled or panics, `Drop`
+                // will broadcast a transient error to followers and clear
+                // the gate so the next caller becomes a fresh leader (no
+                // permanent stall).
+                let guard = LeaderGuard {
+                    gate: Arc::clone(&self.poll_gate),
+                    tx: Some(tx),
+                };
+
+                let result = self.poll_for_primary().await;
+
+                // Broadcast result to all followers and disarm the guard.
+                let broadcast = match &result {
+                    Ok(addr) => PollResult::Ok(addr.clone()),
+                    Err(msg) => PollResult::Err(msg.clone()),
+                };
+                guard.complete(broadcast);
+
+                return result.map_err(|msg| Error::Internal {
+                    message: msg,
+                    source: None,
+                });
             }
         };
 
@@ -490,7 +567,7 @@ mod tests {
             Duration::from_millis(50),
             Duration::from_millis(50),
         );
-        let gate = client.poll_gate.lock().await;
+        let gate = client.poll_gate.lock().unwrap();
         assert!(gate.is_none(), "gate should start empty");
     }
 
@@ -566,5 +643,84 @@ mod tests {
         let addr = follower.await.unwrap();
         assert_eq!(addr, "primary:19998");
         assert_eq!(received.load(Ordering::SeqCst), 1);
+    }
+
+    /// **Regression for C1**: dropping the `LeaderGuard` without calling
+    /// `complete()` (i.e. simulating cancel / panic of `poll_for_primary`)
+    /// MUST broadcast a transient error to followers AND clear the gate so
+    /// the next caller can become a fresh leader.
+    ///
+    /// Pre-fix behaviour: the gate stayed `Some(dead_rx)` forever, follower
+    /// recursion saw `is_err()` and re-attached to the same dead receiver
+    /// → infinite recursion / permanent stall.
+    #[tokio::test]
+    async fn leader_guard_drop_broadcasts_err_and_clears_gate() {
+        let gate: Arc<PollGate> = Arc::new(StdMutex::new(None));
+
+        // Install a fresh watch channel as the leader would.
+        let (tx, mut rx) = watch::channel::<Option<PollResult>>(None);
+        *gate.lock().unwrap() = Some(rx.clone());
+
+        // Drop the guard without `complete()` — emulates a cancelled or
+        // panicking leader.
+        {
+            let _guard = LeaderGuard {
+                gate: Arc::clone(&gate),
+                tx: Some(tx),
+            };
+            // intentionally dropped without complete()
+        }
+
+        // Followers blocked on `rx.changed()` must wake up with an Err
+        // payload (NOT a closed-channel error from the sender being dropped).
+        rx.changed()
+            .await
+            .expect("watch must signal a value change on guard drop");
+        match rx.borrow().clone() {
+            Some(PollResult::Err(msg)) => {
+                assert!(
+                    msg.to_lowercase().contains("cancel"),
+                    "expected cancellation message, got: {msg}"
+                );
+            }
+            other => panic!("expected PollResult::Err on cancel, got {:?}", other),
+        }
+
+        // Gate MUST be reset so the next caller can become a fresh leader.
+        let g = gate.lock().unwrap();
+        assert!(
+            g.is_none(),
+            "gate must be cleared after LeaderGuard drop (else next caller deadlocks)"
+        );
+    }
+
+    /// `LeaderGuard::complete()` must broadcast the real result and the
+    /// subsequent `Drop` must NOT overwrite that result with a sentinel
+    /// error.
+    #[tokio::test]
+    async fn leader_guard_complete_then_drop_keeps_real_result() {
+        let gate: Arc<PollGate> = Arc::new(StdMutex::new(None));
+        let (tx, mut rx) = watch::channel::<Option<PollResult>>(None);
+        *gate.lock().unwrap() = Some(rx.clone());
+
+        {
+            let guard = LeaderGuard {
+                gate: Arc::clone(&gate),
+                tx: Some(tx),
+            };
+            guard.complete(PollResult::Ok("primary:9200".to_string()));
+            // guard goes out of scope here — Drop must be a no-op since we
+            // already disarmed via `complete()`.
+        }
+
+        rx.changed().await.expect("watch must have a value");
+        match rx.borrow().clone() {
+            Some(PollResult::Ok(addr)) => assert_eq!(addr, "primary:9200"),
+            other => panic!("expected Ok primary, got {:?}", other),
+        }
+        assert!(
+            gate.lock().unwrap().is_none(),
+            "gate cleared after complete"
+        );
     }
 }

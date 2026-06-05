@@ -120,8 +120,8 @@ cargo publish --token <your-crates-io-token>
 cargo publish --registry tencent --token <your-token>
 
 # 6. Create a Git tag
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.5
+git push origin v0.1.5
 ```
 
 ## Notes

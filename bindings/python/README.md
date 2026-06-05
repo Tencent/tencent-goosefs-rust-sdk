@@ -14,6 +14,49 @@
 | **API style** | Synchronous blocking (`Goosefs`) + coroutine-based async (`AsyncGoosefs`) |
 | **Status** | alpha — see the [development roadmap](../../docs/PYTHON_BINDING_PROGRESS.md) |
 
+## What's New
+
+- **Unreleased** — adds a synchronous `WorkerClient` (mirror of
+  `AsyncWorkerClient`). Blocking escape hatch for callers that already
+  know a worker address and want a one-shot positioned read without
+  going through `Goosefs.positioned_read` (which routes via the master).
+
+  ```python
+  from goosefs import WorkerClient, Config
+
+  with WorkerClient.connect("127.0.0.1:9203", Config("127.0.0.1:9200")) as wc:
+      data = wc.read_block_positioned(block_id, offset=0, length=64 * 1024)
+  ```
+
+  Same Tokio-runtime constraints as the sync `Goosefs` class — must not
+  be called from inside an asyncio loop or a Tokio worker thread.
+  Inherits a batch of SDK-side correctness fixes (HA primary discovery
+  cancel-safety, `WriteBlockHandle` Drop abort, `GoosefsFileInStream`
+  forward-seek byte-loss, `GoosefsFileWriter` Drop cleanup, `LogSampler`
+  clock-jump safety, etc.) — see [`CHANGELOG.md`](./CHANGELOG.md) for the
+  full list.
+
+- **v0.1.5** — aligned with `goosefs-sdk` 0.1.5. Inherits Prometheus
+  Pushgateway support, the `GoosefsAsyncReader` (`AsyncRead` +
+  `AsyncSeek`) adapter, and the `GoosefsFileInStream::read` short-read
+  byte-loss fix from the underlying SDK. No Python API change — drop-in
+  upgrade from 0.1.4.
+- **v0.1.4** — Python-binding-only performance release:
+  - **Batch metadata APIs**: `AsyncGoosefs.batch_get_status(paths)` /
+    `batch_exists(paths)` and their sync counterparts on `Goosefs`.
+    A single PyO3 boundary crossing per batch; under a real cluster
+    (500 paths, median of 7 iterations) sync `get_status` improves
+    **2.67×** vs a sequential loop and is also faster than a
+    16-thread pool.
+  - **Custom Tokio runtime**: `worker_threads =
+    available_parallelism().max(16)`, `max_blocking_threads = 64`,
+    registered via `pyo3_async_runtimes::tokio::init` at module init.
+  - **Read-path copy elimination**: `pull_n` fills in place,
+    `pull_all` returns `bytes::Bytes`, and `read_file` /
+    `read_range` / `read_at` drop a `to_vec()`.
+
+See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
+
 ## Documentation Map
 
 - **PyPI landing page**: [`PYPI_README.md`](./PYPI_README.md) — install, quickstart, thread / fork safety, type stubs

@@ -1,11 +1,13 @@
 [package]
 name = "goosefs-python"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 license = "Apache-2.0"
 description = "PyO3 binding for the goosefs-sdk Rust crate (powers the `goosefs` PyPI package)"
 publish = false                       # not published to crates.io; only produces wheels via maturin
-rust-version = "1.75"
+# Keep aligned with the workspace root `Cargo.toml` so CI environments
+# never run with a different MSRV between the SDK and its Python binding.
+rust-version = "1.88"
 
 [lib]
 # Decision 1.A (refined to align with Apache OpenDAL's binding):

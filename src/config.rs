@@ -124,8 +124,16 @@ fn parse_byte_size(s: &str) -> Result<u64, String> {
     num_str
         .trim()
         .parse::<u64>()
-        .map(|n| n * multiplier)
         .map_err(|e| format!("invalid byte size '{}': {}", s, e))
+        .and_then(|n| {
+            // `checked_mul` prevents the silent wrap-around that
+            // `n * multiplier` produces in release builds (e.g. on
+            // pathological inputs like "99999999999GB"), which would
+            // otherwise be parsed into a tiny block size and cause
+            // hard-to-diagnose I/O misbehaviour.
+            n.checked_mul(multiplier)
+                .ok_or_else(|| format!("byte size '{}' overflows u64", s))
+        })
 }
 
 impl PropertiesMap {
@@ -604,8 +612,9 @@ pub const STORAGE_OPT_LOGIN_IMPERSONATION_USERNAME: &str = "goosefs_login_impers
 /// use goosefs_sdk::WritePType;
 /// assert_eq!(WritePType::from(wt), WritePType::CacheThrough);
 ///
-/// // Convert from protobuf WritePType
-/// assert_eq!(WriteType::from(WritePType::Through), WriteType::Through);
+/// // Convert from protobuf WritePType (use try_from_proto, NOT From, since
+/// // `WritePType::Unspecified` / `None` are valid proto values).
+/// assert_eq!(WriteType::try_from_proto(WritePType::Through).unwrap(), WriteType::Through);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WriteType {
@@ -714,12 +723,17 @@ impl WriteType {
     }
 }
 
-/// Convenience: `WritePType` → `WriteType` (panics on Unspecified/None).
-impl From<WritePType> for WriteType {
-    fn from(pt: WritePType) -> Self {
-        Self::try_from_proto(pt).expect("cannot convert Unspecified/None WritePType to WriteType")
-    }
-}
+// NOTE: `From<WritePType> for WriteType` is intentionally NOT implemented.
+//
+// `WritePType::Unspecified` and `WritePType::None` (the default proto value
+// returned for unset fields) cannot be losslessly mapped to a `WriteType`,
+// so the conversion is fundamentally fallible and `From` would have to
+// panic. That makes a stray server response containing one of those
+// variants — perfectly legal at the proto level — crash the SDK.
+//
+// Use [`WriteType::try_from_proto`] instead, which surfaces the error as
+// a `Result<WriteType, String>` and lets the caller pick a sensible
+// fallback (typically `WriteType::CacheThrough`).
 
 /// Configuration for the Goosefs Rust gRPC client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2082,12 +2096,21 @@ mod tests {
 
     #[test]
     fn test_write_p_type_to_write_type() {
-        assert_eq!(WriteType::from(WritePType::MustCache), WriteType::MustCache);
         assert_eq!(
-            WriteType::from(WritePType::CacheThrough),
+            WriteType::try_from_proto(WritePType::MustCache).unwrap(),
+            WriteType::MustCache
+        );
+        assert_eq!(
+            WriteType::try_from_proto(WritePType::CacheThrough).unwrap(),
             WriteType::CacheThrough
         );
-        assert_eq!(WriteType::from(WritePType::Through), WriteType::Through);
+        assert_eq!(
+            WriteType::try_from_proto(WritePType::Through).unwrap(),
+            WriteType::Through
+        );
+        // UnspecifiedWriteType / None must surface as Err — never a silent panic.
+        assert!(WriteType::try_from_proto(WritePType::UnspecifiedWriteType).is_err());
+        assert!(WriteType::try_from_proto(WritePType::None).is_err());
     }
 
     #[test]
@@ -2107,7 +2130,7 @@ mod tests {
 
             // Round-trip: enum → WritePType → enum
             let pt = WritePType::from(*wt);
-            let back = WriteType::from(pt);
+            let back = WriteType::try_from_proto(pt).unwrap();
             assert_eq!(back, *wt);
         }
     }
@@ -2241,8 +2264,44 @@ goosefs.master.rpc.port=9200
         assert!(parse_byte_size("bad").is_err());
     }
 
+    /// **Regression for the `n * multiplier` overflow**:
+    /// pre-fix release builds silently wrapped pathological inputs into
+    /// tiny block sizes (e.g. "99999999999GB" became a few megabytes),
+    /// causing hard-to-diagnose I/O misbehaviour. The fix uses
+    /// `checked_mul` and surfaces an `Err`.
+    #[test]
+    fn test_parse_byte_size_overflow_surfaces_err() {
+        // 99999999999 GB ≈ 10^11 GB ≈ 10^20 bytes — far beyond u64::MAX (1.8 * 10^19).
+        assert!(
+            parse_byte_size("99999999999GB").is_err(),
+            "overflow on '99999999999GB' must be reported as Err, not silently wrapped"
+        );
+        assert!(
+            parse_byte_size("99999999999TB").is_err(),
+            "overflow on '99999999999TB' must be reported as Err"
+        );
+        // The largest u64 already fills the slot — multiplying by 1024 (KB)
+        // certainly overflows.
+        assert!(
+            parse_byte_size(&format!("{}KB", u64::MAX)).is_err(),
+            "u64::MAX KB must overflow"
+        );
+        // Just-below-overflow inputs should still parse fine.
+        assert_eq!(parse_byte_size("8GB").unwrap(), 8u64 * 1024 * 1024 * 1024);
+    }
+
+    /// Mutex guarding tests that mutate process-global environment variables
+    /// (set_var / remove_var). Without this, `cargo test`'s default
+    /// multi-threaded executor races different `test_apply_env_*` cases
+    /// against the same `GOOSEFS_*` keys and any reader between the
+    /// `set_var` / `remove_var` window of one test sees the other test's
+    /// value — the symptom is rare 1-in-10 flakes on
+    /// `test_apply_env_ha_addresses`.
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_apply_env_master_addr() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Set env, build from env, unset env
         std::env::set_var("GOOSEFS_MASTER_ADDR", "192.168.1.1:9200");
         let cfg = GoosefsConfig::default().apply_env();
@@ -2252,6 +2311,7 @@ goosefs.master.rpc.port=9200
 
     #[test]
     fn test_apply_env_ha_addresses() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("GOOSEFS_MASTER_ADDR", "10.0.0.1:9200,10.0.0.2:9200");
         let cfg = GoosefsConfig::default().apply_env();
         std::env::remove_var("GOOSEFS_MASTER_ADDR");
@@ -2261,6 +2321,7 @@ goosefs.master.rpc.port=9200
 
     #[test]
     fn test_apply_env_write_type() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("GOOSEFS_WRITE_TYPE", "THROUGH");
         let cfg = GoosefsConfig::default().apply_env();
         std::env::remove_var("GOOSEFS_WRITE_TYPE");
@@ -2269,6 +2330,7 @@ goosefs.master.rpc.port=9200
 
     #[test]
     fn test_apply_env_block_size() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("GOOSEFS_BLOCK_SIZE", "134217728");
         let cfg = GoosefsConfig::default().apply_env();
         std::env::remove_var("GOOSEFS_BLOCK_SIZE");

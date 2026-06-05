@@ -366,19 +366,15 @@ impl PyAsyncGoosefs {
     fn read_file<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let h = self.handle()?;
         future_into_py(py, async move {
-            let bytes = goosefs_sdk::io::GoosefsFileReader::read_file_with_context(
-                h.ctx.clone(),
-                &path,
-            )
-            .await
-            .map_err(map_err)?;
+            let bytes =
+                goosefs_sdk::io::GoosefsFileReader::read_file_with_context(h.ctx.clone(), &path)
+                    .await
+                    .map_err(map_err)?;
             // Hand off to Python: `PyBytes::new` performs a single copy. We
             // could in principle use `PyBytes::new_bound_with` to populate the
             // buffer in-place, but the win is marginal and `Bytes::as_ref()`
             // already gives us a contiguous slice.
-            Python::attach(|py| {
-                Ok(pyo3::types::PyBytes::new(py, bytes.as_ref()).unbind())
-            })
+            Python::attach(|py| Ok(pyo3::types::PyBytes::new(py, bytes.as_ref()).unbind()))
         })
     }
 
@@ -404,9 +400,7 @@ impl PyAsyncGoosefs {
             )
             .await
             .map_err(map_err)?;
-            Python::attach(|py| {
-                Ok(pyo3::types::PyBytes::new(py, bytes.as_ref()).unbind())
-            })
+            Python::attach(|py| Ok(pyo3::types::PyBytes::new(py, bytes.as_ref()).unbind()))
         })
     }
 
@@ -548,17 +542,24 @@ impl PyAsyncGoosefs {
         let h = self.handle()?;
         future_into_py(py, async move {
             // 1. Route.
-            let worker_info = h.ctx.acquire_router().select_worker(block_id).await.map_err(map_err)?;
-            let net_addr = worker_info
-                .address
-                .as_ref()
-                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                    "selected worker has no address",
-                ))?;
+            let worker_info = h
+                .ctx
+                .acquire_router()
+                .select_worker(block_id)
+                .await
+                .map_err(map_err)?;
+            let net_addr = worker_info.address.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("selected worker has no address")
+            })?;
             let worker_addr = format_worker_addr(net_addr);
 
             // 2. Acquire pooled, authenticated WorkerClient.
-            let client = h.ctx.acquire_worker_pool().acquire(&worker_addr).await.map_err(map_err)?;
+            let client = h
+                .ctx
+                .acquire_worker_pool()
+                .acquire(&worker_addr)
+                .await
+                .map_err(map_err)?;
 
             // 3. Wrap and hand to Python. We use `from_sdk` (not the
             //    `connect` factory) so we don't perform another TCP+SASL
@@ -653,27 +654,18 @@ impl PyAsyncGoosefs {
                 length.min(block_size - offset)
             };
             if effective_length == 0 {
-                return Python::attach(|py| {
-                    Ok(pyo3::types::PyBytes::new(py, &[]).unbind())
-                });
+                return Python::attach(|py| Ok(pyo3::types::PyBytes::new(py, &[]).unbind()));
             }
 
             // 2–4. Route + acquire + read with SASL auth-failure retry.
             //       Delegated to `positioned_read_with_reauth` so both
             //       async and sync paths share the same retry logic.
-            let bytes = positioned_read_with_reauth(
-                h.ctx,
-                block_id,
-                offset,
-                effective_length,
-                chunk_size,
-            )
-            .await?;
+            let bytes =
+                positioned_read_with_reauth(h.ctx, block_id, offset, effective_length, chunk_size)
+                    .await?;
 
             // 5. Single copy across the PyO3 boundary.
-            Python::attach(|py| {
-                Ok(pyo3::types::PyBytes::new(py, &bytes).unbind())
-            })
+            Python::attach(|py| Ok(pyo3::types::PyBytes::new(py, &bytes).unbind()))
         })
     }
 
@@ -686,11 +678,7 @@ impl PyAsyncGoosefs {
         // Take the handle out under the lock; if already closed, this is a
         // no-op coroutine. We tolerate a poisoned mutex by treating it as
         // already-closed — better than panicking on shutdown.
-        let taken = self
-            .handle
-            .lock()
-            .map(|mut g| g.take())
-            .unwrap_or(None);
+        let taken = self.handle.lock().map(|mut g| g.take()).unwrap_or(None);
         future_into_py(py, async move {
             if let Some(h) = taken {
                 // `FileSystemContext::close(&self)` does not consume the Arc;

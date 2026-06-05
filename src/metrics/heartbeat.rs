@@ -15,7 +15,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -32,33 +32,42 @@ use crate::proto::grpc::metric::ClientMetrics;
 ///
 /// Aligned with Java's `SamplingLogger` pattern in `ClientMasterSync.java:L39-L41`
 /// (30-second window for heartbeat failure warnings).
+///
+/// Uses [`Instant`] (monotonic) instead of `SystemTime` so that NTP /
+/// administrator clock adjustments cannot stall logging — `SystemTime` is
+/// wall-clock and a backwards jump made `now - last` negative, which
+/// suppressed all WARN logs until the wall-clock caught up to the previous
+/// maximum.
 struct LogSampler {
-    /// Unix-epoch seconds of the last emitted log line.
-    last_emitted_secs: AtomicI64,
-    /// Minimum gap between two emitted log lines (seconds).
-    window_secs: i64,
+    /// Reference point for monotonic elapsed-millisecond bookkeeping.
+    epoch: Instant,
+    /// Milliseconds since `epoch` of the last emitted log line. `-1` means
+    /// "never emitted" — first call always logs.
+    last_emitted_millis: AtomicI64,
+    /// Minimum gap between two emitted log lines (milliseconds).
+    window_millis: i64,
 }
 
 impl LogSampler {
-    const fn new(window: Duration) -> Self {
+    fn new(window: Duration) -> Self {
         Self {
-            last_emitted_secs: AtomicI64::new(0),
-            window_secs: window.as_secs() as i64,
+            epoch: Instant::now(),
+            last_emitted_millis: AtomicI64::new(-1),
+            window_millis: window.as_millis() as i64,
         }
     }
 
     /// Returns `true` if enough time has elapsed since the last emission and
     /// resets the timer. Thread-safe (compare-and-swap).
     fn should_log(&self) -> bool {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        // `Instant::elapsed()` is monotonic — never decreases — so
+        // `now - last` is always non-negative for any valid `last`.
+        let now = self.epoch.elapsed().as_millis() as i64;
 
-        let last = self.last_emitted_secs.load(Ordering::Relaxed);
-        if now - last >= self.window_secs {
+        let last = self.last_emitted_millis.load(Ordering::Relaxed);
+        if last < 0 || now - last >= self.window_millis {
             // Try to claim this window. If another thread wins, they log.
-            self.last_emitted_secs
+            self.last_emitted_millis
                 .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
         } else {

@@ -181,9 +181,7 @@ impl PyGoosefs {
     /// `fs.exists(path)` → `bool`.
     fn exists(&self, py: Python<'_>, path: String) -> PyResult<bool> {
         let h = self.handle()?;
-        Self::guarded_block_on(py, async move {
-            h.fs.exists(&path).await.map_err(map_err)
-        })
+        Self::guarded_block_on(py, async move { h.fs.exists(&path).await.map_err(map_err) })
     }
 
     // ── Batch metadata (Phase 2.1) ───────────────────────────────────────────
@@ -201,11 +199,7 @@ impl PyGoosefs {
     /// (at most `BATCH_CONCURRENCY_LIMIT` RPCs in flight); results in
     /// input order. The
     /// whole batch fails on the first error.
-    fn batch_get_status(
-        &self,
-        py: Python<'_>,
-        paths: Vec<String>,
-    ) -> PyResult<Vec<PyURIStatus>> {
+    fn batch_get_status(&self, py: Python<'_>, paths: Vec<String>) -> PyResult<Vec<PyURIStatus>> {
         let h = self.handle()?;
         Self::guarded_block_on(py, async move {
             use futures::stream::{self, StreamExt};
@@ -294,9 +288,10 @@ impl PyGoosefs {
     /// `fs.rename(src, dst)`.
     fn rename(&self, py: Python<'_>, src: String, dst: String) -> PyResult<()> {
         let h = self.handle()?;
-        Self::guarded_block_on(py, async move {
-            h.fs.rename(&src, &dst).await.map_err(map_err)
-        })
+        Self::guarded_block_on(
+            py,
+            async move { h.fs.rename(&src, &dst).await.map_err(map_err) },
+        )
     }
 
     // ── High-level read / write ─────────────────────────────────────────────
@@ -316,12 +311,9 @@ impl PyGoosefs {
         // is back. This is a single copy into Python memory — the previous
         // `to_vec()` intermediate is gone (Phase 1.4).
         let bytes: bytes::Bytes = Self::guarded_block_on(py, async move {
-            goosefs_sdk::io::GoosefsFileReader::read_file_with_context(
-                h.ctx.clone(),
-                &path,
-            )
-            .await
-            .map_err(map_err)
+            goosefs_sdk::io::GoosefsFileReader::read_file_with_context(h.ctx.clone(), &path)
+                .await
+                .map_err(map_err)
         })?;
         Ok(pyo3::types::PyBytes::new(py, bytes.as_ref()))
     }
@@ -437,13 +429,23 @@ impl PyGoosefs {
     ) -> PyResult<crate::worker::PyAsyncWorkerClient> {
         let h = self.handle()?;
         Self::guarded_block_on(py, async move {
-            let worker_info = h.ctx.acquire_router().select_worker(block_id).await.map_err(map_err)?;
+            let worker_info = h
+                .ctx
+                .acquire_router()
+                .select_worker(block_id)
+                .await
+                .map_err(map_err)?;
             let net_addr = worker_info
                 .address
                 .as_ref()
                 .ok_or_else(|| PyRuntimeError::new_err("selected worker has no address"))?;
             let worker_addr = crate::filesystem::format_worker_addr(net_addr);
-            let client = h.ctx.acquire_worker_pool().acquire(&worker_addr).await.map_err(map_err)?;
+            let client = h
+                .ctx
+                .acquire_worker_pool()
+                .acquire(&worker_addr)
+                .await
+                .map_err(map_err)?;
             Ok(crate::worker::PyAsyncWorkerClient::from_sdk(client))
         })
     }
@@ -534,11 +536,7 @@ impl PyGoosefs {
             )));
         }
 
-        let taken = self
-            .handle
-            .lock()
-            .map(|mut g| g.take())
-            .unwrap_or(None);
+        let taken = self.handle.lock().map(|mut g| g.take()).unwrap_or(None);
 
         if let Some(h) = taken {
             Self::guarded_block_on(py, async move {

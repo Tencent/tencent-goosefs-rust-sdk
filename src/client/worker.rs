@@ -74,11 +74,23 @@ pub struct WriteBlockHandle {
     /// Block being written.
     block_id: i64,
     /// Sender for client → server WriteRequest messages (data chunks, flush commands).
-    pub request_tx: mpsc::Sender<WriteRequest>,
+    ///
+    /// Wrapped in `Option` so that `close()` can `take()` the sender (closing
+    /// the client→server half of the stream) without violating the move
+    /// semantics imposed by this type's `Drop` impl. `None` after `close()`
+    /// has run; senders attempting to use it should treat that as
+    /// "stream already closed".
+    pub request_tx: Option<mpsc::Sender<WriteRequest>>,
     /// Receiver for server → client WriteResponse messages, forwarded from the background task.
     response_rx: mpsc::Receiver<std::result::Result<WriteResponse, tonic::Status>>,
-    /// Handle to the background gRPC task.
-    _task_handle: tokio::task::JoinHandle<()>,
+    /// Handle to the background gRPC task that drives the bidirectional
+    /// `write_block` stream.
+    ///
+    /// The handle is wrapped in `Option` so that `close()` / `cancel()` can
+    /// take ownership (`take()`) and either await it (close) or abort it
+    /// (cancel). The `Drop` impl below also aborts the task as a safety net
+    /// in case the handle is dropped without going through `close`/`cancel`.
+    task_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl WriteBlockHandle {
@@ -104,7 +116,9 @@ impl WriteBlockHandle {
     pub async fn close(mut self) -> Result<()> {
         // Drop the request sender to close the client→server half of the stream.
         // The server will then call onCompleted → commitBlock → replySuccess.
-        drop(self.request_tx);
+        // `take()` returns the sender (or `None` if already taken) — dropping
+        // it here closes the stream half.
+        drop(self.request_tx.take());
         debug!(
             block_id = self.block_id,
             "closed write stream, waiting for server finalize"
@@ -112,6 +126,7 @@ impl WriteBlockHandle {
         // Wait for the server's final response (or stream close).
         // This ensures the background task finishes before we return,
         // preventing the Channel from being dropped while the task is still running.
+        let mut last_err: Option<Error> = None;
         while let Some(result) = self.response_rx.recv().await {
             match result {
                 Ok(_resp) => {
@@ -121,28 +136,107 @@ impl WriteBlockHandle {
                     );
                 }
                 Err(status) => {
-                    return Err(Error::GrpcError {
+                    last_err = Some(Error::GrpcError {
                         message: format!(
                             "WriteBlock server error for block_id={}: {}",
                             self.block_id, status
                         ),
                         source: Box::new(status),
                     });
+                    break;
                 }
             }
+        }
+        // Join the background task so we surface a panic (rather than silently
+        // detaching it). The task should be finished by now because the
+        // response stream has been drained to `None` (or we broke out on
+        // error). We use a short timeout as a defensive measure so a
+        // hypothetical bug in the task does not hang `close()` forever.
+        if let Some(handle) = self.task_handle.take() {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(join_err)) => {
+                    if join_err.is_panic() {
+                        warn!(
+                            block_id = self.block_id,
+                            "WriteBlock background task panicked"
+                        );
+                    }
+                    // Cancelled or panicked — surface as error only if we
+                    // do not already have one from the stream.
+                    if last_err.is_none() {
+                        last_err = Some(Error::Internal {
+                            message: format!(
+                                "WriteBlock background task ended abnormally for block_id={}: {}",
+                                self.block_id, join_err
+                            ),
+                            source: None,
+                        });
+                    }
+                }
+                Err(_) => {
+                    warn!(
+                        block_id = self.block_id,
+                        "WriteBlock background task did not finish within 5s after stream drain; aborting"
+                    );
+                    // We cannot await again here because the JoinHandle was
+                    // moved into `timeout`; the task will be aborted when the
+                    // tokio runtime drops the handle.
+                }
+            }
+        }
+        if let Some(e) = last_err {
+            return Err(e);
         }
         Ok(())
     }
 
     /// Cancel the write stream without waiting for server finalization.
     ///
-    /// Drops the request sender and response receiver immediately.
-    /// The server will detect the stream cancellation and clean up.
+    /// Drops the request sender and response receiver immediately and
+    /// aborts the background gRPC task so its resources are released
+    /// promptly (rather than relying on the implicit "task exits because
+    /// channels were dropped" behaviour, which leaves the JoinHandle
+    /// detached on drop).
     /// Matches Java's `GrpcBlockingStream.cancel()`.
-    pub async fn cancel(self) {
-        drop(self.request_tx);
-        drop(self.response_rx);
+    pub async fn cancel(mut self) {
+        // Abort the background task *before* dropping the channels so the
+        // task does not race against the channel-closed signal. We then
+        // drop the channels so any pending `Sender::send` / `recv` futures
+        // owned by callers fail immediately.
+        if let Some(handle) = self.task_handle.take() {
+            handle.abort();
+        }
+        // The remaining fields are dropped automatically when `self` goes
+        // out of scope at the end of this function — we cannot explicitly
+        // `drop(self.request_tx)` here because doing so while a `Drop` impl
+        // exists for `WriteBlockHandle` would violate move semantics. The
+        // observable behaviour is identical: when the function returns,
+        // `self` (and therefore the channels) are dropped.
         debug!(block_id = self.block_id, "cancelled write stream");
+    }
+}
+
+/// Safety net: aborts the background gRPC task if the handle is dropped
+/// without going through `close()` / `cancel()`.
+///
+/// Without this, an early `?` return on the error path leaves a detached
+/// tokio task that can hang indefinitely on `stream.message().await`
+/// (e.g. on a half-open server connection that never sends a final response),
+/// keeping the underlying tonic Channel alive and leaking resources.
+///
+/// `cancel()` and `close()` already `take()` the `task_handle`, so on the
+/// happy path `task_handle` is `None` here and `abort()` is a no-op —
+/// matching the doc-comment on `task_handle` above.
+impl Drop for WriteBlockHandle {
+    fn drop(&mut self) {
+        if let Some(handle) = self.task_handle.take() {
+            debug!(
+                block_id = self.block_id,
+                "WriteBlockHandle dropped without close()/cancel(); aborting background task"
+            );
+            handle.abort();
+        }
     }
 }
 
@@ -184,7 +278,13 @@ impl WorkerClient {
             .map_err(|e| Error::ConfigError {
                 message: format!("invalid worker endpoint: {}", e),
             })?
-            .connect_timeout(config.connect_timeout);
+            .connect_timeout(config.connect_timeout)
+            // Set request_timeout: workers are the data plane and most prone
+            // to half-open connections. Without this, a hung gRPC stream
+            // (`read_block` / `write_block`) can stall indefinitely while
+            // the master/metrics/worker_manager paths all already enforce
+            // request_timeout.
+            .timeout(config.request_timeout);
 
         let channel = endpoint.connect().await?;
 
@@ -430,9 +530,9 @@ impl WorkerClient {
 
         Ok(WriteBlockHandle {
             block_id,
-            request_tx: tx,
+            request_tx: Some(tx),
             response_rx: resp_rx,
-            _task_handle: task_handle,
+            task_handle: Some(task_handle),
         })
     }
 
@@ -541,10 +641,31 @@ impl WorkerClientPool {
     /// Remove a worker from the pool (e.g., after a connection failure).
     ///
     /// The next `acquire()` call for this address will create a fresh connection.
+    ///
+    /// Also drops the per-address reconnect mutex from `reconnect_locks` so
+    /// the map does not grow unbounded when many distinct worker addresses
+    /// come and go (e.g. worker scale-up / scale-down). It is safe to drop
+    /// the mutex here because:
+    /// - any caller that already holds an `Arc<AsyncMutex<()>>` clone keeps
+    ///   it alive for the duration of its critical section;
+    /// - the *next* `reconnect_lock_for()` call for the same address will
+    ///   lazily install a fresh mutex.
+    /// In the worst case two callers racing across an `invalidate()` may
+    /// hold *different* mutex instances briefly, but the cache double-check
+    /// inside `reconnect_if_stale` still serialises the actual handshake
+    /// via the generation comparison, so correctness is preserved.
     pub async fn invalidate(&self, addr: &str) {
         let mut cache = self.clients.write().await;
         if cache.remove(addr).is_some() {
             debug!(addr = %addr, "invalidated WorkerClient from pool");
+        }
+        drop(cache);
+        // Best-effort cleanup of the per-address reconnect lock to prevent
+        // unbounded growth of `reconnect_locks` over the lifetime of a
+        // long-running process.
+        let mut locks = self.reconnect_locks.write().await;
+        if locks.remove(addr).is_some() {
+            debug!(addr = %addr, "removed reconnect lock for invalidated worker");
         }
     }
 
@@ -691,6 +812,12 @@ impl WorkerClientPool {
         let cache = self.clients.read().await;
         cache.get(addr).map(|c| c.generation)
     }
+
+    /// Snapshot the number of entries in the `reconnect_locks` map.
+    #[cfg(test)]
+    async fn test_reconnect_locks_len(&self) -> usize {
+        self.reconnect_locks.read().await.len()
+    }
 }
 
 #[cfg(test)]
@@ -766,6 +893,41 @@ mod tests {
             .expect("lock for different address must not be blocked");
         drop(guard_b);
         drop(guard_a);
+    }
+
+    /// `invalidate()` must drop the per-address reconnect lock so the
+    /// `reconnect_locks` map does not grow unbounded for long-running
+    /// processes that connect to many distinct worker addresses (worker
+    /// scale-up / scale-down).
+    #[tokio::test]
+    async fn test_invalidate_clears_reconnect_lock_to_prevent_leak() {
+        let pool = WorkerClientPool::new(GoosefsConfig::new("127.0.0.1:9200"));
+
+        // Touch the reconnect-lock map for several addresses (simulates
+        // reconnect activity over time).
+        for i in 0..10 {
+            let addr = format!("ephemeral-worker-{}:9203", i);
+            pool.test_install(&addr, fake_client(&addr)).await;
+            let _lock = pool.reconnect_lock_for(&addr).await;
+        }
+        assert_eq!(
+            pool.test_reconnect_locks_len().await,
+            10,
+            "reconnect_locks must be populated by reconnect_lock_for()"
+        );
+
+        // Now invalidate them (workers scaled down).
+        for i in 0..10 {
+            pool.invalidate(&format!("ephemeral-worker-{}:9203", i))
+                .await;
+        }
+
+        assert_eq!(
+            pool.test_reconnect_locks_len().await,
+            0,
+            "invalidate() must remove the per-address reconnect lock so the \
+             map does not leak across worker churn"
+        );
     }
 
     #[tokio::test]
@@ -968,6 +1130,91 @@ mod tests {
             client_old.generation(),
             fresh_gen,
             "observer with stale gen=0 must get the same fresh client"
+        );
+    }
+
+    /// **Regression for C3**: dropping a `WriteBlockHandle` without going
+    /// through `close()` / `cancel()` MUST abort the background gRPC task.
+    ///
+    /// Pre-fix behaviour: the comment claimed there was a `Drop` safety net
+    /// but the impl was missing. An early `?` on the error path therefore
+    /// left a detached task forever stuck on `stream.message().await`,
+    /// pinning the channel and leaking resources.
+    #[tokio::test]
+    async fn write_block_handle_drop_aborts_background_task() {
+        // Channels must look real but never carry traffic.
+        let (tx, _rx) = mpsc::channel::<WriteRequest>(8);
+        let (_resp_tx, resp_rx) = mpsc::channel(8);
+
+        // A background task that would otherwise hang forever — Drop must
+        // abort it via task_handle.abort().
+        let task = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        let abort_handle = task.abort_handle();
+
+        let handle = WriteBlockHandle {
+            block_id: 42,
+            request_tx: Some(tx),
+            response_rx: resp_rx,
+            task_handle: Some(task),
+        };
+
+        assert!(
+            !abort_handle.is_finished(),
+            "task should still be running before Drop"
+        );
+
+        // Drop the handle on the error path (simulating an early `?` return).
+        drop(handle);
+
+        // Wait briefly for tokio to process the abort.
+        for _ in 0..50 {
+            if abort_handle.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            abort_handle.is_finished(),
+            "Drop did not abort background task — pre-fix regression"
+        );
+    }
+
+    /// `close()` already takes the task_handle and awaits it; the subsequent
+    /// `Drop` must therefore see `task_handle = None` and be a complete
+    /// no-op (no double-abort).
+    #[tokio::test]
+    async fn write_block_handle_drop_after_close_is_noop() {
+        let (tx, _rx) = mpsc::channel::<WriteRequest>(8);
+        // Drop the response sender immediately: the channel is closed, so
+        // close()'s `response_rx.recv()` loop terminates straight away
+        // (matches the real-world "server done" signal).
+        let (_, resp_rx) = mpsc::channel(8);
+
+        // Spawn a task that finishes immediately so close()'s join completes.
+        let task = tokio::spawn(async {});
+
+        let handle = WriteBlockHandle {
+            block_id: 7,
+            request_tx: Some(tx),
+            response_rx: resp_rx,
+            task_handle: Some(task),
+        };
+
+        // close() takes ownership of the handle, drains the (already-closed)
+        // response stream, joins the task, and returns. After it returns,
+        // `self` is dropped — the Drop impl must be a no-op because
+        // `task_handle.take()` already happened inside close().
+        let close_fut = handle.close();
+        let res = tokio::time::timeout(Duration::from_millis(500), close_fut).await;
+        assert!(
+            res.is_ok(),
+            "close() must complete promptly when response stream is closed"
+        );
+        assert!(
+            res.unwrap().is_ok(),
+            "close() should succeed on a graceful task"
         );
     }
 }

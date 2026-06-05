@@ -261,12 +261,7 @@ impl PyAsyncFileReader {
 
     /// `await reader.seek(offset, whence=0)` → new absolute position.
     #[pyo3(signature = (offset, whence=0))]
-    fn seek<'py>(
-        &self,
-        py: Python<'py>,
-        offset: i64,
-        whence: i32,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn seek<'py>(&self, py: Python<'py>, offset: i64, whence: i32) -> PyResult<Bound<'py, PyAny>> {
         let from = whence_to_seek_from(offset, whence)?;
         let inner = Arc::clone(&self.inner);
         future_into_py(py, async move {

@@ -24,6 +24,21 @@
 
 use tokio::runtime::Runtime;
 
+/// Maximum number of blocking threads the shared Tokio runtime is sized
+/// for, and the upper bound on in-flight RPCs that the `batch_*`
+/// (`batch_get_status` / `batch_exists`) helpers dispatch concurrently.
+///
+/// **Single source of truth** — this constant is consumed by both
+/// [`init_custom_runtime`] (to size `max_blocking_threads`) and by
+/// [`crate::context::BATCH_CONCURRENCY_LIMIT`] (which re-exports it as the
+/// `buffered(...)` window for `stream::iter(..)`). Tuning either side
+/// independently is what the previous "keep aligned" comment was guarding
+/// against — sharing a single value guarantees they cannot drift.
+///
+/// Empirically deep enough to saturate a single master while leaving
+/// headroom for non-batch traffic on the same client.
+pub const RUNTIME_MAX_BLOCKING_THREADS: usize = 64;
+
 /// Install a custom multi-thread Tokio runtime builder (Phase 2.2).
 ///
 /// `pyo3_async_runtimes::tokio::init` only *stores* the builder; the runtime
@@ -53,7 +68,7 @@ pub fn init_custom_runtime() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder
         .worker_threads(worker_threads)
-        .max_blocking_threads(64)
+        .max_blocking_threads(RUNTIME_MAX_BLOCKING_THREADS)
         .enable_all();
 
     // `init` returns `()`; if the runtime was somehow already built (it should
