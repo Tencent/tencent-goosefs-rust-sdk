@@ -55,7 +55,7 @@ use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
 use crate::fs::options::InStreamOptions;
 use crate::fs::uri_status::URIStatus;
-use crate::io::reader::GrpcBlockReader;
+use crate::io::reader::{GrpcBlockReader, ReadTuning};
 use crate::proto::proto::dataserver::OpenUfsBlockOptions;
 
 /// Threshold in bytes above which a seek switches from the sequential
@@ -463,13 +463,15 @@ impl GoosefsFileInStream {
             let worker = self.connect_worker(block_id).await?;
             let worker_generation = worker.generation();
             let ufs_opts = self.build_ufs_opts(block_idx);
-            let reader_result = GrpcBlockReader::open(
+            let tuning = ReadTuning::from_config(&self.config);
+            let reader_result = GrpcBlockReader::open_sequential(
                 &worker,
                 block_id,
                 offset_in_block,
                 remaining_in_block,
                 self.config.chunk_size as i64,
                 ufs_opts.clone(),
+                tuning,
             )
             .await;
 
@@ -492,13 +494,14 @@ impl GoosefsFileInStream {
                     let fresh = self
                         .reconnect_worker_for_block(block_id, Some(worker_generation))
                         .await?;
-                    GrpcBlockReader::open(
+                    GrpcBlockReader::open_sequential(
                         &fresh,
                         block_id,
                         offset_in_block,
                         remaining_in_block,
                         self.config.chunk_size as i64,
                         ufs_opts,
+                        tuning,
                     )
                     .await?
                 }
@@ -528,6 +531,21 @@ impl GoosefsFileInStream {
     /// Reads that span multiple blocks are handled by issuing one positioned
     /// read per block and concatenating the results.
     ///
+    /// # Performance — drive concurrent random reads
+    ///
+    /// Each call opens (and closes) a fresh positioned-read stream, so a
+    /// **single-task tight loop** of sequential `read_at(...).await` calls
+    /// leaves only one op in flight and is bottlenecked by the per-op
+    /// round-trip (measured ~2x slower than the steady-state floor; see
+    /// `docs/RUST_PYTHON_SDK_OPTIMIZATION.md` Part V §V.5 "B1 验证结果").
+    ///
+    /// For throughput-oriented random reads, issue reads **concurrently**
+    /// (one future per `read_at`, e.g. `stream::iter(..).buffer_unordered(8..16)`)
+    /// so multiple ops overlap and hide each round-trip. Raising
+    /// [`GoosefsConfig::worker_connection_pool_size`](crate::config::GoosefsConfig)
+    /// further lifts the single-connection ceiling. See Part IV of that doc
+    /// for caller-side concurrency patterns.
+    ///
     /// # Authentication failure recovery
     ///
     /// If a positioned read fails with `AuthenticationFailed`, the stale
@@ -538,6 +556,40 @@ impl GoosefsFileInStream {
         }
 
         let end = (offset + n as i64).min(self.file_length);
+
+        // ── R2 fast path: the whole request lives inside a single block ──
+        // Random reads (PR) almost always fall here (256 KiB / 1 MiB ≪ 64 MiB
+        // block). Returning the `positioned_read` `Bytes` directly avoids the
+        // extra `BytesMut::extend_from_slice` copy the multi-block merge path
+        // below performs. The H2 short-read guard and auth single-flight
+        // reconnect are preserved inside `positioned_read_with_retry`, so the
+        // C2/C3 consistency invariants still hold.
+        let first_block_idx = self.block_index_for_pos(offset);
+        let first_block_end = self.block_start(first_block_idx) + self.status.block_size_bytes;
+        if end <= first_block_end {
+            let block_id = self.block_id_at(first_block_idx)?;
+            let offset_in_block = self.offset_in_block(offset);
+            let length = end - offset;
+            let data = self
+                .positioned_read_with_retry(first_block_idx, block_id, offset_in_block, length)
+                .await?;
+            // Defensive: surface a zero-byte delivery for a non-zero request as
+            // an error rather than a silent truncation (mirrors the slow path).
+            if data.is_empty() {
+                return Err(Error::Internal {
+                    message: format!(
+                        "read_at: positioned_read returned 0 bytes for block {} \
+                         offset_in_block {} length {}",
+                        block_id, offset_in_block, length
+                    ),
+                    source: None,
+                });
+            }
+            return Ok(data);
+        }
+
+        // ── Slow path: the request spans multiple blocks — merge per-block
+        //    positioned reads (kept identical to the pre-R2 behaviour). ──
         let mut result = BytesMut::with_capacity((end - offset) as usize);
         let mut cur = offset;
 
@@ -549,44 +601,9 @@ impl GoosefsFileInStream {
             let read_end = end.min(block_end);
             let length = read_end - cur;
 
-            let worker = self.connect_worker(block_id).await?;
-            let worker_generation = worker.generation();
-            let ufs_opts = self.build_ufs_opts(block_idx);
-
-            let read_result = GrpcBlockReader::positioned_read(
-                &worker,
-                block_id,
-                offset_in_block,
-                length,
-                self.config.chunk_size as i64,
-                ufs_opts.clone(),
-            )
-            .await;
-
-            let data = match read_result {
-                Ok(d) => d,
-                Err(e) if e.is_authentication_failed() => {
-                    debug!(
-                        block_id = block_id,
-                        stale_generation = worker_generation,
-                        error = %e,
-                        "auth failed on positioned read, requesting single-flight reconnect"
-                    );
-                    let fresh = self
-                        .reconnect_worker_for_block(block_id, Some(worker_generation))
-                        .await?;
-                    GrpcBlockReader::positioned_read(
-                        &fresh,
-                        block_id,
-                        offset_in_block,
-                        length,
-                        self.config.chunk_size as i64,
-                        ufs_opts,
-                    )
-                    .await?
-                }
-                Err(e) => return Err(e),
-            };
+            let data = self
+                .positioned_read_with_retry(block_idx, block_id, offset_in_block, length)
+                .await?;
 
             // H2 fix: advance the cursor by the *actual* number of bytes
             // delivered, not by the requested `length`. `positioned_read` /
@@ -616,6 +633,58 @@ impl GoosefsFileInStream {
         }
 
         Ok(result.freeze())
+    }
+
+    /// Issue a single positioned read for `(block_id, offset_in_block, length)`
+    /// with the auth single-flight reconnect retry.
+    ///
+    /// Shared by the R2 fast path and the multi-block slow path so both keep
+    /// identical H2 short-read and auth-recovery semantics (C2/C3).
+    async fn positioned_read_with_retry(
+        &mut self,
+        block_idx: usize,
+        block_id: i64,
+        offset_in_block: i64,
+        length: i64,
+    ) -> Result<Bytes> {
+        let worker = self.connect_worker(block_id).await?;
+        let worker_generation = worker.generation();
+        let ufs_opts = self.build_ufs_opts(block_idx);
+
+        let read_result = GrpcBlockReader::positioned_read(
+            &worker,
+            block_id,
+            offset_in_block,
+            length,
+            self.config.chunk_size as i64,
+            ufs_opts.clone(),
+        )
+        .await;
+
+        match read_result {
+            Ok(d) => Ok(d),
+            Err(e) if e.is_authentication_failed() => {
+                debug!(
+                    block_id = block_id,
+                    stale_generation = worker_generation,
+                    error = %e,
+                    "auth failed on positioned read, requesting single-flight reconnect"
+                );
+                let fresh = self
+                    .reconnect_worker_for_block(block_id, Some(worker_generation))
+                    .await?;
+                GrpcBlockReader::positioned_read(
+                    &fresh,
+                    block_id,
+                    offset_in_block,
+                    length,
+                    self.config.chunk_size as i64,
+                    ufs_opts,
+                )
+                .await
+            }
+            Err(e) => Err(e),
+        }
     }
 
     // ── Convenience ───────────────────────────────────────────────────────────

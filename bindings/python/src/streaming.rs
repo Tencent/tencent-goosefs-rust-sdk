@@ -51,7 +51,6 @@
 //! correctness guarantees for byte preservation, ordering, and EOF
 //! detection.
 
-use std::io::SeekFrom;
 use std::sync::Arc;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -85,6 +84,7 @@ use crate::runtime::block_on;
 ///   wants — the SDK trims internally to its own chunk boundary.
 /// - A zero-byte return from the SDK means the underlying chunk reader
 ///   reached EOF; we break unconditionally to avoid spinning.
+#[allow(dead_code)]
 async fn pull_n(stream: &mut GoosefsFileInStream, want: usize) -> PyResult<Vec<u8>> {
     if want == 0 {
         return Ok(Vec::new());
@@ -116,33 +116,46 @@ async fn pull_all(stream: &mut GoosefsFileInStream) -> PyResult<bytes::Bytes> {
     stream.read_all().await.map_err(map_err)
 }
 
+/// Prefetch hint: when the reader's prefetch buffer is empty, pull at least
+/// this many bytes from the SDK in one shot so subsequent small `read(n)`
+/// calls are served from the buffer (Part V P1).
+const PREFETCH_HINT_BYTES: usize = 1 << 20; // 1 MiB
+
+/// Pull `max(want, PREFETCH_HINT_BYTES)` bytes (or until EOF) from `stream`,
+/// returning `(head, remainder)` where `head` is the first `want` bytes to
+/// hand back to the caller and `remainder` is parked in the reader's prefetch
+/// buffer for the next call.
+///
+/// `bytes::Bytes::split_to` is an O(1) refcount split — the remainder shares
+/// the same allocation, so subsequent buffered reads slice with zero copy
+/// (only the final `PyBytes::new` copies into Python heap).
+///
+/// Short reads are legal (Python `read(n)` may return ≤ n): when the stream
+/// hits EOF before `want`, `head` is simply shorter than requested.
+async fn pull_prefetched(
+    stream: &mut GoosefsFileInStream,
+    want: usize,
+) -> PyResult<(bytes::Bytes, bytes::Bytes)> {
+    let target = want.max(PREFETCH_HINT_BYTES);
+    let mut out = vec![0u8; target];
+    let mut filled = 0;
+    while filled < target {
+        let n = stream.read(&mut out[filled..]).await.map_err(map_err)?;
+        if n == 0 {
+            break; // EOF
+        }
+        filled += n;
+    }
+    out.truncate(filled);
+    let mut buf = bytes::Bytes::from(out);
+    let take = want.min(buf.len());
+    let head = buf.split_to(take);
+    Ok((head, buf))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers shared with sync_fs
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// Translate Python's `whence` integer into Rust's `SeekFrom`.
-///
-/// Mirrors the values exposed by the standard `io` module:
-/// `SEEK_SET = 0` (absolute), `SEEK_CUR = 1` (relative to current
-/// position), `SEEK_END = 2` (relative to file end). Anything else is a
-/// `ValueError` — the Python convention.
-fn whence_to_seek_from(offset: i64, whence: i32) -> PyResult<SeekFrom> {
-    match whence {
-        0 => {
-            if offset < 0 {
-                return Err(PyValueError::new_err(
-                    "negative seek offset is invalid for whence=0 (SEEK_SET)",
-                ));
-            }
-            Ok(SeekFrom::Start(offset as u64))
-        }
-        1 => Ok(SeekFrom::Current(offset)),
-        2 => Ok(SeekFrom::End(offset)),
-        other => Err(PyValueError::new_err(format!(
-            "invalid whence value: {other} (expected 0, 1, or 2)"
-        ))),
-    }
-}
 
 /// Refuse to run a sync streaming method from inside an asyncio loop or
 /// a Tokio runtime — same defence as `PyGoosefs::guarded_block_on`.
@@ -195,6 +208,15 @@ pub struct PyAsyncFileReader {
     /// Cached file length so `__len__` / `tell` do not need to acquire
     /// the mutex (and hence cannot deadlock with an in-flight read).
     file_length: i64,
+    /// Sequential-read prefetch buffer (Part V P1).
+    ///
+    /// Holds bytes already pulled from the SDK but not yet delivered to the
+    /// caller. Anchored on the logical (user-visible) position: `tell()` is
+    /// `stream.pos() - prefetch.len()`. Only ever mutated while the `inner`
+    /// `AsyncMutex` guard is held, so it stays consistent with the stream
+    /// position under the single-task contract. Cleared on `seek` / `close`.
+    /// Bypassed entirely by `read_at` (positioned reads do not move `pos`).
+    prefetch: Arc<std::sync::Mutex<bytes::Bytes>>,
 }
 
 impl PyAsyncFileReader {
@@ -204,6 +226,7 @@ impl PyAsyncFileReader {
         Self {
             inner: Arc::new(AsyncMutex::new(Some(stream))),
             file_length,
+            prefetch: Arc::new(std::sync::Mutex::new(bytes::Bytes::new())),
         }
     }
 }
@@ -217,21 +240,49 @@ impl PyAsyncFileReader {
     #[pyo3(signature = (size=-1))]
     fn read<'py>(&self, py: Python<'py>, size: i64) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
+        let prefetch = Arc::clone(&self.prefetch);
         future_into_py(py, async move {
+            // Hold the stream guard for the whole op so the prefetch buffer
+            // stays serialized with the SDK position (single-task contract).
             let mut guard = inner.lock().await;
             let stream = guard
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("AsyncFileReader is closed"))?;
-            // Two branches build `PyBytes` from their own buffer kind to keep
-            // each path single-copy: `pull_all` hands back the SDK's `Bytes`
-            // (copied once via `as_ref()`), `pull_n` fills a pre-sized `Vec`.
+
             if size < 0 {
-                let bytes = pull_all(stream).await?;
-                Python::attach(|py| Ok(PyBytes::new(py, bytes.as_ref()).unbind()))
-            } else {
-                let buf = pull_n(stream, size as usize).await?;
-                Python::attach(|py| Ok(PyBytes::new(py, &buf).unbind()))
+                // read-all: drain the prefetch buffer first, then the stream.
+                let parked = {
+                    let mut pf = prefetch.lock().unwrap();
+                    std::mem::take(&mut *pf)
+                };
+                let rest = pull_all(stream).await?;
+                let out: bytes::Bytes = if parked.is_empty() {
+                    rest
+                } else {
+                    let mut merged = bytes::BytesMut::with_capacity(parked.len() + rest.len());
+                    merged.extend_from_slice(&parked);
+                    merged.extend_from_slice(&rest);
+                    merged.freeze()
+                };
+                return Python::attach(|py| Ok(PyBytes::new(py, out.as_ref()).unbind()));
             }
+
+            let want = size as usize;
+            // Fast path: serve from the prefetch buffer (zero-copy slice).
+            {
+                let mut pf = prefetch.lock().unwrap();
+                if !pf.is_empty() {
+                    let take = want.min(pf.len());
+                    let head = pf.split_to(take);
+                    return Python::attach(|py| Ok(PyBytes::new(py, head.as_ref()).unbind()));
+                }
+            }
+            // Slow path: pull a large block, hand back `want`, park the rest.
+            let (head, remainder) = pull_prefetched(stream, want).await?;
+            {
+                *prefetch.lock().unwrap() = remainder;
+            }
+            Python::attach(|py| Ok(PyBytes::new(py, head.as_ref()).unbind()))
         })
     }
 
@@ -262,27 +313,63 @@ impl PyAsyncFileReader {
     /// `await reader.seek(offset, whence=0)` → new absolute position.
     #[pyo3(signature = (offset, whence=0))]
     fn seek<'py>(&self, py: Python<'py>, offset: i64, whence: i32) -> PyResult<Bound<'py, PyAny>> {
-        let from = whence_to_seek_from(offset, whence)?;
+        // Validate `whence` up front (the offset sign check for SEEK_SET is
+        // re-done after we resolve the absolute target).
+        if !(0..=2).contains(&whence) {
+            return Err(PyValueError::new_err(format!(
+                "invalid whence value: {whence} (expected 0, 1, or 2)"
+            )));
+        }
         let inner = Arc::clone(&self.inner);
+        let prefetch = Arc::clone(&self.prefetch);
+        let file_length = self.file_length;
         future_into_py(py, async move {
             let mut guard = inner.lock().await;
             let stream = guard
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("AsyncFileReader is closed"))?;
-            let pos = stream.seek_from(from).await.map_err(map_err)?;
+
+            // Clear the prefetch buffer (anchored on the old position) and
+            // recover its length so a relative seek resolves against the
+            // *logical* user position, not the prefetch-advanced stream pos.
+            let parked_len = {
+                let mut pf = prefetch.lock().unwrap();
+                let len = pf.len() as i64;
+                *pf = bytes::Bytes::new();
+                len
+            };
+            let logical_pos = stream.pos() - parked_len;
+            let target = match whence {
+                0 => {
+                    if offset < 0 {
+                        return Err(PyValueError::new_err(
+                            "negative seek offset is invalid for whence=0 (SEEK_SET)",
+                        ));
+                    }
+                    offset
+                }
+                1 => logical_pos + offset,
+                _ => file_length + offset, // whence == 2 (SEEK_END)
+            };
+            let pos = stream.seek(target).await.map_err(map_err)?;
             Ok(pos)
         })
     }
 
     /// `reader.tell()` → current byte position (sync, no I/O).
     ///
+    /// Returns the **logical** position: the SDK stream position minus any
+    /// bytes still parked in the prefetch buffer (Part V P1 / A4).
     /// Implemented by acquiring the mutex with `try_lock()` so we don't
     /// block the caller — if a concurrent read is in flight we surface
     /// `RuntimeError` rather than silently waiting.
     fn tell(&self) -> PyResult<i64> {
         match self.inner.try_lock() {
             Ok(guard) => match guard.as_ref() {
-                Some(s) => Ok(s.pos()),
+                Some(s) => {
+                    let parked = self.prefetch.lock().unwrap().len() as i64;
+                    Ok(s.pos() - parked)
+                }
                 None => Err(PyRuntimeError::new_err("AsyncFileReader is closed")),
             },
             Err(_) => Err(PyRuntimeError::new_err(
@@ -304,12 +391,15 @@ impl PyAsyncFileReader {
     /// `await reader.close()` — release the underlying stream.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
+        let prefetch = Arc::clone(&self.prefetch);
         future_into_py(py, async move {
             // Take the inner stream out, then drop it explicitly — the
             // SDK does its cleanup in `Drop`. We don't surface errors:
             // closing a reader is best-effort.
             let mut guard = inner.lock().await;
             let _ = guard.take();
+            // Drop any parked prefetch bytes (Part V P1 / A4).
+            *prefetch.lock().unwrap() = bytes::Bytes::new();
             Ok(())
         })
     }
@@ -449,6 +539,12 @@ pub struct PyFileReader {
     // serialised by the GIL since sync methods never yield.
     inner: Arc<AsyncMutex<Option<GoosefsFileInStream>>>,
     file_length: i64,
+    /// Sequential-read prefetch buffer (Part V P1). Because sync methods are
+    /// serialised by the GIL, buffered slices are served **without** entering
+    /// the Tokio runtime (`guarded_block_on`), eliminating the per-`read`
+    /// runtime-scheduling cost that dominates SR-64K. See A4 for the
+    /// read/read_at/seek/tell/close interaction rules.
+    prefetch: Arc<std::sync::Mutex<bytes::Bytes>>,
 }
 
 impl PyFileReader {
@@ -457,6 +553,7 @@ impl PyFileReader {
         Self {
             inner: Arc::new(AsyncMutex::new(Some(stream))),
             file_length,
+            prefetch: Arc::new(std::sync::Mutex::new(bytes::Bytes::new())),
         }
     }
 }
@@ -465,22 +562,61 @@ impl PyFileReader {
 impl PyFileReader {
     #[pyo3(signature = (size=-1))]
     fn read<'py>(&self, py: Python<'py>, size: i64) -> PyResult<Bound<'py, PyBytes>> {
+        // Fast path (Part V P1): serve a buffered slice WITHOUT entering the
+        // Tokio runtime. Sync methods are GIL-serialised, so the prefetch
+        // buffer is safe to touch directly here. This is the path that fires
+        // ~15 out of every 16 small `read(64k)` calls on a sequential scan,
+        // cutting the per-call `block_on` scheduling cost.
+        if size >= 0 {
+            let want = size as usize;
+            let mut pf = self.prefetch.lock().unwrap();
+            if !pf.is_empty() {
+                let take = want.min(pf.len());
+                let head = pf.split_to(take);
+                return Ok(PyBytes::new(py, head.as_ref()));
+            }
+        }
+
         let inner = Arc::clone(&self.inner);
-        // `pull_all` returns `Bytes`, `pull_n` returns `Vec<u8>`; we normalise
-        // to `Bytes` so both branches share a single `PyBytes` construction
-        // (one copy into Python-owned memory).
-        let bytes: bytes::Bytes = guarded_block_on(py, async move {
+        let prefetch = Arc::clone(&self.prefetch);
+        if size < 0 {
+            // read-all: drain the prefetch buffer first, then the stream.
+            let parked = {
+                let mut pf = self.prefetch.lock().unwrap();
+                std::mem::take(&mut *pf)
+            };
+            let bytes: bytes::Bytes = guarded_block_on(py, async move {
+                let mut guard = inner.lock().await;
+                let stream = guard
+                    .as_mut()
+                    .ok_or_else(|| PyRuntimeError::new_err("FileReader is closed"))?;
+                let rest = pull_all(stream).await?;
+                if parked.is_empty() {
+                    Ok(rest)
+                } else {
+                    let mut merged = bytes::BytesMut::with_capacity(parked.len() + rest.len());
+                    merged.extend_from_slice(&parked);
+                    merged.extend_from_slice(&rest);
+                    Ok(merged.freeze())
+                }
+            })?;
+            return Ok(PyBytes::new(py, bytes.as_ref()));
+        }
+
+        // Slow path: prefetch buffer empty — pull a large block, hand back
+        // `size`, park the rest for subsequent fast-path reads.
+        let want = size as usize;
+        let (head, remainder): (bytes::Bytes, bytes::Bytes) = guarded_block_on(py, async move {
             let mut guard = inner.lock().await;
             let stream = guard
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("FileReader is closed"))?;
-            if size < 0 {
-                pull_all(stream).await
-            } else {
-                pull_n(stream, size as usize).await.map(bytes::Bytes::from)
-            }
+            pull_prefetched(stream, want).await
         })?;
-        Ok(PyBytes::new(py, bytes.as_ref()))
+        {
+            *prefetch.lock().unwrap() = remainder;
+        }
+        Ok(PyBytes::new(py, head.as_ref()))
     }
 
     fn read_at<'py>(
@@ -507,21 +643,50 @@ impl PyFileReader {
 
     #[pyo3(signature = (offset, whence=0))]
     fn seek(&self, py: Python<'_>, offset: i64, whence: i32) -> PyResult<i64> {
-        let from = whence_to_seek_from(offset, whence)?;
+        if !(0..=2).contains(&whence) {
+            return Err(PyValueError::new_err(format!(
+                "invalid whence value: {whence} (expected 0, 1, or 2)"
+            )));
+        }
+        // Clear the prefetch buffer and convert a relative seek to an
+        // absolute logical target (Part V P1 / A4).
+        let parked_len = {
+            let mut pf = self.prefetch.lock().unwrap();
+            let len = pf.len() as i64;
+            *pf = bytes::Bytes::new();
+            len
+        };
         let inner = Arc::clone(&self.inner);
+        let file_length = self.file_length;
         guarded_block_on(py, async move {
             let mut guard = inner.lock().await;
             let stream = guard
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("FileReader is closed"))?;
-            stream.seek_from(from).await.map_err(map_err)
+            let logical_pos = stream.pos() - parked_len;
+            let target = match whence {
+                0 => {
+                    if offset < 0 {
+                        return Err(PyValueError::new_err(
+                            "negative seek offset is invalid for whence=0 (SEEK_SET)",
+                        ));
+                    }
+                    offset
+                }
+                1 => logical_pos + offset,
+                _ => file_length + offset, // whence == 2 (SEEK_END)
+            };
+            stream.seek(target).await.map_err(map_err)
         })
     }
 
     fn tell(&self) -> PyResult<i64> {
         match self.inner.try_lock() {
             Ok(guard) => match guard.as_ref() {
-                Some(s) => Ok(s.pos()),
+                Some(s) => {
+                    let parked = self.prefetch.lock().unwrap().len() as i64;
+                    Ok(s.pos() - parked)
+                }
                 None => Err(PyRuntimeError::new_err("FileReader is closed")),
             },
             Err(_) => Err(PyRuntimeError::new_err(
@@ -538,6 +703,8 @@ impl PyFileReader {
     }
 
     fn close(&self, py: Python<'_>) -> PyResult<()> {
+        // Drop any parked prefetch bytes (Part V P1 / A4).
+        *self.prefetch.lock().unwrap() = bytes::Bytes::new();
         let inner = Arc::clone(&self.inner);
         guarded_block_on(py, async move {
             let mut guard = inner.lock().await;

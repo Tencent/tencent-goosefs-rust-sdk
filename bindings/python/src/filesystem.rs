@@ -57,7 +57,7 @@ pub(crate) fn format_worker_addr(addr: &goosefs_sdk::proto::grpc::WorkerNetAddre
     )
 }
 
-/// Extract a bytes-like Python object into an owned `Vec<u8>`.
+/// Extract a bytes-like Python object into a `bytes::Bytes`.
 ///
 /// Accepts any object implementing the buffer protocol with format `B`/`c`,
 /// i.e. `bytes`, `bytearray`, `memoryview` of bytes, `array.array("B", …)`,
@@ -65,25 +65,65 @@ pub(crate) fn format_worker_addr(addr: &goosefs_sdk::proto::grpc::WorkerNetAddre
 /// `FromPyObject for Vec<u8>` would happily decode a `str` as Latin-1
 /// bytes, which is almost never what the caller meant. We forbid it so a
 /// silent-but-wrong write is converted into a clear `TypeError`.
-pub(crate) fn extract_bytes_like(data: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+///
+/// # Zero-copy fast path (Part V P2, `abi3-py311` only)
+///
+/// When built with the `abi3-py311` feature the `pyo3::buffer` module is
+/// available, so a C-contiguous read-only buffer is wrapped — **without
+/// copying** — into a `Bytes` whose backing owner holds the `PyBuffer`
+/// alive. The buffer is released when the last `Bytes` clone is dropped;
+/// pyo3's `PyBuffer::Drop` re-acquires the GIL, so dropping the `Bytes` on
+/// any Tokio worker thread is sound. The portable `abi3-py39` build falls
+/// back to the one-copy `extract::<Vec<u8>>()` path.
+pub(crate) fn extract_bytes_like(data: &Bound<'_, PyAny>) -> PyResult<bytes::Bytes> {
     if data.is_instance_of::<pyo3::types::PyString>() {
         return Err(pyo3::exceptions::PyTypeError::new_err(
             "`data` must be a bytes-like object (bytes, bytearray, memoryview); got str. \
              Encode it explicitly with `s.encode(\"utf-8\")` first.",
         ));
     }
-    // NOTE (Phase 3, deferred): the `PyBuffer` zero-extract fast path from the
-    // optimization analysis is NOT viable here. `pyo3::buffer` is gated behind
-    // `not(Py_LIMITED_API)` OR `Py_3_11`, and this crate builds with
-    // `abi3-py39` (one wheel for CPython 3.9+). Adopting `PyBuffer` would force
-    // the abi3 floor up to py311 and drop 3.9/3.10 support — too steep a price
-    // for a marginal (+5-10%) write-path gain. Revisit only if the abi3 floor
-    // is bumped to 3.11. For now keep the portable `extract::<Vec<u8>>()` path.
-    data.extract::<Vec<u8>>().map_err(|_| {
+
+    #[cfg(feature = "abi3-py311")]
+    {
+        use pyo3::buffer::PyBuffer;
+        if let Ok(buf) = PyBuffer::<u8>::get(data) {
+            // Only the C-contiguous, read-only case is safe to borrow: a
+            // non-contiguous or writable buffer could be mutated by Python
+            // mid-write, so fall through to the copy path for those.
+            if buf.is_c_contiguous() && buf.readonly() {
+                return Ok(bytes::Bytes::from_owner(PyBufferOwner(buf)));
+            }
+        }
+    }
+
+    // Fallback (abi3-py39 or non-contiguous/writable buffer): one copy.
+    let v: Vec<u8> = data.extract().map_err(|_| {
         pyo3::exceptions::PyTypeError::new_err(
             "`data` must be a bytes-like object (bytes, bytearray, memoryview)",
         )
-    })
+    })?;
+    Ok(bytes::Bytes::from(v))
+}
+
+/// Owner adaptor that lets `bytes::Bytes` borrow a `PyBuffer`'s memory with
+/// zero copy (Part V P2). `AsRef<[u8]>` exposes the contiguous bytes; the
+/// `PyBuffer` is released on drop (pyo3 re-acquires the GIL internally).
+#[cfg(feature = "abi3-py311")]
+struct PyBufferOwner(pyo3::buffer::PyBuffer<u8>);
+
+#[cfg(feature = "abi3-py311")]
+unsafe impl Send for PyBufferOwner {}
+#[cfg(feature = "abi3-py311")]
+unsafe impl Sync for PyBufferOwner {}
+
+#[cfg(feature = "abi3-py311")]
+impl AsRef<[u8]> for PyBufferOwner {
+    fn as_ref(&self) -> &[u8] {
+        // SAFETY: validated `is_c_contiguous()` + `readonly()` at construction;
+        // the pointer/length come from a live `PyBuffer` we own, so the slice
+        // is valid for the owner's lifetime and the data cannot be mutated.
+        unsafe { std::slice::from_raw_parts(self.0.buf_ptr() as *const u8, self.0.len_bytes()) }
+    }
 }
 
 /// Build a `CreateFilePOptions` from binding-level parameters.

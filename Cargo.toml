@@ -62,6 +62,13 @@ bytes = "1.11.1"
 thiserror = "2"
 tracing = "0.1"
 dashmap = "6"
+# Lock-free atomic Arc swap, used by `MasterClient` to publish the authenticated
+# (channel + SASL guard) snapshot. Replaces the prior `RwLock<Client>` so that
+# the `get_status` hot-path becomes wait-free, while still keeping
+# `(channel, sasl_guard)` together as a single atomically-swapped unit during
+# HA failover (`reconnect`). See docs/RUST_PYTHON_SDK_OPTIMIZATION.md Part II
+# §1 + §II.3 for the consistency contract.
+arc-swap = "1"
 serde = { version = "1", features = ["derive"] }
 async-trait = "0.1"
 rand = "0.9.1"
@@ -79,3 +86,55 @@ tonic-prost-build = { version = "0.14", optional = true }
 [dev-dependencies]
 # Tests/examples may rely on the broader tokio feature set.
 tokio = { version = "1.23", features = ["full", "test-util"] }
+# Used by the `pr_runtime_ab` benchmark to demonstrate the recommended
+# bounded-concurrency caller pattern (`stream::iter(..).buffer_unordered(N)`).
+futures = "0.3"
+# Statistical micro-benchmarks for the GetFileStatus optimization
+# (see benchmarks/master_hotpath.rs and
+# docs/RUST_PYTHON_SDK_OPTIMIZATION.md Part II §1/§3/§4).
+# `default-features = false` drops the optional `rayon`/`html_reports` chain;
+# `cargo_bench_support` enables `cargo bench` integration without the rest.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+# Custom benchmark target. `harness = false` is required so that criterion's
+# own `main()` is used instead of the libtest harness. Lives under
+# `benchmarks/` (alongside the runnable end-to-end benchmarks) rather than the
+# default `benches/`, so its path is declared explicitly.
+[[bench]]
+name = "master_hotpath"
+path = "benchmarks/master_hotpath.rs"
+harness = false
+
+# Runnable end-to-end benchmarks / repro cases live under `benchmarks/`.
+# They are kept as `example` targets (not `[[bench]]`) so they build & run with
+# the familiar `cargo run --release --example <name>` UX and can use
+# dev-dependencies. Cargo only auto-discovers examples under `examples/`, so the
+# relocated ones must be declared explicitly with their path.
+[[example]]
+name = "partv_perf_verify"
+path = "benchmarks/partv_perf_verify.rs"
+
+[[example]]
+name = "pr_runtime_ab"
+path = "benchmarks/pr_runtime_ab.rs"
+
+[[example]]
+name = "repro_writer_write_with_concurrent"
+path = "benchmarks/repro_writer_write_with_concurrent.rs"
+
+# Release profile tuning for the SDK hot paths.
+#
+# Rationale (see docs/RUST_PYTHON_SDK_OPTIMIZATION.md Part II §6):
+# - `lto = "fat"` enables cross-crate inlining, which is essential for the
+#   tonic + prost generated client stubs (heavily generic, so without LTO most
+#   hot calls remain out-of-line).
+# - `codegen-units = 1` lets LLVM see the entire crate at once, allowing
+#   better inlining decisions across modules. Compile time is longer but
+#   release-build runtime perf improves measurably.
+# - We deliberately do NOT enable `panic = "abort"`: that would change panic
+#   semantics (no unwinding), affecting any consumer that relies on
+#   `catch_unwind` / Drop ordering on panic. Keeping the default `unwind`
+#   behaviour preserves backward-compatible panic handling.
+[profile.release]
+lto = "fat"
+codegen-units = 1

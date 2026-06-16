@@ -372,6 +372,44 @@ const DEFAULT_WORKER_PORT: u16 = 9203;
 const DEFAULT_BLOCK_SIZE: u64 = 64 * 1024 * 1024;
 /// Default chunk size for streaming reads: 1 MiB.
 const DEFAULT_CHUNK_SIZE: u64 = 1024 * 1024;
+
+// ── Streaming-read tuning (Part V R1-B) ──────────────────────
+/// Default sequential-read prefetch window (in chunks).
+///
+/// Mirrors Java `USER_STREAMING_READER_MAX_PREFETCH_WINDOW = 8`.
+/// Sent in the first `ReadRequest` so the worker may keep up to
+/// `(1 + prefetch_window)` chunks in flight, decoupling network pull
+/// from application consumption.
+const DEFAULT_PREFETCH_WINDOW: i32 = 8;
+/// Default number of buffered receive messages between the background
+/// stream-drain task and the consumer (mirrors Java
+/// `USER_STREAMING_READER_BUFFER_SIZE_MESSAGES = 16`).
+const DEFAULT_READ_BUFFER_MESSAGES: usize = 16;
+/// Default flow-control ACK coalescing threshold in bytes.
+///
+/// **Default `0` = ACK every chunk** (deadlock-safe). Coalescing ACKs is only
+/// safe when the unacked gap never exceeds the worker's flow-control window;
+/// since not every worker honours the prefetch window, the conservative
+/// default ACKs each chunk (non-blocking `try_send`, so still no per-chunk
+/// round-trip stall). Raise this (e.g. 4 MiB) only against workers confirmed
+/// to honour `prefetch_window`.
+const DEFAULT_ACK_INTERVAL_BYTES: i64 = 0;
+/// Default flow-control ACK coalescing threshold in chunks (`1` = every chunk).
+const DEFAULT_ACK_INTERVAL_CHUNKS: u32 = 1;
+
+// ── Master connection pool (Part V R3) ───────────────────────
+/// Default master connection-pool size (1 = backward compatible, single
+/// HTTP/2 channel). Set to 4 or 8 in high-concurrency remote scenarios to
+/// spread requests across multiple channels and avoid HTTP/2
+/// `SETTINGS_MAX_CONCURRENT_STREAMS` queueing.
+const DEFAULT_MASTER_CONNECTION_POOL_SIZE: usize = 1;
+
+// ── Worker connection pool (Part V worker-side multi-channel) ─
+/// Default per-worker connection-pool size (1 = backward compatible, single
+/// HTTP/2 channel per worker). Raising it (e.g. 4) spreads concurrent block
+/// reads across multiple channels to the same worker, lifting the
+/// single-connection throughput cap observed in local benchmarks.
+const DEFAULT_WORKER_CONNECTION_POOL_SIZE: usize = 1;
 /// Default connect timeout: 30 seconds.
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 30_000;
 /// Default request timeout: 5 minutes.
@@ -788,6 +826,55 @@ pub struct GoosefsConfig {
     /// Use [`GoosefsConfig::with_write_type`] for a type-safe builder.
     pub write_type: Option<i32>,
 
+    // ── Streaming-read tuning (Part V R1-B) ──────────────────
+    /// Sequential-read prefetch window in chunks (default: 8).
+    ///
+    /// Sent in the first `ReadRequest`; lets the worker keep up to
+    /// `(1 + prefetch_window)` chunks in flight. Mirrors Java
+    /// `goosefs.user.streaming.reader.max.prefetch.window`.
+    #[serde(default = "default_prefetch_window")]
+    pub prefetch_window: i32,
+
+    /// Receive-buffer depth (in messages) between the background
+    /// stream-drain task and the consumer (default: 16). Mirrors Java
+    /// `goosefs.user.streaming.reader.buffer.size.messages`.
+    #[serde(default = "default_read_buffer_messages")]
+    pub read_buffer_messages: usize,
+
+    /// Flow-control ACK coalescing threshold in bytes (default: 0 = ACK every
+    /// chunk). Coalescing (>0) is opt-in and only safe on workers that honour
+    /// `prefetch_window`; otherwise it can stall the read flow-control window.
+    #[serde(default = "default_ack_interval_bytes")]
+    pub ack_interval_bytes: i64,
+
+    /// Flow-control ACK coalescing threshold in chunks (default: 1 = every
+    /// chunk). See [`ack_interval_bytes`](Self::ack_interval_bytes).
+    #[serde(default = "default_ack_interval_chunks")]
+    pub ack_interval_chunks: u32,
+
+    // ── Master connection pool (Part V R3) ───────────────────
+    /// Number of independent Master gRPC channels to pool (default: 1).
+    ///
+    /// `1` keeps the legacy single-channel behaviour. Raising it (e.g. 4
+    /// or 8) spreads concurrent metadata RPCs across multiple HTTP/2
+    /// connections, avoiding `SETTINGS_MAX_CONCURRENT_STREAMS` queueing
+    /// under high concurrency over remote RTT. All pooled clients share a
+    /// single inquire client so HA failover stays consistent.
+    #[serde(default = "default_master_connection_pool_size")]
+    pub master_connection_pool_size: usize,
+
+    /// Number of independent gRPC channels to pool **per worker** (default: 1).
+    ///
+    /// `1` keeps the legacy single-channel-per-worker behaviour. Raising it
+    /// (e.g. 4) round-robins concurrent block reads across multiple HTTP/2
+    /// connections to the same worker, lifting the per-connection throughput
+    /// cap (a single channel is bounded by `SETTINGS_MAX_CONCURRENT_STREAMS`
+    /// and one connection's flow control). Each channel performs its own SASL
+    /// handshake and carries a unique generation, so single-flight reconnect
+    /// stays per-channel.
+    #[serde(default = "default_worker_connection_pool_size")]
+    pub worker_connection_pool_size: usize,
+
     // ── Master Inquire / HA retry configuration ──────────────
     /// Maximum total duration for master inquire retries (default: 2 min).
     #[serde(default = "default_master_inquire_max_duration")]
@@ -1030,6 +1117,26 @@ fn default_pushgateway_job() -> String {
     "goosefs_client".to_string()
 }
 
+// ── Streaming-read tuning / master pool defaults (Part V) ─────
+fn default_prefetch_window() -> i32 {
+    DEFAULT_PREFETCH_WINDOW
+}
+fn default_read_buffer_messages() -> usize {
+    DEFAULT_READ_BUFFER_MESSAGES
+}
+fn default_ack_interval_bytes() -> i64 {
+    DEFAULT_ACK_INTERVAL_BYTES
+}
+fn default_ack_interval_chunks() -> u32 {
+    DEFAULT_ACK_INTERVAL_CHUNKS
+}
+fn default_master_connection_pool_size() -> usize {
+    DEFAULT_MASTER_CONNECTION_POOL_SIZE
+}
+fn default_worker_connection_pool_size() -> usize {
+    DEFAULT_WORKER_CONNECTION_POOL_SIZE
+}
+
 impl Default for GoosefsConfig {
     fn default() -> Self {
         Self {
@@ -1042,6 +1149,12 @@ impl Default for GoosefsConfig {
             use_vpc_mapping: false,
             root: String::new(),
             write_type: None,
+            prefetch_window: default_prefetch_window(),
+            read_buffer_messages: default_read_buffer_messages(),
+            ack_interval_bytes: default_ack_interval_bytes(),
+            ack_interval_chunks: default_ack_interval_chunks(),
+            master_connection_pool_size: default_master_connection_pool_size(),
+            worker_connection_pool_size: default_worker_connection_pool_size(),
             master_inquire_retry_max_duration: default_master_inquire_max_duration(),
             master_inquire_initial_sleep: default_master_inquire_initial_sleep(),
             master_inquire_max_sleep: default_master_inquire_max_sleep(),
@@ -1228,6 +1341,37 @@ impl GoosefsConfig {
     pub fn with_write_type_str(self, wt: &str) -> Result<Self, String> {
         let write_type: WriteType = wt.parse()?;
         Ok(self.with_write_type_enum(write_type))
+    }
+
+    /// Set the sequential-read prefetch window (in chunks). See
+    /// [`GoosefsConfig::prefetch_window`] (Part V R1-B-a).
+    pub fn with_prefetch_window(mut self, window: i32) -> Self {
+        self.prefetch_window = window;
+        self
+    }
+
+    /// Set the flow-control ACK coalescing threshold in bytes (Part V R1-B-c).
+    pub fn with_ack_interval_bytes(mut self, bytes: i64) -> Self {
+        self.ack_interval_bytes = bytes;
+        self
+    }
+
+    /// Set the number of pooled Master gRPC channels (Part V R3).
+    ///
+    /// `1` keeps the legacy single-channel behaviour. Values are clamped to
+    /// at least `1`.
+    pub fn with_master_connection_pool_size(mut self, size: usize) -> Self {
+        self.master_connection_pool_size = size.max(1);
+        self
+    }
+
+    /// Set the per-worker gRPC channel-pool size (worker-side multi-channel).
+    ///
+    /// `1` keeps the legacy single-channel-per-worker behaviour. Values are
+    /// clamped to at least `1`.
+    pub fn with_worker_connection_pool_size(mut self, size: usize) -> Self {
+        self.worker_connection_pool_size = size.max(1);
+        self
     }
 
     /// Get the configured `WritePType`, if set.
@@ -1956,6 +2100,29 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    /// Part V R1-B / R3: new streaming-read / master-pool tuning fields have
+    /// the documented defaults, and the pool-size builder clamps to ≥ 1.
+    #[test]
+    fn test_part_v_tuning_defaults_and_builders() {
+        let config = GoosefsConfig::default();
+        assert_eq!(config.prefetch_window, 8);
+        assert_eq!(config.read_buffer_messages, 16);
+        assert_eq!(config.ack_interval_bytes, 0); // ACK every chunk (deadlock-safe)
+        assert_eq!(config.ack_interval_chunks, 1);
+        assert_eq!(config.master_connection_pool_size, 1);
+
+        let tuned = GoosefsConfig::new("127.0.0.1:9200")
+            .with_prefetch_window(16)
+            .with_ack_interval_bytes(8 * 1024 * 1024)
+            .with_master_connection_pool_size(0); // clamps to 1
+        assert_eq!(tuned.prefetch_window, 16);
+        assert_eq!(tuned.ack_interval_bytes, 8 * 1024 * 1024);
+        assert_eq!(tuned.master_connection_pool_size, 1);
+
+        let pooled = GoosefsConfig::new("127.0.0.1:9200").with_master_connection_pool_size(8);
+        assert_eq!(pooled.master_connection_pool_size, 8);
     }
 
     #[test]

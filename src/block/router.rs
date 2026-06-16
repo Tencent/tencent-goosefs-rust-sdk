@@ -18,6 +18,8 @@ use dashmap::DashMap;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
+use arc_swap::ArcSwap;
+
 use crate::error::{Error, Result};
 use crate::proto::grpc::block::WorkerInfo;
 use crate::proto::grpc::WorkerNetAddress;
@@ -35,8 +37,13 @@ const VIRTUAL_NODES_PER_WORKER: u32 = 100;
 /// Thread-safe worker router with consistent hashing, failure tracking,
 /// TTL-based refresh, and local-worker preference.
 pub struct WorkerRouter {
-    /// Current snapshot of workers — updated atomically via Arc swap.
-    workers: RwLock<Arc<Vec<WorkerInfo>>>,
+    /// Current snapshot of workers — published wait-free via [`ArcSwap`].
+    ///
+    /// The hot `select_worker` / `pick_any_worker` path does a single atomic
+    /// `load` (no `tokio::sync::RwLock` round-trip per op); `update_workers`
+    /// publishes a fresh `Arc<Vec<WorkerInfo>>` via `store`. Readers see either
+    /// the old or new snapshot, never a torn mix.
+    workers: ArcSwap<Vec<WorkerInfo>>,
     /// Tracks recently failed worker addresses with the failure timestamp.
     failed_workers: DashMap<String, Instant>,
     /// Duration after which a failed worker is eligible again.
@@ -60,55 +67,56 @@ pub struct WorkerRouter {
     /// lock acquisition on every `select_worker()` call when no local
     /// worker was present. Distinguishing the two states eliminates that
     /// hot-path overhead.
-    local_worker_id: RwLock<Option<Option<i64>>>,
+    local_worker_id: ArcSwap<Option<Option<i64>>>,
 
     // ── Pre-built consistent-hash ring ──────────────────────────────────────
     /// Sorted `(hash, worker_index)` pairs across all virtual nodes.
     ///
-    /// Built once in `update_workers` and shared via `Arc` so the hot
-    /// `select_worker` path does only an O(log N) `binary_search`.
+    /// Built once in `update_workers` and published wait-free via [`ArcSwap`]
+    /// alongside `workers`, so the hot `select_worker` path does only an
+    /// O(log N) `binary_search`.
     /// Previously the ring was rebuilt + sorted on every call (O(N log N)
     /// with N typically `VIRTUAL_NODES_PER_WORKER * worker_count`).
-    hash_ring: RwLock<Arc<Vec<(u64, usize)>>>,
+    hash_ring: ArcSwap<Vec<(u64, usize)>>,
 }
 
 impl WorkerRouter {
     /// Create a new router with an empty worker list and default TTLs.
     pub fn new() -> Self {
         Self {
-            workers: RwLock::new(Arc::new(Vec::new())),
+            workers: ArcSwap::from_pointee(Vec::new()),
             failed_workers: DashMap::new(),
             failure_ttl: DEFAULT_FAILURE_TTL,
             last_refresh: RwLock::new(Instant::now()),
             worker_refresh_ttl: DEFAULT_WORKER_REFRESH_TTL,
-            local_worker_id: RwLock::new(None),
-            hash_ring: RwLock::new(Arc::new(Vec::new())),
+            local_worker_id: ArcSwap::from_pointee(None),
+            hash_ring: ArcSwap::from_pointee(Vec::new()),
         }
     }
 
     /// Create a router with a custom failure TTL.
     pub fn with_failure_ttl(failure_ttl: Duration) -> Self {
         Self {
-            workers: RwLock::new(Arc::new(Vec::new())),
+            workers: ArcSwap::from_pointee(Vec::new()),
             failed_workers: DashMap::new(),
             failure_ttl,
             last_refresh: RwLock::new(Instant::now()),
             worker_refresh_ttl: DEFAULT_WORKER_REFRESH_TTL,
-            local_worker_id: RwLock::new(None),
-            hash_ring: RwLock::new(Arc::new(Vec::new())),
+            local_worker_id: ArcSwap::from_pointee(None),
+            hash_ring: ArcSwap::from_pointee(Vec::new()),
         }
     }
 
     /// Create a router with custom failure TTL and worker refresh TTL.
     pub fn with_ttls(failure_ttl: Duration, worker_refresh_ttl: Duration) -> Self {
         Self {
-            workers: RwLock::new(Arc::new(Vec::new())),
+            workers: ArcSwap::from_pointee(Vec::new()),
             failed_workers: DashMap::new(),
             failure_ttl,
             last_refresh: RwLock::new(Instant::now()),
             worker_refresh_ttl,
-            local_worker_id: RwLock::new(None),
-            hash_ring: RwLock::new(Arc::new(Vec::new())),
+            local_worker_id: ArcSwap::from_pointee(None),
+            hash_ring: ArcSwap::from_pointee(Vec::new()),
         }
     }
 
@@ -123,20 +131,18 @@ impl WorkerRouter {
         let new_ring = Arc::new(build_hash_ring(&workers));
         let new_snapshot = Arc::new(workers);
 
-        let mut guard = self.workers.write().await;
-        *guard = new_snapshot;
-        drop(guard);
-
-        *self.hash_ring.write().await = new_ring;
+        // Atomic wait-free publication (readers never block / never tear).
+        self.workers.store(new_snapshot);
+        self.hash_ring.store(new_ring);
         // Reset refresh clock
         *self.last_refresh.write().await = Instant::now();
         // Invalidate local-worker cache so it is re-detected on next call.
-        *self.local_worker_id.write().await = None;
+        self.local_worker_id.store(Arc::new(None));
     }
 
     /// Get a snapshot of the current worker list.
     pub async fn get_workers(&self) -> Arc<Vec<WorkerInfo>> {
-        self.workers.read().await.clone()
+        self.workers.load_full()
     }
 
     // ── TTL helpers ─────────────────────────────────────────────────────────────
@@ -241,7 +247,7 @@ impl WorkerRouter {
     /// `LocalFirstPolicy`.  The local worker is only bypassed if it is in the
     /// failed set.
     pub async fn select_worker(&self, block_id: i64) -> Result<WorkerInfo> {
-        let workers = self.workers.read().await.clone();
+        let workers = self.workers.load_full();
 
         if workers.is_empty() {
             return Err(Error::NoWorkerAvailable {
@@ -258,17 +264,17 @@ impl WorkerRouter {
         // expensive `hostname::get()` call) on every subsequent
         // `select_worker()`.
         {
-            let needs_probe = self.local_worker_id.read().await.is_none();
+            let needs_probe = self.local_worker_id.load().is_none();
             if needs_probe {
                 let detected = Self::detect_local_worker(&workers).await;
                 let cached_value = if detected > 0 { Some(detected) } else { None };
-                *self.local_worker_id.write().await = Some(cached_value);
+                self.local_worker_id.store(Arc::new(Some(cached_value)));
             }
         }
 
         // Prefer local worker if available and not failed
         {
-            let cached = *self.local_worker_id.read().await;
+            let cached = **self.local_worker_id.load();
             if let Some(Some(local_id)) = cached {
                 if let Some(local_w) = workers.iter().find(|w| w.id == Some(local_id)) {
                     if let Some(addr) = &local_w.address {
@@ -284,7 +290,7 @@ impl WorkerRouter {
         // `update_workers`). The hot path is now O(log N) `binary_search`
         // plus a small forward-walk to skip failed workers, instead of the
         // previous O(N log N) rebuild-and-sort per request.
-        let ring = self.hash_ring.read().await.clone();
+        let ring = self.hash_ring.load_full();
         if let Some(w) = self.consistent_hash_select_with_ring(block_id, &workers, &ring, true) {
             return Ok(w);
         }
@@ -319,7 +325,7 @@ impl WorkerRouter {
     /// Excludes recently-failed workers; falls back to all workers if every
     /// worker is marked failed.
     pub async fn pick_any_worker(&self) -> Result<WorkerInfo> {
-        let workers = self.workers.read().await.clone();
+        let workers = self.workers.load_full();
 
         if workers.is_empty() {
             return Err(Error::NoWorkerAvailable {
@@ -686,7 +692,7 @@ mod tests {
             .await;
         // Trigger detection (populates cache with `Some(None)` = probed, no local).
         let _ = router.select_worker(1).await;
-        assert_eq!(*router.local_worker_id.read().await, Some(None));
+        assert_eq!(**router.local_worker_id.load(), Some(None));
 
         // Second update — local worker arrives.
         router
@@ -696,7 +702,7 @@ mod tests {
             ])
             .await;
         // Cache should be reset to `None` (= not probed), re-detected on next select.
-        assert_eq!(*router.local_worker_id.read().await, None);
+        assert_eq!(**router.local_worker_id.load(), None);
         let selected = router.select_worker(1).await.unwrap();
         assert_eq!(selected.id, Some(2), "new local worker should be preferred");
     }

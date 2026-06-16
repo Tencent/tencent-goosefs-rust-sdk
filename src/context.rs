@@ -55,8 +55,8 @@ use crate::block::router::WorkerRouter;
 use crate::client::metrics_master::MetricsClient;
 use crate::client::metrics_master::MetricsMasterClient;
 use crate::client::{
-    create_master_inquire_client, MasterClient, MasterInquireClient, WorkerClientPool,
-    WorkerManagerClient,
+    create_master_inquire_client, MasterClient, MasterClientPool, MasterInquireClient,
+    WorkerClientPool, WorkerManagerClient,
 };
 use crate::config::{ConfigRefresher, GoosefsConfig, TransparentAccelerationSwitch};
 use crate::error::{Error, Result};
@@ -90,8 +90,11 @@ const CONFIG_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 pub struct FileSystemContext {
     config: Arc<GoosefsConfig>,
 
-    /// Persistent Master gRPC connection (metadata RPCs).
-    master: Arc<MasterClient>,
+    /// Persistent Master gRPC connection pool (metadata RPCs).
+    ///
+    /// Round-robin pool of `config.master_connection_pool_size` channels
+    /// (default 1 = single channel, backward compatible). See Part V R3.
+    master_pool: Arc<MasterClientPool>,
 
     /// Persistent WorkerManager gRPC connection (`GetWorkerInfoList`).
     worker_manager: Arc<WorkerManagerClient>,
@@ -152,12 +155,12 @@ impl FileSystemContext {
         // same singleflight-deduped HA discovery.
         let inquire_client = create_master_inquire_client(&config);
 
-        // Connect Master and WorkerManager in parallel.
-        let (master_res, wm_res) = tokio::join!(
-            MasterClient::connect_with_inquire(&config, inquire_client.clone()),
+        // Connect Master pool and WorkerManager in parallel.
+        let (pool_res, wm_res) = tokio::join!(
+            MasterClientPool::connect_with_inquire(&config, inquire_client.clone()),
             WorkerManagerClient::connect_with_inquire(&config, inquire_client.clone()),
         );
-        let master = Arc::new(master_res?);
+        let master_pool = Arc::new(pool_res?);
         let worker_manager = Arc::new(wm_res?);
 
         // Fetch the initial worker list.
@@ -181,7 +184,7 @@ impl FileSystemContext {
 
         let ctx = Arc::new(Self {
             config: config.clone(),
-            master,
+            master_pool,
             worker_manager,
             worker_pool,
             worker_router,
@@ -210,9 +213,18 @@ impl FileSystemContext {
 
     // ── Acquisition API ──────────────────────────────────────────────────────
 
-    /// Return the shared `MasterClient` (zero-cost Arc clone).
+    /// Return a shared `MasterClient` from the pool (zero-cost Arc clone).
+    ///
+    /// With `master_connection_pool_size > 1` this round-robins across the
+    /// pooled channels to spread concurrent metadata RPCs over multiple
+    /// HTTP/2 connections (Part V R3).
     pub fn acquire_master(&self) -> Arc<MasterClient> {
-        self.master.clone()
+        self.master_pool.pick()
+    }
+
+    /// Return the shared `MasterClientPool` (zero-cost Arc clone).
+    pub fn acquire_master_pool(&self) -> Arc<MasterClientPool> {
+        self.master_pool.clone()
     }
 
     /// Return the shared `WorkerManagerClient` (zero-cost Arc clone).

@@ -29,6 +29,8 @@ use tonic::transport::Channel;
 use tonic::Streaming;
 use tracing::{debug, instrument, warn};
 
+use arc_swap::ArcSwap;
+
 use crate::auth::{ChannelAuthenticator, ChannelIdInterceptor, SaslStreamGuard};
 use crate::config::GoosefsConfig;
 use crate::error::{Error, Result};
@@ -360,11 +362,15 @@ impl WorkerClient {
         offset: i64,
         length: i64,
         chunk_size: i64,
+        prefetch_window: Option<i32>,
         open_ufs_block_options: Option<OpenUfsBlockOptions>,
     ) -> Result<(mpsc::Sender<ReadRequest>, Streaming<ReadResponse>)> {
         let (tx, rx) = mpsc::channel::<ReadRequest>(32);
 
-        // Send the initial read request
+        // Send the initial read request. `prefetch_window` (Part V R1-B-a)
+        // tells the worker how many extra chunks it may keep in flight,
+        // raising the sequential-stream pipeline depth above the default
+        // 4 MiB fallback.
         let initial_request = ReadRequest {
             block_id: Some(block_id),
             offset: Some(offset),
@@ -376,7 +382,7 @@ impl WorkerClient {
             request_id: None,
             capability: None,
             block_size: None,
-            prefetch_window: None,
+            prefetch_window,
         };
         tx.send(initial_request)
             .await
@@ -576,19 +582,37 @@ impl WorkerClient {
 /// reconnect, all other concurrent observers receive the already-replaced
 /// client.  This reduces N concurrent reconnects to exactly 1.
 pub struct WorkerClientPool {
-    /// Cached worker clients keyed by `"host:port"` address.
+    /// Cached worker clients keyed by a **channel key**.
     ///
-    /// The stored client carries its own `generation` in-band; readers simply
-    /// clone it and inspect `client.generation()`.
-    clients: RwLock<HashMap<String, WorkerClient>>,
+    /// With `pool_size == 1` the key is just the `"host:port"` address (legacy
+    /// behaviour). With `pool_size > 1` the key is `"host:port#slot"`, so each
+    /// worker address owns `pool_size` independent channels (each with its own
+    /// SASL session + generation). The stored client carries its own
+    /// `generation` in-band; readers clone it and inspect `client.generation()`.
+    ///
+    /// **Wait-free read path (P1)**: stored as an [`ArcSwap`] so the hot
+    /// `acquire` path is a single atomic load + map lookup + cheap `WorkerClient`
+    /// clone — no `tokio::sync::RwLock` round-trip. The client set changes only
+    /// on connect-miss / reconnect / invalidate (all rare), so writers do a
+    /// copy-on-write via [`ArcSwap::rcu`]; concurrent writers on different keys
+    /// are reconciled by `rcu`'s retry loop, and same-key connects are
+    /// single-flighted by the per-key reconnect mutex (see `acquire_by_key`).
+    /// Mirrors the `ArcSwap<AuthedState>` model already used by `MasterClient`.
+    clients: ArcSwap<HashMap<String, WorkerClient>>,
     /// Per-address async mutex guarding the reconnect critical section.
     ///
-    /// Separated from `clients` so the reconnect handshake (which performs
-    /// network I/O) does not hold the clients-map write lock.  Acquiring this
-    /// mutex for one address does not block other addresses' reconnects.
+    /// Keyed by the same channel key as `clients`. Separated from `clients` so
+    /// the reconnect handshake (which performs network I/O) does not hold the
+    /// clients-map write lock. Acquiring this mutex for one channel does not
+    /// block other channels' reconnects.
     reconnect_locks: RwLock<HashMap<String, Arc<AsyncMutex<()>>>>,
+    /// Per-address round-robin counter used to pick the next channel slot when
+    /// `pool_size > 1`. Lazily created on first `acquire` for an address.
+    addr_rr: RwLock<HashMap<String, Arc<AtomicU64>>>,
+    /// Number of channels to pool per worker address (≥ 1).
+    pool_size: usize,
     /// Monotonic counter used to hand out a unique `generation` for every
-    /// freshly-created `WorkerClient`.
+    /// freshly-created `WorkerClient` (global across all addresses + slots).
     next_generation: AtomicU64,
     /// Config used to create new connections.
     config: GoosefsConfig,
@@ -597,9 +621,12 @@ pub struct WorkerClientPool {
 impl WorkerClientPool {
     /// Create a new empty connection pool.
     pub fn new(config: GoosefsConfig) -> Self {
+        let pool_size = config.worker_connection_pool_size.max(1);
         Self {
-            clients: RwLock::new(HashMap::new()),
+            clients: ArcSwap::from_pointee(HashMap::new()),
             reconnect_locks: RwLock::new(HashMap::new()),
+            addr_rr: RwLock::new(HashMap::new()),
+            pool_size,
             // Start generations at 1 so `0` (the default on constructed-but-
             // never-pooled clients) is always "stale" relative to any pooled
             // client — this makes `reconnect_if_stale(addr, 0)` always force
@@ -609,33 +636,100 @@ impl WorkerClientPool {
         }
     }
 
+    /// Number of channels pooled per worker address.
+    pub fn pool_size(&self) -> usize {
+        self.pool_size
+    }
+
+    /// Channel-map key for `(addr, slot)`. For a single-channel pool this is
+    /// just `addr` (byte-identical to the legacy behaviour).
+    fn slot_key(&self, addr: &str, slot: usize) -> String {
+        if self.pool_size <= 1 {
+            addr.to_string()
+        } else {
+            format!("{addr}#{slot}")
+        }
+    }
+
+    /// Pick the next round-robin slot for `addr` (always `0` when `pool_size == 1`).
+    async fn next_slot(&self, addr: &str) -> usize {
+        if self.pool_size <= 1 {
+            return 0;
+        }
+        {
+            let rr = self.addr_rr.read().await;
+            if let Some(c) = rr.get(addr) {
+                return (c.fetch_add(1, Ordering::Relaxed) % self.pool_size as u64) as usize;
+            }
+        }
+        let mut rr = self.addr_rr.write().await;
+        let c = rr
+            .entry(addr.to_string())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)));
+        (c.fetch_add(1, Ordering::Relaxed) % self.pool_size as u64) as usize
+    }
+
     /// Acquire a `WorkerClient` for the given address.
     ///
     /// Returns a cached client if one exists, otherwise creates a new connection.
-    /// The tonic `Channel` supports multiplexing, so a single cached client can
-    /// handle multiple concurrent RPCs.
+    /// With `pool_size > 1` this round-robins across the per-worker channels so
+    /// concurrent block reads spread over multiple HTTP/2 connections. The
+    /// tonic `Channel` itself also multiplexes, so each channel handles many
+    /// concurrent RPCs.
     pub async fn acquire(&self, addr: &str) -> Result<WorkerClient> {
-        // Fast path: check read lock first
-        {
-            let cache = self.clients.read().await;
-            if let Some(client) = cache.get(addr) {
-                debug!(addr = %addr, generation = client.generation, "reusing cached WorkerClient");
-                return Ok(client.clone());
-            }
+        let slot = self.next_slot(addr).await;
+        let key = self.slot_key(addr, slot);
+        self.acquire_by_key(&key, addr).await
+    }
+
+    /// Get-or-create the cached client for a specific channel `key`, connecting
+    /// to `connect_addr` on a miss.
+    async fn acquire_by_key(&self, key: &str, connect_addr: &str) -> Result<WorkerClient> {
+        // Fast path (P1): wait-free atomic load + map lookup + cheap clone.
+        // Hit on every steady-state block read — no lock, no await.
+        if let Some(client) = self.clients.load().get(key).cloned() {
+            debug!(key = %key, generation = client.generation, "reusing cached WorkerClient");
+            return Ok(client);
         }
 
-        // Slow path: create new connection under write lock
-        let mut cache = self.clients.write().await;
-        // Double-check after acquiring write lock (another task may have inserted)
-        if let Some(client) = cache.get(addr) {
-            return Ok(client.clone());
+        // Miss: serialise the connect for this channel key via the per-key
+        // reconnect mutex so concurrent callers for the *same* key share a
+        // single TCP+SASL handshake. Callers for *different* keys still connect
+        // concurrently (no global lock — unlike the previous coarse write lock).
+        let lock = self.reconnect_lock_for(key).await;
+        let _guard = lock.lock().await;
+        // Double-check after acquiring the mutex (another task may have inserted
+        // while we queued).
+        if let Some(client) = self.clients.load().get(key).cloned() {
+            return Ok(client);
         }
 
-        debug!(addr = %addr, "creating new WorkerClient for pool");
-        let mut client = WorkerClient::connect(addr, &self.config).await?;
+        debug!(key = %key, addr = %connect_addr, "creating new WorkerClient for pool");
+        let mut client = WorkerClient::connect(connect_addr, &self.config).await?;
         client.generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
-        cache.insert(addr.to_string(), client.clone());
+        self.insert_client(key, client.clone());
         Ok(client)
+    }
+
+    /// Copy-on-write insert into the `clients` map (wait-free readers).
+    ///
+    /// Uses [`ArcSwap::rcu`] so concurrent inserts on *different* keys do not
+    /// clobber each other (the closure re-runs on contention).
+    fn insert_client(&self, key: &str, client: WorkerClient) {
+        self.clients.rcu(|cur| {
+            let mut next = (**cur).clone();
+            next.insert(key.to_string(), client.clone());
+            next
+        });
+    }
+
+    /// Copy-on-write remove from the `clients` map (wait-free readers).
+    fn remove_client(&self, key: &str) {
+        self.clients.rcu(|cur| {
+            let mut next = (**cur).clone();
+            next.remove(key);
+            next
+        });
     }
 
     /// Remove a worker from the pool (e.g., after a connection failure).
@@ -655,17 +749,33 @@ impl WorkerClientPool {
     /// inside `reconnect_if_stale` still serialises the actual handshake
     /// via the generation comparison, so correctness is preserved.
     pub async fn invalidate(&self, addr: &str) {
-        let mut cache = self.clients.write().await;
-        if cache.remove(addr).is_some() {
-            debug!(addr = %addr, "invalidated WorkerClient from pool");
+        // Remove every channel slot for this address.
+        let keys: Vec<String> = (0..self.pool_size)
+            .map(|s| self.slot_key(addr, s))
+            .collect();
+        // Single copy-on-write pass removing all slots for this address.
+        self.clients.rcu(|cur| {
+            let mut next = (**cur).clone();
+            for k in &keys {
+                if next.remove(k).is_some() {
+                    debug!(key = %k, "invalidated WorkerClient from pool");
+                }
+            }
+            next
+        });
+        // Best-effort cleanup of the per-channel reconnect locks + the
+        // round-robin counter to prevent unbounded growth of the maps over
+        // the lifetime of a long-running process.
+        {
+            let mut locks = self.reconnect_locks.write().await;
+            for k in &keys {
+                if locks.remove(k).is_some() {
+                    debug!(key = %k, "removed reconnect lock for invalidated worker");
+                }
+            }
         }
-        drop(cache);
-        // Best-effort cleanup of the per-address reconnect lock to prevent
-        // unbounded growth of `reconnect_locks` over the lifetime of a
-        // long-running process.
-        let mut locks = self.reconnect_locks.write().await;
-        if locks.remove(addr).is_some() {
-            debug!(addr = %addr, "removed reconnect lock for invalidated worker");
+        if self.pool_size > 1 {
+            self.addr_rr.write().await.remove(addr);
         }
     }
 
@@ -708,26 +818,73 @@ impl WorkerClientPool {
         addr: &str,
         stale_generation: u64,
     ) -> Result<WorkerClient> {
-        // Take the per-address reconnect mutex.  Concurrent callers for the
-        // same address serialise here; callers for *different* addresses do
+        // Single-channel pool: the channel key is just `addr` (legacy path).
+        if self.pool_size <= 1 {
+            return self.reconnect_by_key(addr, addr, stale_generation).await;
+        }
+
+        // Multi-channel pool: the caller knows only `(addr, generation)`, not
+        // which slot failed. Generations are globally unique, so locate the
+        // slot whose cached client still carries `stale_generation` and
+        // reconnect exactly that channel. If no slot matches, the channel was
+        // already replaced by a concurrent task — just hand back a fresh
+        // round-robin client (the read will retry on it).
+        let mut target_key: Option<String> = None;
+        {
+            let cache = self.clients.load();
+            for s in 0..self.pool_size {
+                let k = self.slot_key(addr, s);
+                if let Some(c) = cache.get(&k) {
+                    if c.generation == stale_generation {
+                        target_key = Some(k);
+                        break;
+                    }
+                }
+            }
+        }
+        match target_key {
+            Some(key) => self.reconnect_by_key(&key, addr, stale_generation).await,
+            None => {
+                debug!(
+                    addr = %addr,
+                    observed = stale_generation,
+                    "reconnect coalesced — no slot matches stale generation (already refreshed)"
+                );
+                crate::metrics::counter(crate::metrics::name::CLIENT_WORKER_RECONNECTS_COALESCED)
+                    .inc(1);
+                self.acquire(addr).await
+            }
+        }
+    }
+
+    /// Single-flight reconnect for a specific channel `map_key`, connecting to
+    /// `connect_addr` on the actual handshake. Coalesces concurrent callers on
+    /// the same key via the per-key reconnect mutex + generation re-check.
+    async fn reconnect_by_key(
+        &self,
+        map_key: &str,
+        connect_addr: &str,
+        stale_generation: u64,
+    ) -> Result<WorkerClient> {
+        // Take the per-channel reconnect mutex.  Concurrent callers for the
+        // same channel serialise here; callers for *different* channels do
         // not block each other.
-        let lock = self.reconnect_lock_for(addr).await;
+        let lock = self.reconnect_lock_for(map_key).await;
         let _guard = lock.lock().await;
 
         // Under the mutex, re-check the cache.  If another task already
         // replaced the stale client while we were queuing, skip the
         // reconnect entirely.
         {
-            let cache = self.clients.read().await;
-            if let Some(client) = cache.get(addr) {
+            let cache = self.clients.load();
+            if let Some(client) = cache.get(map_key) {
                 if client.generation > stale_generation {
                     debug!(
-                        addr = %addr,
+                        key = %map_key,
                         observed = stale_generation,
                         current = client.generation,
                         "reconnect coalesced — another task already refreshed this channel"
                     );
-                    // Instrument: coalesced reconnect
                     crate::metrics::counter(
                         crate::metrics::name::CLIENT_WORKER_RECONNECTS_COALESCED,
                     )
@@ -740,24 +897,17 @@ impl WorkerClientPool {
         // We are the designated reconnect-er: drop the stale entry, then
         // build and install a new one.
         debug!(
-            addr = %addr,
+            key = %map_key,
             stale_generation = stale_generation,
             "performing single-flight reconnect"
         );
-        // Instrument: actual reconnect performed
         crate::metrics::counter(crate::metrics::name::CLIENT_WORKER_RECONNECTS_TOTAL).inc(1);
-        {
-            let mut cache = self.clients.write().await;
-            cache.remove(addr);
-        }
-        let mut fresh = WorkerClient::connect(addr, &self.config).await?;
+        self.remove_client(map_key);
+        let mut fresh = WorkerClient::connect(connect_addr, &self.config).await?;
         fresh.generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
-        {
-            let mut cache = self.clients.write().await;
-            cache.insert(addr.to_string(), fresh.clone());
-        }
+        self.insert_client(map_key, fresh.clone());
         debug!(
-            addr = %addr,
+            key = %map_key,
             new_generation = fresh.generation,
             "single-flight reconnect installed fresh WorkerClient"
         );
@@ -777,11 +927,14 @@ impl WorkerClientPool {
     /// acquires the same per-address reconnect mutex so it still coalesces
     /// against any in-flight `reconnect_if_stale`.
     pub async fn reconnect(&self, addr: &str) -> Result<WorkerClient> {
-        // Use `u64::MAX` as "stale" so `reconnect_if_stale` always proceeds
-        // with the handshake (current generation can never exceed MAX).
-        // This still passes through the per-address mutex so concurrent
-        // callers on the same address share a single handshake.
-        self.reconnect_if_stale(addr, u64::MAX).await
+        // Use `u64::MAX` as "stale" so the handshake always proceeds (current
+        // generation can never exceed MAX). This still passes through the
+        // per-channel mutex so concurrent callers on the same channel share a
+        // single handshake. For a multi-channel pool, reconnect one
+        // round-robin slot (the caller has no generation to target).
+        let slot = self.next_slot(addr).await;
+        let key = self.slot_key(addr, slot);
+        self.reconnect_by_key(&key, addr, u64::MAX).await
     }
 
     /// Create a new pool wrapped in `Arc` for shared ownership.
@@ -802,15 +955,15 @@ impl WorkerClientPool {
     #[cfg(test)]
     async fn test_install(&self, addr: &str, mut client: WorkerClient) -> Option<WorkerClient> {
         client.generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
-        let mut cache = self.clients.write().await;
-        cache.insert(addr.to_string(), client)
+        let prev = self.clients.load().get(addr).cloned();
+        self.insert_client(addr, client);
+        prev
     }
 
     /// Snapshot the current cached generation for `addr` (if any).
     #[cfg(test)]
     async fn test_current_generation(&self, addr: &str) -> Option<u64> {
-        let cache = self.clients.read().await;
-        cache.get(addr).map(|c| c.generation)
+        self.clients.load().get(addr).map(|c| c.generation)
     }
 
     /// Snapshot the number of entries in the `reconnect_locks` map.
@@ -835,6 +988,36 @@ mod tests {
         // tests below never issue one.
         let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
         WorkerClient::from_channel(channel, addr.to_string())
+    }
+
+    /// Worker-side multi-channel pool: `next_slot` round-robins per address
+    /// and `slot_key` composes the channel key (Part V worker-side pool).
+    #[tokio::test]
+    async fn worker_pool_round_robins_slots() {
+        let config = GoosefsConfig::new("127.0.0.1:9200").with_worker_connection_pool_size(4);
+        let pool = WorkerClientPool::new(config);
+        assert_eq!(pool.pool_size(), 4);
+        assert_eq!(pool.slot_key("h:1", 0), "h:1#0");
+        assert_eq!(pool.slot_key("h:1", 3), "h:1#3");
+
+        let mut seen = Vec::new();
+        for _ in 0..8 {
+            seen.push(pool.next_slot("h:1").await);
+        }
+        assert_eq!(seen, vec![0, 1, 2, 3, 0, 1, 2, 3]);
+        // A different address has its own independent counter.
+        assert_eq!(pool.next_slot("h:2").await, 0);
+    }
+
+    /// Single-channel pool (default) keeps the legacy `addr`-keyed behaviour
+    /// byte-for-byte, so existing single-flight tests are unaffected.
+    #[tokio::test]
+    async fn worker_pool_single_channel_keys_by_addr() {
+        let pool = WorkerClientPool::new(GoosefsConfig::new("127.0.0.1:9200"));
+        assert_eq!(pool.pool_size(), 1);
+        assert_eq!(pool.slot_key("h:1", 0), "h:1");
+        assert_eq!(pool.next_slot("h:1").await, 0);
+        assert_eq!(pool.next_slot("h:1").await, 0);
     }
 
     #[tokio::test]
