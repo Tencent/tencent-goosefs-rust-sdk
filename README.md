@@ -770,6 +770,33 @@ cargo test
 cargo build --release
 ```
 
+### Clean Build Artifacts
+
+```shell
+cargo clean
+```
+
+### Build Python Bindings
+
+The `goosefs` Python package lives under [`bindings/python/`](bindings/python/)
+and is built with [maturin](https://www.maturin.rs/). For local development:
+
+```shell
+cd bindings/python
+uv sync --all-extras --group dev --group test   # one-time environment setup
+uv run maturin develop --uv                      # compile + install as editable
+```
+
+See [`bindings/python/DEVELOPMENT.md`](bindings/python/DEVELOPMENT.md) for the full
+build/test/lint loop.
+
+### Release
+
+| Artifact | Guide |
+|----------|-------|
+| Rust crate (`goosefs-sdk`) → crates.io / Cargo registry | [`docs/RELEASE.md`](docs/RELEASE.md) |
+| Python package (`goosefs`) → PyPI (manylinux wheels) | [`docs/PYTHON_RELEASE.md`](docs/PYTHON_RELEASE.md) |
+
 ### Re-generate Proto Code
 
 This crate ships **pre-generated** protobuf code under [`src/generated/`](src/generated/), so downstream users do **NOT** need `protoc` installed to build `goosefs-sdk` — a regular `cargo build` just works out of the box.

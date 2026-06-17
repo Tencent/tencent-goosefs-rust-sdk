@@ -68,9 +68,7 @@ async def test_batch_exists_empty(async_fs: AsyncGoosefs) -> None:
     assert await async_fs.batch_exists([]) == []
 
 
-async def test_batch_get_status_returns_in_order(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_batch_get_status_returns_in_order(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     a = f"{tmp_dir}/a"
     b = f"{tmp_dir}/b"
     await async_fs.mkdir(a)

@@ -453,9 +453,7 @@ class AsyncWorkerClient:
         """
         ...
     @staticmethod
-    def connect_simple(
-        addr: str, connect_timeout_ms: int = ...
-    ) -> Awaitable[AsyncWorkerClient]:
+    def connect_simple(addr: str, connect_timeout_ms: int = ...) -> Awaitable[AsyncWorkerClient]:
         """Connect without SASL authentication — test workers only.
 
         .. deprecated::

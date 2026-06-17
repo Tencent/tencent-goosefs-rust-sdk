@@ -133,12 +133,30 @@ RUST_LOG="debug,h2=warn,hyper=warn" python my_script.py
 
 Performance benchmarks are **on hold** together with P9 (canary + regression); they will be restarted when the project finalizes a unified CI pipeline plan. They will live under the `bench/` directory and cover read/write latency, throughput (with reference targets to be decided: Java SDK / native Rust SDK / OpenDAL adapter), and metadata RPS.
 
-## Release Flow (P8 on hold)
+## Release
 
-Cross-platform wheel builds and the PyPI release pipeline (P8) are **on hold**, awaiting decisions on the unified CI platform (GitHub Actions vs the company pipeline), PyPI account ownership, and the Windows support scope. Once restarted, it will cover:
-1. Version-alignment check between `goosefs-sdk` and `goosefs-python` `Cargo.toml`s.
-2. Five target wheels (manylinux x86_64/aarch64, macOS x86_64/arm64, Windows x86_64).
-3. PyPI Trusted Publisher (OIDC) release.
-4. Internal PyPI mirror sync.
+Quick commands for building and publishing the `goosefs` wheel:
 
-Until then, please consult the GooseFS team before publishing manually from a local machine; for local developer verification use `maturin develop`, and for producing a wheel use `maturin build --release`.
+```bash
+# Build a wheel for the local platform (quick check)
+uv run maturin build --release
+
+# Build a manylinux wheel for Linux (usable on Tencent Cloud Linux)
+rustup target add x86_64-unknown-linux-gnu
+uv run --with ziglang maturin build --release \
+    --target x86_64-unknown-linux-gnu --manylinux 2_28 --zig --out dist
+
+# Publish to PyPI
+uv run maturin publish
+```
+
+For the complete release process — manylinux tag selection, ARM (aarch64) wheels,
+building on a Tencent Cloud Linux host, and uploading to the official / Tencent
+internal PyPI mirror — see [`../../docs/PYTHON_RELEASE.md`](../../docs/PYTHON_RELEASE.md).
+
+> **CI automation (P8) still pending:** a fully automated cross-platform wheel
+> matrix (manylinux x86_64/aarch64, macOS x86_64/arm64, Windows x86_64), PyPI
+> Trusted Publisher (OIDC) release, and internal mirror sync are awaiting the
+> unified CI platform decision. Until then, release manually via the steps above
+> and confirm version alignment between `goosefs-sdk` and `goosefs-python`
+> `Cargo.toml`s before publishing.

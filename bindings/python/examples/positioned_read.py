@@ -46,8 +46,7 @@ async def main() -> None:
     master = os.environ.get("GOOSEFS_MASTER_ADDR")
     if not master:
         print(
-            "GOOSEFS_MASTER_ADDR is not set. "
-            "Example: export GOOSEFS_MASTER_ADDR=127.0.0.1:9200",
+            "GOOSEFS_MASTER_ADDR is not set. Example: export GOOSEFS_MASTER_ADDR=127.0.0.1:9200",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -150,10 +149,7 @@ async def main() -> None:
                 offset=128,
                 length=32,
             )
-            print(
-                f"[ll-pr]  low-level read_block_positioned  "
-                f"@blk{block_id}+128+32 -> {mid!r}"
-            )
+            print(f"[ll-pr]  low-level read_block_positioned  @blk{block_id}+128+32 -> {mid!r}")
             assert mid == payload[128:160]
 
         # Cleanup so the example is re-runnable.

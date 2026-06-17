@@ -40,7 +40,6 @@ import os
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Layer 1 — Import-time guards (always run, no cluster needed)
 # ---------------------------------------------------------------------------
@@ -73,19 +72,16 @@ def test_sync_worker_client_is_exported() -> None:
 
 
 def test_async_worker_client_has_connect_classmethod() -> None:
-    """``AsyncWorkerClient.connect(addr, config)`` must be a classmethod-style entry point."""
+    """``AsyncWorkerClient.connect(addr, config)`` must be a class-level static factory."""
     import goosefs
 
-    assert hasattr(goosefs.AsyncWorkerClient, "connect"), (
-        "AsyncWorkerClient.connect missing"
-    )
+    assert hasattr(goosefs.AsyncWorkerClient, "connect"), "AsyncWorkerClient.connect missing"
+    assert callable(goosefs.AsyncWorkerClient.connect), "AsyncWorkerClient.connect not callable"
     assert hasattr(goosefs.AsyncWorkerClient, "read_block_positioned"), (
         "AsyncWorkerClient.read_block_positioned missing"
     )
     # `addr` should be a property/getter (constant for the lifetime of wc)
-    assert hasattr(goosefs.AsyncWorkerClient, "addr"), (
-        "AsyncWorkerClient.addr accessor missing"
-    )
+    assert hasattr(goosefs.AsyncWorkerClient, "addr"), "AsyncWorkerClient.addr accessor missing"
 
 
 def test_sync_worker_client_has_connect_classmethod() -> None:
@@ -97,6 +93,7 @@ def test_sync_worker_client_has_connect_classmethod() -> None:
     import goosefs
 
     assert hasattr(goosefs.WorkerClient, "connect"), "WorkerClient.connect missing"
+    assert callable(goosefs.WorkerClient.connect), "WorkerClient.connect not callable"
     assert hasattr(goosefs.WorkerClient, "read_block_positioned"), (
         "WorkerClient.read_block_positioned missing"
     )
@@ -143,8 +140,7 @@ def test_p6_classes_in_dunder_all() -> None:
     required = ("AsyncWorkerClient", "WorkerClient")
     missing = [name for name in required if name not in all_]
     assert not missing, (
-        f"P6 classes missing from goosefs.__all__: {missing}; "
-        f"current __all__={all_!r}"
+        f"P6 classes missing from goosefs.__all__: {missing}; current __all__={all_!r}"
     )
 
 

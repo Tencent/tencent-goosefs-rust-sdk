@@ -36,7 +36,6 @@ import os
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Layer 1 — Import-time guards (always run, no cluster needed)
 # ---------------------------------------------------------------------------
@@ -117,9 +116,7 @@ class TestAsyncPositionedReadAuthRetryGuard:
     """
 
     @pytest.mark.asyncio
-    async def test_async_positioned_read_round_trip(
-        self, async_fs, tmp_dir
-    ) -> None:
+    async def test_async_positioned_read_round_trip(self, async_fs, tmp_dir) -> None:
         """Write a small file and read it back via ``positioned_read``.
 
         Exercises the full pipeline:
@@ -140,18 +137,13 @@ class TestAsyncPositionedReadAuthRetryGuard:
 
         # ``positioned_read`` is the entry point for the auth-retry pipeline.
         # Under normal conditions this succeeds on the first try.
-        data = await async_fs.positioned_read(
-            path, offset=0, length=len(payload)
-        )
+        data = await async_fs.positioned_read(path, offset=0, length=len(payload))
         assert data == payload, (
-            "positioned_read did not round-trip the payload — "
-            "auth-retry entry point may be broken"
+            "positioned_read did not round-trip the payload — auth-retry entry point may be broken"
         )
 
     @pytest.mark.asyncio
-    async def test_async_positioned_read_with_offset(
-        self, async_fs, tmp_dir
-    ) -> None:
+    async def test_async_positioned_read_with_offset(self, async_fs, tmp_dir) -> None:
         """``positioned_read`` with non-zero offset must slice correctly."""
         path = f"{tmp_dir}/auth-retry-async-offset.bin"
         payload = b"0123456789ABCDEF" * 64
@@ -178,9 +170,7 @@ class TestSyncPositionedReadAuthRetryGuard:
     binding correctly reaches that shared code path.
     """
 
-    def test_sync_positioned_read_round_trip(
-        self, sync_fs, sync_tmp_dir
-    ) -> None:
+    def test_sync_positioned_read_round_trip(self, sync_fs, sync_tmp_dir) -> None:
         """Write a small file and read it back via sync ``positioned_read``.
 
         This is the Critical #1 regression guard: before the fix, the
@@ -200,9 +190,7 @@ class TestSyncPositionedReadAuthRetryGuard:
             "auth-retry entry point may be broken (Critical #1 regression)"
         )
 
-    def test_sync_positioned_read_with_offset(
-        self, sync_fs, sync_tmp_dir
-    ) -> None:
+    def test_sync_positioned_read_with_offset(self, sync_fs, sync_tmp_dir) -> None:
         """``positioned_read`` with non-zero offset must slice correctly."""
         path = f"{sync_tmp_dir}/auth-retry-sync-offset.bin"
         payload = b"0123456789ABCDEF" * 64
@@ -210,5 +198,5 @@ class TestSyncPositionedReadAuthRetryGuard:
 
         data = sync_fs.positioned_read(path, offset=16, length=32)
         assert data == payload[16:48], (
-            f"sync positioned_read(offset=16, length=32) returned wrong slice"
+            "sync positioned_read(offset=16, length=32) returned wrong slice"
         )

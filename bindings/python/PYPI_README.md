@@ -24,6 +24,51 @@ Pre-built wheels are provided for:
 
 Windows wheels are best-effort and may be added in a later release.
 
+## Building From Source (Optional)
+
+Most users should just `pip install goosefs`. Build from source only if you need
+an unreleased change or a platform without a pre-built wheel.
+
+**Prerequisites:** Python 3.9+, Rust 1.88+ ([rustup](https://rustup.rs/)).
+
+```bash
+git clone https://git.woa.com/tencent-cloud-datalake/goosefs-client-rust.git
+cd goosefs-client-rust/bindings/python
+```
+
+Install [maturin](https://www.maturin.rs/):
+
+```bash
+pip install maturin
+```
+
+Build and install:
+
+```bash
+# Development mode (editable)
+maturin develop
+
+# Or build a wheel
+maturin build --release
+pip install target/wheels/goosefs-*.whl
+```
+
+To produce a portable Linux wheel (usable on Tencent Cloud Linux), cross-compile
+with [zig](https://ziglang.org/):
+
+```bash
+rustup target add x86_64-unknown-linux-gnu
+pip install ziglang
+maturin build --release --target x86_64-unknown-linux-gnu --manylinux 2_28 --zig
+```
+
+Verify:
+
+```python
+import goosefs
+print("GooseFS Python bindings installed:", goosefs.__version__)
+```
+
 ## Quick start
 
 ```python
