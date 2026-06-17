@@ -69,6 +69,17 @@ dashmap = "6"
 # HA failover (`reconnect`). See docs/RUST_PYTHON_SDK_OPTIMIZATION.md Part II
 # §1 + §II.3 for the consistency contract.
 arc-swap = "1"
+# Stable, spec-defined, high-performance hash (xxHash3) — the single hash the
+# whole crate is standardised on. Two usage shapes:
+#  - Ephemeral / in-process (dir allocation, page-lock striping, the block
+#    routing ring): the `Xxh3Default` Hasher replaces `std`'s SipHash
+#    `DefaultHasher` on hot paths where no DoS resistance is needed.
+#  - On-disk page store bucket selection (`file_id` → directory): the
+#    `xxh3_64` one-shot, whose output must stay byte-for-byte stable across
+#    Rust versions / platforms (the cache survives restarts & toolchain
+#    upgrades). Mirrors Lance's `xxhash_rust::xxh3` usage. Version aligned with
+#    Lance.
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 serde = { version = "1", features = ["derive"] }
 async-trait = "0.1"
 rand = "0.9.1"
@@ -121,6 +132,10 @@ path = "benchmarks/pr_runtime_ab.rs"
 [[example]]
 name = "repro_writer_write_with_concurrent"
 path = "benchmarks/repro_writer_write_with_concurrent.rs"
+
+[[example]]
+name = "page_cache_ab"
+path = "benchmarks/page_cache_ab.rs"
 
 # Release profile tuning for the SDK hot paths.
 #

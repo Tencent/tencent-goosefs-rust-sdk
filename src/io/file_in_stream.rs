@@ -49,6 +49,7 @@ use bytes::{Bytes, BytesMut};
 use tracing::{debug, warn};
 
 use crate::block::router::WorkerRouter;
+use crate::cache::{CacheManager, ExternalRangeReader};
 use crate::client::{WorkerClient, WorkerClientPool, WorkerManagerClient};
 use crate::config::GoosefsConfig;
 use crate::context::FileSystemContext;
@@ -148,6 +149,25 @@ pub struct GoosefsFileInStream {
     /// (`open()`).  When `Some`, `connect_worker` reuses pooled connections
     /// instead of creating a new one per block.
     worker_pool: Option<Arc<WorkerClientPool>>,
+
+    // ── Client local page cache (random-read path) ───────────────────────────
+    /// Shared local page cache, when enabled. `None` disables caching for this
+    /// stream (legacy `open()` always `None`).
+    cache: Option<Arc<dyn CacheManager>>,
+    /// Page size in bytes used to split random reads into cache pages.
+    cache_page_size: u64,
+    /// Stable file identifier (server inode id rendered as text) used as the
+    /// cache key namespace. Same file → same id → cross-stream hits.
+    cache_file_id: Arc<str>,
+    /// Whether to write missed pages back into the cache.
+    cache_fill: bool,
+    /// Whether back-fills use the bounded async write-back pool (`true`) or
+    /// block inline until cached (`false`).
+    cache_async_write: bool,
+    /// Whether **sequential** reads (`read`) are routed through the page cache.
+    /// Random reads (`read_at`) always use the cache when present; sequential
+    /// reads default to the native streaming path to avoid read amplification.
+    cache_sequential_read: bool,
 }
 
 impl GoosefsFileInStream {
@@ -223,6 +243,12 @@ impl GoosefsFileInStream {
             cached_positioned_block_id: -1,
             router,
             worker_pool: None, // legacy mode: no shared pool
+            cache: None,       // legacy mode: no page cache
+            cache_page_size: config.client_cache_page_size,
+            cache_file_id: Arc::from(String::new()),
+            cache_fill: false,
+            cache_async_write: false,
+            cache_sequential_read: false,
         })
     }
 
@@ -278,17 +304,41 @@ impl GoosefsFileInStream {
         let file_length = status.length;
         let worker_pool = ctx.acquire_worker_pool();
 
+        // Inject the shared page cache (best-effort; `None` when disabled).
+        let cache = ctx.acquire_cache_manager();
+        let cache_file_id: Arc<str> = Arc::from(status.file_id.to_string());
+        // Only back-fill the local page cache when the read allows caching.
+        // A `NoCache` read still serves cache *hits* (free speedup) but must
+        // not pollute the cache with one-off / large-scan pages.
+        let cache_fill = cache.is_some()
+            && options.in_stream_options.read_type != crate::fs::options::ReadType::NoCache;
+
+        // Notify the cache that this file was (re)opened. If the same file_id
+        // is now backing different content (overwrite — length or mtime
+        // changed), the cache invalidates its stale pages so this stream never
+        // serves stale data. Best-effort and cheap when nothing changed.
+        if let Some(cache) = &cache {
+            cache
+                .on_file_open(
+                    &cache_file_id,
+                    status.length,
+                    status.last_modification_time_ms,
+                )
+                .await;
+        }
+
         debug!(
             path = %path,
             file_length = file_length,
             block_count = status.block_ids.len(),
+            cache_enabled = cache.is_some(),
             "GoosefsFileInStream opened (context mode)"
         );
 
         Ok(Self {
             file_length,
             status,
-            config,
+            config: config.clone(),
             options: options.in_stream_options,
             pos: 0,
             carry_over: BytesMut::new(),
@@ -297,6 +347,12 @@ impl GoosefsFileInStream {
             cached_positioned_block_id: -1,
             router,
             worker_pool: Some(worker_pool),
+            cache,
+            cache_page_size: config.client_cache_page_size,
+            cache_file_id,
+            cache_fill,
+            cache_async_write: config.client_cache_async_write_enabled,
+            cache_sequential_read: config.client_cache_sequential_read_enabled,
         })
     }
 
@@ -451,6 +507,35 @@ impl GoosefsFileInStream {
             return Ok(0);
         }
 
+        // 2.5) Cache-enabled path: optionally serve sequential reads through
+        //      the page cache too (mirrors Java `LocalCacheFileInStream`, which
+        //      routes all reads through the cache).
+        //
+        //      Gated behind `client_cache_sequential_read_enabled` (default
+        //      off): routing a large sequential scan through fixed-size pages
+        //      turns one streamed request into many per-page positioned reads
+        //      (read amplification), and a `NoCache` sequential read would
+        //      re-fetch a whole page for every small buffer with no caching
+        //      benefit. When disabled, sequential reads use the native
+        //      streaming path below while random `read_at` still uses the cache.
+        //
+        //      `carry_over` is guaranteed empty here: step 1 above returns
+        //      early whenever it holds parked bytes, so this branch always
+        //      copies exactly what the caller asked for and never bypasses
+        //      buffered data.
+        if self.cache.is_some() && self.cache_sequential_read {
+            debug_assert!(
+                self.carry_over.is_empty(),
+                "carry_over must be drained before the sequential cache path"
+            );
+            let end = (self.pos + buf.len() as i64).min(self.file_length);
+            let data = self.read_at_cached(self.pos, end).await?;
+            let n = data.len().min(buf.len());
+            buf[..n].copy_from_slice(&data[..n]);
+            self.pos += n as i64;
+            return Ok(n);
+        }
+
         let block_idx = self.block_index_for_pos(self.pos);
         let block_id = self.block_id_at(block_idx)?;
 
@@ -557,6 +642,20 @@ impl GoosefsFileInStream {
 
         let end = (offset + n as i64).min(self.file_length);
 
+        // Route through the local page cache when enabled; otherwise read
+        // straight from the worker/UFS.
+        if self.cache.is_some() {
+            return self.read_at_cached(offset, end).await;
+        }
+        self.read_external_range(offset, end).await
+    }
+
+    /// Read the byte range `[offset, end)` directly from the worker/UFS,
+    /// bypassing the local page cache.
+    ///
+    /// This is the original (cache-less) `read_at` implementation, factored
+    /// out so the cached path can reuse it as the miss/back-fill source.
+    async fn read_external_range(&mut self, offset: i64, end: i64) -> Result<Bytes> {
         // ── R2 fast path: the whole request lives inside a single block ──
         // Random reads (PR) almost always fall here (256 KiB / 1 MiB ≪ 64 MiB
         // block). Returning the `positioned_read` `Bytes` directly avoids the
@@ -633,6 +732,50 @@ impl GoosefsFileInStream {
         }
 
         Ok(result.freeze())
+    }
+
+    /// Cached random-read path: serve `[offset, end)` page-by-page from the
+    /// local cache, reading whole pages from the worker/UFS on a miss and
+    /// (optionally) writing them back.
+    ///
+    /// The cache is **best-effort**: any cache failure degrades to an external
+    /// read of the same range, so correctness never depends on the cache.
+    /// The page-split loop itself lives in
+    /// [`crate::cache::read_through_cache`] so it can be unit-tested offline.
+    async fn read_at_cached(&mut self, offset: i64, end: i64) -> Result<Bytes> {
+        // Clone the `Arc<dyn CacheManager>` so cache calls don't borrow `self`
+        // (the external read below needs `&mut self`).
+        let cache = match self.cache.clone() {
+            Some(c) => c,
+            None => return self.read_external_range(offset, end).await,
+        };
+        let page_size = self.cache_page_size;
+        let file_id = self.cache_file_id.clone();
+        let file_length = self.file_length;
+        let fill_mode = self.cache_fill_mode();
+
+        crate::cache::read_through_cache(
+            &cache,
+            self,
+            &file_id,
+            page_size,
+            file_length,
+            offset,
+            end,
+            fill_mode,
+        )
+        .await
+    }
+
+    /// Effective back-fill mode for this stream's cache.
+    fn cache_fill_mode(&self) -> crate::cache::FillMode {
+        if !self.cache_fill {
+            crate::cache::FillMode::None
+        } else if self.cache_async_write {
+            crate::cache::FillMode::Async
+        } else {
+            crate::cache::FillMode::Sync
+        }
     }
 
     /// Issue a single positioned read for `(block_id, offset_in_block, length)`
@@ -1018,6 +1161,15 @@ impl GoosefsFileInStream {
     }
 }
 
+/// Bridges the stream's worker/UFS positioned-read path to the cache layer's
+/// miss source, so [`crate::cache::read_through_cache`] can drive cache fills.
+#[async_trait::async_trait]
+impl ExternalRangeReader for GoosefsFileInStream {
+    async fn read_range(&mut self, offset: i64, end: i64) -> Result<Bytes> {
+        self.read_external_range(offset, end).await
+    }
+}
+
 // ── Unit tests (pure logic — no I/O) ─────────────────────────────────────────
 
 #[cfg(test)]
@@ -1056,6 +1208,12 @@ mod tests {
             cached_positioned_block_id: -1,
             router: WorkerRouter::new(),
             worker_pool: None,
+            cache: None,
+            cache_page_size: 1024 * 1024,
+            cache_file_id: Arc::from(String::new()),
+            cache_fill: false,
+            cache_async_write: false,
+            cache_sequential_read: false,
         }
     }
 

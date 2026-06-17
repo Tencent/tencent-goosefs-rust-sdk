@@ -52,6 +52,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::block::router::WorkerRouter;
+use crate::cache::{CacheManager, LocalCacheManager};
 use crate::client::metrics_master::MetricsClient;
 use crate::client::metrics_master::MetricsMasterClient;
 use crate::client::{
@@ -104,6 +105,13 @@ pub struct FileSystemContext {
 
     /// Consistent-hash router with TTL refresh and local-first preference.
     worker_router: Arc<WorkerRouter>,
+
+    /// Client-side local page cache, when `config.client_cache_enabled`.
+    ///
+    /// `None` when the cache is disabled or failed to initialize (the cache is
+    /// best-effort, so an init failure degrades to no-cache rather than
+    /// failing `connect()`). Shared across all readers in this context.
+    cache_manager: Option<Arc<dyn CacheManager>>,
 
     /// HA Master address discovery client (shared between master + wm).
     inquire_client: Arc<dyn MasterInquireClient>,
@@ -182,12 +190,33 @@ impl FileSystemContext {
         // Build the shared worker connection pool.
         let worker_pool = WorkerClientPool::new_shared((*config).clone());
 
+        // Build the client-side local page cache (best-effort).
+        let cache_manager: Option<Arc<dyn CacheManager>> = if config.client_cache_enabled {
+            match LocalCacheManager::from_config(&config).await {
+                Ok(mgr) => {
+                    debug!(
+                        page_size = config.client_cache_page_size,
+                        dirs = ?config.client_cache_dirs,
+                        "client local page cache enabled"
+                    );
+                    Some(mgr as Arc<dyn CacheManager>)
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to init client page cache; continuing without cache");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let ctx = Arc::new(Self {
             config: config.clone(),
             master_pool,
             worker_manager,
             worker_pool,
             worker_router,
+            cache_manager,
             inquire_client,
             config_refresher: Arc::new(ConfigRefresher::from_config(&config)),
             closed: Arc::new(AtomicBool::new(false)),
@@ -240,6 +269,14 @@ impl FileSystemContext {
     /// Return the shared `WorkerRouter` (zero-cost Arc clone).
     pub fn acquire_router(&self) -> Arc<WorkerRouter> {
         self.worker_router.clone()
+    }
+
+    /// Return the shared client-side page cache, if enabled.
+    ///
+    /// `None` when `config.client_cache_enabled = false` or the cache failed
+    /// to initialize. Readers consult this on the random-read path.
+    pub fn acquire_cache_manager(&self) -> Option<Arc<dyn CacheManager>> {
+        self.cache_manager.clone()
     }
 
     /// Return the shared `MasterInquireClient` (zero-cost Arc clone).

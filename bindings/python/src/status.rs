@@ -225,9 +225,12 @@ impl PyURIStatus {
     }
 
     fn __hash__(&self) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
+        // xxHash3 (same hash Lance uses via `xxhash_rust::xxh3`): fast and
+        // non-cryptographic. A Python `__hash__` only needs to be stable for the
+        // lifetime of the process. Standardised across the project on xxHash3.
         use std::hash::{Hash, Hasher};
-        let mut h = DefaultHasher::new();
+        use xxhash_rust::xxh3::Xxh3Default;
+        let mut h = Xxh3Default::default();
         self.inner.path.hash(&mut h);
         self.inner.last_modification_time_ms.hash(&mut h);
         h.finish()

@@ -50,6 +50,7 @@ collect_ignore_glob = (
         "test_streaming_async.py",
         "test_streaming_sync.py",
         "test_atexit.py",
+        "test_page_cache.py",
     ]
 )
 

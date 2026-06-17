@@ -67,6 +67,7 @@
 
 pub mod auth;
 pub mod block;
+pub mod cache;
 pub mod client;
 pub mod config;
 pub mod context;

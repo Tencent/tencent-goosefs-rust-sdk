@@ -291,6 +291,50 @@ impl PropertiesMap {
             }
         }
 
+        // ── Client local page cache: goosefs.user.client.cache.* ──────────
+        if let Some(enabled) = self.get_bool("goosefs.user.client.cache.enabled") {
+            cfg.client_cache_enabled = enabled;
+        }
+        if let Some(ps_str) = self.get("goosefs.user.client.cache.page.size") {
+            if let Ok(ps) = parse_byte_size(ps_str) {
+                if ps > 0 {
+                    cfg.client_cache_page_size = ps;
+                }
+            }
+        }
+        if let Some(sz_str) = self.get("goosefs.user.client.cache.size") {
+            if let Ok(sz) = parse_byte_size(sz_str) {
+                cfg.client_cache_size = sz;
+            }
+        }
+        if let Some(dirs) = self.get_list("goosefs.user.client.cache.dirs") {
+            if !dirs.is_empty() {
+                cfg.client_cache_dirs = dirs;
+            }
+        }
+        if let Some(policy) = self.get("goosefs.user.client.cache.eviction.policy") {
+            if let Ok(e) = policy.parse::<CacheEvictorType>() {
+                cfg.client_cache_evictor = e;
+            }
+        }
+        if let Some(enabled) = self.get_bool("goosefs.user.client.cache.async.write.enabled") {
+            cfg.client_cache_async_write_enabled = enabled;
+        }
+        if let Some(n) = self.get_parsed::<usize>("goosefs.user.client.cache.async.write.threads") {
+            if n > 0 {
+                cfg.client_cache_async_write_threads = n;
+            }
+        }
+        if let Some(enabled) = self.get_bool("goosefs.user.client.cache.quota.enabled") {
+            cfg.client_cache_quota_enabled = enabled;
+        }
+        if let Some(secs) = self.get_parsed::<u64>("goosefs.user.client.cache.ttl.seconds") {
+            cfg.client_cache_ttl_secs = secs;
+        }
+        if let Some(enabled) = self.get_bool("goosefs.user.client.cache.sequential.read.enabled") {
+            cfg.client_cache_sequential_read_enabled = enabled;
+        }
+
         cfg
     }
 }
@@ -454,6 +498,51 @@ const DEFAULT_PUSHGATEWAY_ENABLED: bool = false;
 /// Default Pushgateway push interval: 10 s.
 const DEFAULT_PUSHGATEWAY_PUSH_INTERVAL_MS: u64 = 10_000;
 
+// ── Client local page cache defaults ─────────────────────────
+//
+// Mirror Java `PropertyKey.USER_CLIENT_CACHE_*`. The local page cache is
+// **disabled by default** (`client_cache_enabled = false`) so existing
+// behaviour is unchanged unless explicitly opted in.
+
+/// Default page size: 1 MiB (mirrors Java `USER_CLIENT_CACHE_PAGE_SIZE`).
+const DEFAULT_CLIENT_CACHE_PAGE_SIZE: u64 = 1024 * 1024;
+/// Default per-directory cache capacity: 512 MiB (mirrors Java `USER_CLIENT_CACHE_SIZE`).
+const DEFAULT_CLIENT_CACHE_SIZE: u64 = 512 * 1024 * 1024;
+/// Default async-write concurrency (mirrors Java `USER_CLIENT_CACHE_ASYNC_WRITE_THREADS`).
+const DEFAULT_CLIENT_CACHE_ASYNC_WRITE_THREADS: usize = 16;
+/// Default cache directory used when none is configured.
+const DEFAULT_CLIENT_CACHE_DIR: &str = "/tmp/goosefs_cache";
+
+/// Page-cache eviction policy.
+///
+/// Mirrors Java `goosefs.user.client.cache.eviction.policy` (evictor class).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum CacheEvictorType {
+    /// Least-Recently-Used (default).
+    Lru,
+    /// Least-Frequently-Used.
+    Lfu,
+}
+
+impl Default for CacheEvictorType {
+    fn default() -> Self {
+        CacheEvictorType::Lru
+    }
+}
+
+impl std::str::FromStr for CacheEvictorType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "LRU" => Ok(CacheEvictorType::Lru),
+            "LFU" => Ok(CacheEvictorType::Lfu),
+            other => Err(format!("unknown cache evictor type: {other}")),
+        }
+    }
+}
+
 // ── Storage option key constants ─────────────────────────────
 //
 // These are the canonical key names used in `storage_options` maps
@@ -595,6 +684,31 @@ pub const ENV_PUSHGATEWAY_JOB: &str = "GOOSEFS_METRICS_PUSHGATEWAY_JOB";
 /// When not set, the Pushgateway auto-assigns based on the client IP.
 pub const ENV_PUSHGATEWAY_INSTANCE: &str = "GOOSEFS_METRICS_PUSHGATEWAY_INSTANCE";
 
+// ── Client local page cache env vars ─────────────────────────
+/// Whether to enable the client-side local page cache (`true`/`false`).
+pub const ENV_CLIENT_CACHE_ENABLED: &str = "GOOSEFS_USER_CLIENT_CACHE_ENABLED";
+/// Page size in bytes for the local page cache.
+pub const ENV_CLIENT_CACHE_PAGE_SIZE: &str = "GOOSEFS_USER_CLIENT_CACHE_PAGE_SIZE";
+/// Per-directory capacity in bytes for the local page cache.
+pub const ENV_CLIENT_CACHE_SIZE: &str = "GOOSEFS_USER_CLIENT_CACHE_SIZE";
+/// Comma-separated list of local page cache directories.
+pub const ENV_CLIENT_CACHE_DIRS: &str = "GOOSEFS_USER_CLIENT_CACHE_DIRS";
+/// Eviction policy (`LRU`/`LFU`).
+pub const ENV_CLIENT_CACHE_EVICTOR: &str = "GOOSEFS_USER_CLIENT_CACHE_EVICTION_POLICY";
+/// Whether async write-back (cache fill) is enabled (`true`/`false`).
+pub const ENV_CLIENT_CACHE_ASYNC_WRITE_ENABLED: &str =
+    "GOOSEFS_USER_CLIENT_CACHE_ASYNC_WRITE_ENABLED";
+/// Async write-back concurrency.
+pub const ENV_CLIENT_CACHE_ASYNC_WRITE_THREADS: &str =
+    "GOOSEFS_USER_CLIENT_CACHE_ASYNC_WRITE_THREADS";
+/// Whether per-scope quota is enabled (`true`/`false`).
+pub const ENV_CLIENT_CACHE_QUOTA_ENABLED: &str = "GOOSEFS_USER_CLIENT_CACHE_QUOTA_ENABLED";
+/// Page time-to-live in seconds (`0` = no expiry).
+pub const ENV_CLIENT_CACHE_TTL_SECS: &str = "GOOSEFS_USER_CLIENT_CACHE_TTL_SECONDS";
+/// Whether sequential reads are routed through the local page cache (`true`/`false`).
+pub const ENV_CLIENT_CACHE_SEQUENTIAL_READ_ENABLED: &str =
+    "GOOSEFS_USER_CLIENT_CACHE_SEQUENTIAL_READ_ENABLED";
+
 /// Storage option key for config manager RPC addresses.
 pub const STORAGE_OPT_CONFIG_MANAGER_RPC_ADDRESSES: &str = "goosefs_config_manager_rpc_addresses";
 
@@ -615,6 +729,18 @@ pub const STORAGE_OPT_AUTHORIZATION_PERMISSION_ENABLED: &str =
 
 /// Storage option key for login impersonation username.
 pub const STORAGE_OPT_LOGIN_IMPERSONATION_USERNAME: &str = "goosefs_login_impersonation_username";
+
+// ── Client local page cache storage option keys ──────────────
+/// Storage option key for enabling the local page cache.
+pub const STORAGE_OPT_CLIENT_CACHE_ENABLED: &str = "goosefs_client_cache_enabled";
+/// Storage option key for the local page cache page size (bytes).
+pub const STORAGE_OPT_CLIENT_CACHE_PAGE_SIZE: &str = "goosefs_client_cache_page_size";
+/// Storage option key for the local page cache per-directory size (bytes).
+pub const STORAGE_OPT_CLIENT_CACHE_SIZE: &str = "goosefs_client_cache_size";
+/// Storage option key for the local page cache directories (comma-separated).
+pub const STORAGE_OPT_CLIENT_CACHE_DIRS: &str = "goosefs_client_cache_dirs";
+/// Storage option key for the local page cache eviction policy (`LRU`/`LFU`).
+pub const STORAGE_OPT_CLIENT_CACHE_EVICTOR: &str = "goosefs_client_cache_eviction_policy";
 
 // ── WriteType: ergonomic Rust enum wrapping WritePType ───────
 
@@ -1063,6 +1189,77 @@ pub struct GoosefsConfig {
     /// Properties key: `goosefs.metrics.pushgateway.instance`
     #[serde(default)]
     pub pushgateway_instance: Option<String>,
+
+    // ── Client local page cache ──────────────────────────────
+    /// Whether the client-side local page cache is enabled (default: `false`).
+    ///
+    /// When `false`, all reads go straight to the worker/UFS (current
+    /// behaviour). When `true`, a [`crate::cache::CacheManager`] is created
+    /// and consulted on the read path. Mirrors Java
+    /// `goosefs.user.client.cache.enabled`.
+    #[serde(default)]
+    pub client_cache_enabled: bool,
+
+    /// Cache page size in bytes (default: 1 MiB).
+    ///
+    /// Mirrors Java `goosefs.user.client.cache.page.size`.
+    #[serde(default = "default_client_cache_page_size")]
+    pub client_cache_page_size: u64,
+
+    /// Per-directory cache capacity in bytes (default: 512 MiB).
+    ///
+    /// Mirrors Java `goosefs.user.client.cache.size`.
+    #[serde(default = "default_client_cache_size")]
+    pub client_cache_size: u64,
+
+    /// Local cache directories (default: `["/tmp/goosefs_cache"]`).
+    ///
+    /// Mirrors Java `goosefs.user.client.cache.dirs`.
+    #[serde(default = "default_client_cache_dirs")]
+    pub client_cache_dirs: Vec<String>,
+
+    /// Page eviction policy (default: `LRU`).
+    ///
+    /// Mirrors Java `goosefs.user.client.cache.eviction.policy`.
+    #[serde(default)]
+    pub client_cache_evictor: CacheEvictorType,
+
+    /// Whether async write-back (cache fill) is enabled (default: `true`).
+    ///
+    /// Mirrors Java `goosefs.user.client.cache.async.write.enabled`.
+    #[serde(default = "default_true_bool")]
+    pub client_cache_async_write_enabled: bool,
+
+    /// Async write-back concurrency (default: 16).
+    ///
+    /// Mirrors Java `goosefs.user.client.cache.async.write.threads`.
+    #[serde(default = "default_client_cache_async_write_threads")]
+    pub client_cache_async_write_threads: usize,
+
+    /// Whether per-scope cache quota is enabled (default: `false`).
+    ///
+    /// Mirrors Java `goosefs.user.client.cache.quota.enabled`.
+    #[serde(default)]
+    pub client_cache_quota_enabled: bool,
+
+    /// Page time-to-live in seconds; `0` means no expiry (default: `0`).
+    ///
+    /// Mirrors Java `goosefs.user.client.cache.ttl`.
+    #[serde(default)]
+    pub client_cache_ttl_secs: u64,
+
+    /// Whether **sequential** reads (`read`) are routed through the local page
+    /// cache (default: `false`).
+    ///
+    /// Random reads (`read_at`) always consult the cache when it is enabled.
+    /// Sequential reads, however, default to the native streaming path: routing
+    /// a large sequential scan through fixed-size pages turns one streamed
+    /// request into many per-page positioned reads (read amplification), and a
+    /// `NoCache` sequential read would re-fetch a whole page for every small
+    /// buffer with no caching benefit. Enable this only when sequential reads
+    /// are expected to be re-read and should be cached/served locally.
+    #[serde(default)]
+    pub client_cache_sequential_read_enabled: bool,
 }
 
 fn default_master_inquire_max_duration() -> Duration {
@@ -1115,6 +1312,23 @@ fn default_pushgateway_push_interval() -> Duration {
 }
 fn default_pushgateway_job() -> String {
     "goosefs_client".to_string()
+}
+
+// ── Client local page cache defaults ─────────────────────────
+fn default_client_cache_page_size() -> u64 {
+    DEFAULT_CLIENT_CACHE_PAGE_SIZE
+}
+fn default_client_cache_size() -> u64 {
+    DEFAULT_CLIENT_CACHE_SIZE
+}
+fn default_client_cache_dirs() -> Vec<String> {
+    vec![DEFAULT_CLIENT_CACHE_DIR.to_string()]
+}
+fn default_client_cache_async_write_threads() -> usize {
+    DEFAULT_CLIENT_CACHE_ASYNC_WRITE_THREADS
+}
+fn default_true_bool() -> bool {
+    true
 }
 
 // ── Streaming-read tuning / master pool defaults (Part V) ─────
@@ -1178,6 +1392,16 @@ impl Default for GoosefsConfig {
             pushgateway_push_interval: default_pushgateway_push_interval(),
             pushgateway_job: default_pushgateway_job(),
             pushgateway_instance: None,
+            client_cache_enabled: false,
+            client_cache_page_size: default_client_cache_page_size(),
+            client_cache_size: default_client_cache_size(),
+            client_cache_dirs: default_client_cache_dirs(),
+            client_cache_evictor: CacheEvictorType::default(),
+            client_cache_async_write_enabled: default_true_bool(),
+            client_cache_async_write_threads: default_client_cache_async_write_threads(),
+            client_cache_quota_enabled: false,
+            client_cache_ttl_secs: 0,
+            client_cache_sequential_read_enabled: false,
         }
     }
 }
@@ -1674,6 +1898,68 @@ impl GoosefsConfig {
         if let Ok(val) = env::var(ENV_PUSHGATEWAY_INSTANCE) {
             if !val.is_empty() {
                 self.pushgateway_instance = Some(val);
+            }
+        }
+
+        // ── Client local page cache ──────────────────────────
+        if let Ok(val) = env::var(ENV_CLIENT_CACHE_ENABLED) {
+            if let Ok(b) = val.to_lowercase().parse::<bool>() {
+                self.client_cache_enabled = b;
+            }
+        }
+        if let Ok(val) = env::var(ENV_CLIENT_CACHE_PAGE_SIZE) {
+            if let Ok(n) = val.parse::<u64>() {
+                if n > 0 {
+                    self.client_cache_page_size = n;
+                }
+            }
+        }
+        if let Ok(val) = env::var(ENV_CLIENT_CACHE_SIZE) {
+            if let Ok(n) = val.parse::<u64>() {
+                self.client_cache_size = n;
+            }
+        }
+        if let Ok(val) = env::var(ENV_CLIENT_CACHE_DIRS) {
+            let dirs: Vec<String> = val
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+            if !dirs.is_empty() {
+                self.client_cache_dirs = dirs;
+            }
+        }
+        if let Ok(val) = env::var(ENV_CLIENT_CACHE_EVICTOR) {
+            if let Ok(e) = val.parse::<CacheEvictorType>() {
+                self.client_cache_evictor = e;
+            }
+        }
+        if let Ok(val) = env::var(ENV_CLIENT_CACHE_ASYNC_WRITE_ENABLED) {
+            if let Ok(b) = val.to_lowercase().parse::<bool>() {
+                self.client_cache_async_write_enabled = b;
+            }
+        }
+        if let Ok(val) = env::var(ENV_CLIENT_CACHE_ASYNC_WRITE_THREADS) {
+            if let Ok(n) = val.parse::<usize>() {
+                if n > 0 {
+                    self.client_cache_async_write_threads = n;
+                }
+            }
+        }
+        if let Ok(val) = env::var(ENV_CLIENT_CACHE_QUOTA_ENABLED) {
+            if let Ok(b) = val.to_lowercase().parse::<bool>() {
+                self.client_cache_quota_enabled = b;
+            }
+        }
+        if let Ok(val) = env::var(ENV_CLIENT_CACHE_TTL_SECS) {
+            if let Ok(n) = val.parse::<u64>() {
+                self.client_cache_ttl_secs = n;
+            }
+        }
+        if let Ok(val) = env::var(ENV_CLIENT_CACHE_SEQUENTIAL_READ_ENABLED) {
+            if let Ok(b) = val.to_lowercase().parse::<bool>() {
+                self.client_cache_sequential_read_enabled = b;
             }
         }
 

@@ -303,6 +303,103 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 }
 ```
 
+### Example: Client Local Page Cache
+
+The SDK ships an optional **client-side local page cache** (mirrors the GooseFS
+Java client's `goosefs.user.client.cache.*`). When enabled, ranges read from a
+worker/UFS are cached on the **local disk** in fixed-size pages; subsequent reads
+of the same range are served straight from local disk — no worker round-trip.
+This is a big win for repeated-epoch AI training, Parquet/ORC random small I/O,
+and hot small-file reads.
+
+- **Disabled by default** — existing behavior is unchanged unless you opt in.
+- **Best-effort** — any cache error or miss transparently falls back to reading
+  from the worker/UFS; the cache never affects correctness.
+- **Transparent** — random (`read_at`) reads on `GoosefsFileInStream` route
+  through the cache once enabled, with no API change. Sequential (`read`) reads
+  **bypass the cache by default** to avoid read amplification; enable
+  `client_cache_sequential_read_enabled` to cache them too.
+  **Note**: the cache is consulted by the **seekable streaming reader**
+  (`GoosefsFileInStream` / Python `fs.open_file(...)`). The one-shot
+  `GoosefsFileReader::read_file`/`read_range` and `positioned_read` helpers use
+  the worker-direct path and do **not** consult the local cache — read via the
+  streaming reader to benefit from caching.
+- **Overwrite-safe** — on (re)open the cache compares the file's
+  `(length, last_modification_time)`; if the file changed, its stale pages are
+  invalidated automatically. (Best-effort: relies on the UFS `mtime`
+  granularity — use a TTL where only second-level `mtime` is available.)
+- **Survives restarts** — pages **and their identity** persisted on disk are
+  restored on startup, so overwrite detection still applies to restored pages.
+
+```rust
+use std::sync::Arc;
+
+use goosefs_sdk::config::GoosefsConfig;
+use goosefs_sdk::context::FileSystemContext;
+use goosefs_sdk::io::GoosefsFileInStream;
+use goosefs_sdk::fs::options::OpenFileOptions;
+
+#[tokio::main]
+async fn main() -> goosefs_sdk::error::Result<()> {
+    let mut config = GoosefsConfig::new("127.0.0.1:9200");
+
+    // ── Enable the local page cache ──────────────────────────────
+    config.client_cache_enabled = true;                       // off by default
+    config.client_cache_page_size = 1024 * 1024;              // 1 MiB pages
+    config.client_cache_size = 512 * 1024 * 1024;             // 512 MiB per dir
+    config.client_cache_dirs = vec!["/tmp/goosefs_cache".into()];
+    // Optional knobs:
+    // config.client_cache_evictor = goosefs_sdk::config::CacheEvictorType::Lru; // or Lfu
+    // config.client_cache_async_write_enabled = true;        // async back-fill (default)
+    // config.client_cache_ttl_secs = 0;                      // 0 = no expiry
+    // config.client_cache_sequential_read_enabled = false;   // cache sequential reads too (off by default)
+
+    // The cache lives on the context and is shared by every reader it opens.
+    let ctx: Arc<FileSystemContext> = FileSystemContext::connect(config).await?;
+
+    // Reads transparently consult / fill the cache.
+    let mut s =
+        GoosefsFileInStream::open_with_context(ctx.clone(), "/data/big.parquet", OpenFileOptions::default())
+            .await?;
+    let _cold = s.read_at(0, 1 << 20).await?; // miss → worker + back-fill
+    let _warm = s.read_at(0, 1 << 20).await?; // hit  → served from local disk
+
+    ctx.close().await?;
+    Ok(())
+}
+```
+
+Configuration is also accepted via `goosefs-site.properties` keys,
+`GOOSEFS_USER_CLIENT_CACHE_*` environment variables, and (from Python) the
+`Config(properties={...})` dict:
+
+| Property key | Field | Default |
+|---|---|---|
+| `goosefs.user.client.cache.enabled` | `client_cache_enabled` | `false` |
+| `goosefs.user.client.cache.page.size` | `client_cache_page_size` | `1MB` |
+| `goosefs.user.client.cache.size` | `client_cache_size` | `512MB` |
+| `goosefs.user.client.cache.dirs` | `client_cache_dirs` | `/tmp/goosefs_cache` |
+| `goosefs.user.client.cache.eviction.policy` | `client_cache_evictor` | `LRU` |
+| `goosefs.user.client.cache.async.write.enabled` | `client_cache_async_write_enabled` | `true` |
+| `goosefs.user.client.cache.async.write.threads` | `client_cache_async_write_threads` | `16` |
+| `goosefs.user.client.cache.ttl.seconds` | `client_cache_ttl_secs` | `0` (no expiry) |
+| `goosefs.user.client.cache.sequential.read.enabled` | `client_cache_sequential_read_enabled` | `false` |
+
+Cache effectiveness is observable via `Client.Cache*` metrics (e.g.
+`CacheBytesReadCache` vs `CacheBytesReadExternal`, `CachePages`,
+`CacheBytesEvicted`), reported through the same heartbeat/Pushgateway pipeline
+as other client metrics.
+
+> **Tip:** Run `cargo run --example page_cache_demo` for an end-to-end demo that
+> writes a file, then proves cold-miss → back-fill → warm-hit using the
+> `Client.Cache*` metrics. (Set `GOOSEFS_AUTH_TYPE=nosasl` if your dev cluster
+> runs without SASL.)
+>
+> More cache coverage:
+> - A/B throughput benchmark: `cargo run --release --example page_cache_ab`
+> - Integration tests (live cluster): `GOOSEFS_AUTH_TYPE=nosasl cargo test --test page_cache_e2e -- --ignored`
+> - Python e2e: `GOOSEFS_MASTER_ADDR=127.0.0.1:9200 GOOSEFS_AUTH_TYPE=nosasl uv run --group test pytest tests/test_page_cache.py` (in `bindings/python`)
+
 ### Example: Client Metrics & Heartbeat
 
 The SDK ships a built-in client-metrics pipeline. When `metrics_enabled = true`
@@ -634,6 +731,7 @@ goosefs-client-rust/
 │   ├── streaming_file_read.rs   # ★ Streaming read — constant O(block) memory
 │   ├── seekable_file_read.rs    # ★ Seekable read via GoosefsFileInStream (seek / read_at)
 │   ├── context_file_rw.rs       # ★ FileSystemContext shared connection pool
+│   ├── page_cache_demo.rs       # ★ Client local page cache (cold miss → back-fill → warm hit)
 │   ├── write_types.rs           # ★ WriteType comparison
 │   ├── ha_multi_master.rs       # ★ Multi-master mode
 │   ├── auth_demo.rs             # ★ Authentication demo (NOSASL / SIMPLE)

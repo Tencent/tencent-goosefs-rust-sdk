@@ -44,6 +44,9 @@ pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 bytes = "1"
 futures = "0.3"
+# Stable, high-performance hash (xxHash3), aligned with the SDK crate and
+# Lance's `xxhash_rust::xxh3` usage. Used by `PyFileStatus::__hash__`.
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

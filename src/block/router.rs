@@ -9,7 +9,6 @@
 //! - Local worker preference — detect the local worker by hostname/IP
 //!   and route block reads there first (mirrors Java `LocalFirstPolicy`)
 
-use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,6 +16,7 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
+use xxhash_rust::xxh3::Xxh3Default;
 
 use arc_swap::ArcSwap;
 
@@ -468,8 +468,14 @@ fn worker_addr_key(addr: &WorkerNetAddress) -> String {
 }
 
 /// Compute a u64 hash for a string key.
+///
+/// xxHash3 (same hash Lance uses via `xxhash_rust::xxh3`): fast and
+/// non-cryptographic. The consistent-hashing ring is rebuilt in-process from
+/// the current worker set, so only intra-run consistency matters — no DoS
+/// resistance or cross-version stability is required here. Standardised across
+/// the project on xxHash3.
 fn hash_key(key: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = Xxh3Default::default();
     key.hash(&mut hasher);
     hasher.finish()
 }
