@@ -49,7 +49,7 @@ use bytes::{Bytes, BytesMut};
 use tracing::{debug, warn};
 
 use crate::block::router::WorkerRouter;
-use crate::block::short_circuit::{ShortCircuitConfig, ShortCircuitError, ShortCircuitFactory};
+use crate::block::short_circuit::{ShortCircuitError, ShortCircuitFactory};
 use crate::cache::{CacheManager, ExternalRangeReader};
 use crate::client::{WorkerClient, WorkerClientPool, WorkerManagerClient};
 use crate::config::GoosefsConfig;
@@ -327,20 +327,11 @@ impl GoosefsFileInStream {
         let file_length = status.length;
         let worker_pool = ctx.acquire_worker_pool();
 
-        // Build the short-circuit factory (best-effort optimisation). It reuses
-        // the context's shared worker pool + router (the router carries the
-        // local-worker detection that drives `source_is_local`). Disabled when
-        // the SC kill switch is off.
-        let sc_cfg = ShortCircuitConfig::from_config(&config);
-        let short_circuit = if sc_cfg.enabled {
-            Some(Arc::new(ShortCircuitFactory::new(
-                worker_pool.clone(),
-                shared_router.clone(),
-                sc_cfg,
-            )))
-        } else {
-            None
-        };
+        // Reuse the context-shared short-circuit factory (P8): all streams from
+        // this context share one hot-block reader LRU, so a hot local block is
+        // opened/mmap'd once and reused across streams. `None` when the SC kill
+        // switch is off.
+        let short_circuit = ctx.acquire_short_circuit();
 
         // Inject the shared page cache (best-effort; `None` when disabled).
         let cache = ctx.acquire_cache_manager();

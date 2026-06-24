@@ -224,6 +224,50 @@ mod e2e {
         Ok(())
     }
 
+    /// P8: two streams built from the **same context** share the SC reader
+    /// LRU, so a hot block is `OpenLocalBlock`+mmap'd once and the second
+    /// stream's read is a cache hit (not a fresh open).
+    #[tokio::test]
+    #[ignore]
+    async fn short_circuit_reader_shared_across_streams() -> Result<()> {
+        let ctx = FileSystemContext::connect(base_config()).await?;
+        let path = unique_path("shared");
+        let payload = make_payload(2 * 1024 * 1024);
+        write_blob(&ctx, &path, &payload).await?;
+
+        let open_before = sc_open_success();
+        let hits_before = sc_cache_hits();
+
+        // Stream A reads block 0 → opens the reader.
+        let mut a =
+            GoosefsFileInStream::open_with_context(ctx.clone(), &path, OpenFileOptions::default())
+                .await?;
+        let ra = a.read_at(0, 4096).await?;
+        assert_eq!(ra.as_ref(), &payload[..4096]);
+
+        // Stream B (same context) reads the same block → shared-LRU hit, no
+        // additional OpenLocalBlock.
+        let mut b =
+            GoosefsFileInStream::open_with_context(ctx.clone(), &path, OpenFileOptions::default())
+                .await?;
+        let rb = b.read_at(2048, 4096).await?;
+        assert_eq!(rb.as_ref(), &payload[2048..2048 + 4096]);
+
+        let opens = sc_open_success() - open_before;
+        let hits = sc_cache_hits() - hits_before;
+        // One open shared by both streams; B's read is a hit. Lower bounds keep
+        // the assertion robust under concurrent SC tests.
+        assert!(opens >= 1, "expected at least one OpenLocalBlock");
+        assert!(
+            hits >= 1,
+            "second stream must reuse the shared reader (>=1 cache hit), got {hits}"
+        );
+
+        ctx.acquire_master().delete(&path, false).await.ok();
+        ctx.close().await?;
+        Ok(())
+    }
+
     /// Per-block reader reuse: many reads of the same block trigger exactly one
     /// `OpenLocalBlock`; the rest are LRU cache hits.
     #[tokio::test]

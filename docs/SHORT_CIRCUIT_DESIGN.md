@@ -977,17 +977,17 @@ Java 的 `LocalFileDataReader.close()` 是 `mStream.close() + waitForComplete()`
 | P0 | 文档评审通过 | 本文档 | ✅ 完成 |
 | P1 | 重构 LocalBlockReader：去 _file，去 spawn_blocking，加 MADV_RANDOM | crate memmap2 ≥ 0.9 | ✅ 完成（`src/block/short_circuit/reader.rs`，零拷贝 read/read_bytes/read_to_slice + L2 prefetch） |
 | P2 | 实现 ShortCircuitFactory（LRU + neg cache） | lru crate | ✅ 完成（`factory.rs`，有界 LRU + 有界负缓存 + 决策矩阵 + EACCES 粘性禁用） |
-| P3 | 接入 BlockInStream::create，capability 注入 | worker.rs 改造 | ◑ 部分完成：随机/定位读路径（`read_external_range`）与**顺序 `read()` 路径**均已接入 SC（直接从本地 mmap 切片），透明回退 gRPC；`WorkerClient::open_local_block` + RAII guard 已实现。**capability 仍传 `None`**（§3.1，dev 缺 `capability_fetcher`，待补） |
+| P3 | 接入 BlockInStream::create，capability 注入 | worker.rs 改造 | ✅ 完成：随机/定位读路径（`read_external_range`）与顺序 `read()` 路径均接入 SC，透明回退 gRPC；`WorkerClient::open_local_block` + RAII guard 实现。capability **插桩已完成**——`CapabilityProvider` trait + 工厂 `with_capability_provider`，按 block 注入；默认无 provider 发 `None`（NOSASL/禁用集群正常，开启集群自动回退）。仅「真实凭据来源」属外部待补（dev 读路径尚无 `capability_fetcher`） |
 | P4 | metrics + tracing 全量打通 | metrics/tracing | ✅ 完成（`Client.ShortCircuit*` 13 项计数/Gauge + tracing span） |
 | — | **端到端验证**（本地 NOSASL 集群） | 运行中的 Worker | ✅ 完成：`examples/short_circuit_demo.rs` + `tests/short_circuit_e2e.rs`（4 用例：SC 命中、SC vs gRPC 字节一致 INV-S1、顺序 read_all、reader 复用）。附带修复：`WorkerRouter` 改用「绑定本机接口地址」判定本地 worker |
 | P5 | bench：sc_seq / sc_pr / sc_lat 三套 | criterion | ✅ 完成（以可运行 A/B 形式）：`benchmarks/sc_pr_ab.rs`（SC vs gRPC 随机读吞吐+p50/p99/p999）。实测见 `docs/perf/2026-06-24-sc-pr-ab/`：热 cache 下吞吐 ×307、p99 ×261 |
 | P6 | SIGBUS handler + safe_read 兜底 | signal-hook | ✅ 完成（`sigbus.rs`，SA_SIGINFO 异步信号安全诊断 + abort，unix；用 libc 非 signal-hook） |
 | P7 | 大页（THP via MADV_HUGEPAGE）opt-in + 实测 | 内核 THP 支持 | ◑ opt-in 已实现（`short.circuit.thp`，Linux `MADV_HUGEPAGE`，默认关）；实测留待 Linux 节点 |
-| P8 | 跨任务共享 pool（可选） | 评估后决定 | ⏸ 评估后**暂缓**：P5 实测显示单次 `OpenLocalBlock`+mmap 的成本被同块数千次切片读完全摊薄（demo 中 1 open / 63+ cache 命中），per-task LRU 已捕获绝大部分收益；进程级共享 pool 引入 `Arc` 原子开销 + 跨任务锁生命周期协调复杂度，性价比低。待出现「大量并发流读同一热块」的实测瓶颈再启动 |
+| P8 | 跨任务共享 pool（可选） | 评估后决定 | ✅ 完成：`ShortCircuitFactory` 上提到 `FileSystemContext`（`acquire_short_circuit`），同一 context 的所有流共享一份热块 reader LRU + 负缓存——热块仅 `OpenLocalBlock`+mmap 一次，跨流/跨任务复用。前置：将 guard 的 tonic `Streaming` 包入 `Mutex` 使 `LocalBlockReader: Send+Sync`（编译期断言 + E2E `short_circuit_reader_shared_across_streams` 验证） |
 
 每阶段需附 PR + bench 报告 + 火焰图。
 
-> **实现说明（截至本次提交）**：P1/P2/P4/P5/P6 完成，P3（随机+顺序读路径）与 P7（THP opt-in）落地并经真实集群验证字节一致 + 性能基准。剩余：P3 capability 来源接入、P7 Linux 实测、P8 跨任务 pool。代码位于 `src/block/short_circuit/`（`reader.rs`/`factory.rs`/`sigbus.rs`）、`src/client/worker.rs`（`open_local_block` + `OpenLocalBlockGuard`）、`src/block/router.rs`（`is_block_source_local` + 接口绑定法本地判定）、`src/io/file_in_stream.rs`（`try_short_circuit_read` + `sc_sequential_read`）。基准 `benchmarks/sc_pr_ab.rs`，E2E `tests/short_circuit_e2e.rs`，示例 `examples/short_circuit_demo.rs`。
+> **实现说明（截至本次提交）**：P1–P6、P8 完成；P3 含 capability 插桩（`CapabilityProvider`），随机+顺序读路径均落地并经真实集群验证字节一致 + 性能基准 + 跨流共享。剩余外部依赖：P3 真实 capability 凭据来源、P7 Linux THP 实测。代码位于 `src/block/short_circuit/`（`reader.rs`/`factory.rs`/`sigbus.rs`）、`src/client/worker.rs`、`src/block/router.rs`、`src/io/file_in_stream.rs`、`src/context.rs`（共享工厂）。基准 `benchmarks/sc_pr_ab.rs`，E2E `tests/short_circuit_e2e.rs`（5 用例），示例 `examples/short_circuit_demo.rs`。
 
 ---
 

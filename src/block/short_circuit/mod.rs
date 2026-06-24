@@ -21,7 +21,8 @@ mod reader;
 mod sigbus;
 
 pub use factory::{
-    should_use_short_circuit, ScDecisionCtx, ShortCircuitConfig, ShortCircuitFactory,
+    should_use_short_circuit, CapabilityProvider, ScDecisionCtx, ShortCircuitConfig,
+    ShortCircuitFactory,
 };
 pub use reader::LocalBlockReader;
 

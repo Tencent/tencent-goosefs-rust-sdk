@@ -426,6 +426,18 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// `LocalBlockReader` (and thus `Arc<LocalBlockReader>`) must be
+    /// `Send + Sync` so the context-level `ShortCircuitFactory` can share
+    /// cached readers across tasks/threads (P8). This is a compile-time guard:
+    /// it fails to build if a future change (e.g. an un-wrapped `!Sync` field
+    /// in the guard) regresses the bound.
+    #[test]
+    fn local_block_reader_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<LocalBlockReader>();
+        assert_send_sync::<std::sync::Arc<LocalBlockReader>>();
+    }
+
     /// Write `data` to a uniquely-named temp file and return its path.
     fn write_temp(data: &[u8]) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();

@@ -280,7 +280,14 @@ pub struct OpenLocalBlockGuard {
     _request_tx: Option<mpsc::Sender<OpenLocalBlockRequest>>,
     /// Server→client half. Held (but not polled) so the stream is not torn
     /// down before `_request_tx` closes it; dropped together with the guard.
-    _response_stream: Streaming<OpenLocalBlockResponse>,
+    ///
+    /// Wrapped in a `std::sync::Mutex` purely to make the guard (and therefore
+    /// [`LocalBlockReader`](crate::block::short_circuit::LocalBlockReader))
+    /// `Sync`: tonic's `Streaming` is `Send` but `!Sync`, which would otherwise
+    /// prevent sharing a cached reader across tasks via the process/context-
+    /// level [`ShortCircuitFactory`](crate::block::short_circuit::ShortCircuitFactory).
+    /// The mutex is never locked — the stream is only kept alive for Drop.
+    _response_stream: std::sync::Mutex<Streaming<OpenLocalBlockResponse>>,
 }
 
 impl Drop for OpenLocalBlockGuard {
@@ -562,7 +569,7 @@ impl WorkerClient {
         let guard = OpenLocalBlockGuard {
             block_id,
             _request_tx: Some(tx),
-            _response_stream: response_stream,
+            _response_stream: std::sync::Mutex::new(response_stream),
         };
         Ok((first, guard))
     }

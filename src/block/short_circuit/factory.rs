@@ -27,8 +27,25 @@ use crate::client::WorkerClientPool;
 use crate::config::GoosefsConfig;
 use crate::error::{Error, Result};
 use crate::metrics::{self, name};
+use crate::proto::proto::security::Capability;
 
 use super::{AccessHint, LocalBlockReader, ShortCircuitError};
+
+/// Supplies the `Capability` to attach to an `OpenLocalBlock` request for a
+/// given block (design §3.1 / INV-S3).
+///
+/// On capability-enabled clusters the Worker rejects `OpenLocalBlock` requests
+/// without a valid capability; an implementation of this trait is how the SC
+/// path obtains one. The credential **source** does not yet exist in the dev
+/// client read path (`InStreamOptions` has no `capability_fetcher`), so by
+/// default no provider is set and `None` (no capability) is sent — which on a
+/// capability-enabled cluster simply triggers a transparent gRPC fallback
+/// (INV-S1). Wiring a real provider (from `FileSystemContext` / auth config) is
+/// the remaining external step.
+pub trait CapabilityProvider: Send + Sync {
+    /// Return the capability for `block_id`, or `None` if unavailable.
+    fn capability_for(&self, block_id: i64) -> Option<Capability>;
+}
 
 /// Resolved short-circuit tuning, derived from [`GoosefsConfig`] (design §6).
 #[derive(Debug, Clone)]
@@ -130,6 +147,9 @@ pub struct ShortCircuitFactory {
     neg_cache: Mutex<LruCache<i64, Instant>>,
     /// Sticky process-level disable (set on a permanent failure like EACCES).
     process_sc_disabled: AtomicBool,
+    /// Optional capability provider for `OpenLocalBlock` (design §3.1). `None`
+    /// → send no capability (works on capability-disabled / NOSASL clusters).
+    capability_provider: Option<Arc<dyn CapabilityProvider>>,
     cfg: ShortCircuitConfig,
 }
 
@@ -152,8 +172,16 @@ impl ShortCircuitFactory {
             cache: Mutex::new(LruCache::new(cap)),
             neg_cache: Mutex::new(LruCache::new(neg_cap)),
             process_sc_disabled: AtomicBool::new(false),
+            capability_provider: None,
             cfg,
         }
+    }
+
+    /// Attach a [`CapabilityProvider`] used to populate `OpenLocalBlock`
+    /// requests (design §3.1). Builder style; defaults to no provider.
+    pub fn with_capability_provider(mut self, provider: Arc<dyn CapabilityProvider>) -> Self {
+        self.capability_provider = Some(provider);
+        self
     }
 
     /// The resolved SC config.
@@ -207,13 +235,23 @@ impl ShortCircuitFactory {
             .await
             .map_err(|e| ShortCircuitError::OpenLocalBlock(Box::new(e)))?;
 
-        // 3) Open the local block. capability source is a P3 item (design
-        //    §3.1) — pass `None` until the client read path wires up a
-        //    capability fetcher. On capability-enabled clusters this will be
-        //    rejected and we transparently fall back to gRPC (INV-S1/S3).
-        let open_result =
-            LocalBlockReader::open(&worker, block_id, block_size, None, self.cfg.advise, self.cfg.thp)
-                .await;
+        // 3) Open the local block. capability comes from the provider when one
+        //    is configured (design §3.1); otherwise `None` (no capability),
+        //    which on a capability-enabled cluster triggers a transparent gRPC
+        //    fallback (INV-S1/S3).
+        let capability = self
+            .capability_provider
+            .as_ref()
+            .and_then(|p| p.capability_for(block_id));
+        let open_result = LocalBlockReader::open(
+            &worker,
+            block_id,
+            block_size,
+            capability,
+            self.cfg.advise,
+            self.cfg.thp,
+        )
+        .await;
 
         match open_result {
             Ok(reader) => {
