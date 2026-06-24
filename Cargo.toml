@@ -152,6 +152,10 @@ path = "benchmarks/repro_writer_write_with_concurrent.rs"
 name = "page_cache_ab"
 path = "benchmarks/page_cache_ab.rs"
 
+[[example]]
+name = "sc_pr_ab"
+path = "benchmarks/sc_pr_ab.rs"
+
 # Release profile tuning for the SDK hot paths.
 #
 # Rationale (see docs/RUST_PYTHON_SDK_OPTIMIZATION.md Part II §6):
