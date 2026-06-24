@@ -310,6 +310,30 @@ impl WorkerRouter {
         self.failed_workers.insert(key, Instant::now());
     }
 
+    /// `source_is_local` pre-filter for short-circuit reads
+    /// (SHORT_CIRCUIT_DESIGN §3.7).
+    ///
+    /// Returns `true` iff the worker that would serve `block_id` is the
+    /// detected local worker. This composes the existing local-first routing:
+    /// [`select_worker`](Self::select_worker) already returns the local worker
+    /// (when present & healthy) for *every* block, so a match here means the
+    /// block would be served locally.
+    ///
+    /// **Note (design §3.7):** "worker local" ≠ "block physically local". This
+    /// is only a pre-filter to avoid issuing a pointless `OpenLocalBlock` RPC
+    /// to a remote worker; the final authority on whether the block can be
+    /// mmap'd locally is the `OpenLocalBlock` RPC itself.
+    pub async fn is_block_source_local(&self, block_id: i64) -> bool {
+        let Ok(selected) = self.select_worker(block_id).await else {
+            return false;
+        };
+        // `select_worker` has now probed & cached the local worker id.
+        match **self.local_worker_id.load() {
+            Some(Some(local_id)) => selected.id == Some(local_id),
+            _ => false,
+        }
+    }
+
     /// Pick any eligible worker (random selection, not tied to a block ID).
     ///
     /// Matches Java `UnderFileSystemFileOutStream`:

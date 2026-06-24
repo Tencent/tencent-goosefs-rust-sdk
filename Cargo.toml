@@ -82,6 +82,15 @@ arc-swap = "1"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 serde = { version = "1", features = ["derive"] }
 async-trait = "0.1"
+# Short-circuit (local) block read data plane: whole-block read-only mmap +
+# `madvise` hints (MADV_RANDOM / SEQUENTIAL / WILLNEED). See
+# docs/SHORT_CIRCUIT_DESIGN.md §3.2. `Mmap::advise` is unix-only; all advise
+# calls are `cfg(unix)`-gated so the crate still builds on other targets.
+memmap2 = "0.9"
+# Bounded LRU used by `ShortCircuitFactory` for the per-task hot-block reader
+# cache and the (also bounded) negative cache. See SHORT_CIRCUIT_DESIGN.md
+# §3.5 / §4.2.
+lru = "0.12"
 rand = "0.9.1"
 uuid = { version = "1.2", features = ["v4"] }
 hostname = "0.4"

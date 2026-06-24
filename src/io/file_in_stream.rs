@@ -49,6 +49,7 @@ use bytes::{Bytes, BytesMut};
 use tracing::{debug, warn};
 
 use crate::block::router::WorkerRouter;
+use crate::block::short_circuit::{ShortCircuitConfig, ShortCircuitError, ShortCircuitFactory};
 use crate::cache::{CacheManager, ExternalRangeReader};
 use crate::client::{WorkerClient, WorkerClientPool, WorkerManagerClient};
 use crate::config::GoosefsConfig;
@@ -168,6 +169,17 @@ pub struct GoosefsFileInStream {
     /// Random reads (`read_at`) always use the cache when present; sequential
     /// reads default to the native streaming path to avoid read amplification.
     cache_sequential_read: bool,
+
+    // ── Short-circuit (local mmap) read path ─────────────────────────────────
+    /// Short-circuit factory, when SC is enabled **and** the stream was built
+    /// in context mode (it needs the shared `WorkerClientPool` + `WorkerRouter`).
+    ///
+    /// `None` disables SC for this stream (legacy `open()`, or SC kill switch
+    /// off). When `Some`, the positioned-read path (`read_external_range`,
+    /// which also backs cache miss-fills and `read_at`) first attempts a local
+    /// mmap read and transparently falls back to gRPC on any recoverable
+    /// failure (INV-S1). See `docs/SHORT_CIRCUIT_DESIGN.md` §4.3.
+    short_circuit: Option<Arc<ShortCircuitFactory>>,
 }
 
 impl GoosefsFileInStream {
@@ -249,6 +261,9 @@ impl GoosefsFileInStream {
             cache_fill: false,
             cache_async_write: false,
             cache_sequential_read: false,
+            // SC needs the shared pool + router from a FileSystemContext; the
+            // legacy `open()` path has neither, so SC is disabled here.
+            short_circuit: None,
         })
     }
 
@@ -304,6 +319,21 @@ impl GoosefsFileInStream {
         let file_length = status.length;
         let worker_pool = ctx.acquire_worker_pool();
 
+        // Build the short-circuit factory (best-effort optimisation). It reuses
+        // the context's shared worker pool + router (the router carries the
+        // local-worker detection that drives `source_is_local`). Disabled when
+        // the SC kill switch is off.
+        let sc_cfg = ShortCircuitConfig::from_config(&config);
+        let short_circuit = if sc_cfg.enabled {
+            Some(Arc::new(ShortCircuitFactory::new(
+                worker_pool.clone(),
+                shared_router.clone(),
+                sc_cfg,
+            )))
+        } else {
+            None
+        };
+
         // Inject the shared page cache (best-effort; `None` when disabled).
         let cache = ctx.acquire_cache_manager();
         let cache_file_id: Arc<str> = Arc::from(status.file_id.to_string());
@@ -353,6 +383,7 @@ impl GoosefsFileInStream {
             cache_fill,
             cache_async_write: config.client_cache_async_write_enabled,
             cache_sequential_read: config.client_cache_sequential_read_enabled,
+            short_circuit,
         })
     }
 
@@ -669,6 +700,16 @@ impl GoosefsFileInStream {
             let block_id = self.block_id_at(first_block_idx)?;
             let offset_in_block = self.offset_in_block(offset);
             let length = end - offset;
+
+            // Try the short-circuit (local mmap) path first; it falls back
+            // transparently to gRPC on any recoverable failure (INV-S1).
+            if let Some(sc_result) = self
+                .try_short_circuit_read(block_id, first_block_idx, offset_in_block, length)
+                .await
+            {
+                return sc_result;
+            }
+
             let data = self
                 .positioned_read_with_retry(first_block_idx, block_id, offset_in_block, length)
                 .await?;
@@ -700,9 +741,18 @@ impl GoosefsFileInStream {
             let read_end = end.min(block_end);
             let length = read_end - cur;
 
-            let data = self
-                .positioned_read_with_retry(block_idx, block_id, offset_in_block, length)
-                .await?;
+            // Short-circuit per block, with transparent gRPC fallback.
+            let data = match self
+                .try_short_circuit_read(block_id, block_idx, offset_in_block, length)
+                .await
+            {
+                Some(Ok(b)) => b,
+                Some(Err(e)) => return Err(e),
+                None => {
+                    self.positioned_read_with_retry(block_idx, block_id, offset_in_block, length)
+                        .await?
+                }
+            };
 
             // H2 fix: advance the cursor by the *actual* number of bytes
             // delivered, not by the requested `length`. `positioned_read` /
@@ -827,6 +877,92 @@ impl GoosefsFileInStream {
                 .await
             }
             Err(e) => Err(e),
+        }
+    }
+
+    /// Logical (on-disk) byte size of the block at `block_idx`.
+    ///
+    /// Full blocks are `block_size_bytes`; the trailing block is the file
+    /// remainder. This is what the Worker reports as the `OpenLocalBlock`
+    /// response `block_size`, so it is the value passed to the short-circuit
+    /// factory (request `block_size` + the SC decision's size threshold).
+    fn block_logical_size(&self, block_idx: usize) -> i64 {
+        let bs = self.status.block_size_bytes;
+        if bs <= 0 {
+            return self.file_length.max(0);
+        }
+        let start = self.block_start(block_idx);
+        (self.file_length - start).clamp(0, bs)
+    }
+
+    /// Attempt a short-circuit (local mmap) read of `[offset_in_block,
+    /// offset_in_block+length)` within `block_id`.
+    ///
+    /// Returns:
+    /// - `Some(Ok(bytes))` — SC served the read (zero-copy).
+    /// - `Some(Err(e))`   — a **semantic** error (e.g. `OutOfRange`) that must
+    ///   be surfaced unchanged (INV-S4); the caller must NOT fall back.
+    /// - `None`           — SC was not used, or hit a recoverable failure;
+    ///   the caller transparently falls back to the gRPC path (INV-S1).
+    ///
+    /// capability is `None` here (design §3.1 P3 item — the read path has no
+    /// capability fetcher yet). On capability-enabled clusters the
+    /// `OpenLocalBlock` RPC is rejected and this returns `None`, so the read
+    /// still completes over gRPC with identical bytes.
+    async fn try_short_circuit_read(
+        &self,
+        block_id: i64,
+        block_idx: usize,
+        offset_in_block: i64,
+        length: i64,
+    ) -> Option<Result<Bytes>> {
+        let factory = self.short_circuit.as_ref()?;
+        let block_size = self.block_logical_size(block_idx);
+
+        if !factory.should_use(block_id, block_size).await {
+            return None;
+        }
+
+        let reader = match factory.get_or_open(block_id, block_size).await {
+            Ok(r) => r,
+            Err(e) => {
+                // `get_or_open` already negative-caches recoverable failures.
+                // A semantic error cannot arise from open; treat everything as
+                // a transparent fallback to gRPC.
+                debug!(
+                    block_id = block_id,
+                    error = %e,
+                    "short-circuit open failed, falling back to gRPC"
+                );
+                return None;
+            }
+        };
+
+        match reader.read_bytes(offset_in_block as usize, length as usize) {
+            Ok(bytes) => Some(Ok(bytes)),
+            Err(ShortCircuitError::OutOfRange { off, len, file_size }) => {
+                // Semantic error — propagate (INV-S4). With ranges already
+                // clamped to file_length this should not occur; if it does it
+                // signals a real metadata/block-size inconsistency worth
+                // surfacing rather than masking behind a fallback.
+                Some(Err(Error::InvalidArgument {
+                    message: format!(
+                        "short-circuit read out of range on block {block_id}: \
+                         off={off} len={len} block_size={file_size}"
+                    ),
+                }))
+            }
+            Err(e) => {
+                // Any other (recoverable) read error: drop the cached reader
+                // and fall back to gRPC for this read.
+                debug!(
+                    block_id = block_id,
+                    error = %e,
+                    "short-circuit read failed, falling back to gRPC"
+                );
+                factory.invalidate(block_id).await;
+                None
+            }
         }
     }
 
@@ -1214,6 +1350,7 @@ mod tests {
             cache_fill: false,
             cache_async_write: false,
             cache_sequential_read: false,
+            short_circuit: None,
         }
     }
 
@@ -1343,5 +1480,27 @@ mod tests {
             stream.worker_pool.is_none(),
             "legacy mode should have no pool"
         );
+        assert!(
+            stream.short_circuit.is_none(),
+            "legacy mode should not enable short-circuit"
+        );
+    }
+
+    /// `block_logical_size` returns the full block size for interior blocks and
+    /// the file remainder for the trailing (partial) block — matching the
+    /// Worker's `OpenLocalBlock` response `block_size`.
+    #[test]
+    fn test_block_logical_size() {
+        let bs = 64 * 1024 * 1024i64;
+        // 2.5 blocks: blocks 0,1 are full; block 2 is a half-block remainder.
+        let len = 2 * bs + bs / 2;
+        let status = make_status(len, bs);
+        let stream = make_stream(status);
+
+        assert_eq!(stream.block_logical_size(0), bs);
+        assert_eq!(stream.block_logical_size(1), bs);
+        assert_eq!(stream.block_logical_size(2), bs / 2);
+        // Past EOF clamps to 0 (never negative).
+        assert_eq!(stream.block_logical_size(99), 0);
     }
 }
