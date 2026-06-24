@@ -18,6 +18,7 @@
 
 mod factory;
 mod reader;
+mod sigbus;
 
 pub use factory::{
     should_use_short_circuit, ScDecisionCtx, ShortCircuitConfig, ShortCircuitFactory,

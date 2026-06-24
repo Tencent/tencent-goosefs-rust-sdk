@@ -51,6 +51,10 @@ pub struct ShortCircuitConfig {
     pub prefetch_max_batch: usize,
     /// Minimum block size to attempt SC (`...min.block.size`).
     pub min_block_size: i64,
+    /// Install the SIGBUS diagnostic handler (`...sigbus.handler`).
+    pub sigbus_handler: bool,
+    /// Request THP for the mapping via `MADV_HUGEPAGE` (`...thp`, experimental).
+    pub thp: bool,
 }
 
 impl ShortCircuitConfig {
@@ -66,6 +70,8 @@ impl ShortCircuitConfig {
             prefetch_coalesce_gap: cfg.short_circuit_prefetch_coalesce_gap,
             prefetch_max_batch: cfg.short_circuit_prefetch_max_batch.max(1),
             min_block_size: cfg.short_circuit_min_block_size.max(0),
+            sigbus_handler: cfg.short_circuit_sigbus_handler,
+            thp: cfg.short_circuit_thp,
         }
     }
 }
@@ -138,6 +144,8 @@ impl ShortCircuitFactory {
         // The negative cache is independently bounded; reuse the reader-cache
         // capacity as a sensible upper bound on distinct recently-failed ids.
         let neg_cap = NonZeroUsize::new(cfg.cache_capacity.max(1).max(64)).unwrap();
+        // Install the process-global SIGBUS diagnostic handler (idempotent).
+        super::sigbus::install_if_enabled(cfg.sigbus_handler);
         Self {
             worker_pool,
             router,
@@ -204,7 +212,8 @@ impl ShortCircuitFactory {
         //    capability fetcher. On capability-enabled clusters this will be
         //    rejected and we transparently fall back to gRPC (INV-S1/S3).
         let open_result =
-            LocalBlockReader::open(&worker, block_id, block_size, None, self.cfg.advise).await;
+            LocalBlockReader::open(&worker, block_id, block_size, None, self.cfg.advise, self.cfg.thp)
+                .await;
 
         match open_result {
             Ok(reader) => {
@@ -327,6 +336,8 @@ mod tests {
             prefetch_coalesce_gap: 64 * 1024,
             prefetch_max_batch: 1024,
             min_block_size: 0,
+            sigbus_handler: false,
+            thp: false,
         }
     }
 

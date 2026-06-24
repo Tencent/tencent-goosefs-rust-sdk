@@ -1307,6 +1307,21 @@ pub struct GoosefsConfig {
     /// (default: 0 = no minimum). `goosefs.client.short.circuit.min.block.size`.
     #[serde(default)]
     pub short_circuit_min_block_size: i64,
+
+    /// Install a process-global SIGBUS handler that diagnoses + `abort`s on a
+    /// mapping fault (default: `true`). A SIGBUS on a committed, locked block
+    /// indicates a protocol violation (INV-D1); aborting surfaces it loudly
+    /// rather than returning torn/stale bytes (design §3.2 / §8.1). Linux/macOS
+    /// only; a no-op elsewhere. `goosefs.client.short.circuit.sigbus.handler`.
+    #[serde(default = "default_true_bool")]
+    pub short_circuit_sigbus_handler: bool,
+
+    /// Request Transparent Huge Pages for the block mapping via
+    /// `madvise(MADV_HUGEPAGE)` (default: `false`, **experimental**). Linux
+    /// only and effective only where file-backed THP is supported; a no-op
+    /// elsewhere. `goosefs.client.short.circuit.thp`.
+    #[serde(default)]
+    pub short_circuit_thp: bool,
 }
 
 fn default_master_inquire_max_duration() -> Duration {
@@ -1478,6 +1493,8 @@ impl Default for GoosefsConfig {
             short_circuit_prefetch_coalesce_gap: default_short_circuit_prefetch_coalesce_gap(),
             short_circuit_prefetch_max_batch: default_short_circuit_prefetch_max_batch(),
             short_circuit_min_block_size: 0,
+            short_circuit_sigbus_handler: true,
+            short_circuit_thp: false,
         }
     }
 }

@@ -75,7 +75,8 @@ impl LocalBlockReader {
     ///    `block_size` and a lock-holding [`OpenLocalBlockGuard`].
     /// 2. Maps the whole block file read-only (one `mmap`), then drops the
     ///    `File` so no fd is retained (the VMA keeps the inode alive).
-    /// 3. Applies the `madvise` hint derived from `hint` (L1 kernel readahead).
+    /// 3. Applies the `madvise` hint derived from `hint` (L1 kernel readahead),
+    ///    and optionally `MADV_HUGEPAGE` when `thp` is set (Linux only, §11.1).
     ///
     /// `block_size` is the caller's expected size used in the request; the
     /// **response** `block_size` is authoritative and becomes `file_size`.
@@ -89,6 +90,7 @@ impl LocalBlockReader {
         block_size: i64,
         capability: Option<Capability>,
         hint: AccessHint,
+        thp: bool,
     ) -> Result<Self, ShortCircuitError> {
         let (resp, guard) = client
             .open_local_block(block_id, block_size, capability)
@@ -137,6 +139,9 @@ impl LocalBlockReader {
         let file_size = file_size.min(mmap.len());
 
         apply_advice(&mmap, hint);
+        if thp {
+            apply_hugepage(&mmap);
+        }
 
         metrics::counter(name::CLIENT_SC_OPEN_SUCCESS).inc(1);
         metrics::gauge(name::CLIENT_SC_ACTIVE_READERS)
@@ -382,6 +387,21 @@ fn apply_advice(mmap: &Mmap, hint: AccessHint) {
 
 #[cfg(not(unix))]
 fn apply_advice(_mmap: &Mmap, _hint: AccessHint) {}
+
+/// Request Transparent Huge Pages for the mapping via `madvise(MADV_HUGEPAGE)`
+/// (design §11.1). Linux only — file-backed THP support is kernel/FS
+/// dependent, so this is best-effort and failures are logged and ignored.
+/// A no-op on every non-Linux target (no `MADV_HUGEPAGE` there).
+#[cfg(target_os = "linux")]
+fn apply_hugepage(mmap: &Mmap) {
+    use memmap2::Advice;
+    if let Err(e) = mmap.advise(Advice::HugePage) {
+        debug!(error = %e, "madvise(HUGEPAGE) failed (non-fatal)");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apply_hugepage(_mmap: &Mmap) {}
 
 /// Issue `madvise(MADV_WILLNEED)` over `[offset, offset+len)` (unix only).
 /// Best-effort: failures are logged and ignored (INV-D4 — readahead hint only).

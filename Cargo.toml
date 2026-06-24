@@ -98,6 +98,12 @@ hostname = "0.4"
 # downstream gRPC-only consumers can opt out.
 reqwest = { version = "^0.12", features = ["rustls-tls"], default-features = false, optional = true }
 
+# Unix-only: raw `sigaction` for the short-circuit SIGBUS diagnostic handler
+# (SHORT_CIRCUIT_DESIGN §3.2 / §8.1). Already in the dependency graph
+# transitively; declared directly so the handler can be registered.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [build-dependencies]
 # Optional: only required when regenerating protobuf code in-tree.
 # See build.rs and the `regen-proto` feature.

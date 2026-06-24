@@ -442,6 +442,7 @@ dependencies = [
  "dashmap",
  "futures",
  "hostname",
+ "libc",
  "lru",
  "memmap2",
  "prost",
