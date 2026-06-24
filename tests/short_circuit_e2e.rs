@@ -183,6 +183,47 @@ mod e2e {
         Ok(())
     }
 
+    /// Sequential `read_all()` is served by the short-circuit path and matches
+    /// the source byte-for-byte.
+    #[tokio::test]
+    #[ignore]
+    async fn short_circuit_sequential_read_all() -> Result<()> {
+        let ctx = FileSystemContext::connect(base_config()).await?;
+        let path = unique_path("seq");
+        let payload = make_payload(3 * 1024 * 1024);
+        write_blob(&ctx, &path, &payload).await?;
+
+        let open_before = sc_open_success();
+        let bytes_before = sc_read_bytes();
+
+        let mut s =
+            GoosefsFileInStream::open_with_context(ctx.clone(), &path, OpenFileOptions::default())
+                .await?;
+        let all = s.read_all().await?;
+
+        assert_eq!(all.len(), payload.len(), "read_all length mismatch");
+        assert_eq!(
+            all.as_ref(),
+            payload.as_slice(),
+            "read_all bytes mismatch (INV-S1)"
+        );
+
+        // The sequential path is now served by SC: at least one open and the
+        // SC byte counter advanced by at least the full file size.
+        assert!(
+            sc_open_success() > open_before,
+            "short-circuit did not engage on the sequential path"
+        );
+        assert!(
+            sc_read_bytes() - bytes_before >= payload.len() as i64,
+            "SC byte counter should cover the whole sequential read"
+        );
+
+        ctx.acquire_master().delete(&path, false).await.ok();
+        ctx.close().await?;
+        Ok(())
+    }
+
     /// Per-block reader reuse: many reads of the same block trigger exactly one
     /// `OpenLocalBlock`; the rest are LRU cache hits.
     #[tokio::test]

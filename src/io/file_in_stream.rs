@@ -175,11 +175,18 @@ pub struct GoosefsFileInStream {
     /// in context mode (it needs the shared `WorkerClientPool` + `WorkerRouter`).
     ///
     /// `None` disables SC for this stream (legacy `open()`, or SC kill switch
-    /// off). When `Some`, the positioned-read path (`read_external_range`,
-    /// which also backs cache miss-fills and `read_at`) first attempts a local
-    /// mmap read and transparently falls back to gRPC on any recoverable
-    /// failure (INV-S1). See `docs/SHORT_CIRCUIT_DESIGN.md` §4.3.
+    /// off). When `Some`, both the positioned-read path (`read_external_range`)
+    /// and the sequential `read()` path first attempt a local mmap read and
+    /// transparently fall back to gRPC on any recoverable failure (INV-S1).
+    /// See `docs/SHORT_CIRCUIT_DESIGN.md` §4.3.
     short_circuit: Option<Arc<ShortCircuitFactory>>,
+
+    /// Block id currently being served sequentially via the short-circuit
+    /// (local mmap) path, or `-1`. Lets consecutive `read()` calls within the
+    /// same block reuse the SC decision (and the cached reader) without
+    /// re-running `should_use` each chunk. Reset to `-1` when the block falls
+    /// back to gRPC.
+    sc_seq_block: i64,
 }
 
 impl GoosefsFileInStream {
@@ -264,6 +271,7 @@ impl GoosefsFileInStream {
             // SC needs the shared pool + router from a FileSystemContext; the
             // legacy `open()` path has neither, so SC is disabled here.
             short_circuit: None,
+            sc_seq_block: -1,
         })
     }
 
@@ -384,6 +392,7 @@ impl GoosefsFileInStream {
             cache_async_write: config.client_cache_async_write_enabled,
             cache_sequential_read: config.client_cache_sequential_read_enabled,
             short_circuit,
+            sc_seq_block: -1,
         })
     }
 
@@ -569,6 +578,28 @@ impl GoosefsFileInStream {
 
         let block_idx = self.block_index_for_pos(self.pos);
         let block_id = self.block_id_at(block_idx)?;
+
+        // Short-circuit sequential fast path: serve the read directly from the
+        // local block mmap (zero-copy slice), bypassing the gRPC stream. SC is
+        // stateless/positioned so no carry-over / stream state is involved.
+        //
+        // We attempt SC when: (a) we are already SC-serving this block
+        // (`sc_seq_block == block_id`, reuse the decision + cached reader), or
+        // (b) we are at a fresh block boundary (`block_in_stream_block_id !=
+        // block_id`) and `should_use` approves. We do NOT switch a block that
+        // is mid-gRPC-stream. Any recoverable failure transparently falls back
+        // to gRPC (INV-S1).
+        if self.short_circuit.is_some() {
+            let use_sc = self.sc_seq_block == block_id
+                || (self.block_in_stream_block_id != block_id
+                    && self.sc_should_use_seq(block_id, block_idx).await);
+            if use_sc {
+                if let Some(res) = self.sc_sequential_read(buf, block_idx, block_id).await {
+                    return res;
+                }
+                // SC declined/failed for this block — fall through to gRPC.
+            }
+        }
 
         // Does the sequential stream match the current block?
         if self.block_in_stream_block_id != block_id {
@@ -968,6 +999,90 @@ impl GoosefsFileInStream {
 
     // ── Convenience ───────────────────────────────────────────────────────────
 
+    /// Whether the sequential read at the current block should use SC.
+    async fn sc_should_use_seq(&self, block_id: i64, block_idx: usize) -> bool {
+        match &self.short_circuit {
+            Some(f) => f.should_use(block_id, self.block_logical_size(block_idx)).await,
+            None => false,
+        }
+    }
+
+    /// Serve a sequential read of the current block directly from the local
+    /// mmap (short-circuit). Copies `min(buf.len(), bytes-left-in-block)` bytes
+    /// from `offset_in_block`, advances `self.pos`, and returns the count.
+    ///
+    /// Returns:
+    /// - `Some(Ok(n))` — SC served `n` bytes (a short read at the block
+    ///   boundary is normal; the caller's loop continues into the next block).
+    /// - `Some(Err(e))` — a semantic error (`OutOfRange`) to surface (INV-S4).
+    /// - `None` — recoverable failure; the caller falls back to the gRPC
+    ///   streaming path for this block (INV-S1).
+    async fn sc_sequential_read(
+        &mut self,
+        buf: &mut [u8],
+        block_idx: usize,
+        block_id: i64,
+    ) -> Option<Result<usize>> {
+        // Clone the Arc so we can mutate `self` after the async open without a
+        // borrow conflict.
+        let factory = self.short_circuit.clone()?;
+        let block_size = self.block_logical_size(block_idx);
+
+        let reader = match factory.get_or_open(block_id, block_size).await {
+            Ok(r) => r,
+            Err(e) => {
+                debug!(
+                    block_id = block_id,
+                    error = %e,
+                    "short-circuit sequential open failed, falling back to gRPC"
+                );
+                self.sc_seq_block = -1;
+                return None;
+            }
+        };
+
+        let off = self.offset_in_block(self.pos) as usize;
+        let remaining = self.remaining_in_block(self.pos).max(0) as usize;
+        let n = remaining.min(buf.len());
+        if n == 0 {
+            self.sc_seq_block = -1;
+            return Some(Ok(0));
+        }
+
+        match reader.read(off, n) {
+            Ok(slice) => {
+                buf[..n].copy_from_slice(slice);
+                // SC is now the source for this block — drop any stale gRPC
+                // stream and remember the decision for subsequent chunks.
+                self.block_in_stream = None;
+                self.block_in_stream_block_id = -1;
+                self.sc_seq_block = block_id;
+                self.pos += n as i64;
+                Some(Ok(n))
+            }
+            Err(ShortCircuitError::OutOfRange {
+                off,
+                len,
+                file_size,
+            }) => Some(Err(Error::InvalidArgument {
+                message: format!(
+                    "short-circuit sequential read out of range on block {block_id}: \
+                     off={off} len={len} block_size={file_size}"
+                ),
+            })),
+            Err(e) => {
+                debug!(
+                    block_id = block_id,
+                    error = %e,
+                    "short-circuit sequential read failed, falling back to gRPC"
+                );
+                factory.invalidate(block_id).await;
+                self.sc_seq_block = -1;
+                None
+            }
+        }
+    }
+
     /// Read all remaining bytes from the current position to EOF.
     ///
     /// Now that [`Self::read`] is loss-less (any chunk overflow is parked
@@ -1351,6 +1466,7 @@ mod tests {
             cache_async_write: false,
             cache_sequential_read: false,
             short_circuit: None,
+            sc_seq_block: -1,
         }
     }
 
