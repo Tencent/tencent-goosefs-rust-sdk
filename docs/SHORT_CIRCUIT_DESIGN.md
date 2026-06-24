@@ -972,19 +972,22 @@ Java 的 `LocalFileDataReader.close()` 是 `mStream.close() + waitForComplete()`
 
 ## 10. 实施路线图
 
-| 阶段 | 内容 | 依赖 |
-|---|---|---|
-| P0 | 文档评审通过 | 本文档 |
-| P1 | 重构 LocalBlockReader：去 _file，去 spawn_blocking，加 MADV_RANDOM | crate memmap2 ≥ 0.9 |
-| P2 | 实现 ShortCircuitFactory（LRU + neg cache） | lru crate |
-| P3 | 接入 BlockInStream::create，capability 注入 | worker.rs 改造 |
-| P4 | metrics + tracing 全量打通 | metrics/tracing |
-| P5 | bench：sc_seq / sc_pr / sc_lat 三套 | criterion |
-| P6 | SIGBUS handler + safe_read 兜底 | signal-hook |
-| P7 | 大页（THP via MADV_HUGEPAGE）opt-in + 实测 | 内核 THP 支持 |
-| P8 | 跨任务共享 pool（可选） | 评估后决定 |
+| 阶段 | 内容 | 依赖 | 状态 |
+|---|---|---|---|
+| P0 | 文档评审通过 | 本文档 | ✅ 完成 |
+| P1 | 重构 LocalBlockReader：去 _file，去 spawn_blocking，加 MADV_RANDOM | crate memmap2 ≥ 0.9 | ✅ 完成（`src/block/short_circuit/reader.rs`，零拷贝 read/read_bytes/read_to_slice + L2 prefetch） |
+| P2 | 实现 ShortCircuitFactory（LRU + neg cache） | lru crate | ✅ 完成（`factory.rs`，有界 LRU + 有界负缓存 + 决策矩阵 + EACCES 粘性禁用） |
+| P3 | 接入 BlockInStream::create，capability 注入 | worker.rs 改造 | ◑ 部分完成：已接入 `GoosefsFileInStream::read_external_range`（positioned/random + cache 回源）并透明回退 gRPC；`WorkerClient::open_local_block` + RAII guard 已实现。**capability 仍传 `None`**（§3.1，dev 缺 `capability_fetcher`，待补）；顺序流式 `read()` 路径暂未接入 |
+| P4 | metrics + tracing 全量打通 | metrics/tracing | ✅ 完成（`Client.ShortCircuit*` 13 项计数/Gauge + tracing span） |
+| — | **端到端验证**（本地 NOSASL 集群） | 运行中的 Worker | ✅ 完成：`examples/short_circuit_demo.rs` + `tests/short_circuit_e2e.rs`（SC 命中、SC vs gRPC 字节一致 INV-S1、reader 复用）。附带修复：`WorkerRouter` 改用「绑定本机接口地址」判定本地 worker（worker 多以 LAN IP 注册，原 hostname/loopback 匹配会漏判） |
+| P5 | bench：sc_seq / sc_pr / sc_lat 三套 | criterion | ☐ 待做 |
+| P6 | SIGBUS handler + safe_read 兜底 | signal-hook | ☐ 待做（`ShortCircuitError::SigBus` 已预留） |
+| P7 | 大页（THP via MADV_HUGEPAGE）opt-in + 实测 | 内核 THP 支持 | ☐ 待做 |
+| P8 | 跨任务共享 pool（可选） | 评估后决定 | ☐ 待做 |
 
 每阶段需附 PR + bench 报告 + 火焰图。
+
+> **实现说明（截至本次提交）**：P1/P2/P4 完成，P3 已打通随机/定位读路径并经真实集群验证字节一致；剩余 P3 项为 capability 来源接入与顺序流式路径适配。代码位于 `src/block/short_circuit/`、`src/client/worker.rs`（`open_local_block` + `OpenLocalBlockGuard`）、`src/block/router.rs`（`is_block_source_local` + 接口绑定法本地判定）、`src/io/file_in_stream.rs`（`try_short_circuit_read`）。
 
 ---
 
