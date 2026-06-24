@@ -983,7 +983,7 @@ Java 的 `LocalFileDataReader.close()` 是 `mStream.close() + waitForComplete()`
 | P5 | bench：sc_seq / sc_pr / sc_lat 三套 | criterion | ✅ 完成（以可运行 A/B 形式）：`benchmarks/sc_pr_ab.rs`（SC vs gRPC 随机读吞吐+p50/p99/p999）。实测见 `docs/perf/2026-06-24-sc-pr-ab/`：热 cache 下吞吐 ×307、p99 ×261 |
 | P6 | SIGBUS handler + safe_read 兜底 | signal-hook | ✅ 完成（`sigbus.rs`，SA_SIGINFO 异步信号安全诊断 + abort，unix；用 libc 非 signal-hook） |
 | P7 | 大页（THP via MADV_HUGEPAGE）opt-in + 实测 | 内核 THP 支持 | ◑ opt-in 已实现（`short.circuit.thp`，Linux `MADV_HUGEPAGE`，默认关）；实测留待 Linux 节点 |
-| P8 | 跨任务共享 pool（可选） | 评估后决定 | ☐ 待做 |
+| P8 | 跨任务共享 pool（可选） | 评估后决定 | ⏸ 评估后**暂缓**：P5 实测显示单次 `OpenLocalBlock`+mmap 的成本被同块数千次切片读完全摊薄（demo 中 1 open / 63+ cache 命中），per-task LRU 已捕获绝大部分收益；进程级共享 pool 引入 `Arc` 原子开销 + 跨任务锁生命周期协调复杂度，性价比低。待出现「大量并发流读同一热块」的实测瓶颈再启动 |
 
 每阶段需附 PR + bench 报告 + 火焰图。
 

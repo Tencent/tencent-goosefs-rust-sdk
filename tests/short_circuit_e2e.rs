@@ -46,7 +46,7 @@ mod e2e {
     }
 
     fn base_config() -> GoosefsConfig {
-        let mut config = GoosefsConfig::new(&master_addr());
+        let mut config = GoosefsConfig::new(master_addr());
         config.auth_type = auth_type();
         config
     }

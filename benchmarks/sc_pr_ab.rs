@@ -49,7 +49,7 @@ fn auth_type() -> AuthType {
 }
 
 fn base_config(sc_enabled: bool) -> GoosefsConfig {
-    let mut c = GoosefsConfig::new(&master_addr());
+    let mut c = GoosefsConfig::new(master_addr());
     c.auth_type = auth_type();
     c.short_circuit_enabled = sc_enabled;
     // Keep the page cache out of the comparison: we want SC-vs-gRPC, not cache.
