@@ -225,6 +225,34 @@ pub mod name {
 
     /// Total blocks successfully written (counter).
     pub const CLIENT_BLOCKS_WRITTEN_TOTAL: &str = "Client.BlocksWrittenTotal";
+
+    // ── Short-circuit (local mmap) read path (SHORT_CIRCUIT_DESIGN §7.3) ──
+    /// Successful `OpenLocalBlock` + mmap sessions.
+    pub const CLIENT_SC_OPEN_SUCCESS: &str = "Client.ShortCircuitOpenSuccess";
+    /// `OpenLocalBlock` RPC failures (block not local / IO error).
+    pub const CLIENT_SC_OPENLOCAL_FAIL: &str = "Client.ShortCircuitOpenLocalFail";
+    /// `File::open` failures on the local block path (e.g. EACCES).
+    pub const CLIENT_SC_FILE_OPEN_FAIL: &str = "Client.ShortCircuitFileOpenFail";
+    /// `Mmap::map` failures (ENOMEM / EINVAL).
+    pub const CLIENT_SC_MMAP_FAIL: &str = "Client.ShortCircuitMmapFail";
+    /// Total bytes served from the short-circuit (mmap) path.
+    pub const CLIENT_SC_READ_BYTES: &str = "Client.ShortCircuitReadBytes";
+    /// Number of short-circuit `read` / `read_bytes` / `read_to_slice` calls.
+    pub const CLIENT_SC_READ_CALLS: &str = "Client.ShortCircuitReadCalls";
+    /// Factory LRU reader-cache hits.
+    pub const CLIENT_SC_CACHE_HITS: &str = "Client.ShortCircuitCacheHits";
+    /// Factory LRU reader-cache evictions.
+    pub const CLIENT_SC_CACHE_EVICTIONS: &str = "Client.ShortCircuitCacheEvictions";
+    /// Negative-cache hits (block recently failed SC → skipped, went gRPC).
+    pub const CLIENT_SC_NEG_CACHE_HITS: &str = "Client.ShortCircuitNegCacheHits";
+    /// Currently-live short-circuit readers (gauge).
+    pub const CLIENT_SC_ACTIVE_READERS: &str = "Client.ShortCircuitActiveReaders";
+    /// `prefetch` / `prefetch_many` calls.
+    pub const CLIENT_SC_PREFETCH_CALLS: &str = "Client.ShortCircuitPrefetchCalls";
+    /// Cumulative bytes requested for prefetch.
+    pub const CLIENT_SC_PREFETCH_BYTES: &str = "Client.ShortCircuitPrefetchBytes";
+    /// Actual `madvise(WILLNEED)` syscalls issued (after coalescing).
+    pub const CLIENT_SC_PREFETCH_MADVISE: &str = "Client.ShortCircuitPrefetchMadvise";
 }
 
 #[cfg(test)]

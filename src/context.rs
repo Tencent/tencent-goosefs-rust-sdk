@@ -52,6 +52,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::block::router::WorkerRouter;
+use crate::block::short_circuit::{ShortCircuitConfig, ShortCircuitFactory};
 use crate::cache::{CacheManager, LocalCacheManager};
 use crate::client::metrics_master::MetricsClient;
 use crate::client::metrics_master::MetricsMasterClient;
@@ -105,6 +106,15 @@ pub struct FileSystemContext {
 
     /// Consistent-hash router with TTL refresh and local-first preference.
     worker_router: Arc<WorkerRouter>,
+
+    /// Shared short-circuit (local mmap) factory, when SC is enabled.
+    ///
+    /// Hoisted to the context (P8) so **all** `GoosefsFileInStream`s built from
+    /// this context share one hot-block reader LRU + negative cache: a hot
+    /// local block is `OpenLocalBlock`+mmap'd once and reused across every
+    /// concurrent stream/task, instead of once per stream. `None` when the SC
+    /// kill switch is off. See `docs/SHORT_CIRCUIT_DESIGN.md` §3.5 / §10 P8.
+    short_circuit: Option<Arc<ShortCircuitFactory>>,
 
     /// Client-side local page cache, when `config.client_cache_enabled`.
     ///
@@ -190,6 +200,21 @@ impl FileSystemContext {
         // Build the shared worker connection pool.
         let worker_pool = WorkerClientPool::new_shared((*config).clone());
 
+        // Build the shared short-circuit factory (one per context, reused by
+        // every stream) when the SC kill switch is on. It uses the shared
+        // worker pool + router so local-worker detection and connection reuse
+        // are consistent across all streams (P8).
+        let sc_cfg = ShortCircuitConfig::from_config(&config);
+        let short_circuit = if sc_cfg.enabled {
+            Some(Arc::new(ShortCircuitFactory::new(
+                worker_pool.clone(),
+                worker_router.clone(),
+                sc_cfg,
+            )))
+        } else {
+            None
+        };
+
         // Build the client-side local page cache (best-effort).
         let cache_manager: Option<Arc<dyn CacheManager>> = if config.client_cache_enabled {
             match LocalCacheManager::from_config(&config).await {
@@ -216,6 +241,7 @@ impl FileSystemContext {
             worker_manager,
             worker_pool,
             worker_router,
+            short_circuit,
             cache_manager,
             inquire_client,
             config_refresher: Arc::new(ConfigRefresher::from_config(&config)),
@@ -269,6 +295,13 @@ impl FileSystemContext {
     /// Return the shared `WorkerRouter` (zero-cost Arc clone).
     pub fn acquire_router(&self) -> Arc<WorkerRouter> {
         self.worker_router.clone()
+    }
+
+    /// Return the shared short-circuit factory, if SC is enabled (zero-cost
+    /// Arc clone). All streams built from this context share it (P8), so a hot
+    /// local block is opened/mmap'd once and reused across streams.
+    pub fn acquire_short_circuit(&self) -> Option<Arc<ShortCircuitFactory>> {
+        self.short_circuit.clone()
     }
 
     /// Return the shared client-side page cache, if enabled.

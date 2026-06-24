@@ -35,10 +35,12 @@ use crate::auth::{ChannelAuthenticator, ChannelIdInterceptor, SaslStreamGuard};
 use crate::config::GoosefsConfig;
 use crate::error::{Error, Result};
 use crate::proto::grpc::block::{
-    block_worker_client::BlockWorkerClient, write_request, ReadRequest, ReadResponse, RequestType,
-    WriteRequest, WriteRequestCommand, WriteResponse,
+    block_worker_client::BlockWorkerClient, write_request, OpenLocalBlockRequest,
+    OpenLocalBlockResponse, ReadRequest, ReadResponse, RequestType, WriteRequest,
+    WriteRequestCommand, WriteResponse,
 };
 use crate::proto::proto::dataserver::{CreateUfsFileOptions, OpenUfsBlockOptions};
+use crate::proto::proto::security::Capability;
 
 /// Options for a `write_block` RPC that control *where* the Worker writes data.
 ///
@@ -242,6 +244,64 @@ impl Drop for WriteBlockHandle {
     }
 }
 
+/// RAII guard that keeps a Worker-side `OpenLocalBlock` session (and therefore
+/// the block lock) alive for as long as a short-circuit reader needs the
+/// mmap'd block file.
+///
+/// # Protocol
+///
+/// `OpenLocalBlock` is a bidirectional streaming RPC ("Replaces
+/// ShortCircuitBlockReadHandler"). The client sends a single
+/// [`OpenLocalBlockRequest`]; the Worker locks the block, replies with an
+/// [`OpenLocalBlockResponse`] carrying the on-disk `path` + logical
+/// `block_size`, and **holds the lock until the client half-closes the
+/// stream**.
+///
+/// This guard owns the request `Sender` (the client→server half). Dropping the
+/// guard drops the sender, which closes the client half of the stream → the
+/// Worker observes `onCompleted` → unlocks the block.
+///
+/// # Drop / unlock semantics (design §8.2.1)
+///
+/// `Drop` is synchronous and cannot `await`, so unlock is **eventually
+/// released**: dropping the sender signals the close, and the actual
+/// `onCompleted`/unlock is finalized by the tonic runtime in the background.
+/// The held `_response_stream` keeps the HTTP/2 stream state from being torn
+/// down prematurely. Worst case, the Worker's own `OpenLocalBlock` session
+/// idle-timeout reclaims the lock (mirroring Java). This satisfies INV-S2:
+/// the lock is held for the whole reader lifetime and released in bounded time
+/// after Drop, never leaked indefinitely.
+pub struct OpenLocalBlockGuard {
+    /// Block whose lock this guard holds (for tracing on Drop).
+    block_id: i64,
+    /// Client→server half of the bidi stream. Dropping this closes the stream
+    /// and triggers the Worker-side unlock. Kept in an `Option` only so the
+    /// `Drop` impl can emit a trace before the field is dropped.
+    _request_tx: Option<mpsc::Sender<OpenLocalBlockRequest>>,
+    /// Server→client half. Held (but not polled) so the stream is not torn
+    /// down before `_request_tx` closes it; dropped together with the guard.
+    ///
+    /// Wrapped in a `std::sync::Mutex` purely to make the guard (and therefore
+    /// [`LocalBlockReader`](crate::block::short_circuit::LocalBlockReader))
+    /// `Sync`: tonic's `Streaming` is `Send` but `!Sync`, which would otherwise
+    /// prevent sharing a cached reader across tasks via the process/context-
+    /// level [`ShortCircuitFactory`](crate::block::short_circuit::ShortCircuitFactory).
+    /// The mutex is never locked — the stream is only kept alive for Drop.
+    _response_stream: std::sync::Mutex<Streaming<OpenLocalBlockResponse>>,
+}
+
+impl Drop for OpenLocalBlockGuard {
+    fn drop(&mut self) {
+        debug!(
+            block_id = self.block_id,
+            "OpenLocalBlockGuard dropped — closing bidi stream, Worker will unlock block"
+        );
+        // Explicit drop of the sender (the response stream is dropped with the
+        // struct) closes the client half → Worker `onCompleted` → unlock.
+        let _ = self._request_tx.take();
+    }
+}
+
 /// Type alias for the authenticated Worker gRPC client.
 type AuthenticatedBlockWorkerClient =
     BlockWorkerClient<InterceptedService<Channel, ChannelIdInterceptor>>;
@@ -436,6 +496,82 @@ impl WorkerClient {
         let response = self.inner.clone().read_block(stream).await?;
 
         Ok((tx, response.into_inner()))
+    }
+
+    /// Open a **short-circuit** local block session.
+    ///
+    /// Drives the `OpenLocalBlock` bidirectional streaming RPC (design §3.1):
+    /// sends a single [`OpenLocalBlockRequest`] `{ block_id, capability,
+    /// block_size }`, waits for the first [`OpenLocalBlockResponse`] (carrying
+    /// the on-disk `path` and the logical `block_size`), and returns it
+    /// together with an [`OpenLocalBlockGuard`] that keeps the Worker-side
+    /// block lock held for the guard's lifetime.
+    ///
+    /// The caller (the short-circuit data plane) `mmap`s the returned `path`
+    /// and reads bytes locally with zero further RPCs. When the reader is
+    /// dropped, the guard closes the stream and the Worker unlocks the block.
+    ///
+    /// # capability
+    ///
+    /// `capability` must be `Some` on capability-enabled clusters or the
+    /// Worker will reject the request (matching the gRPC read path's
+    /// authorization, INV-S3). The source of the capability is resolved by the
+    /// caller; `None` means "no capability" (NOSASL / capability-disabled
+    /// clusters).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error`] from the underlying transport / gRPC status (e.g.
+    ///   `NotFound` when the block is not local, `PermissionDenied` /
+    ///   `AuthenticationFailed` for capability rejection). The short-circuit
+    ///   factory classifies these into fallback-vs-propagate (design §3.6).
+    #[instrument(skip(self, capability), fields(block_id = %block_id, block_size = %block_size))]
+    pub async fn open_local_block(
+        &self,
+        block_id: i64,
+        block_size: i64,
+        capability: Option<Capability>,
+    ) -> Result<(OpenLocalBlockResponse, OpenLocalBlockGuard)> {
+        let (tx, rx) = mpsc::channel::<OpenLocalBlockRequest>(4);
+
+        let request = OpenLocalBlockRequest {
+            block_id: Some(block_id),
+            capability,
+            block_size: Some(block_size),
+        };
+        tx.send(request).await.map_err(|_| Error::BlockIoError {
+            message: format!("failed to send OpenLocalBlockRequest for block_id={block_id}"),
+        })?;
+
+        let stream = ReceiverStream::new(rx);
+        let response = self.inner.clone().open_local_block(stream).await?;
+        let mut response_stream = response.into_inner();
+
+        // The Worker locks the block and replies with the local path. Pull the
+        // first response; the stream then stays open (lock held) until the
+        // guard is dropped.
+        let first = response_stream
+            .message()
+            .await?
+            .ok_or_else(|| Error::BlockIoError {
+                message: format!(
+                    "OpenLocalBlock stream for block_id={block_id} closed before any response"
+                ),
+            })?;
+
+        debug!(
+            block_id = block_id,
+            path = first.path.as_deref().unwrap_or(""),
+            block_size = ?first.block_size,
+            "OpenLocalBlock granted local path"
+        );
+
+        let guard = OpenLocalBlockGuard {
+            block_id,
+            _request_tx: Some(tx),
+            _response_stream: std::sync::Mutex::new(response_stream),
+        };
+        Ok((first, guard))
     }
 
     /// Start a bidirectional streaming WriteBlock RPC.

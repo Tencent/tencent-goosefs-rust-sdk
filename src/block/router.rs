@@ -180,8 +180,11 @@ impl WorkerRouter {
 
     /// Detect and cache the ID of the local worker, if any.
     ///
-    /// Matches each worker's `host` field against the current machine's
-    /// hostname and all local IP addresses.
+    /// A worker is "local" when its registered `host` is either a known local
+    /// name (`localhost` / loopback / this machine's hostname) **or** a local
+    /// interface address. The latter is decisive in practice: Goosefs workers
+    /// usually register with their LAN IP (e.g. `10.x.x.x`), not loopback or
+    /// hostname (SHORT_CIRCUIT_DESIGN §3.7).
     ///
     /// Returns the worker ID of the local worker, or `0` if none found.
     async fn detect_local_worker(workers: &[WorkerInfo]) -> i64 {
@@ -190,7 +193,10 @@ impl WorkerRouter {
         for w in workers {
             if let Some(addr) = &w.address {
                 let host = addr.host.as_deref().unwrap_or("");
-                if local_names.iter().any(|n| n == host) {
+                if host.is_empty() {
+                    continue;
+                }
+                if local_names.iter().any(|n| n == host) || Self::is_local_address(host) {
                     let id = w.id.unwrap_or(0);
                     debug!(host = %host, worker_id = id, "detected local worker");
                     return id;
@@ -200,11 +206,14 @@ impl WorkerRouter {
         0
     }
 
-    /// Collect the set of names that identify the local machine.
+    /// Collect the set of names that statically identify the local machine:
+    /// `localhost` / `127.0.0.1` / `::1` and the system hostname (full + short).
     ///
-    /// Includes:
-    /// - `hostname` (short)
-    /// - `127.0.0.1` / `::1`
+    /// Interface IPs are matched separately by [`is_local_address`] (binding),
+    /// which is more reliable than precomputing the outbound IP on multi-homed
+    /// hosts.
+    ///
+    /// [`is_local_address`]: Self::is_local_address
     fn local_hostnames() -> Vec<String> {
         let mut names = vec![
             "localhost".to_string(),
@@ -224,6 +233,19 @@ impl WorkerRouter {
         }
 
         names
+    }
+
+    /// Whether `host` is an address of a **local** network interface.
+    ///
+    /// Implemented by attempting to bind a UDP socket to `(host, 0)`: the OS
+    /// only allows binding to an address that belongs to a local interface, so
+    /// a successful bind means the host is local. Port `0` is ephemeral and no
+    /// packets are sent — this is purely a route/interface check. Works for
+    /// both IPv4/IPv6 literals and resolvable local names, with no extra
+    /// dependency or `unsafe` interface enumeration.
+    fn is_local_address(host: &str) -> bool {
+        use std::net::UdpSocket;
+        UdpSocket::bind((host, 0u16)).is_ok()
     }
 
     /// Select the best worker for the given block ID using consistent hashing.
@@ -308,6 +330,30 @@ impl WorkerRouter {
     pub fn mark_failed(&self, addr: &WorkerNetAddress) {
         let key = worker_addr_key(addr);
         self.failed_workers.insert(key, Instant::now());
+    }
+
+    /// `source_is_local` pre-filter for short-circuit reads
+    /// (SHORT_CIRCUIT_DESIGN §3.7).
+    ///
+    /// Returns `true` iff the worker that would serve `block_id` is the
+    /// detected local worker. This composes the existing local-first routing:
+    /// [`select_worker`](Self::select_worker) already returns the local worker
+    /// (when present & healthy) for *every* block, so a match here means the
+    /// block would be served locally.
+    ///
+    /// **Note (design §3.7):** "worker local" ≠ "block physically local". This
+    /// is only a pre-filter to avoid issuing a pointless `OpenLocalBlock` RPC
+    /// to a remote worker; the final authority on whether the block can be
+    /// mmap'd locally is the `OpenLocalBlock` RPC itself.
+    pub async fn is_block_source_local(&self, block_id: i64) -> bool {
+        let Ok(selected) = self.select_worker(block_id).await else {
+            return false;
+        };
+        // `select_worker` has now probed & cached the local worker id.
+        match **self.local_worker_id.load() {
+            Some(Some(local_id)) => selected.id == Some(local_id),
+            _ => false,
+        }
     }
 
     /// Pick any eligible worker (random selection, not tied to a block ID).
