@@ -75,6 +75,14 @@ torn/stale data. Consider io.mode=pread for untrusted filesystems. fault_addr=0x
     }
 
     /// Install the SIGBUS handler once per process. Idempotent.
+    ///
+    /// If `sigaction(2)` itself fails (extremely unlikely for SIGBUS on a
+    /// well-formed `struct sigaction`), we emit a single warning line to
+    /// stderr via `write(2)` and continue. The process keeps the kernel's
+    /// default SIGBUS disposition (terminate + core), which is still safe
+    /// w.r.t. data correctness — we just lose the targeted INV-D1 diagnostic
+    /// message. We deliberately do NOT panic / abort here: failing to install
+    /// a *diagnostic* aid must not itself take down the process.
     pub fn install() {
         INSTALL.call_once(|| {
             // SAFETY: standard one-time `sigaction` registration. We use
@@ -84,7 +92,19 @@ torn/stale data. Consider io.mode=pread for untrusted filesystems. fault_addr=0x
                 action.sa_sigaction = handle_sigbus as usize;
                 action.sa_flags = libc::SA_SIGINFO;
                 libc::sigemptyset(&mut action.sa_mask);
-                libc::sigaction(libc::SIGBUS, &action, std::ptr::null_mut());
+                let rc = libc::sigaction(libc::SIGBUS, &action, std::ptr::null_mut());
+                if rc != 0 {
+                    // Read errno *immediately* before any other libc call can
+                    // clobber it. We don't format it (keeps the warning path
+                    // allocation-free and trivially auditable); operators can
+                    // correlate with strace if needed.
+                    const WARN: &[u8] =
+                        b"[goosefs-sc] WARN: sigaction(SIGBUS) registration failed; \
+short-circuit mmap will rely on the kernel's default SIGBUS disposition \
+(terminate). Data correctness is unaffected; only the targeted INV-D1 \
+diagnostic message is lost.\n";
+                    libc::write(2, WARN.as_ptr() as *const libc::c_void, WARN.len());
+                }
             }
         });
     }
