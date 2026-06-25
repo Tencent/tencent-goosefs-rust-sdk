@@ -1260,6 +1260,68 @@ pub struct GoosefsConfig {
     /// are expected to be re-read and should be cached/served locally.
     #[serde(default)]
     pub client_cache_sequential_read_enabled: bool,
+
+    // ── Short-circuit (local mmap) read path (SHORT_CIRCUIT_DESIGN §6) ──
+    /// Master kill switch for the short-circuit local read path (default:
+    /// `true`). Mirrors Java `goosefs.user.short.circuit.enabled`.
+    #[serde(default = "default_true_bool")]
+    pub short_circuit_enabled: bool,
+
+    /// Per-task LRU capacity for hot-block readers (default: 64).
+    /// `goosefs.client.short.circuit.cache.capacity`.
+    #[serde(default = "default_short_circuit_cache_capacity")]
+    pub short_circuit_cache_capacity: usize,
+
+    /// Idle TTL after which a cached SC reader is dropped (default: 30 s).
+    /// `goosefs.client.short.circuit.cache.ttl`.
+    #[serde(default = "default_short_circuit_cache_ttl")]
+    pub short_circuit_cache_ttl: Duration,
+
+    /// Negative-cache TTL: a block that failed SC is not retried for this long
+    /// (default: 5 s). `goosefs.client.short.circuit.neg.cache.ttl`.
+    #[serde(default = "default_short_circuit_neg_cache_ttl")]
+    pub short_circuit_neg_cache_ttl: Duration,
+
+    /// L1 kernel-readahead hint: `sequential | random | normal | none`
+    /// (default: `random`). `goosefs.client.short.circuit.advise`.
+    #[serde(default = "default_short_circuit_advise")]
+    pub short_circuit_advise: String,
+
+    /// L2 application-level prefetch master switch (default: `true`). When
+    /// `false`, `prefetch` / `prefetch_many` degrade to no-ops.
+    /// `goosefs.client.short.circuit.prefetch.enabled`.
+    #[serde(default = "default_true_bool")]
+    pub short_circuit_prefetch_enabled: bool,
+
+    /// Max gap (bytes) between adjacent ranges merged by `prefetch_many`
+    /// (default: 64 KiB). `goosefs.client.short.circuit.prefetch.coalesce.gap`.
+    #[serde(default = "default_short_circuit_prefetch_coalesce_gap")]
+    pub short_circuit_prefetch_coalesce_gap: usize,
+
+    /// Max number of `madvise` calls issued per `prefetch_many` (default:
+    /// 1024). `goosefs.client.short.circuit.prefetch.max.batch`.
+    #[serde(default = "default_short_circuit_prefetch_max_batch")]
+    pub short_circuit_prefetch_max_batch: usize,
+
+    /// Minimum block size (bytes) to attempt SC; smaller blocks skip SC
+    /// (default: 0 = no minimum). `goosefs.client.short.circuit.min.block.size`.
+    #[serde(default)]
+    pub short_circuit_min_block_size: i64,
+
+    /// Install a process-global SIGBUS handler that diagnoses + `abort`s on a
+    /// mapping fault (default: `true`). A SIGBUS on a committed, locked block
+    /// indicates a protocol violation (INV-D1); aborting surfaces it loudly
+    /// rather than returning torn/stale bytes (design §3.2 / §8.1). Linux/macOS
+    /// only; a no-op elsewhere. `goosefs.client.short.circuit.sigbus.handler`.
+    #[serde(default = "default_true_bool")]
+    pub short_circuit_sigbus_handler: bool,
+
+    /// Request Transparent Huge Pages for the block mapping via
+    /// `madvise(MADV_HUGEPAGE)` (default: `false`, **experimental**). Linux
+    /// only and effective only where file-backed THP is supported; a no-op
+    /// elsewhere. `goosefs.client.short.circuit.thp`.
+    #[serde(default)]
+    pub short_circuit_thp: bool,
 }
 
 fn default_master_inquire_max_duration() -> Duration {
@@ -1329,6 +1391,26 @@ fn default_client_cache_async_write_threads() -> usize {
 }
 fn default_true_bool() -> bool {
     true
+}
+
+// ── Short-circuit (local mmap) read defaults (SHORT_CIRCUIT_DESIGN §6) ─
+fn default_short_circuit_cache_capacity() -> usize {
+    64
+}
+fn default_short_circuit_cache_ttl() -> Duration {
+    Duration::from_secs(30)
+}
+fn default_short_circuit_neg_cache_ttl() -> Duration {
+    Duration::from_secs(5)
+}
+fn default_short_circuit_advise() -> String {
+    "random".to_string()
+}
+fn default_short_circuit_prefetch_coalesce_gap() -> usize {
+    64 * 1024
+}
+fn default_short_circuit_prefetch_max_batch() -> usize {
+    1024
 }
 
 // ── Streaming-read tuning / master pool defaults (Part V) ─────
@@ -1402,6 +1484,17 @@ impl Default for GoosefsConfig {
             client_cache_quota_enabled: false,
             client_cache_ttl_secs: 0,
             client_cache_sequential_read_enabled: false,
+            short_circuit_enabled: true,
+            short_circuit_cache_capacity: default_short_circuit_cache_capacity(),
+            short_circuit_cache_ttl: default_short_circuit_cache_ttl(),
+            short_circuit_neg_cache_ttl: default_short_circuit_neg_cache_ttl(),
+            short_circuit_advise: default_short_circuit_advise(),
+            short_circuit_prefetch_enabled: true,
+            short_circuit_prefetch_coalesce_gap: default_short_circuit_prefetch_coalesce_gap(),
+            short_circuit_prefetch_max_batch: default_short_circuit_prefetch_max_batch(),
+            short_circuit_min_block_size: 0,
+            short_circuit_sigbus_handler: true,
+            short_circuit_thp: false,
         }
     }
 }

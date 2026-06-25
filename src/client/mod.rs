@@ -13,6 +13,7 @@ pub use master_inquire::{
     SingleMasterInquireClient,
 };
 pub use metrics_master::MetricsClient;
+pub use worker::OpenLocalBlockGuard;
 pub use worker::WorkerClient;
 pub use worker::WorkerClientPool;
 pub use worker::WriteBlockHandle;

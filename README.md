@@ -475,6 +475,22 @@ let config = GoosefsConfig::new("127.0.0.1:9200")
 - `Client.BytesWrittenLocal` — bytes written via local short-circuit (auto-incremented).
 - `Client.BytesWrittenUfs` — bytes written directly to UFS (bypassing the cache).
 
+**Short-circuit (local mmap) read counters** (see [`docs/SHORT_CIRCUIT_DESIGN.md`](docs/SHORT_CIRCUIT_DESIGN.md)):
+
+- `Client.ShortCircuitOpenSuccess` — successful `OpenLocalBlock` + mmap sessions.
+- `Client.ShortCircuitOpenLocalFail` — `OpenLocalBlock` RPC failures (block not local / IO error).
+- `Client.ShortCircuitFileOpenFail` — `File::open` failures on the local block path (e.g. EACCES).
+- `Client.ShortCircuitMmapFail` — `mmap` failures (ENOMEM / EINVAL / size mismatch).
+- `Client.ShortCircuitReadBytes` — total bytes served from the local mmap path.
+- `Client.ShortCircuitReadCalls` — number of short-circuit read calls.
+- `Client.ShortCircuitCacheHits` — hot-block reader LRU hits (mmap reused, no new open).
+- `Client.ShortCircuitCacheEvictions` — reader-cache evictions.
+- `Client.ShortCircuitNegCacheHits` — negative-cache hits (recently-failed block skipped → gRPC).
+- `Client.ShortCircuitActiveReaders` — currently-live short-circuit readers (gauge).
+- `Client.ShortCircuitPrefetchCalls` — `prefetch` / `prefetch_many` calls.
+- `Client.ShortCircuitPrefetchBytes` — cumulative bytes requested for prefetch.
+- `Client.ShortCircuitPrefetchMadvise` — actual `madvise(WILLNEED)` syscalls issued (after coalescing).
+
 > **Tip:** Run `cargo run --example metrics_heartbeat` for an end-to-end demo that exercises both `metrics_enabled = true` and `metrics_enabled = false`. Set `RUST_LOG=info` to see the SDK's heartbeat / flush logs.
 
 ### Example: Authentication
@@ -794,8 +810,8 @@ build/test/lint loop.
 
 | Artifact | Guide |
 |----------|-------|
-| Rust crate (`goosefs-sdk`) → crates.io / Cargo registry | [`docs/RELEASE.md`](docs/RELEASE.md) |
-| Python package (`goosefs`) → PyPI (manylinux wheels) | [`docs/PYTHON_RELEASE.md`](docs/PYTHON_RELEASE.md) |
+| Rust crate (`goosefs-sdk`) → crates.io / Cargo registry | [`docs/RELEASE.md`](docs/release/RELEASE.md) |
+| Python package (`goosefs`) → PyPI (manylinux wheels) | [`docs/PYTHON_RELEASE.md`](docs/release/PYTHON_RELEASE.md) |
 
 ### Re-generate Proto Code
 
