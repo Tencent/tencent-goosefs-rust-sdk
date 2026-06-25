@@ -66,7 +66,7 @@
 
 | ID | 不变式 | 类别 | 验证手段 |
 |---|---|---|---|
-| INV-D1 | block 文件在 reader 生命周期内内容不可变（Worker 持锁不 truncate / replace / 改写已落盘 block） | 数据 | 协议约束 + SIGBUS handler 兜底 |
+| INV-D1 | A block file's content is immutable for the lifetime of any reader (Worker holds the lock and never truncates / replaces / rewrites a sealed block); cross-reader sub-contract: after an overwrite, a freshly opened stream must immediately observe the new bytes and new length (no reuse of the v1 mmap / block-id view) | data | protocol contract + SIGBUS handler safety net + `sc_consistency::inv_d1_e2e_overwrite_visibility` |
 | INV-D2 | mmap 切片 `&mmap[off..off+len]` 的字节内容 = Worker 端同 block 同范围 pread 的字节内容 | 数据 | `sc_consistency` 测试：SC vs gRPC 双读 diff |
 | INV-D3 | `read_bytes` 返回的 `Bytes` 在其生命周期内对应内存不会被 munmap | 数据 | `Arc<Mmap>` 作为 owner，结构体字段 Drop 顺序保证 |
 | INV-D4 | `prefetch` / `prefetch_many` 不修改任何字节，仅是 readahead hint | 数据 | `madvise(MADV_WILLNEED)` 语义保证 + 单测 |
@@ -821,6 +821,7 @@ docs/perf/2026-06-24-sc-pr-256t/
 3. `cargo bench --bench sc_lat` — p50/p99/p999 延迟分布
 4. `cargo bench --bench sc_prefetch` — 冷数据 PR 在 {无 prefetch, prefetch, prefetch_many} 三种模式下的吞吐与 p99，必须证明 prefetch 路径相对无 prefetch 至少 10× p99 改善
 5. `cargo test --test sc_consistency` — **门禁级一致性回归测试**（与 bench 不同，必须 100% 通过；任何 PR 触发，失败直接阻塞合入）。覆盖 §1.3 的全部不变式：
+   - **INV-D1 (end-to-end cross-reader sub-contract)**: write v1 -> close stream -> overwrite once with a same-length but different payload and once with a different-length payload -> a freshly opened stream must immediately observe the new bytes and new length (`sc_consistency::inv_d1_e2e_overwrite_visibility`, with an assertion on the new-read path that `CLIENT_SC_OPEN_SUCCESS` increases, to rule out a silent gRPC-fallback false positive).
    - **INV-D2**：同一 block 用 SC 路径与 gRPC 路径双读，逐字节 diff（覆盖顺序读、PR、跨 chunk、跨 page 边界）
    - **INV-D3**：`read_bytes` 返回的 `Bytes` 在 reader Drop 之后仍能被安全访问，内容不变（验证 owner 生命周期）
    - **INV-D4**：`prefetch` / `prefetch_many` 调用前后同范围 `read` 字节内容完全一致

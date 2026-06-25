@@ -7,18 +7,22 @@
 //!
 //! | Case                                | Invariant              |
 //! |-------------------------------------|------------------------|
+//! | `inv_d1_e2e_overwrite_visibility`   | INV-D1 (cross-reader)  |
 //! | `inv_d2_sc_vs_grpc_byte_diff`       | INV-D2 (boundaries)    |
 //! | `inv_s1_fallback_is_transparent`    | INV-S1 (fallback path) |
 //! | `inv_s2_drop_releases_worker_lock`  | INV-S2 (RAII)          |
 //! | `inv_s5_read_apis_are_equivalent`   | INV-S5 (3-API parity)  |
 //!
-//! Lower-level invariants (INV-D1/D3/D4, INV-S4) are exercised by the
+//! Lower-level invariants (INV-D3/D4, INV-S4) are exercised by the
 //! reader-layer unit tests in `src/block/short_circuit/reader.rs` (see
 //! `read_bytes_outlives_reader`, `prefetch_does_not_change_bytes`,
-//! `out_of_range_is_error`, ...). Configuration-knob plumbing for INV-S3
-//! (`CapabilityProvider`) is covered by the factory unit tests; an
-//! end-to-end capability assertion needs a capability-enabled cluster
-//! and is gated separately when that wiring lands.
+//! `out_of_range_is_error`, ...). Within-reader INV-D1 (Worker holds
+//! the OpenLocalBlock lock; block file content is immutable for the
+//! lifetime of one reader) is a protocol invariant of GooseFS itself
+//! and is asserted in the SDK indirectly via the SC-vs-gRPC byte diff
+//! (INV-D2). The case here covers the *cross-reader* half of INV-D1:
+//! a fresh stream opened after an overwrite must not reuse a stale
+//! mmap / block-id view of the previous version.
 //!
 //! All cases require a running GooseFS cluster with a **local** worker
 //! (so the SC path actually engages). They are `#[ignore]`d so plain
@@ -383,6 +387,130 @@ mod consistency {
             "INV-S5: read_at bytes drift from source"
         );
         assert_eq!(pr_buf.as_slice(), all.as_ref(), "INV-S5: read_at != read_all");
+
+        ctx.acquire_master().delete(&path, false).await.ok();
+        ctx.close().await?;
+        Ok(())
+    }
+
+    // ── INV-D1 (cross-reader) ────────────────────────────────────────────────
+
+    /// **INV-D1 (cross-reader half)** — within a single reader, GooseFS's
+    /// OpenLocalBlock lock guarantees the underlying block file is
+    /// immutable; that half is asserted indirectly through the SC vs
+    /// gRPC byte diff (INV-D2). This case covers the complementary
+    /// guarantee: when the file is **overwritten between streams**, a
+    /// freshly opened SC stream must not reuse a stale mmap / block-id
+    /// view of the previous version.
+    ///
+    /// Three phases per overwrite:
+    ///   1. Write v(n), open a stream, read it warm, drop the stream.
+    ///   2. Overwrite to v(n+1). The two payloads have **distinct
+    ///      lengths and biased bytes** so that any stale-view leak
+    ///      (whole or prefix) shows up as a mismatch.
+    ///   3. Open a brand-new stream and assert
+    ///        - new length is observed (no truncation to v(n).len()),
+    ///        - all bytes match v(n+1) exactly,
+    ///        - SC actually engaged on the post-overwrite read (a
+    ///          fallback-only success would mask a real SC bug).
+    ///
+    /// The third assertion is a sanity probe via `CLIENT_SC_OPEN_SUCCESS`
+    /// rather than a hard contract: if no LOCAL worker is registered,
+    /// the test prints a hint and skips the counter check, but byte
+    /// equality is still mandatory.
+    #[tokio::test]
+    #[ignore]
+    async fn inv_d1_e2e_overwrite_visibility() -> Result<()> {
+        let ctx = FileSystemContext::connect(sc_config()).await?;
+        let path = unique_path("d1e2e");
+
+        // Same length first (catches block-id reuse with identical layout),
+        // then different length (catches stale length / cached file size).
+        let v1 = make_payload(2 * 1024 * 1024 + 11);
+        let v2 = {
+            let mut p = make_payload(v1.len());
+            for b in &mut p {
+                *b = b.wrapping_add(0xA5);
+            }
+            p
+        };
+        let v3 = make_payload(3 * 1024 * 1024 + 777); // different length
+
+        // ── Phase 1: write v1, read warm, drop. ──────────────────────────
+        write_blob(&ctx, &path, &v1).await?;
+        {
+            let mut s = open_stream(&ctx, &path).await?;
+            let warm = s.read_all().await?;
+            assert_eq!(
+                warm.as_ref(),
+                v1.as_slice(),
+                "INV-D1-E2E (phase 1): initial read drifted from v1"
+            );
+        }
+
+        // ── Phase 2: overwrite to v2 (same length, bytes shifted). ───────
+        write_blob(&ctx, &path, &v2).await?;
+        let opens_before_v2 = sc_open_success();
+        {
+            let mut s = open_stream(&ctx, &path).await?;
+            let observed = s.read_all().await?;
+            assert_eq!(
+                observed.len(),
+                v2.len(),
+                "INV-D1-E2E (phase 2): length mismatch after same-length overwrite"
+            );
+            assert_eq!(
+                observed.as_ref(),
+                v2.as_slice(),
+                "INV-D1-E2E (phase 2): served stale v1 bytes after overwrite to v2 \
+                 (same length — likely block-id reuse leaking a stale mmap view)"
+            );
+
+            // Cross-check via positioned read across a sub-chunk boundary.
+            let mut s_pr = open_stream(&ctx, &path).await?;
+            let off = ((1 << 20) - 7) as i64;
+            let len = 2 * (1 << 20);
+            let len = len.min(v2.len() - off as usize);
+            let got = s_pr.read_at(off, len).await?;
+            assert_eq!(
+                got.as_ref(),
+                &v2[off as usize..off as usize + len],
+                "INV-D1-E2E (phase 2): read_at drifted from v2 across chunk boundary"
+            );
+        }
+        let opens_after_v2 = sc_open_success();
+
+        // ── Phase 3: overwrite to v3 (different length). ─────────────────
+        write_blob(&ctx, &path, &v3).await?;
+        {
+            let mut s = open_stream(&ctx, &path).await?;
+            let observed = s.read_all().await?;
+            assert_eq!(
+                observed.len(),
+                v3.len(),
+                "INV-D1-E2E (phase 3): length still matches v2 after overwrite \
+                 to a longer v3 — file size is being cached across streams"
+            );
+            assert_eq!(
+                observed.as_ref(),
+                v3.as_slice(),
+                "INV-D1-E2E (phase 3): served stale v2 bytes after overwrite to v3"
+            );
+        }
+
+        // SC engagement sanity probe: across the post-overwrite reads
+        // we expect at least one new successful SC open. If no LOCAL
+        // worker is registered, every read fell back to gRPC — that's
+        // a deployment shape, not a correctness bug, so we only print
+        // a hint instead of failing.
+        if opens_after_v2 <= opens_before_v2 {
+            eprintln!(
+                "INV-D1-E2E: no SC engagement observed across the overwrite \
+                 reads — is a LOCAL worker registered? Byte-equality \
+                 assertions still passed, so the data-plane contract holds; \
+                 the SC-engagement probe is being skipped."
+            );
+        }
 
         ctx.acquire_master().delete(&path, false).await.ok();
         ctx.close().await?;
