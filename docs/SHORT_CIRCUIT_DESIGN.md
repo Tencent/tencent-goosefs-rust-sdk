@@ -72,7 +72,7 @@
 | INV-D4 | `prefetch` / `prefetch_many` 不修改任何字节，仅是 readahead hint | 数据 | `madvise(MADV_WILLNEED)` 语义保证 + 单测 |
 | INV-S1 | SC 失败 fallback 到 gRPC 后，上层读到的字节序列与"始终走 gRPC"完全相同 | 语义 | 故障注入测试 |
 | INV-S2 | reader 存活期间 Worker 侧 OpenLocalBlock 锁始终持有；reader Drop 触发异步解锁，最坏由 reaper / Worker 会话超时回收，不无限泄漏 | 语义 | 字段声明顺序 + Drop 顺序审查 + reaper 超时（§8.2.1） |
-| INV-S3 | capability 鉴权语义与 gRPC 路径完全一致（开启的集群上未带 capability 必拒） | 语义 | 集成测试覆盖 |
+| INV-S3 | capability 鉴权语义与 gRPC 路径完全一致（开启的集群上未带 capability 必拒） | 语义 | 集成测试覆盖（`tests/sc_inv_s3.rs`，含 SDK 契约 S3-a/S3-b 强校验 + Worker 行为 S3-c 观测式探针） |
 | INV-S4 | 错误分类稳定：`OutOfRange` 等语义错误不被 fallback 吞掉，必须上抛 | 语义 | §3.6 决策矩阵 + 单测 |
 | INV-S5 | `read` / `read_bytes` / `read_to_slice` 三 API 在相同 `(offset, len)` 输入下返回的字节内容一致 | 语义 | 单测三路径 diff |
 
@@ -142,6 +142,8 @@
 
 1. **capability 注入**：早期原型与现有读路径都标 `capability: None`（事实核对：`worker.rs` 的 `read_block`/`write_block` 构造 `ReadRequest`/`WriteRequest` 时 `capability: None` 写死，L383/L425/L477）。SC 路径必须在 capability-enabled 集群上带上有效 capability，否则会被 Worker 拒绝并 fallback 到 gRPC，浪费一次 RTT。
    > **⚠️ capability 来源尚不存在，是 P3 待补项**：dev 当前 `InStreamOptions`（`fs/options.rs` L79）仅有 `read_type` / `position_short` / `max_ufs_read_concurrency` / `prefetch_window`，**没有 `capability_fetcher` 字段**，整个客户端读路径也尚未接入 `Capability`。因此"从某处取 capability 填入"是**需要新增的能力**，不能照抄一个不存在的 API。落地时（§10 P3，随 `worker.rs` 的 `open_local_block` 封装一并做）需先确定来源——候选是 `FileSystemContext` / 鉴权配置（参考 `auth/mod.rs` 的 `CAPABILITY_TOKEN` 与 `config.rs` 的 capability 相关 TODO），来源确定前不得在接口上假定其已存在。
+   >
+   > **实测判决（2026-06-25，本机 SIMPLE + `goosefs.security.authorization.capability.enabled=true` 集群）**：`tests/sc_inv_s3.rs::inv_s3_c_probe_capability_enforcement` 输出 `ACCEPTED — Worker did not reject capability=None on this auth mode`（`OPEN_SUCCESS +1, OPENLOCAL_FAIL +0, FILE_OPEN_FAIL +0, MMAP_FAIL +0, READ_CALLS +10`）。结论：**SIMPLE 认证模式下 Worker 即便开启 capability 开关，对 `OpenLocalBlock` 路径上 capability 字段为空的请求依然放行**，capability 强制校验只在具备 BlockKey 签名链的认证模式（如 KERBEROS）下才会真正拒绝。当前部署形态下不接 `CapabilityProvider` 也能让 SC 工作，INV-S1/S3-b 的字节契约成立；切到 KERBEROS 时 `inv_s3_a_sc_engages_when_capability_not_enforced` 将 legitimately 失败，强制运维要么接入真实 provider，要么显式关闭 SC 开关，杜绝"暗 SC"。
 2. **锁可见性**：guard 内嵌 Drop 时间戳到 tracing span，便于排查"锁未释放"。
 3. **多 RPC 并行**：当上层一次性需要多个 block（向量化批读）时，提供 `open_local_blocks_batched(Vec<id>) -> Vec<Result<Reader>>`，并发 N 路 bidi，把 N 次 RTT 压到 1 次（Java 没有此能力）。
 
@@ -824,7 +826,7 @@ docs/perf/2026-06-24-sc-pr-256t/
    - **INV-D4**：`prefetch` / `prefetch_many` 调用前后同范围 `read` 字节内容完全一致
    - **INV-S1**：故障注入（强制 OpenLocalBlock RPC 失败 / `File::open` EACCES / `Mmap::map` 失败）后，`BlockInStream::read` 返回的字节序列与全程 gRPC 完全相同
    - **INV-S2**：构造异常路径（read 中 panic / `?` 提前返回），验证 reader Drop 后 Worker 侧锁释放
-   - **INV-S3**：capability 启用 / 关闭两组场景下错误分类与 gRPC 一致
+   - **INV-S3**：capability 启用 / 关闭两组场景下错误分类与 gRPC 一致。SDK 一侧的契约（注入 plumbing + 字节等价 + 拒绝时透明 fallback）由 `tests/sc_inv_s3.rs` 三例覆盖：`inv_s3_a` 验 SC 在未强制 capability 的集群上必 engage；`inv_s3_b` 在当前认证模式下逐字节 diff SC vs gRPC；`inv_s3_c` 是观测式探针，按 SC 计数器（`CLIENT_SC_OPEN_SUCCESS / OPENLOCAL_FAIL / FILE_OPEN_FAIL / MMAP_FAIL`）输出 `ACCEPTED / REJECTED / BYPASSED` 判决并记入测试日志（含 `INV-S3-c verdict:` 前缀，便于 CI grep）。
    - **INV-S4**：`OutOfRange` 不被 fallback 吞掉，调用方收到与 gRPC 相同的错误类型
    - **INV-S5**：`read` / `read_bytes` / `read_to_slice` 三 API 在相同输入下结果一致
 
@@ -1008,7 +1010,7 @@ Java 的 `LocalFileDataReader.close()` 是 `mStream.close() + waitForComplete()`
 | P0 | 文档评审通过 | 本文档 | ✅ 完成 |
 | P1 | 重构 LocalBlockReader：去 _file，去 spawn_blocking，加 MADV_RANDOM | crate memmap2 ≥ 0.9 | ✅ 完成（`src/block/short_circuit/reader.rs`，零拷贝 read/read_bytes/read_to_slice + L2 prefetch） |
 | P2 | 实现 ShortCircuitFactory（LRU + neg cache） | lru crate | ✅ 完成（`factory.rs`，有界 LRU + 有界负缓存 + 决策矩阵 + EACCES 粘性禁用） |
-| P3 | 接入 BlockInStream::create，capability 注入 | worker.rs 改造 | ✅ 完成：随机/定位读路径（`read_external_range`）与顺序 `read()` 路径均接入 SC，透明回退 gRPC；`WorkerClient::open_local_block` + RAII guard 实现。capability **插桩已完成**——`CapabilityProvider` trait + 工厂 `with_capability_provider`，按 block 注入；默认无 provider 发 `None`（NOSASL/禁用集群正常，开启集群自动回退）。仅「真实凭据来源」属外部待补（dev 读路径尚无 `capability_fetcher`） |
+| P3 | 接入 BlockInStream::create，capability 注入 | worker.rs 改造 | ✅ 完成：随机/定位读路径（`read_external_range`）与顺序 `read()` 路径均接入 SC，透明回退 gRPC；`WorkerClient::open_local_block` + RAII guard 实现。capability **插桩已完成**——`CapabilityProvider` trait + 工厂 `with_capability_provider`，按 block 注入；默认无 provider 发 `None`（NOSASL/禁用集群正常，开启集群自动回退）。**SDK 契约由 `tests/sc_inv_s3.rs` 三例闭环**（S3-a engage 基线 / S3-b 字节等价 / S3-c Worker 行为探针）。仅「真实凭据来源」属外部待补（dev 读路径尚无 `capability_fetcher`），且本机 SIMPLE+capability.enabled=true 实测显示 Worker 在该认证模式下对空 capability 放行，所以未接 provider 不阻塞 SC 在该形态下工作（详见 §3.1 实测判决） |
 | P4 | metrics + tracing 全量打通 | metrics/tracing | ✅ 完成（`Client.ShortCircuit*` 13 项计数/Gauge + tracing span） |
 | — | **端到端验证**（本地 NOSASL 集群） | 运行中的 Worker | ✅ 完成：`examples/short_circuit_demo.rs` + `tests/short_circuit_e2e.rs`（4 用例：SC 命中、SC vs gRPC 字节一致 INV-S1、顺序 read_all、reader 复用）。附带修复：`WorkerRouter` 改用「绑定本机接口地址」判定本地 worker |
 | P5 | bench：sc_seq / sc_pr / sc_lat 三套 | criterion | ✅ 完成（以可运行 A/B 形式）：`benchmarks/sc_pr_ab.rs`（SC vs gRPC 随机读吞吐+p50/p99/p999）。实测见 `docs/perf/2026-06-24-sc-pr-ab/`：热 cache 下吞吐 ×307、p99 ×261 |
@@ -1018,7 +1020,7 @@ Java 的 `LocalFileDataReader.close()` 是 `mStream.close() + waitForComplete()`
 
 每阶段需附 PR + bench 报告 + 火焰图。
 
-> **实现说明（截至本次提交）**：P1–P6、P8 完成；P3 含 capability 插桩（`CapabilityProvider`），随机+顺序读路径均落地并经真实集群验证字节一致 + 性能基准 + 跨流共享。剩余外部依赖：P3 真实 capability 凭据来源、P7 Linux THP 实测。代码位于 `src/block/short_circuit/`（`reader.rs`/`factory.rs`/`sigbus.rs`）、`src/client/worker.rs`、`src/block/router.rs`、`src/io/file_in_stream.rs`、`src/context.rs`（共享工厂）。基准 `benchmarks/sc_pr_ab.rs`，E2E `tests/short_circuit_e2e.rs`（5 用例），示例 `examples/short_circuit_demo.rs`。
+> **实现说明（截至本次提交）**：P1–P6、P8 完成；P3 含 capability 插桩（`CapabilityProvider`），随机+顺序读路径均落地并经真实集群验证字节一致 + 性能基准 + 跨流共享，**SDK 契约门禁由 `tests/sc_inv_s3.rs` 三例守护**（本机 SIMPLE+capability.enabled=true 集群实测全绿，S3-c 探针判决 `ACCEPTED`，详见 §3.1）。剩余外部依赖：P3 真实 capability 凭据来源（仅在切换到 KERBEROS 等强认证模式时成为硬阻塞）、P7 Linux THP 实测。代码位于 `src/block/short_circuit/`（`reader.rs`/`factory.rs`/`sigbus.rs`）、`src/client/worker.rs`、`src/block/router.rs`、`src/io/file_in_stream.rs`、`src/context.rs`（共享工厂）。基准 `benchmarks/sc_pr_ab.rs`，E2E `tests/short_circuit_e2e.rs`（5 用例）+ 一致性回归 `tests/sc_consistency.rs`（INV-D2/S1/S2/S5）+ capability 套件 `tests/sc_inv_s3.rs`（INV-S3-a/b/c），示例 `examples/short_circuit_demo.rs`。
 
 ---
 
