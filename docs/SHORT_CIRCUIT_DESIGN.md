@@ -982,12 +982,12 @@ Java 的 `LocalFileDataReader.close()` 是 `mStream.close() + waitForComplete()`
 | — | **端到端验证**（本地 NOSASL 集群） | 运行中的 Worker | ✅ 完成：`examples/short_circuit_demo.rs` + `tests/short_circuit_e2e.rs`（4 用例：SC 命中、SC vs gRPC 字节一致 INV-S1、顺序 read_all、reader 复用）。附带修复：`WorkerRouter` 改用「绑定本机接口地址」判定本地 worker |
 | P5 | bench：sc_seq / sc_pr / sc_lat 三套 | criterion | ✅ 完成（以可运行 A/B 形式）：`benchmarks/sc_pr_ab.rs`（SC vs gRPC 随机读吞吐+p50/p99/p999）。实测见 `docs/perf/2026-06-24-sc-pr-ab/`：热 cache 下吞吐 ×307、p99 ×261 |
 | P6 | SIGBUS handler + safe_read 兜底 | signal-hook | ✅ 完成（`sigbus.rs`，SA_SIGINFO 异步信号安全诊断 + abort，unix；用 libc 非 signal-hook） |
-| P7 | 大页（THP via MADV_HUGEPAGE）opt-in + 实测 | 内核 THP 支持 | ◑ opt-in 已实现（`short.circuit.thp`，Linux `MADV_HUGEPAGE`，默认关）；实测留待 Linux 节点 |
+| P7 | 大页（THP via MADV_HUGEPAGE）opt-in + 实测 | 内核 THP 支持 | ✅ 代码完成 + 2MB VA 对齐修复。V2 重测（2026-06-25）：strace 证实 8 条 `MADV_HUGEPAGE` 全部 2MB 对齐（地址末尾 5 位 = `00000`），返回值 `= 0`。但 `thp_file_alloc` 始终为 0（系统级：`thp_file_fallback=0`，内核根本未进入分配路径）。根因：5.4 内核 `CONFIG_READ_ONLY_THP_FOR_FS` 仅支持 `read()` → `readahead` 路径的 file THP，**不支持** `mmap(MAP_SHARED)` + `MADV_HUGEPAGE` 的缺页异常路径。代码已就绪（无需进一步修改），待升级 5.10+ 内核后自动生效。详见探针报告 `docs/perf/2026-06-25-sc-thp-probe/` |
 | P8 | 跨任务共享 pool（可选） | 评估后决定 | ✅ 完成：`ShortCircuitFactory` 上提到 `FileSystemContext`（`acquire_short_circuit`），同一 context 的所有流共享一份热块 reader LRU + 负缓存——热块仅 `OpenLocalBlock`+mmap 一次，跨流/跨任务复用。前置：将 guard 的 tonic `Streaming` 包入 `Mutex` 使 `LocalBlockReader: Send+Sync`（编译期断言 + E2E `short_circuit_reader_shared_across_streams` 验证） |
 
 每阶段需附 PR + bench 报告 + 火焰图。
 
-> **实现说明（截至本次提交）**：P1–P6、P8 完成；P3 含 capability 插桩（`CapabilityProvider`），随机+顺序读路径均落地并经真实集群验证字节一致 + 性能基准 + 跨流共享。剩余外部依赖：P3 真实 capability 凭据来源、P7 Linux THP 实测。代码位于 `src/block/short_circuit/`（`reader.rs`/`factory.rs`/`sigbus.rs`）、`src/client/worker.rs`、`src/block/router.rs`、`src/io/file_in_stream.rs`、`src/context.rs`（共享工厂）。基准 `benchmarks/sc_pr_ab.rs`，E2E `tests/short_circuit_e2e.rs`（5 用例），示例 `examples/short_circuit_demo.rs`。
+> **实现说明（截至本次提交）**：P1–P6、P8 完成；P3 含 capability 插桩（`CapabilityProvider`），随机+顺序读路径均落地并经真实集群验证字节一致 + 性能基准 + 跨流共享。P7 代码完成，2026-06-25 最终验证：V2 2MB VA 对齐修复后 strace 证实 8 条 `MADV_HUGEPAGE` 全部 2MB 对齐且 `= 0`（success），但 `thp_file_alloc` 仍为 0（`thp_file_fallback=0`，内核未进入分配路径）。根因：5.4 内核 `CONFIG_READ_ONLY_THP_FOR_FS` 仅支持 `read()` → `readahead` 路径，**不支持** `mmap(MAP_SHARED)` + `MADV_HUGEPAGE` 缺页异常路径。代码已就绪（无需进一步修改），待升级 5.10+ 内核后自动生效。探针报告见 `docs/perf/2026-06-25-sc-thp-probe/`。剩余外部依赖：P3 真实 capability 凭据来源。代码位于 `src/block/short_circuit/`（`reader.rs`/`factory.rs`/`sigbus.rs`）、`src/client/worker.rs`、`src/block/router.rs`、`src/io/file_in_stream.rs`、`src/context.rs`（共享工厂）。基准 `benchmarks/sc_pr_ab.rs`，E2E `tests/short_circuit_e2e.rs`（5 用例），示例 `examples/short_circuit_demo.rs`。
 
 ---
 
