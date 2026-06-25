@@ -54,6 +54,30 @@ GoosefsFileReader / GoosefsFileInStream
 - 不实现写缓存（write-back / write-through cache），首版聚焦**读缓存**。
 - 不实现跨进程共享缓存（多进程共享磁盘目录）的强一致协调，首版按单进程独占目录处理。
 
+### 1.4 Data-Consistency Invariants (INV-PC-*)
+
+Page cache is best-effort by design (see §9): any internal failure is
+swallowed and the read falls back to the external source. "Best-effort"
+however does **not** weaken the byte-level contract — the reader must
+always observe the exact bytes the worker / UFS would have served. The
+following hard invariants make that contract testable and gate every
+release.
+
+They mirror the structure used by `SHORT_CIRCUIT_DESIGN.md` §1.3
+(`INV-D*` data-plane / `INV-S*` semantic). Every invariant maps to a
+gating-grade test case in `tests/page_cache_consistency.rs` (§12.5).
+
+| ID | Invariant | Test case |
+|---|---|---|
+| **INV-PC-D1** | Cache-on and cache-off paths return byte-for-byte identical data on every page / chunk / block / tail boundary, on both cold-miss and warm-hit reads. | `inv_pc_d1_cache_vs_direct_byte_diff` |
+| **INV-PC-D2** | The three public read APIs on `GoosefsFileInStream` (`read` sequential, `read_at` positioned, `read_all` whole-file) return identical bytes for the same logical input under cache-on. | `inv_pc_d2_read_apis_are_equivalent` |
+| **INV-PC-S1** | When the cache layer fails — unwritable cache directory, store-write rejection, async-fill queue exhaustion — the next `get` either misses cleanly or serves correct bytes; it must never return stale or torn data. | `inv_pc_s1_failed_fill_does_not_poison_cache` |
+| **INV-PC-S2** | Cached pages survive process restart only when `(file_id, length, last_modification_time_ms)` is unchanged; on overwrite, `on_file_open` invalidates them before the first read so no stale bytes are served. | `inv_pc_s2_restart_byte_parity` |
+
+Lower-level invariants (page-store atomic rename, evictor ordering, TTL
+lazy expiry, benign racing) are exercised by the in-tree unit tests
+listed in §12 item 1 and are not duplicated at the gating tier.
+
 ---
 
 ## 2. Java 端实现参考
@@ -771,6 +795,46 @@ cfg = Config("m1:9200", properties={
 4. **Python e2e**（`bindings/python/tests/test_page_cache.py`）
    - ✅ 缓存开关经 `Config(properties=…)` 透传、读往返、重复读、range 读、覆盖写不读脏数据、关闭缓存基线。
      运行：`GOOSEFS_MASTER_ADDR=127.0.0.1:9200 GOOSEFS_AUTH_TYPE=nosasl uv run --group test pytest tests/test_page_cache.py`。
+5. **Gating-grade consistency suite**（`tests/page_cache_consistency.rs`，`#[ignore]`，连真实集群） — see §12.5.
+
+### 12.5 Gating-grade consistency suite (`page_cache_consistency`)
+
+This is the page-cache analogue of `tests/sc_consistency.rs`. Every
+invariant from §1.4 maps to exactly one `#[tokio::test] #[ignore]` case
+that asserts a hard byte-equality contract (not a perf metric); a
+failure here is a release blocker. Run them explicitly:
+
+```bash
+GOOSEFS_AUTH_TYPE=nosasl \
+  cargo test --test page_cache_consistency -- --ignored --nocapture --test-threads=1
+```
+
+Coverage map:
+
+| Test case | Invariant | What it asserts |
+|---|---|---|
+| `inv_pc_d1_cache_vs_direct_byte_diff` | INV-PC-D1 | Two contexts — one with cache enabled, one disabled — open the same blob and read at a curated set of boundaries (page 4 KiB, chunk 1 MiB, block 4 MiB, tail). Each pair plus the source payload are asserted three-way equal, on both cold-miss and warm-hit passes. |
+| `inv_pc_d2_read_apis_are_equivalent` | INV-PC-D2 | A single cache-on context drains the same file three ways — `read_all`, sequential `read` with heterogeneous chunk sizes, positioned `read_at` with a 257 KiB step — and asserts the three results plus the source are byte-equal. |
+| `inv_pc_s1_failed_fill_does_not_poison_cache` | INV-PC-S1 | Cache directory is pointed at an unwritable path, so every fill fails. The reader must still return bytes equal to the source for both whole-file and boundary-spanning ranges, and the `Client.CacheBytesReadCache` counter must stay flat (no torn data is ever served from the cache). |
+| `inv_pc_s2_restart_byte_parity` | INV-PC-S2 | Two phases. Phase A: cache-on context, write payload v1, read it warm, drop the context. Phase B: a fresh context backed by the same on-disk cache directory reads the file again and must return v1 byte-for-byte. Then the file is overwritten as v2 (different length); a third context reading after the overwrite must observe v2 bytes (no stale v1 from disk). |
+
+Design notes (parity with `sc_consistency.rs`):
+
+- `block_size = 4 MiB` and a 10 MiB payload force every test to cross at
+  least two block boundaries on a single-worker dev cluster.
+- A position-dependent payload (Knuth multiplicative hash) is used so
+  any wrong offset / length surfaces as a byte mismatch instead of
+  `0 == 0` luck.
+- `client_cache_async_write_enabled = false` makes fills deterministic;
+  the warm pass therefore truly exercises the cache rather than racing
+  with an in-flight async fill.
+- All cases are `#[ignore]`d so plain `cargo test` stays hermetic and
+  CI's gating job opts in via `--ignored`.
+
+Not covered by this suite (intentional, lower-tier coverage suffices):
+
+- INV-PC-S1 sub-case for async-fill queue exhaustion under load — covered by the unit test `concurrent_puts_and_gets_same_and_distinct_pages` in `manager.rs` and the `CachePutAsyncRejectionErrors` counter wiring; reproducing it deterministically at e2e tier needs a synthetic slow `PageStore`.
+- INV-PC-S2 sub-case for sidecar drift — covered by `restore_drops_pages_without_identity_sidecar` and `restore_reclaims_empty_shell_dir_with_only_sidecar` in `manager.rs`.
 
 ---
 
