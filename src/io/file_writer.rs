@@ -235,6 +235,12 @@ pub struct GoosefsFileWriter {
     /// if UFS close succeeded but `completeFile` failed, we must clean up the
     /// Goosefs-side metadata entry only (not the UFS file).
     ufs_stream_completed: AtomicBool,
+    /// Whether the local worker router needs lazy initialization from the shared context.
+    ///
+    /// Set to `true` in `create_with_context` (deferred init) and `false` in
+    /// test constructors (where the router starts empty). Once initialized via
+    /// `ensure_router_init()`, this is set to `false` and subsequent calls are no-ops.
+    _router_needs_init: AtomicBool,
 }
 
 impl GoosefsFileWriter {
@@ -297,19 +303,12 @@ impl GoosefsFileWriter {
         let write_strategy = resolve_write_strategy(effective_write_type, &file_info);
 
         // Reuse shared router and pool from context (zero additional RPCs).
-        let router_arc = ctx.acquire_router();
+        // Worker list is NOT eagerly snapshotted here — it is deferred to the
+        // first `write()` call via `ensure_router_init()`. This avoids expensive
+        // hash-ring builds for zero-byte writes (e.g. CreateFile-then-close),
+        // which is the dominant pattern in metadata-only benchmarks.
         let worker_pool = ctx.acquire_worker_pool();
-
-        // Clone the router into a local WorkerRouter wrapper.
-        // We snapshot the current worker list from the shared router.
         let router = WorkerRouter::new();
-        let workers = (*router_arc.get_workers().await).clone();
-        if workers.is_empty() {
-            return Err(Error::NoWorkerAvailable {
-                message: "no workers available for writing".to_string(),
-            });
-        }
-        router.update_workers(workers).await;
 
         let operation_id = Uuid::new_v4();
 
@@ -335,7 +334,33 @@ impl GoosefsFileWriter {
             ufs_stream: None,
             ufs_worker_addr: None,
             ufs_stream_completed: AtomicBool::new(false),
+            _router_needs_init: AtomicBool::new(true),
         })
+    }
+
+    /// Lazily populate the local worker router from the shared context.
+    ///
+    /// Called at the start of `write()` — this is the first point where worker
+    /// routing is actually needed. For zero-byte writes (CreateFile + close
+    /// without any data), the expensive `build_hash_ring` is never invoked.
+    ///
+    /// Safe to call multiple times — once initialized, this immediately returns.
+    async fn ensure_router_init(&mut self) -> Result<()> {
+        if !self._router_needs_init.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if let Some(ctx) = &self._context {
+            let shared = ctx.acquire_router();
+            let workers = (*shared.get_workers().await).clone();
+            if workers.is_empty() {
+                return Err(Error::NoWorkerAvailable {
+                    message: "no workers available for writing".to_string(),
+                });
+            }
+            self.router.update_workers(workers).await;
+            self._router_needs_init.store(false, Ordering::Release);
+        }
+        Ok(())
     }
 
     /// Write data to the file.
@@ -362,6 +387,11 @@ impl GoosefsFileWriter {
         if data.is_empty() {
             return Ok(());
         }
+
+        // Lazy-init: first write() triggers worker router population.
+        // Deferring this from create_with_context() avoids expensive
+        // hash-ring builds for zero-byte writes (CreateFile-then-close).
+        self.ensure_router_init().await?;
 
         // 1) Feed the cache stream (sliced by block boundaries).
         if self.write_strategy.cache_stream {
@@ -1532,6 +1562,7 @@ mod tests {
             ufs_stream: None,
             ufs_worker_addr: None,
             ufs_stream_completed: AtomicBool::new(false),
+            _router_needs_init: AtomicBool::new(false),
         }
     }
 
