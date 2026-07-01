@@ -336,7 +336,7 @@ impl PyAsyncGoosefs {
                 let ctx = ctx.clone();
                 async move { crate::streaming::sdk_open_in_stream(ctx, p).await }
             }))
-            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+ .buffered(crate::context::RESOURCE_BATCH_CONCURRENCY_LIMIT)
             .collect()
             .await;
 
