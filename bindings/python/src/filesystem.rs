@@ -344,7 +344,18 @@ impl PyAsyncGoosefs {
                 results
                     .into_iter()
                     .map(|r| {
-                        let reader = PyAsyncFileReader::from_sdk(r?);
+ let reader = match r {
+                            Ok(r) => PyAsyncFileReader::from_sdk(r),
+                            Err(e) => {
+                                // 在返回错误前，显式关闭已成功创建的reader以避免资源泄漏
+                                for r in results.iter() {
+                                    if let Ok(reader) = r {
+                                        reader.close();
+                                    }
+                                }
+                                return Err(e.into());
+                            }
+                        };
                         Py::new(py, reader).map(|p| p.into_any())
                     })
                     .collect::<PyResult<Vec<_>>>()
