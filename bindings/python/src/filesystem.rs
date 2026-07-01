@@ -37,6 +37,7 @@ use crate::errors::map_err;
 use crate::options::PyDeleteOptions;
 use crate::positioned_read::{positioned_read_with_reauth, resolve_block_id, DEFAULT_CHUNK_SIZE};
 use crate::status::PyURIStatus;
+use crate::streaming::PyAsyncFileReader;
 use crate::worker::PyAsyncWorkerClient;
 
 /// Build a `\"host:port\"` worker address from a `WorkerNetAddress`.
@@ -308,6 +309,235 @@ impl PyAsyncGoosefs {
             .await
             .into_iter()
             .collect::<PyResult<Vec<bool>>>()
+        })
+    }
+
+    /// `await fs.batch_open_file(paths)` → `list[AsyncFileReader]`.
+    ///
+    /// Opens every path with bounded concurrency (at most
+    /// `BATCH_CONCURRENCY_LIMIT` RPCs in flight) and returns the readers
+    /// in input order.  The whole batch fails on the first error.
+    ///
+    /// Unlike calling `fs.open_file()` N times from Python (which crosses
+    /// the PyO3 boundary N times and serialises ``Python::attach`` for each
+    /// returned reader), this method performs all open RPCs inside a single
+    /// Rust future, eliminating GIL contention when launched from many
+    /// concurrent asyncio tasks.
+    fn batch_open_file<'py>(
+        &self,
+        py: Python<'py>,
+        paths: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let h = self.handle()?;
+        future_into_py(py, async move {
+            use futures::stream::{self, StreamExt};
+            let ctx = h.ctx.clone();
+            let results: Vec<_> = stream::iter(paths.into_iter().map(move |p| {
+                let ctx = ctx.clone();
+                async move { crate::streaming::sdk_open_in_stream(ctx, p).await }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect()
+            .await;
+
+            Python::attach(|py| {
+                results
+                    .into_iter()
+                    .map(|r| {
+                        let reader = PyAsyncFileReader::from_sdk(r?);
+                        Py::new(py, reader).map(|p| p.into_any())
+                    })
+                    .collect::<PyResult<Vec<_>>>()
+            })
+        })
+    }
+
+    /// `await fs.batch_create_file(paths, *, write_type=None, block_size_bytes=None, recursive=False)` → `list[int]`.
+    ///
+    /// Creates and closes an empty file at every path with bounded concurrency
+    /// (at most `BATCH_CONCURRENCY_LIMIT` RPCs in flight). Returns the number
+    /// of bytes written per file (always 0 for empty files) in input order.
+    ///
+    /// The whole batch fails on the first error. Use individual `write_file`
+    /// calls if you need per-path error isolation.
+    #[pyo3(signature = (paths, *, write_type=None, block_size_bytes=None, recursive=false))]
+    fn batch_create_file<'py>(
+        &self,
+        py: Python<'py>,
+        paths: Vec<String>,
+        write_type: Option<crate::types::PyWriteType>,
+        block_size_bytes: Option<i64>,
+        recursive: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let h = self.handle()?;
+        let proto_opts = build_create_file_options(write_type, block_size_bytes, recursive);
+        future_into_py(py, async move {
+            use futures::stream::{self, StreamExt};
+            let ctx = h.ctx.clone();
+            let empty: &[u8] = &[];
+            stream::iter(paths.into_iter().map(move |p| {
+                let ctx = ctx.clone();
+                let opts = proto_opts.clone();
+                async move {
+                    goosefs_sdk::io::GoosefsFileWriter::write_file_with_context_and_options(
+                        ctx, &p, empty, opts,
+                    )
+                    .await
+                    .map_err(map_err)
+                }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<Vec<u64>>>()
+        })
+    }
+
+    /// `await fs.batch_create_dir(paths, *, recursive=False)` → `None`.
+    ///
+    /// Creates a directory at every path with bounded concurrency (at most
+    /// `BATCH_CONCURRENCY_LIMIT` RPCs in flight).
+    ///
+    /// The whole batch fails on the first error.
+    #[pyo3(signature = (paths, *, recursive=false))]
+    fn batch_create_dir<'py>(
+        &self,
+        py: Python<'py>,
+        paths: Vec<String>,
+        recursive: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let h = self.handle()?;
+        future_into_py(py, async move {
+            use futures::stream::{self, StreamExt};
+            let fs = h.fs.clone();
+            stream::iter(paths.into_iter().map(move |p| {
+                let fs = fs.clone();
+                async move { fs.mkdir(&p, recursive).await.map_err(map_err) }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<()>>()
+        })
+    }
+
+    /// `await fs.batch_rename(pairs)` → `None`.
+    ///
+    /// Renames every `(src, dst)` pair with bounded concurrency (at most
+    /// `BATCH_CONCURRENCY_LIMIT` RPCs in flight).
+    ///
+    /// `pairs` is a flat list of alternating source and destination paths:
+    /// `[src_0, dst_0, src_1, dst_1, ...]`. The length must be even.
+    ///
+    /// The whole batch fails on the first error.
+    fn batch_rename<'py>(
+        &self,
+        py: Python<'py>,
+        pairs: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if pairs.len() % 2 != 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "pairs must have even length (flat src, dst, src, dst, ...)",
+            ));
+        }
+        let h = self.handle()?;
+        // Collect chunks into owned tuples so the inner async closure
+        // does not borrow from `pairs`.
+        let chunks: Vec<(String, String)> = pairs
+            .chunks_exact(2)
+            .map(|c| (c[0].clone(), c[1].clone()))
+            .collect();
+        future_into_py(py, async move {
+            use futures::stream::{self, StreamExt};
+            let fs = h.fs.clone();
+            stream::iter(chunks.into_iter().map(move |(src, dst)| {
+                let fs = fs.clone();
+                async move { fs.rename(&src, &dst).await.map_err(map_err) }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<()>>()
+        })
+    }
+
+    /// `await fs.batch_delete(paths, *, recursive=False, unchecked=False, goosefs_only=False)` → `None`.
+    ///
+    /// Deletes every path with bounded concurrency (at most
+    /// `BATCH_CONCURRENCY_LIMIT` RPCs in flight).
+    ///
+    /// The whole batch fails on the first error.
+    #[pyo3(signature = (paths, *, recursive=false, unchecked=false, goosefs_only=false))]
+    fn batch_delete<'py>(
+        &self,
+        py: Python<'py>,
+        paths: Vec<String>,
+        recursive: bool,
+        unchecked: bool,
+        goosefs_only: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let h = self.handle()?;
+        let opts = goosefs_sdk::fs::options::DeleteOptions {
+            recursive,
+            unchecked,
+            goosefs_only,
+        };
+        future_into_py(py, async move {
+            use futures::stream::{self, StreamExt};
+            let fs = h.fs.clone();
+            stream::iter(paths.into_iter().map(move |p| {
+                let fs = fs.clone();
+                let o = opts.clone();
+                async move { fs.delete(&p, o).await.map_err(map_err) }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<()>>()
+        })
+    }
+
+    /// `await fs.batch_list_status(dirs, *, recursive=False)` → `list[list[URIStatus]]`.
+    ///
+    /// Lists each directory with bounded concurrency (at most
+    /// `BATCH_CONCURRENCY_LIMIT` RPCs in flight) and returns the entries
+    /// for each directory in input order as a list-of-lists.
+    ///
+    /// The whole batch fails on the first error.
+    #[pyo3(signature = (dirs, *, recursive=false))]
+    fn batch_list_status<'py>(
+        &self,
+        py: Python<'py>,
+        dirs: Vec<String>,
+        recursive: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let h = self.handle()?;
+        future_into_py(py, async move {
+            use futures::stream::{self, StreamExt};
+            let fs = h.fs.clone();
+            stream::iter(dirs.into_iter().map(move |d| {
+                let fs = fs.clone();
+                async move {
+                    fs.list_status(&d, recursive)
+                        .await
+                        .map_err(map_err)
+                        .map(|entries| {
+                            entries
+                                .into_iter()
+                                .map(PyURIStatus::new)
+                                .collect::<Vec<_>>()
+                        })
+                }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<Vec<Vec<PyURIStatus>>>>()
         })
     }
 

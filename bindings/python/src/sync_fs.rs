@@ -235,6 +235,168 @@ impl PyGoosefs {
         })
     }
 
+    /// `fs.batch_create_file(paths, *, write_type=None, block_size_bytes=None, recursive=False)` → `list[int]`.
+    #[pyo3(signature = (paths, *, write_type=None, block_size_bytes=None, recursive=false))]
+    fn batch_create_file(
+        &self,
+        py: Python<'_>,
+        paths: Vec<String>,
+        write_type: Option<crate::types::PyWriteType>,
+        block_size_bytes: Option<i64>,
+        recursive: bool,
+    ) -> PyResult<Vec<u64>> {
+        let h = self.handle()?;
+        let proto_opts = crate::filesystem::build_create_file_options(write_type, block_size_bytes, recursive);
+        Self::guarded_block_on(py, async move {
+            use futures::stream::{self, StreamExt};
+            let ctx = h.ctx.clone();
+            let empty: &[u8] = &[];
+            stream::iter(paths.into_iter().map(move |p| {
+                let ctx = ctx.clone();
+                let opts = proto_opts.clone();
+                async move {
+                    goosefs_sdk::io::GoosefsFileWriter::write_file_with_context_and_options(
+                        ctx, &p, empty, opts,
+                    )
+                    .await
+                    .map_err(map_err)
+                }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<Vec<u64>>>()
+        })
+    }
+
+    /// `fs.batch_create_dir(paths, *, recursive=False)`.
+    #[pyo3(signature = (paths, *, recursive=false))]
+    fn batch_create_dir(
+        &self,
+        py: Python<'_>,
+        paths: Vec<String>,
+        recursive: bool,
+    ) -> PyResult<()> {
+        let h = self.handle()?;
+        Self::guarded_block_on(py, async move {
+            use futures::stream::{self, StreamExt};
+            let fs = h.fs.clone();
+            stream::iter(paths.into_iter().map(move |p| {
+                let fs = fs.clone();
+                async move { fs.mkdir(&p, recursive).await.map_err(map_err) }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<()>>()
+        })
+    }
+
+    /// `fs.batch_rename(pairs)`.
+    fn batch_rename(
+        &self,
+        py: Python<'_>,
+        pairs: Vec<String>,
+    ) -> PyResult<()> {
+        if pairs.len() % 2 != 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "pairs must have even length (flat src, dst, src, dst, ...)",
+            ));
+        }
+        let h = self.handle()?;
+        // Collect chunks into owned tuples so the inner async closure
+        // does not borrow from `pairs`.
+        let chunks: Vec<(String, String)> = pairs
+            .chunks_exact(2)
+            .map(|c| (c[0].clone(), c[1].clone()))
+            .collect();
+        Self::guarded_block_on(py, async move {
+            use futures::stream::{self, StreamExt};
+            let fs = h.fs.clone();
+            stream::iter(chunks.into_iter().map(move |(src, dst)| {
+                let fs = fs.clone();
+                async move { fs.rename(&src, &dst).await.map_err(map_err) }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<()>>()
+        })
+    }
+
+    /// `fs.batch_delete(paths, *, recursive=False, unchecked=False, goosefs_only=False)`.
+    #[pyo3(signature = (paths, *, recursive=false, unchecked=false, goosefs_only=false))]
+    fn batch_delete(
+        &self,
+        py: Python<'_>,
+        paths: Vec<String>,
+        recursive: bool,
+        unchecked: bool,
+        goosefs_only: bool,
+    ) -> PyResult<()> {
+        let h = self.handle()?;
+        let opts = goosefs_sdk::fs::options::DeleteOptions {
+            recursive,
+            unchecked,
+            goosefs_only,
+        };
+        Self::guarded_block_on(py, async move {
+            use futures::stream::{self, StreamExt};
+            let fs = h.fs.clone();
+            stream::iter(paths.into_iter().map(move |p| {
+                let fs = fs.clone();
+                let o = opts.clone();
+                async move { fs.delete(&p, o).await.map_err(map_err) }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<()>>()
+        })
+    }
+
+    /// `fs.batch_list_status(dirs, *, recursive=False)` → `list[list[URIStatus]]`.
+    ///
+    /// Lists each directory with bounded concurrency (at most
+    /// `BATCH_CONCURRENCY_LIMIT` RPCs in flight) and returns the entries
+    /// for each directory in input order as a list-of-lists.
+    #[pyo3(signature = (dirs, *, recursive=false))]
+    fn batch_list_status(
+        &self,
+        py: Python<'_>,
+        dirs: Vec<String>,
+        recursive: bool,
+    ) -> PyResult<Vec<Vec<PyURIStatus>>> {
+        let h = self.handle()?;
+        Self::guarded_block_on(py, async move {
+            use futures::stream::{self, StreamExt};
+            let fs = h.fs.clone();
+            stream::iter(dirs.into_iter().map(move |d| {
+                let fs = fs.clone();
+                async move {
+                    fs.list_status(&d, recursive)
+                        .await
+                        .map_err(map_err)
+                        .map(|entries| {
+                            entries
+                                .into_iter()
+                                .map(PyURIStatus::new)
+                                .collect::<Vec<_>>()
+                        })
+                }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<Vec<Vec<PyURIStatus>>>>()
+        })
+    }
+
     // ── Mutations ───────────────────────────────────────────────────────────
 
     /// `fs.mkdir(path, recursive=False)`.

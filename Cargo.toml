@@ -1,3 +1,12 @@
+[workspace]
+members = [
+    ".",
+    "bindings/python",
+]
+# Prevents cargo from auto-discovering unrelated directories as members.
+# Only the root SDK crate and its Python binding are members.
+resolver = "2"
+
 [package]
 name = "goosefs-sdk"
 version = "0.1.5"
@@ -172,3 +181,10 @@ path = "benchmarks/sc_pr_ab.rs"
 [profile.release]
 lto = "fat"
 codegen-units = 1
+# strip = true removes debug symbols (DWARF / PDB / Mach-O debug) from the
+# final binary. For the Python abi3 wheel this is free size reduction; for the
+# SDK crate it strips the library, so downstream consumers that want backtraces
+# should build with `debug=1` or use their own profile.
+# debug = false is the default for release, made explicit here for clarity.
+strip = true
+debug = false
