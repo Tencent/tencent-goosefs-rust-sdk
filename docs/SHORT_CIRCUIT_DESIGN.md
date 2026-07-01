@@ -66,13 +66,13 @@
 
 | ID | 不变式 | 类别 | 验证手段 |
 |---|---|---|---|
-| INV-D1 | block 文件在 reader 生命周期内内容不可变（Worker 持锁不 truncate / replace / 改写已落盘 block） | 数据 | 协议约束 + SIGBUS handler 兜底 |
+| INV-D1 | A block file's content is immutable for the lifetime of any reader (Worker holds the lock and never truncates / replaces / rewrites a sealed block); cross-reader sub-contract: after an overwrite, a freshly opened stream must immediately observe the new bytes and new length (no reuse of the v1 mmap / block-id view) | data | protocol contract + SIGBUS handler safety net + `sc_consistency::inv_d1_e2e_overwrite_visibility` |
 | INV-D2 | mmap 切片 `&mmap[off..off+len]` 的字节内容 = Worker 端同 block 同范围 pread 的字节内容 | 数据 | `sc_consistency` 测试：SC vs gRPC 双读 diff |
 | INV-D3 | `read_bytes` 返回的 `Bytes` 在其生命周期内对应内存不会被 munmap | 数据 | `Arc<Mmap>` 作为 owner，结构体字段 Drop 顺序保证 |
 | INV-D4 | `prefetch` / `prefetch_many` 不修改任何字节，仅是 readahead hint | 数据 | `madvise(MADV_WILLNEED)` 语义保证 + 单测 |
 | INV-S1 | SC 失败 fallback 到 gRPC 后，上层读到的字节序列与"始终走 gRPC"完全相同 | 语义 | 故障注入测试 |
 | INV-S2 | reader 存活期间 Worker 侧 OpenLocalBlock 锁始终持有；reader Drop 触发异步解锁，最坏由 reaper / Worker 会话超时回收，不无限泄漏 | 语义 | 字段声明顺序 + Drop 顺序审查 + reaper 超时（§8.2.1） |
-| INV-S3 | capability 鉴权语义与 gRPC 路径完全一致（开启的集群上未带 capability 必拒） | 语义 | 集成测试覆盖 |
+| INV-S3 | capability 鉴权语义与 gRPC 路径完全一致（开启的集群上未带 capability 必拒） | 语义 | 集成测试覆盖（`tests/sc_inv_s3.rs`，含 SDK 契约 S3-a/S3-b 强校验 + Worker 行为 S3-c 观测式探针） |
 | INV-S4 | 错误分类稳定：`OutOfRange` 等语义错误不被 fallback 吞掉，必须上抛 | 语义 | §3.6 决策矩阵 + 单测 |
 | INV-S5 | `read` / `read_bytes` / `read_to_slice` 三 API 在相同 `(offset, len)` 输入下返回的字节内容一致 | 语义 | 单测三路径 diff |
 
@@ -142,6 +142,8 @@
 
 1. **capability 注入**：早期原型与现有读路径都标 `capability: None`（事实核对：`worker.rs` 的 `read_block`/`write_block` 构造 `ReadRequest`/`WriteRequest` 时 `capability: None` 写死，L383/L425/L477）。SC 路径必须在 capability-enabled 集群上带上有效 capability，否则会被 Worker 拒绝并 fallback 到 gRPC，浪费一次 RTT。
    > **⚠️ capability 来源尚不存在，是 P3 待补项**：dev 当前 `InStreamOptions`（`fs/options.rs` L79）仅有 `read_type` / `position_short` / `max_ufs_read_concurrency` / `prefetch_window`，**没有 `capability_fetcher` 字段**，整个客户端读路径也尚未接入 `Capability`。因此"从某处取 capability 填入"是**需要新增的能力**，不能照抄一个不存在的 API。落地时（§10 P3，随 `worker.rs` 的 `open_local_block` 封装一并做）需先确定来源——候选是 `FileSystemContext` / 鉴权配置（参考 `auth/mod.rs` 的 `CAPABILITY_TOKEN` 与 `config.rs` 的 capability 相关 TODO），来源确定前不得在接口上假定其已存在。
+   >
+   > **实测判决（2026-06-25，本机 SIMPLE + `goosefs.security.authorization.capability.enabled=true` 集群）**：`tests/sc_inv_s3.rs::inv_s3_c_probe_capability_enforcement` 输出 `ACCEPTED — Worker did not reject capability=None on this auth mode`（`OPEN_SUCCESS +1, OPENLOCAL_FAIL +0, FILE_OPEN_FAIL +0, MMAP_FAIL +0, READ_CALLS +10`）。结论：**SIMPLE 认证模式下 Worker 即便开启 capability 开关，对 `OpenLocalBlock` 路径上 capability 字段为空的请求依然放行**，capability 强制校验只在具备 BlockKey 签名链的认证模式（如 KERBEROS）下才会真正拒绝。当前部署形态下不接 `CapabilityProvider` 也能让 SC 工作，INV-S1/S3-b 的字节契约成立；切到 KERBEROS 时 `inv_s3_a_sc_engages_when_capability_not_enforced` 将 legitimately 失败，强制运维要么接入真实 provider，要么显式关闭 SC 开关，杜绝"暗 SC"。
 2. **锁可见性**：guard 内嵌 Drop 时间戳到 tracing span，便于排查"锁未释放"。
 3. **多 RPC 并行**：当上层一次性需要多个 block（向量化批读）时，提供 `open_local_blocks_batched(Vec<id>) -> Vec<Result<Reader>>`，并发 N 路 bidi，把 N 次 RTT 压到 1 次（Java 没有此能力）。
 
@@ -819,12 +821,13 @@ docs/perf/2026-06-24-sc-pr-256t/
 3. `cargo bench --bench sc_lat` — p50/p99/p999 延迟分布
 4. `cargo bench --bench sc_prefetch` — 冷数据 PR 在 {无 prefetch, prefetch, prefetch_many} 三种模式下的吞吐与 p99，必须证明 prefetch 路径相对无 prefetch 至少 10× p99 改善
 5. `cargo test --test sc_consistency` — **门禁级一致性回归测试**（与 bench 不同，必须 100% 通过；任何 PR 触发，失败直接阻塞合入）。覆盖 §1.3 的全部不变式：
+   - **INV-D1 (end-to-end cross-reader sub-contract)**: write v1 -> close stream -> overwrite once with a same-length but different payload and once with a different-length payload -> a freshly opened stream must immediately observe the new bytes and new length (`sc_consistency::inv_d1_e2e_overwrite_visibility`, with an assertion on the new-read path that `CLIENT_SC_OPEN_SUCCESS` increases, to rule out a silent gRPC-fallback false positive).
    - **INV-D2**：同一 block 用 SC 路径与 gRPC 路径双读，逐字节 diff（覆盖顺序读、PR、跨 chunk、跨 page 边界）
    - **INV-D3**：`read_bytes` 返回的 `Bytes` 在 reader Drop 之后仍能被安全访问，内容不变（验证 owner 生命周期）
    - **INV-D4**：`prefetch` / `prefetch_many` 调用前后同范围 `read` 字节内容完全一致
    - **INV-S1**：故障注入（强制 OpenLocalBlock RPC 失败 / `File::open` EACCES / `Mmap::map` 失败）后，`BlockInStream::read` 返回的字节序列与全程 gRPC 完全相同
    - **INV-S2**：构造异常路径（read 中 panic / `?` 提前返回），验证 reader Drop 后 Worker 侧锁释放
-   - **INV-S3**：capability 启用 / 关闭两组场景下错误分类与 gRPC 一致
+   - **INV-S3**：capability 启用 / 关闭两组场景下错误分类与 gRPC 一致。SDK 一侧的契约（注入 plumbing + 字节等价 + 拒绝时透明 fallback）由 `tests/sc_inv_s3.rs` 三例覆盖：`inv_s3_a` 验 SC 在未强制 capability 的集群上必 engage；`inv_s3_b` 在当前认证模式下逐字节 diff SC vs gRPC；`inv_s3_c` 是观测式探针，按 SC 计数器（`CLIENT_SC_OPEN_SUCCESS / OPENLOCAL_FAIL / FILE_OPEN_FAIL / MMAP_FAIL`）输出 `ACCEPTED / REJECTED / BYPASSED` 判决并记入测试日志（含 `INV-S3-c verdict:` 前缀，便于 CI grep）。
    - **INV-S4**：`OutOfRange` 不被 fallback 吞掉，调用方收到与 gRPC 相同的错误类型
    - **INV-S5**：`read` / `read_bytes` / `read_to_slice` 三 API 在相同输入下结果一致
 
@@ -906,6 +909,37 @@ pub enum ShortCircuitError {
    - SAFETY 前提：在 mmap 生命周期内，文件内容不被截断/替换（INV-D1）。
    - 缓解：Worker 持锁不 truncate（协议根基）；SIGBUS handler 仅做诊断后 `abort`（见 §3.2）；需要鲁棒性的部署改用 `io.mode=pread` 数据面而非 mmap。
 
+#### 8.1.1 INV-D1 已由 GooseFS 源码验证（block_id 不复用 ∧ 持锁不可变）
+
+针对「缓存的 `LocalBlockReader`（LRU TTL 30s）是否可能读到过期/复用内容」这一质疑，已对照 `/opt/sourcecode/cos/goosefs` 源码逐点核实，**结论：无需 `(length, version)` sidecar 校验或其他额外防护**，INV-D1 由 GooseFS 协议双重保证：
+
+**(1) block_id 全局单调、永不复用** —— 源码 `core/server/master/.../block/BlockContainerIdGenerator.java`：
+
+```java
+private final AtomicLong mNextContainerId;                 // 单调，无回收
+public long getNewContainerId() { return mNextContainerId.getAndIncrement(); }
+public JournalEntry toJournalEntry() { ... setNextContainerId(mNextContainerId.get()) } // journal 持久化
+```
+
+`BlockId.java` 中 `blockId = [container_id:53bit][sequence:11bit]`，container_id 即文件容器 id。生成器 `getAndIncrement()` 严格递增、经 journal 持久化（master 重启 `setNextContainerId` 恢复、不回退）、**无任何回收分支**。文件删除后新文件必然分配更大的 container_id ⇒ 新 block_id 与任何历史 block_id 不同 ⇒ 「block 被删/GC 后 block_id 在 TTL 内被复用给新内容」**不可能发生**。
+
+**(2) Worker 锁覆盖整个 reader 生命周期** —— 源码 `core/server/worker/.../grpc/ShortCircuitBlockReadHandler.java`：
+
+```java
+// onNext(OpenLocalBlockRequest): 先加 block 读锁再返回本地路径
+mLockId = mWorker.lockBlock(mSessionId, request.getBlockId());
+// 源码注释原文: "The block is locked for the session,
+//               the lock is released when the session is closed."
+// onCompleted / onError: stream 关闭才解锁
+mWorker.unlockBlock(mLockId); mWorker.cleanupSession(mSessionId);
+```
+
+锁随 **stream（session）生命周期**，客户端不关闭 stream 就不解锁——与 Rust 端 `OpenLocalBlockGuard` 严格对应：guard 在 ⇒ stream 在 ⇒ Worker 持读锁；guard Drop ⇒ `onCompleted` ⇒ `unlockBlock`。我们的 `LocalBlockReader` **全程持有 guard（含 LRU 缓存的 30s）**，故缓存期间 Worker 读锁始终持有，block 文件无法被 evict / delete / truncate（删除需写锁，与读锁互斥）⇒ mmap 底层字节稳定。
+
+**(3) 非本地块的处理（B1 安全根基）**：block 不在本 Worker 时 `lockBlock` / `getBlockMeta` 抛异常 → `onError` → 客户端收到 gRPC 错误 → 透明回退（INV-S1）。因此 `is_local_address` 在容器/多宿主下的误判只损失一次无效 RPC，不影响正确性。
+
+**双重保证（id 不复用 ∧ 持锁不可变）使风险路径不可达**；这套锁正是 GooseFS/Java 既有短路读所依赖的同一把锁，本实现与现有 Java 客户端**等价安全**，未引入新风险。SIGBUS handler（abort 而非错读）作为「协议万一被破坏」的最后兜底已属恰当。
+
 > 零拷贝 `read_bytes` 路径**不引入 unsafe**：改用 `Bytes::from_owner`（§3.3），由 bytes crate 在安全代码内维持 owner 生命周期。早期原型的 `Bytes::from_raw_parts` 是不存在的 API，已废弃。
 
 ### 8.2 Drop 顺序
@@ -977,17 +1011,17 @@ Java 的 `LocalFileDataReader.close()` 是 `mStream.close() + waitForComplete()`
 | P0 | 文档评审通过 | 本文档 | ✅ 完成 |
 | P1 | 重构 LocalBlockReader：去 _file，去 spawn_blocking，加 MADV_RANDOM | crate memmap2 ≥ 0.9 | ✅ 完成（`src/block/short_circuit/reader.rs`，零拷贝 read/read_bytes/read_to_slice + L2 prefetch） |
 | P2 | 实现 ShortCircuitFactory（LRU + neg cache） | lru crate | ✅ 完成（`factory.rs`，有界 LRU + 有界负缓存 + 决策矩阵 + EACCES 粘性禁用） |
-| P3 | 接入 BlockInStream::create，capability 注入 | worker.rs 改造 | ✅ 完成：随机/定位读路径（`read_external_range`）与顺序 `read()` 路径均接入 SC，透明回退 gRPC；`WorkerClient::open_local_block` + RAII guard 实现。capability **插桩已完成**——`CapabilityProvider` trait + 工厂 `with_capability_provider`，按 block 注入；默认无 provider 发 `None`（NOSASL/禁用集群正常，开启集群自动回退）。仅「真实凭据来源」属外部待补（dev 读路径尚无 `capability_fetcher`） |
+| P3 | 接入 BlockInStream::create，capability 注入 | worker.rs 改造 | ✅ 完成：随机/定位读路径（`read_external_range`）与顺序 `read()` 路径均接入 SC，透明回退 gRPC；`WorkerClient::open_local_block` + RAII guard 实现。capability **插桩已完成**——`CapabilityProvider` trait + 工厂 `with_capability_provider`，按 block 注入；默认无 provider 发 `None`（NOSASL/禁用集群正常，开启集群自动回退）。**SDK 契约由 `tests/sc_inv_s3.rs` 三例闭环**（S3-a engage 基线 / S3-b 字节等价 / S3-c Worker 行为探针）。仅「真实凭据来源」属外部待补（dev 读路径尚无 `capability_fetcher`），且本机 SIMPLE+capability.enabled=true 实测显示 Worker 在该认证模式下对空 capability 放行，所以未接 provider 不阻塞 SC 在该形态下工作（详见 §3.1 实测判决） |
 | P4 | metrics + tracing 全量打通 | metrics/tracing | ✅ 完成（`Client.ShortCircuit*` 13 项计数/Gauge + tracing span） |
 | — | **端到端验证**（本地 NOSASL 集群） | 运行中的 Worker | ✅ 完成：`examples/short_circuit_demo.rs` + `tests/short_circuit_e2e.rs`（4 用例：SC 命中、SC vs gRPC 字节一致 INV-S1、顺序 read_all、reader 复用）。附带修复：`WorkerRouter` 改用「绑定本机接口地址」判定本地 worker |
 | P5 | bench：sc_seq / sc_pr / sc_lat 三套 | criterion | ✅ 完成（以可运行 A/B 形式）：`benchmarks/sc_pr_ab.rs`（SC vs gRPC 随机读吞吐+p50/p99/p999）。实测见 `docs/perf/2026-06-24-sc-pr-ab/`：热 cache 下吞吐 ×307、p99 ×261 |
 | P6 | SIGBUS handler + safe_read 兜底 | signal-hook | ✅ 完成（`sigbus.rs`，SA_SIGINFO 异步信号安全诊断 + abort，unix；用 libc 非 signal-hook） |
-| P7 | 大页（THP via MADV_HUGEPAGE）opt-in + 实测 | 内核 THP 支持 | ✅ 代码完成 + 2MB VA 对齐修复。V2 重测（2026-06-25）：strace 证实 8 条 `MADV_HUGEPAGE` 全部 2MB 对齐（地址末尾 5 位 = `00000`），返回值 `= 0`。但 `thp_file_alloc` 始终为 0（系统级：`thp_file_fallback=0`，内核根本未进入分配路径）。根因：5.4 内核 `CONFIG_READ_ONLY_THP_FOR_FS` 仅支持 `read()` → `readahead` 路径的 file THP，**不支持** `mmap(MAP_SHARED)` + `MADV_HUGEPAGE` 的缺页异常路径。代码已就绪（无需进一步修改），待升级 5.10+ 内核后自动生效。详见探针报告 `docs/perf/2026-06-25-sc-thp-probe/` |
+| P7 | 大页（THP via MADV_HUGEPAGE）opt-in + 实测 | 内核 THP 支持 | ◑ opt-in 已实现（`short.circuit.thp`，Linux `MADV_HUGEPAGE`，默认关）；实测留待 Linux 节点 |
 | P8 | 跨任务共享 pool（可选） | 评估后决定 | ✅ 完成：`ShortCircuitFactory` 上提到 `FileSystemContext`（`acquire_short_circuit`），同一 context 的所有流共享一份热块 reader LRU + 负缓存——热块仅 `OpenLocalBlock`+mmap 一次，跨流/跨任务复用。前置：将 guard 的 tonic `Streaming` 包入 `Mutex` 使 `LocalBlockReader: Send+Sync`（编译期断言 + E2E `short_circuit_reader_shared_across_streams` 验证） |
 
 每阶段需附 PR + bench 报告 + 火焰图。
 
-> **实现说明（截至本次提交）**：P1–P6、P8 完成；P3 含 capability 插桩（`CapabilityProvider`），随机+顺序读路径均落地并经真实集群验证字节一致 + 性能基准 + 跨流共享。P7 代码完成，2026-06-25 最终验证：V2 2MB VA 对齐修复后 strace 证实 8 条 `MADV_HUGEPAGE` 全部 2MB 对齐且 `= 0`（success），但 `thp_file_alloc` 仍为 0（`thp_file_fallback=0`，内核未进入分配路径）。根因：5.4 内核 `CONFIG_READ_ONLY_THP_FOR_FS` 仅支持 `read()` → `readahead` 路径，**不支持** `mmap(MAP_SHARED)` + `MADV_HUGEPAGE` 缺页异常路径。代码已就绪（无需进一步修改），待升级 5.10+ 内核后自动生效。探针报告见 `docs/perf/2026-06-25-sc-thp-probe/`。剩余外部依赖：P3 真实 capability 凭据来源。代码位于 `src/block/short_circuit/`（`reader.rs`/`factory.rs`/`sigbus.rs`）、`src/client/worker.rs`、`src/block/router.rs`、`src/io/file_in_stream.rs`、`src/context.rs`（共享工厂）。基准 `benchmarks/sc_pr_ab.rs`，E2E `tests/short_circuit_e2e.rs`（5 用例），示例 `examples/short_circuit_demo.rs`。
+> **实现说明（截至本次提交）**：P1–P6、P8 完成；P3 含 capability 插桩（`CapabilityProvider`），随机+顺序读路径均落地并经真实集群验证字节一致 + 性能基准 + 跨流共享，**SDK 契约门禁由 `tests/sc_inv_s3.rs` 三例守护**（本机 SIMPLE+capability.enabled=true 集群实测全绿，S3-c 探针判决 `ACCEPTED`，详见 §3.1）。剩余外部依赖：P3 真实 capability 凭据来源（仅在切换到 KERBEROS 等强认证模式时成为硬阻塞）、P7 Linux THP 实测。代码位于 `src/block/short_circuit/`（`reader.rs`/`factory.rs`/`sigbus.rs`）、`src/client/worker.rs`、`src/block/router.rs`、`src/io/file_in_stream.rs`、`src/context.rs`（共享工厂）。基准 `benchmarks/sc_pr_ab.rs`，E2E `tests/short_circuit_e2e.rs`（5 用例）+ 一致性回归 `tests/sc_consistency.rs`（INV-D2/S1/S2/S5）+ capability 套件 `tests/sc_inv_s3.rs`（INV-S3-a/b/c），示例 `examples/short_circuit_demo.rs`。
 
 ---
 

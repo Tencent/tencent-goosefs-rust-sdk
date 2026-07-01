@@ -86,6 +86,15 @@ pub enum ShortCircuitError {
     #[error("short-circuit: mmap failed: {0}")]
     Mmap(#[source] std::io::Error),
 
+    /// The Worker-reported **logical** block size exceeds the physical mapping
+    /// length — a metadata / block-file inconsistency (INV-D1 / INV-D2). This
+    /// is *recoverable*: rather than silently clamping the logical size (which
+    /// would hide the drift and could make legitimately-requested tail bytes
+    /// look out-of-range), the open fails and the read transparently falls back
+    /// to gRPC, which reads the block authoritatively (INV-S1).
+    #[error("short-circuit: logical block size {logical} exceeds mapped file size {mapped}")]
+    SizeMismatch { logical: usize, mapped: usize },
+
     /// `madvise` failed (currently unused on the error path — advise failures
     /// are non-fatal and logged; kept for completeness with design §7.1).
     #[error("short-circuit: madvise failed: {0}")]
@@ -150,6 +159,11 @@ mod tests {
         assert!(!ShortCircuitError::NotLocal.is_semantic());
         assert!(!ShortCircuitError::MissingPath.is_semantic());
         assert!(!ShortCircuitError::SigBus.is_semantic());
+        assert!(!ShortCircuitError::SizeMismatch {
+            logical: 100,
+            mapped: 50
+        }
+        .is_semantic());
         assert!(!ShortCircuitError::FileOpen(std::io::Error::from(
             std::io::ErrorKind::PermissionDenied
         ))

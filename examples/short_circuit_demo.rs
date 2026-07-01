@@ -136,8 +136,14 @@ async fn main() -> Result<()> {
 
     println!("\n4. Short-circuit metrics (delta over this run):");
     println!("   sc_open_success      : {}", open_after - open_before);
-    println!("   sc_openlocal_fail    : {}", openfail_after - openfail_before);
-    println!("   sc_read_bytes        : {}", scbytes_after - scbytes_before);
+    println!(
+        "   sc_openlocal_fail    : {}",
+        openfail_after - openfail_before
+    );
+    println!(
+        "   sc_read_bytes        : {}",
+        scbytes_after - scbytes_before
+    );
     println!("   sc_cache_hits        : {}", hits_after - hits_before);
     println!(
         "   sc_active_readers    : {}",

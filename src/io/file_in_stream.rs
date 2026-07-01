@@ -962,7 +962,11 @@ impl GoosefsFileInStream {
 
         match reader.read_bytes(offset_in_block as usize, length as usize) {
             Ok(bytes) => Some(Ok(bytes)),
-            Err(ShortCircuitError::OutOfRange { off, len, file_size }) => {
+            Err(ShortCircuitError::OutOfRange {
+                off,
+                len,
+                file_size,
+            }) => {
                 // Semantic error — propagate (INV-S4). With ranges already
                 // clamped to file_length this should not occur; if it does it
                 // signals a real metadata/block-size inconsistency worth
@@ -993,7 +997,10 @@ impl GoosefsFileInStream {
     /// Whether the sequential read at the current block should use SC.
     async fn sc_should_use_seq(&self, block_id: i64, block_idx: usize) -> bool {
         match &self.short_circuit {
-            Some(f) => f.should_use(block_id, self.block_logical_size(block_idx)).await,
+            Some(f) => {
+                f.should_use(block_id, self.block_logical_size(block_idx))
+                    .await
+            }
             None => false,
         }
     }

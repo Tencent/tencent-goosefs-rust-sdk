@@ -152,7 +152,7 @@ uv run maturin publish
 
 For the complete release process — manylinux tag selection, ARM (aarch64) wheels,
 building on a Tencent Cloud Linux host, and uploading to the official / Tencent
-internal PyPI mirror — see [`../../docs/PYTHON_RELEASE.md`](../../docs/PYTHON_RELEASE.md).
+internal PyPI mirror — see [`../../docs/PYTHON_RELEASE.md`](../../docs/release/PYTHON_RELEASE.md).
 
 > **CI automation (P8) still pending:** a fully automated cross-platform wheel
 > matrix (manylinux x86_64/aarch64, macOS x86_64/arm64, Windows x86_64), PyPI

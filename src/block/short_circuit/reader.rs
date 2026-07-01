@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use memmap2::Mmap;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use crate::client::{OpenLocalBlockGuard, WorkerClient};
 use crate::metrics::{self, name};
@@ -125,7 +125,7 @@ impl LocalBlockReader {
         // a diagnosed `abort` rather than a torn/stale read — it never returns
         // partial bytes. No other unsafe is used: the zero-copy `read_bytes`
         // path uses the safe `Bytes::from_owner`.
-        let mmap = mmap_block(&file, thp).map_err(|e| {
+        let mmap = unsafe { Mmap::map(&file) }.map_err(|e| {
             metrics::counter(name::CLIENT_SC_MMAP_FAIL).inc(1);
             ShortCircuitError::Mmap(e)
         })?;
@@ -133,10 +133,27 @@ impl LocalBlockReader {
         drop(file);
 
         // Defensive: the logical block must fit inside the physical mapping.
-        // A logical size larger than the file would let bounds_check admit
-        // reads past the mapping → UB. Treat as an out-of-range protocol error
-        // (do NOT silently clamp — that would violate INV-D2).
-        let file_size = file_size.min(mmap.len());
+        // A logical size larger than the file would let `bounds_check` admit
+        // reads past the mapping (and `MmapChunk::as_ref` slice `[..file_size]`
+        // would panic). Per INV-D2 we must NOT silently clamp — that would
+        // hide a metadata/block-file inconsistency and could make tail bytes a
+        // caller legitimately requests look out-of-range. Surface it as a
+        // *recoverable* protocol error so the read falls back to gRPC, which
+        // reads the block authoritatively (INV-S1).
+        if file_size > mmap.len() {
+            metrics::counter(name::CLIENT_SC_MMAP_FAIL).inc(1);
+            warn!(
+                block_id = block_id,
+                logical = file_size,
+                mapped = mmap.len(),
+                "short-circuit: logical block size exceeds mmap length, \
+                 falling back to gRPC (metadata/block drift?)"
+            );
+            return Err(ShortCircuitError::SizeMismatch {
+                logical: file_size,
+                mapped: mmap.len(),
+            });
+        }
 
         apply_advice(&mmap, hint);
         if thp {
@@ -232,11 +249,7 @@ impl LocalBlockReader {
     ///
     /// For callers that must own the buffer. Returns the number of bytes
     /// copied (`dst.len()`).
-    pub fn read_to_slice(
-        &self,
-        offset: usize,
-        dst: &mut [u8],
-    ) -> Result<usize, ShortCircuitError> {
+    pub fn read_to_slice(&self, offset: usize, dst: &mut [u8]) -> Result<usize, ShortCircuitError> {
         let len = dst.len();
         self.bounds_check(offset, len)?;
         metrics::counter(name::CLIENT_SC_READ_CALLS).inc(1);
@@ -368,119 +381,6 @@ fn coalesce_ranges(ranges: &[(usize, usize)], gap: usize) -> Vec<(usize, usize)>
     merged
 }
 
-/// Map the block file read-only, ensuring 2MB virtual-address alignment when
-/// THP is requested (Linux only). `khugepaged` requires both VA and file-offset
-/// to be 2MB-aligned for file-backed page collapse; the file offset is 0
-/// (aligned) but `Mmap::map` does not guarantee VA alignment.
-///
-/// Strategy (Linux + THP, unaligned):
-///  1. Reserve a PROT_NONE anonymous region
-///  2. Find the 2MB-aligned address within it
-///  3. MAP_FIXED the file there
-///  4. Unmap the unused anonymous pages
-/// Falls back to a plain `Mmap::map` on any failure.
-fn mmap_block(file: &std::fs::File, thp: bool) -> std::io::Result<Mmap> {
-    #[cfg(target_os = "linux")]
-    if thp {
-        return mmap_block_thp_linux(file);
-    }
-    // Non-Linux or THP disabled: use standard mmap.
-    let _ = thp;
-    unsafe { Mmap::map(file) }
-}
-
-/// On Linux with THP, try to get a 2MB-aligned mmap.  Falls back to a plain
-/// `Mmap::map` when the kernel / address-space layout prevents alignment.
-#[cfg(target_os = "linux")]
-fn mmap_block_thp_linux(file: &std::fs::File) -> std::io::Result<Mmap> {
-    use std::os::unix::io::AsRawFd;
-
-    let mmap = unsafe { Mmap::map(file) }?;
-    let addr = mmap.as_ptr() as usize;
-
-    // Already 2MB-aligned — nothing to do.
-    if addr % 0x200000 == 0 {
-        debug!(addr = format_args!("{addr:#x}"), "THP: mmap already 2MB-aligned");
-        return Ok(mmap);
-    }
-
-    let map_bytes = mmap.len();
-    let aligned_bytes = (map_bytes + 0x1FFFFF) & !0x1FFFFF; // round up
-    let fd = file.as_raw_fd();
-
-    unsafe {
-        // Reserve a large PROT_NONE region to find a 2MB-aligned address.
-        // The original `mmap` is kept alive so no other thread can race us
-        // for the freed space between an early drop and the reservation.
-        let reserve = libc::mmap(
-            std::ptr::null_mut(),
-            aligned_bytes + 0x400000, // at least 2×2MB for alignment headroom
-            libc::PROT_NONE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-            -1,
-            0,
-        );
-        if reserve == libc::MAP_FAILED {
-            debug!("THP: cannot reserve address space, falling back to unaligned mmap");
-            return Ok(mmap);
-        }
-
-        let aligned = ((reserve as usize) + 0x1FFFFF) & !0x1FFFFF;
-        let before = aligned - reserve as usize;
-        let after = (reserve as usize + aligned_bytes + 0x400000) - (aligned + aligned_bytes);
-
-        // Release the unneeded PROT_NONE pages on both sides.
-        if before > 0 {
-            libc::munmap(reserve, before);
-        }
-        if after > 0 {
-            libc::munmap((aligned + aligned_bytes) as *mut libc::c_void, after);
-        }
-
-        // MAP_FIXED (not NOREPLACE) is safe here: the target range contains
-        // only our own PROT_NONE pages, so no other mapping is destroyed.
-        let ptr = libc::mmap(
-            aligned as *mut libc::c_void,
-            aligned_bytes,
-            libc::PROT_READ,
-            libc::MAP_PRIVATE | libc::MAP_FIXED,
-            fd,
-            0,
-        );
-        if ptr == libc::MAP_FAILED {
-            debug!("THP: MAP_FIXED at 2MB-aligned VA failed, falling back");
-            return Ok(mmap);
-        }
-
-        debug!(aligned = format_args!("{aligned:#x}"), "THP: mmap re-mapped at 2MB-aligned VA");
-        // The original unaligned `mmap` is dropped here (munmap'd when it
-        // goes out of scope). The aligned copy is returned.
-        Ok(mmap_from_raw(ptr as *mut u8, aligned_bytes))
-    }
-}
-
-/// Construct a `memmap2::Mmap` from a raw pointer obtained via `libc::mmap`.
-///
-/// memmap2 does not expose a public `from_raw` constructor, so we write the
-/// fields directly.  The internal layout is `{ NonNull<u8>, usize }` — two
-/// pointer-sized fields in declaration order.
-///
-/// # Panics (at compile time)
-/// If `size_of::<Mmap>() != size_of::<[usize; 2]>()`.
-#[cfg(target_os = "linux")]
-unsafe fn mmap_from_raw(ptr: *mut u8, len: usize) -> Mmap {
-    // Compile-time layout assertion.
-    const _: [(); std::mem::size_of::<Mmap>()] = [(); std::mem::size_of::<[usize; 2]>()];
-    let raw = [ptr as usize, len];
-    let mut m = std::mem::MaybeUninit::<Mmap>::uninit();
-    std::ptr::copy_nonoverlapping(
-        raw.as_ptr() as *const u8,
-        m.as_mut_ptr() as *mut u8,
-        std::mem::size_of::<Mmap>(),
-    );
-    m.assume_init()
-}
-
 /// Apply the L1 kernel-readahead hint (design §3.2.1 "L1 decision matrix").
 ///
 /// `madvise` is unix-only in `memmap2`; on other targets this is a no-op and
@@ -504,20 +404,10 @@ fn apply_advice(_mmap: &Mmap, _hint: AccessHint) {}
 /// Request Transparent Huge Pages for the mapping via `madvise(MADV_HUGEPAGE)`
 /// (design §11.1). Linux only — file-backed THP support is kernel/FS
 /// dependent, so this is best-effort and failures are logged and ignored.
-/// The caller should ensure the mmap VA is 2MB-aligned (see [`mmap_block`]);
-/// unaligned VA renders the hint ineffective even when the kernel supports
-/// file-backed THP.
 /// A no-op on every non-Linux target (no `MADV_HUGEPAGE` there).
 #[cfg(target_os = "linux")]
 fn apply_hugepage(mmap: &Mmap) {
     use memmap2::Advice;
-    let addr = mmap.as_ptr() as usize;
-    if addr % 0x200000 != 0 {
-        debug!(
-            addr = format_args!("{addr:#x}"),
-            "THP: mmap VA not 2MB-aligned, MADV_HUGEPAGE will be ineffective"
-        );
-    }
     if let Err(e) = mmap.advise(Advice::HugePage) {
         debug!(error = %e, "madvise(HUGEPAGE) failed (non-fatal)");
     }
@@ -582,8 +472,8 @@ mod tests {
 
     fn reader_for(data: &[u8]) -> (LocalBlockReader, std::path::PathBuf) {
         let path = write_temp(data);
-        let r =
-            LocalBlockReader::open_from_path_for_test(&path, data.len(), AccessHint::Random).unwrap();
+        let r = LocalBlockReader::open_from_path_for_test(&path, data.len(), AccessHint::Random)
+            .unwrap();
         (r, path)
     }
 
@@ -711,8 +601,8 @@ mod tests {
         let data = vec![7u8; 100];
         let path = write_temp(&data);
         // Claim a logical size far larger than the 100-byte file.
-        let r =
-            LocalBlockReader::open_from_path_for_test(&path, 1_000_000, AccessHint::Default).unwrap();
+        let r = LocalBlockReader::open_from_path_for_test(&path, 1_000_000, AccessHint::Default)
+            .unwrap();
         assert_eq!(r.file_size(), 100, "logical size must clamp to file len");
         assert!(matches!(
             r.read(0, 200),

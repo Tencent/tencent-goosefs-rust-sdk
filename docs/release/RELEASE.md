@@ -2,7 +2,7 @@
 
 This document describes how to package and publish the **Rust crate** `goosefs-sdk` to a Cargo registry (crates.io or the Tencent internal Cargo Registry).
 
-> Looking to release the **Python** client (`goosefs`)? See [`PYTHON_RELEASE.md`](./PYTHON_RELEASE.md) instead — it builds native manylinux wheels via maturin and publishes to PyPI.
+> Looking to release the **Python** client (`goosefs`)? See [`PYTHON_RELEASE.md`](PYTHON_RELEASE.md) instead — it builds native manylinux wheels via maturin and publishes to PyPI.
 
 ## Prerequisites
 

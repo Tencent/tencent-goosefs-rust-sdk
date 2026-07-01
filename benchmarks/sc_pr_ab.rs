@@ -88,12 +88,7 @@ fn percentile(sorted: &[u128], q: f64) -> u128 {
 }
 
 /// Run `reads` random positioned reads of `io` bytes over `[0, size)`.
-async fn run_pr(
-    ctx: &Arc<FileSystemContext>,
-    size: u64,
-    io: usize,
-    reads: usize,
-) -> Result<Stats> {
+async fn run_pr(ctx: &Arc<FileSystemContext>, size: u64, io: usize, reads: usize) -> Result<Stats> {
     let mut s =
         GoosefsFileInStream::open_with_context(ctx.clone(), TEST_PATH, OpenFileOptions::default())
             .await?;
@@ -143,9 +138,7 @@ async fn main() -> Result<()> {
 
     println!("Short-Circuit Positioned-Read A/B Benchmark");
     println!("===========================================");
-    println!(
-        "file={size_mb} MiB  io={io_kb} KiB  reads={reads}  (random offsets, single task)"
-    );
+    println!("file={size_mb} MiB  io={io_kb} KiB  reads={reads}  (random offsets, single task)");
 
     // ── Write the test file once (SC config irrelevant for the write). ──
     let write_ctx = FileSystemContext::connect(base_config(true)).await?;
@@ -154,8 +147,8 @@ async fn main() -> Result<()> {
         let _ = master.create_directory("/sc-bench", true).await;
         let _ = master.delete(TEST_PATH, false).await;
         let payload: Vec<u8> = (0..size as usize).map(|i| (i % 251) as u8).collect();
-        let mut w = GoosefsFileWriter::create_with_context(write_ctx.clone(), TEST_PATH, None)
-            .await?;
+        let mut w =
+            GoosefsFileWriter::create_with_context(write_ctx.clone(), TEST_PATH, None).await?;
         w.write(&payload).await?;
         w.close().await?;
         println!("\nwrote {size_mb} MiB to {TEST_PATH}");
@@ -187,13 +180,15 @@ async fn main() -> Result<()> {
     if sc_fired {
         println!("short-circuit: ACTIVE (served from local mmap)");
     } else {
-        println!(
-            "short-circuit: NOT active (no local worker?) — 'SC' row reflects gRPC fallback"
-        );
+        println!("short-circuit: NOT active (no local worker?) — 'SC' row reflects gRPC fallback");
     }
 
     // ── cleanup ──
-    write_ctx.acquire_master().delete(TEST_PATH, false).await.ok();
+    write_ctx
+        .acquire_master()
+        .delete(TEST_PATH, false)
+        .await
+        .ok();
     write_ctx.close().await?;
     grpc_ctx.close().await?;
     sc_ctx.close().await?;

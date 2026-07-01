@@ -345,10 +345,13 @@ impl ShortCircuitFactory {
     /// Resolve the worker serving `block_id` and acquire a pooled client.
     async fn acquire_worker(&self, block_id: i64) -> Result<crate::client::WorkerClient> {
         let worker_info = self.router.select_worker(block_id).await?;
-        let addr = worker_info.address.as_ref().ok_or_else(|| Error::Internal {
-            message: "short-circuit: worker has no address".to_string(),
-            source: None,
-        })?;
+        let addr = worker_info
+            .address
+            .as_ref()
+            .ok_or_else(|| Error::Internal {
+                message: "short-circuit: worker has no address".to_string(),
+                source: None,
+            })?;
         let worker_addr = format!(
             "{}:{}",
             addr.host.as_deref().unwrap_or("127.0.0.1"),
