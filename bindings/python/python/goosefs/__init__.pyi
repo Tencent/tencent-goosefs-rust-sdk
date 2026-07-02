@@ -580,11 +580,14 @@ class AsyncGoosefs:
     def get_status(self, path: str) -> Awaitable[URIStatus]: ...
     def list_status(self, path: str, *, recursive: bool = ...) -> Awaitable[list[URIStatus]]: ...
     def exists(self, path: str) -> Awaitable[bool]: ...
+ # Maximum number of RPCs allowed in flight for batch operations.
+    MAX_BATCH_RPC_IN_FLIGHT = 64
+
     def batch_get_status(self, paths: list[str]) -> Awaitable[list[URIStatus]]:
         """Concurrent ``get_status`` for every path (single PyO3 crossing).
 
         Results are returned in input order. Concurrency is bounded
-        internally (at most 64 RPCs in flight) so passing thousands of
+        internally (at most `MAX_BATCH_RPC_IN_FLIGHT` RPCs in flight) so passing thousands of
         paths will *not* fan out thousands of simultaneous gRPC streams
         to the master.
 
@@ -596,13 +599,13 @@ class AsyncGoosefs:
     def batch_exists(self, paths: list[str]) -> Awaitable[list[bool]]:
         """Concurrent ``exists`` for every path; booleans in input order.
 
-        Concurrency is bounded internally (at most 64 RPCs in flight)."""
+        Concurrency is bounded internally (at most `MAX_BATCH_RPC_IN_FLIGHT` RPCs in flight)."""
         ...
     def batch_open_file(self, paths: list[str]) -> Awaitable[list[AsyncFileReader]]:
         """Concurrent ``open_file`` for every path (single PyO3 crossing).
 
         Returns readers in input order. Concurrency is bounded internally
-        (at most 64 RPCs in flight)."""
+        (at most `MAX_BATCH_RPC_IN_FLIGHT` RPCs in flight)."""
         ...
     def batch_create_file(
         self,
@@ -615,7 +618,7 @@ class AsyncGoosefs:
         """Concurrent empty-file create+write+close for every path.
 
         Returns bytes-written per file (always 0 for empty files) in
-        input order. Concurrency is bounded internally (at most 64 RPCs
+        input order. Concurrency is bounded internally (at most `MAX_BATCH_RPC_IN_FLIGHT` RPCs
         in flight). The whole batch fails on the first error."""
         ...
     def batch_create_dir(
@@ -626,7 +629,7 @@ class AsyncGoosefs:
     ) -> Awaitable[None]:
         """Concurrent ``mkdir`` for every path (single PyO3 crossing).
 
-        Concurrency is bounded internally (at most 64 RPCs in flight).
+        Concurrency is bounded internally (at most `MAX_BATCH_RPC_IN_FLIGHT` RPCs in flight).
         The whole batch fails on the first error."""
         ...
     def batch_rename(
@@ -637,7 +640,7 @@ class AsyncGoosefs:
 
         ``pairs`` is a flat list: ``[src_0, dst_0, src_1, dst_1, ...]``.
         Length must be even. Concurrency is bounded internally (at most
-        64 RPCs in flight). The whole batch fails on the first error."""
+        `MAX_BATCH_RPC_IN_FLIGHT` RPCs in flight). The whole batch fails on the first error."""
         ...
     def batch_delete(
         self,
@@ -649,9 +652,7 @@ class AsyncGoosefs:
     ) -> Awaitable[None]:
         """Concurrent ``delete`` for every path (single PyO3 crossing).
 
-        Concurrency is bounded internally (at most 64 RPCs in flight).
-        The whole batch fails on the first error."""
-        ...
+        Concurrency is bounded internally (at most `MAX_BATCH_RPC_IN_FLIGHT` RPCs in flight).
     def mkdir(self, path: str, *, recursive: bool = ...) -> Awaitable[None]: ...
     def delete(
         self,
