@@ -334,7 +334,7 @@ impl PyAsyncGoosefs {
             let ctx = h.ctx.clone();
             let results: Vec<_> = stream::iter(paths.into_iter().map(move |p| {
                 let ctx = ctx.clone();
-                async move { crate::streaming::sdk_open_in_stream(ctx, p).await }
+async move { crate::streaming::sdk_open_in_stream(ctx, p).await.map_err(map_err) }
             }))
  .buffered(crate::context::RESOURCE_BATCH_CONCURRENCY_LIMIT)
             .collect()
