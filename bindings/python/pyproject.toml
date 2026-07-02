@@ -27,8 +27,11 @@ classifiers = [
 ]
 dynamic = ["version"]
 dependencies = [
-    "maturin>=1.13.3",
 ]
+
+[build-system]
+requires = ["maturin>=1.13.3"]
+build-backend = "maturin"
 
 [project.urls]
 Homepage   = "https://git.woa.com/tencent-cloud-datalake/goosefs-client-rust"
