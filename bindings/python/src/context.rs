@@ -31,6 +31,14 @@ use goosefs_sdk::fs::BaseFileSystem;
 /// editing the single source of truth in `runtime.rs`.
 pub const BATCH_CONCURRENCY_LIMIT: usize = crate::runtime::RUNTIME_MAX_BLOCKING_THREADS;
 
+/// Maximum number of in-flight RPCs for resource-holding `batch_*` calls
+/// (e.g. `batch_open_file` which holds open file handles and worker
+/// connections for each returned reader).
+///
+/// Uses the same limit as [`BATCH_CONCURRENCY_LIMIT`] since resource-holding
+/// batch operations should have the same concurrency constraints.
+pub const RESOURCE_BATCH_CONCURRENCY_LIMIT: usize = crate::runtime::RUNTIME_MAX_BLOCKING_THREADS;
+
 /// Bundles a Goosefs context with the high-level filesystem façade.
 ///
 /// Cheap to clone — both fields are `Arc<…>` internally.

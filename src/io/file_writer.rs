@@ -240,7 +240,7 @@ pub struct GoosefsFileWriter {
     /// Set to `true` in `create_with_context` (deferred init) and `false` in
     /// test constructors (where the router starts empty). Once initialized via
     /// `ensure_router_init()`, this is set to `false` and subsequent calls are no-ops.
- _router_needs_init: bool,
+    _router_needs_init: AtomicBool,
 }
 
 impl GoosefsFileWriter {
@@ -351,6 +351,7 @@ impl GoosefsFileWriter {
         }
         // Production paths always set `_context` via `create_with_context`; `None` only appears in tests.
         debug_assert!(self._context.is_some(), "`_context` must be set in production paths");
+        if let Some(ctx) = &self._context {
             let shared = ctx.acquire_router();
             let workers = (*shared.get_workers().await).clone();
             if workers.is_empty() {

@@ -341,26 +341,25 @@ async move { crate::streaming::sdk_open_in_stream(ctx, p).await.map_err(map_err)
             .await;
 
             Python::attach(|py| {
-                results
-                    .into_iter()
-                    .map(|r| {
-let mut opened_readers = Vec::new();
-let reader = match r {
-    Ok(r) => {
-        opened_readers.push(r);
-        PyAsyncFileReader::from_sdk(opened_readers.pop().unwrap())
-    }
-    Err(e) => {
-        // 在返回错误前，关闭所有已成功打开的 reader，避免资源泄漏
-        for r in opened_readers {
-            r.close();
-        }
-        return Err(e.into());
-    }
-};
-                        Py::new(py, reader).map(|p| p.into_any())
-                    })
-                    .collect::<PyResult<Vec<_>>>()
+                let mut readers: Vec<Py<PyAsyncFileReader>> = Vec::new();
+                for r in results {
+                    match r {
+                        Ok(stream) => {
+                            let reader = PyAsyncFileReader::from_sdk(stream);
+                            readers.push(Py::new(py, reader)?);
+                        }
+                        Err(e) => {
+                            // Close all successfully-opened readers by dropping their
+                            // Python references. Each PyAsyncFileReader Drop triggers
+                            // GoosefsFileInStream Drop, which releases the underlying
+                            // worker connection — preventing resource leaks when a
+                            // batch open fails partway through.
+                            drop(readers);
+                            return Err(e.into());
+                        }
+                    }
+                }
+                Ok(readers.into_iter().map(|p| p.into_any()).collect())
             })
         })
     }
