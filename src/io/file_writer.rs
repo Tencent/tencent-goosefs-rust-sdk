@@ -240,7 +240,7 @@ pub struct GoosefsFileWriter {
     /// Set to `true` in `create_with_context` (deferred init) and `false` in
     /// test constructors (where the router starts empty). Once initialized via
     /// `ensure_router_init()`, this is set to `false` and subsequent calls are no-ops.
-    _router_needs_init: AtomicBool,
+ _router_needs_init: bool,
 }
 
 impl GoosefsFileWriter {
