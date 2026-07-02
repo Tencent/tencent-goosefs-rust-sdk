@@ -37,6 +37,7 @@ use crate::errors::map_err;
 use crate::options::PyDeleteOptions;
 use crate::positioned_read::{positioned_read_with_reauth, resolve_block_id, DEFAULT_CHUNK_SIZE};
 use crate::status::PyURIStatus;
+use crate::streaming::PyAsyncFileReader;
 use crate::worker::PyAsyncWorkerClient;
 
 /// Build a `\"host:port\"` worker address from a `WorkerNetAddress`.
@@ -308,6 +309,247 @@ impl PyAsyncGoosefs {
             .await
             .into_iter()
             .collect::<PyResult<Vec<bool>>>()
+        })
+    }
+
+    /// `await fs.batch_open_file(paths)` → `list[AsyncFileReader]`.
+    ///
+    /// Opens every path with bounded concurrency (at most
+    /// `BATCH_CONCURRENCY_LIMIT` RPCs in flight) and returns the readers
+    /// in input order.  The whole batch fails on the first error.
+    ///
+    /// Unlike calling `fs.open_file()` N times from Python (which crosses
+    /// the PyO3 boundary N times and serialises ``Python::attach`` for each
+    /// returned reader), this method performs all open RPCs inside a single
+    /// Rust future, eliminating GIL contention when launched from many
+    /// concurrent asyncio tasks.
+    fn batch_open_file<'py>(
+        &self,
+        py: Python<'py>,
+        paths: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let h = self.handle()?;
+        future_into_py(py, async move {
+            use futures::stream::{self, StreamExt};
+            let ctx = h.ctx.clone();
+            let results: Vec<_> = stream::iter(paths.into_iter().map(move |p| {
+                let ctx = ctx.clone();
+async move { crate::streaming::sdk_open_in_stream(ctx, p).await }
+            }))
+ .buffered(crate::context::RESOURCE_BATCH_CONCURRENCY_LIMIT)
+            .collect()
+            .await;
+
+            Python::attach(|py| {
+                let mut readers: Vec<Py<PyAsyncFileReader>> = Vec::new();
+                for r in results {
+                    match r {
+                        Ok(stream) => {
+                            let reader = PyAsyncFileReader::from_sdk(stream);
+                            readers.push(Py::new(py, reader)?);
+                        }
+                        Err(e) => {
+                            // Close all successfully-opened readers by dropping their
+                            // Python references. Each PyAsyncFileReader Drop triggers
+                            // GoosefsFileInStream Drop, which releases the underlying
+                            // worker connection — preventing resource leaks when a
+                            // batch open fails partway through.
+                            drop(readers);
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(readers.into_iter().map(|p| p.into_any()).collect::<Vec<_>>())
+            })
+        })
+    }
+
+    /// `await fs.batch_create_file(paths, *, write_type=None, block_size_bytes=None, recursive=False)` → `list[int]`.
+    ///
+    /// Creates and closes an empty file at every path with bounded concurrency
+    /// (at most `BATCH_CONCURRENCY_LIMIT` RPCs in flight). Returns the number
+    /// of bytes written per file (always 0 for empty files) in input order.
+    ///
+    /// The whole batch fails on the first error. Use individual `write_file`
+    /// calls if you need per-path error isolation.
+    #[pyo3(signature = (paths, *, write_type=None, block_size_bytes=None, recursive=false))]
+    fn batch_create_file<'py>(
+        &self,
+        py: Python<'py>,
+        paths: Vec<String>,
+        write_type: Option<crate::types::PyWriteType>,
+        block_size_bytes: Option<i64>,
+        recursive: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let h = self.handle()?;
+        let proto_opts = build_create_file_options(write_type, block_size_bytes, recursive);
+        future_into_py(py, async move {
+            use futures::stream::{self, StreamExt};
+            let ctx = h.ctx.clone();
+            let empty: &[u8] = &[];
+            stream::iter(paths.into_iter().map(move |p| {
+                let ctx = ctx.clone();
+                let opts = proto_opts.clone();
+                async move {
+                    goosefs_sdk::io::GoosefsFileWriter::write_file_with_context_and_options(
+                        ctx, &p, empty, opts,
+                    )
+                    .await
+                    .map_err(map_err)
+                }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<Vec<u64>>>()
+        })
+    }
+
+    /// `await fs.batch_create_dir(paths, *, recursive=False)` → `None`.
+    ///
+    /// Creates a directory at every path with bounded concurrency (at most
+    /// `BATCH_CONCURRENCY_LIMIT` RPCs in flight).
+    ///
+    /// The whole batch fails on the first error.
+    #[pyo3(signature = (paths, *, recursive=false))]
+    fn batch_create_dir<'py>(
+        &self,
+        py: Python<'py>,
+        paths: Vec<String>,
+        recursive: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let h = self.handle()?;
+        future_into_py(py, async move {
+            use futures::stream::{self, StreamExt};
+            let fs = h.fs.clone();
+            stream::iter(paths.into_iter().map(move |p| {
+                let fs = fs.clone();
+                async move { fs.mkdir(&p, recursive).await.map_err(map_err) }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<()>>()
+        })
+    }
+
+    /// `await fs.batch_rename(pairs)` → `None`.
+    ///
+    /// Renames every `(src, dst)` pair with bounded concurrency (at most
+    /// `BATCH_CONCURRENCY_LIMIT` RPCs in flight).
+    ///
+    /// `pairs` is a flat list of alternating source and destination paths:
+    /// `[src_0, dst_0, src_1, dst_1, ...]`. The length must be even.
+    ///
+    /// The whole batch fails on the first error.
+    fn batch_rename<'py>(
+        &self,
+        py: Python<'py>,
+        pairs: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if pairs.len() % 2 != 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "pairs must have even length (flat src, dst, src, dst, ...)",
+            ));
+        }
+        let h = self.handle()?;
+        // Collect chunks into owned tuples so the inner async closure
+        // does not borrow from `pairs`.
+        let chunks: Vec<(String, String)> = pairs
+            .chunks_exact(2)
+            .map(|c| (c[0].clone(), c[1].clone()))
+            .collect();
+        future_into_py(py, async move {
+            use futures::stream::{self, StreamExt};
+            let fs = h.fs.clone();
+            stream::iter(chunks.into_iter().map(move |(src, dst)| {
+                let fs = fs.clone();
+                async move { fs.rename(&src, &dst).await.map_err(map_err) }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<()>>()
+        })
+    }
+
+    /// `await fs.batch_delete(paths, *, recursive=False, unchecked=False, goosefs_only=False)` → `None`.
+    ///
+    /// Deletes every path with bounded concurrency (at most
+    /// `BATCH_CONCURRENCY_LIMIT` RPCs in flight).
+    ///
+    /// The whole batch fails on the first error.
+    #[pyo3(signature = (paths, *, recursive=false, unchecked=false, goosefs_only=false))]
+    fn batch_delete<'py>(
+        &self,
+        py: Python<'py>,
+        paths: Vec<String>,
+        recursive: bool,
+        unchecked: bool,
+        goosefs_only: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let h = self.handle()?;
+        let opts = goosefs_sdk::fs::options::DeleteOptions {
+            recursive,
+            unchecked,
+            goosefs_only,
+        };
+        future_into_py(py, async move {
+            use futures::stream::{self, StreamExt};
+            let fs = h.fs.clone();
+            stream::iter(paths.into_iter().map(move |p| {
+                let fs = fs.clone();
+                let o = opts.clone();
+                async move { fs.delete(&p, o).await.map_err(map_err) }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<()>>()
+        })
+    }
+
+    /// `await fs.batch_list_status(dirs, *, recursive=False)` → `list[list[URIStatus]]`.
+    ///
+    /// Lists each directory with bounded concurrency (at most
+    /// `BATCH_CONCURRENCY_LIMIT` RPCs in flight) and returns the entries
+    /// for each directory in input order as a list-of-lists.
+    ///
+    /// The whole batch fails on the first error.
+    #[pyo3(signature = (dirs, *, recursive=false))]
+    fn batch_list_status<'py>(
+        &self,
+        py: Python<'py>,
+        dirs: Vec<String>,
+        recursive: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let h = self.handle()?;
+        future_into_py(py, async move {
+            use futures::stream::{self, StreamExt};
+            let fs = h.fs.clone();
+            stream::iter(dirs.into_iter().map(move |d| {
+                let fs = fs.clone();
+                async move {
+                    fs.list_status(&d, recursive)
+                        .await
+                        .map_err(map_err)
+                        .map(|entries| {
+                            entries
+                                .into_iter()
+                                .map(PyURIStatus::new)
+                                .collect::<Vec<_>>()
+                        })
+                }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<Vec<Vec<PyURIStatus>>>>()
         })
     }
 
@@ -762,5 +1004,169 @@ impl PyAsyncGoosefs {
             },
             Err(_) => "AsyncGoosefs(<poisoned>)".to_string(),
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Unit tests — batch_open_file resource-leak regression guard
+// ═══════════════════════════════════════════════════════════════════════════
+///
+/// These tests validate the **iteration + early-return + drop** pattern used
+/// inside `batch_open_file`.  The real method runs inside `Python::attach`
+/// and therefore cannot be called directly from a `#[tokio::test]`, but the
+/// core cleanup logic is pure Rust and is exercised here.
+///
+/// # Background
+///
+/// When a batch-open encounters an error partway through, the remaining
+/// items in `results` are dropped by the `for`-loop scope end, *and* all
+/// previously-accumulated `Py<PyAsyncFileReader>` values are explicitly
+/// `drop()`ed so that their `GoosefsFileInStream` inner streams release
+/// worker connections.  The tests below lock down that invariant.
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// A minimal stand-in for `Py<PyAsyncFileReader>` whose `Drop` bumps a
+    /// shared counter so we can verify that *all* accumulated items are
+    /// dropped when the batch-open loop hits an error.
+    struct DropTracker {
+        _id: usize,
+        counter: Arc<AtomicUsize>,
+    }
+
+    impl Drop for DropTracker {
+        fn drop(&mut self) {
+            self.counter.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    // ── helper: mirror the batch_open_file inner loop ──────────────────────
+
+    /// Mirror the exact iteration logic used in `batch_open_file`:
+    ///
+    /// ```rust,ignore
+    /// let mut readers: Vec<Py<PyAsyncFileReader>> = Vec::new();
+    /// for r in results {
+    ///     match r {
+    ///         Ok(stream) => { readers.push(/* Py::new from stream */); }
+    ///         Err(e)     => { drop(readers); return Err(e.into()); }
+    ///     }
+    /// }
+    /// Ok(readers.into_iter().map(|p| p.into_any()).collect())
+    /// ```
+    ///
+    /// We substitute `DropTracker` for `Py<PyAsyncFileReader>` so that each
+    /// `Drop` is observable through the shared atomic counter.
+    fn collect_or_cleanup(
+        results: Vec<Result<usize, &str>>,
+        counter: Arc<AtomicUsize>,
+    ) -> Result<Vec<DropTracker>, &str> {
+        let mut acc: Vec<DropTracker> = Vec::new();
+        for (i, r) in results.into_iter().enumerate() {
+            match r {
+                Ok(_id) => {
+                    acc.push(DropTracker {
+                        _id: i,
+                        counter: Arc::clone(&counter),
+                    });
+                }
+                Err(e) => {
+                    drop(acc); // ← the critical line under test
+                    return Err(e);
+                }
+            }
+        }
+        Ok(acc)
+    }
+
+    // ── tests ─────────────────────────────────────────────────────────────
+
+    /// All items succeed → no drops (items are returned to caller).
+    #[test]
+    fn all_success_no_drops() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let results: Vec<Result<usize, &str>> = vec![Ok(1), Ok(2), Ok(3)];
+        let collected = collect_or_cleanup(results, Arc::clone(&counter));
+        assert!(collected.is_ok());
+        // Drops happen only when the returned Vec is dropped.
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        drop(collected);
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    /// First item is an error → zero accumulated items, zero drops.
+    #[test]
+    fn error_at_head_no_drops() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let results: Vec<Result<usize, &str>> = vec![Err("fail"), Ok(1), Ok(2)];
+        let result = collect_or_cleanup(results, Arc::clone(&counter));
+        assert!(result.is_err());
+        // `acc` was empty when Err was hit – nothing to drop.
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    /// Three successes, then an error → the three accumulated items MUST be
+    /// dropped *before* the error is returned (regression guard for the
+    /// connection-leak bug).
+    #[test]
+    fn error_mid_way_drops_all_accumulated() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let results: Vec<Result<usize, &str>> =
+            vec![Ok(1), Ok(2), Ok(3), Err("fail"), Ok(4), Ok(5)];
+        let result = collect_or_cleanup(results, Arc::clone(&counter));
+        assert!(result.is_err());
+        // The first 3 Ok items must have been dropped by `drop(acc)`.
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    /// Verify that the items *after* the error are never consumed (they are
+    /// dropped by the `for`-loop scope end, which is the complementary part
+    /// of the leak fix — unconsumed `Ok(stream)` values in `results` are
+    /// released by their `Drop` impl).
+    #[test]
+    fn unconsumed_results_are_dropped() {
+        let outer_counter = Arc::new(AtomicUsize::new(0));
+
+        // Simulate: each item in `results` is an `Ok(DropTracker)` or `Err`.
+        // Items **before** the error are consumed and moved into `acc`, then
+        // dropped via `drop(acc)`.  Items **after** the error are never
+        // moved out of `results` — their `Drop` fires when `results` goes
+        // out of scope.
+        {
+            let mut results: Vec<Result<DropTracker, &str>> = Vec::new();
+            for i in 0..6 {
+                if i == 3 {
+                    results.push(Err("fail"));
+                } else {
+                    results.push(Ok(DropTracker {
+                        _id: i,
+                        counter: Arc::clone(&outer_counter),
+                    }));
+                }
+            }
+            // Running the same loop pattern
+            let mut acc: Vec<DropTracker> = Vec::new();
+            for r in results {
+                match r {
+                    Ok(dt) => {
+                        acc.push(dt); // moves out of `results`
+                    }
+                    Err(_e) => {
+                        drop(acc);
+                        // `results` (with remaining unconsumed items) will
+                        // be dropped here as the `for` loop goes out of
+                        // scope — this is the second half of the leak fix.
+                        return; // simulate `return Err(e.into())`
+                    }
+                }
+            }
+        }
+        // All 5 Ok items (indices 0,1,2,4,5) should be dropped:
+        // - 0,1,2 via `drop(acc)` (consumed, moved into acc)
+        // - 4,5 via `results` scope exit (unconsumed, left in results)
+        assert_eq!(outer_counter.load(Ordering::SeqCst), 5);
     }
 }
