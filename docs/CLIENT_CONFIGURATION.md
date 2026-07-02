@@ -115,6 +115,37 @@ When auto-discovering the properties file, the client searches in this order
 | `master_connection_pool_size` | `usize` | `1` | Number of independent Master gRPC channels to pool. `1` = legacy single-channel. Raising it (e.g. `4`/`8`) spreads concurrent metadata RPCs across multiple HTTP/2 connections, avoiding `SETTINGS_MAX_CONCURRENT_STREAMS` queueing under high concurrency / remote RTT. All pooled clients share one inquire client so HA failover stays consistent. **Set programmatically** via `with_master_connection_pool_size()`. (Optimization doc Part V R3.) |
 | `worker_connection_pool_size` | `usize` | `1` | Number of independent gRPC channels to pool **per worker**. `1` = legacy single-channel-per-worker. Raising it (e.g. `4`) round-robins block reads across multiple HTTP/2 connections to the same worker, lifting the per-connection throughput cap. Each channel does its own SASL handshake. **Set programmatically** via `with_worker_connection_pool_size()`. (Optimization doc Part V R4.) |
 
+#### 2.1.1 URI form (`gfs://…`)
+
+For parity with the Java client and Hadoop-style paths, the SDK also
+accepts a **URI form** that packs masters + root path into one string:
+
+```text
+gfs://<host:port>[,<host:port>...][/<root-path>]
+```
+
+Rules — deliberately identical to the plain comma-list form used by
+`goosefs.master.rpc.addresses` / `GOOSEFS_MASTER_ADDR`, so nothing new
+to memorise:
+
+- Authority segment is split on `,` (whitespace around each entry is
+  trimmed; empty entries are dropped).
+- Path segment (if any) becomes [`root`](#21-connection-settings). A
+  trailing `/` is stripped; a bare `/` collapses to no root.
+- The `gfs://` scheme is mandatory — bare `host:port` lists keep going
+  through the legacy path.
+
+Entry points that accept the URI form:
+
+| Language | Call | Example |
+|---|---|---|
+| Rust | `GoosefsConfig::from_uri(...)` | `GoosefsConfig::from_uri("gfs://m1:9200,m2:9200,m3:9200/data")?` |
+| Rust | `GOOSEFS_MASTER_ADDR` env var | `export GOOSEFS_MASTER_ADDR="gfs://m1:9200,m2:9200/data"` |
+| Python | `Config(uri)` / `Config.from_uri(uri)` | `Config("gfs://m1:9200,m2:9200,m3:9200/data")` |
+
+The URI form is 100 % additive: existing single-address, comma-list,
+properties-file, and env-var callers keep working unchanged.
+
 ### 2.2 Data Transfer Settings
 
 | Field | Type | Default | Description |
@@ -240,7 +271,7 @@ properties file values and built-in defaults.
 
 | Environment Variable | GoosefsConfig Field | Description |
 |---------------------|---------------------|-------------|
-| `GOOSEFS_MASTER_ADDR` | `master_addr` / `master_addrs` | Master address(es). Comma-separated for HA: `"addr1:port,addr2:port"`. |
+| `GOOSEFS_MASTER_ADDR` | `master_addr` / `master_addrs` | Master address(es). Three accepted forms: single `host:port`; comma-separated list `addr1:port,addr2:port` for HA; or a Hadoop-style URI `gfs://addr1:port,addr2:port/root-path` (URI form also seeds `root`). |
 | `GOOSEFS_WRITE_TYPE` | `write_type` | Default write type. Accepted: `must_cache`, `try_cache`, `cache_through`, `through`, `async_through` (case-insensitive). |
 | `GOOSEFS_BLOCK_SIZE` | `block_size` | Block size in bytes (plain integer). |
 | `GOOSEFS_CHUNK_SIZE` | `chunk_size` | Chunk size in bytes (plain integer). |

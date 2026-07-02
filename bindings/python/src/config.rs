@@ -43,30 +43,40 @@ pub struct PyConfig {
 impl PyConfig {
     /// `Config(master_addr: str, *, properties: dict[str, str] | None = None)`
     ///
-    /// `master_addr` accepts either a single `host:port` (single-master) or
-    /// a comma-separated list (`m1:9200,m2:9200,m3:9200`) for HA. Property
-    /// keys are the same as those accepted by `goosefs-site.properties`.
+    /// `master_addr` accepts three forms:
+    ///
+    /// * Single `host:port` (single-master).
+    /// * Comma-separated list (`m1:9200,m2:9200,m3:9200`) for HA.
+    /// * A `gfs://` URI (`gfs://m1:9200,m2:9200/root-path`) — the path
+    ///   segment (if any) becomes [`Config.root`].
+    ///
+    /// Property keys are the same as those accepted by
+    /// `goosefs-site.properties`.
     #[new]
     #[pyo3(signature = (master_addr, *, properties=None))]
     fn new(master_addr: &str, properties: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        // Detect HA form (comma-separated). `from_addresses` panics on empty
-        // input, so we filter blanks first.
-        let addrs: Vec<String> = master_addr
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if addrs.is_empty() {
-            return Err(ConfigError::new_err(
-                "master_addr must be a non-empty 'host:port' or comma-separated list",
-            ));
-        }
-
-        // Start from the address-only config…
-        let mut cfg = if addrs.len() == 1 {
-            GoosefsConfig::new(&addrs[0])
+        // Build the address-only base config. Two accepted forms:
+        //   * `gfs://...` URI  — sniffed by scheme prefix
+        //   * bare comma list  — legacy path, unchanged
+        let mut cfg = if master_addr.trim_start().starts_with("gfs://") {
+            GoosefsConfig::from_uri(master_addr.trim())
+                .map_err(|e| ConfigError::new_err(e.to_string()))?
         } else {
-            GoosefsConfig::new_ha(addrs)
+            let addrs: Vec<String> = master_addr
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if addrs.is_empty() {
+                return Err(ConfigError::new_err(
+                    "master_addr must be a non-empty 'host:port', comma-separated list, or 'gfs://' URI",
+                ));
+            }
+            if addrs.len() == 1 {
+                GoosefsConfig::new(&addrs[0])
+            } else {
+                GoosefsConfig::new_ha(addrs)
+            }
         };
 
         // …then layer the user's `properties=` dict on top by serialising it
@@ -106,6 +116,7 @@ impl PyConfig {
             // ately omit them.
             let preserved_addr = cfg.master_addr.clone();
             let preserved_addrs = std::mem::take(&mut cfg.master_addrs);
+            let preserved_root = std::mem::take(&mut cfg.root);
             cfg = parsed;
             if cfg.master_addr.is_empty() {
                 cfg.master_addr = preserved_addr;
@@ -113,9 +124,33 @@ impl PyConfig {
             if cfg.master_addrs.is_empty() {
                 cfg.master_addrs = preserved_addrs;
             }
+            // Preserve a URI-derived root too — properties files rarely set
+            // `goosefs.root`, but when they do the caller intent is explicit
+            // and wins over the URI form.
+            if cfg.root.is_empty() {
+                cfg.root = preserved_root;
+            }
         }
 
         Ok(Self { inner: cfg })
+    }
+
+    /// Load a config from a Goosefs `gfs://` URI.
+    ///
+    /// Convenience wrapper around [`GoosefsConfig::from_uri`]:
+    ///
+    /// ```python
+    /// cfg = Config.from_uri("gfs://m1:9200,m2:9200,m3:9200/data")
+    /// ```
+    ///
+    /// `properties` — if provided — is applied on top of the URI-derived
+    /// config, mirroring the constructor's behaviour.
+    #[staticmethod]
+    #[pyo3(signature = (uri, *, properties=None))]
+    fn from_uri(uri: &str, properties: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        // Reuse `__new__` — the constructor already sniffs the `gfs://`
+        // scheme and layers `properties=` on top identically.
+        Self::new(uri, properties)
     }
 
     /// Load a config from a `goosefs-site.properties` file on disk.
@@ -235,5 +270,19 @@ mod tests {
             .filter(|s| !s.is_empty())
             .collect();
         assert!(addrs.is_empty());
+    }
+
+    #[test]
+    fn uri_form_populates_addresses_and_root() {
+        // Mirrors what `__new__` does when it sees a `gfs://` prefix — we
+        // exercise the SDK helper directly to keep the test free of a live
+        // Python interpreter.
+        let cfg = GoosefsConfig::from_uri(
+            "gfs://172.16.16.27:9200,172.16.16.23:9200,172.16.16.38:9200/xxxx",
+        )
+        .expect("well-formed URI");
+        assert_eq!(cfg.master_addr, "172.16.16.27:9200");
+        assert_eq!(cfg.master_addresses().len(), 3);
+        assert_eq!(cfg.root, "/xxxx");
     }
 }

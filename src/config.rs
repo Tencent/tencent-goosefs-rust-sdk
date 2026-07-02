@@ -36,6 +36,80 @@ impl std::fmt::Display for ConfigLoadError {
 
 impl std::error::Error for ConfigLoadError {}
 
+// ── URI parsing ───────────────────────────────────────────────
+//
+// Parse Hadoop-style `gfs://<addrs>/<path>` URIs. The authority segment
+// uses the same `,`-separated rule as `goosefs.master.rpc.addresses` and
+// `GOOSEFS_MASTER_ADDR`; the path segment (if any) becomes [`GoosefsConfig::root`].
+
+/// Error returned when a `gfs://` URI cannot be parsed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UriParseError {
+    /// Missing or unrecognised scheme (must be `gfs://`).
+    InvalidScheme { input: String },
+    /// The authority segment contained no non-empty `host:port` entries.
+    EmptyAuthority { input: String },
+}
+
+impl std::fmt::Display for UriParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UriParseError::InvalidScheme { input } => write!(
+                f,
+                "invalid Goosefs URI (expected 'gfs://<host:port>[,...][/path]'): {input:?}"
+            ),
+            UriParseError::EmptyAuthority { input } => {
+                write!(f, "Goosefs URI has no master addresses: {input:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for UriParseError {}
+
+/// Parse `gfs://<addrs>[/<path>]` into `(addresses, root_path)`.
+///
+/// - `addrs` is split on `,`, whitespace-trimmed, empties dropped.
+/// - `root_path` is the URI path verbatim (leading `/` preserved) or `""`.
+/// - `?` / `#` are **not** recognised as query/fragment delimiters: this
+///   parser only splits authority vs path on the first `/`. Any `?` or `#`
+///   appearing before that `/` will be embedded verbatim into an address
+///   entry. Callers who need query-string driven config should use
+///   properties/env instead.
+fn parse_gfs_uri(uri: &str) -> Result<(Vec<String>, String), UriParseError> {
+    const SCHEME: &str = "gfs://";
+    let rest = uri
+        .strip_prefix(SCHEME)
+        .ok_or_else(|| UriParseError::InvalidScheme {
+            input: uri.to_string(),
+        })?;
+
+    // Split authority vs path on the first '/'. If there is no '/' the
+    // whole remainder is authority and root is empty.
+    let (authority, root) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, ""),
+    };
+
+    let addrs: Vec<String> = authority
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    if addrs.is_empty() {
+        return Err(UriParseError::EmptyAuthority {
+            input: uri.to_string(),
+        });
+    }
+
+    // Trim trailing '/' on root but keep a leading '/' so callers can rely
+    // on `full_path()` semantics. A bare "/" collapses to "" (no root).
+    let root = root.trim_end_matches('/').to_string();
+
+    Ok((addrs, root))
+}
+
 // ── Properties file parsing ───────────────────────────────────
 //
 // Parse Java-style `goosefs-site.properties` files.
@@ -1541,6 +1615,50 @@ impl GoosefsConfig {
         }
     }
 
+    /// Create a config from a Goosefs URI string.
+    ///
+    /// Accepts the Hadoop-style form used by the Java client:
+    ///
+    /// ```text
+    /// gfs://<host:port>[,<host:port>...][/<root-path>]
+    /// ```
+    ///
+    /// The authority segment is split on `,` (same rule as
+    /// `goosefs.master.rpc.addresses` and `GOOSEFS_MASTER_ADDR`); the path
+    /// segment (if any) is stored as [`root`](Self::root). The `gfs://`
+    /// scheme is required — bare `host:port` lists should keep going through
+    /// [`from_addresses`](Self::from_addresses).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use goosefs_sdk::config::GoosefsConfig;
+    ///
+    /// // Single master, with root path
+    /// let cfg = GoosefsConfig::from_uri("gfs://10.0.0.1:9200/data").unwrap();
+    /// assert_eq!(cfg.master_addr, "10.0.0.1:9200");
+    /// assert_eq!(cfg.root, "/data");
+    ///
+    /// // Three masters (HA), no root
+    /// let cfg = GoosefsConfig::from_uri(
+    ///     "gfs://10.0.0.1:9200,10.0.0.2:9200,10.0.0.3:9200",
+    /// ).unwrap();
+    /// assert!(cfg.is_multi_master());
+    /// assert_eq!(cfg.root, "");
+    /// ```
+    pub fn from_uri(uri: &str) -> Result<Self, UriParseError> {
+        let (addrs, root) = parse_gfs_uri(uri)?;
+        let mut cfg = Self::from_addresses(addrs);
+        // Only assign root if the URI actually carries a path segment.
+        // A URI without a path (e.g. `gfs://a:9200`) leaves `cfg.root`
+        // at its default (""), which matches the semantics used by
+        // `apply_env` for the same case.
+        if !root.is_empty() {
+            cfg.root = root;
+        }
+        Ok(cfg)
+    }
+
     /// Return the effective list of master addresses.
     ///
     /// If [`master_addrs`](Self::master_addrs) is non-empty, returns it directly.
@@ -1833,20 +1951,53 @@ impl GoosefsConfig {
     pub fn apply_env(mut self) -> Self {
         use std::env;
 
-        // Master address(es)
+        // Master address(es).
+        //
+        // Two accepted forms — sniffed by the presence of the `gfs://`
+        // scheme prefix, so the plain comma-list path is 100 % backward
+        // compatible:
+        //
+        //   * `gfs://h1:9200,h2:9200,h3:9200/root` — full URI (masters + root)
+        //   * `h1:9200,h2:9200,h3:9200`            — bare comma list (legacy)
         if let Ok(addr) = env::var(ENV_MASTER_ADDR) {
-            let addrs: Vec<String> = addr
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .collect();
-            if !addrs.is_empty() {
-                self.master_addr = addrs[0].clone();
-                if addrs.len() > 1 {
-                    self.master_addrs = addrs;
-                } else {
-                    self.master_addrs = Vec::new();
+            if addr.trim_start().starts_with("gfs://") {
+                match parse_gfs_uri(addr.trim()) {
+                    Ok((addrs, root)) => {
+                        self.master_addr = addrs[0].clone();
+                        self.master_addrs = if addrs.len() > 1 { addrs } else { Vec::new() };
+                        if !root.is_empty() {
+                            self.root = root;
+                        }
+                    }
+                    Err(e) => {
+                        // Keep the env-load path infallible, but surface
+                        // the mistake — otherwise a typo like
+                        // `GOOSEFS_MASTER_ADDR=gfs://` would silently
+                        // fall through to the default `127.0.0.1:9200`
+                        // (which `validate()` still accepts) and produce
+                        // very confusing connection failures.
+                        tracing::warn!(
+                            "ignoring malformed GOOSEFS_MASTER_ADDR URI {:?}: {}; \
+                             existing master address configuration is retained",
+                            addr,
+                            e
+                        );
+                    }
+                }
+            } else {
+                let addrs: Vec<String> = addr
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect();
+                if !addrs.is_empty() {
+                    self.master_addr = addrs[0].clone();
+                    if addrs.len() > 1 {
+                        self.master_addrs = addrs;
+                    } else {
+                        self.master_addrs = Vec::new();
+                    }
                 }
             }
         }
@@ -2435,6 +2586,91 @@ mod tests {
         GoosefsConfig::new_ha(vec![]);
     }
 
+    // ─── from_uri / parse_gfs_uri ───────────────────────────────
+
+    #[test]
+    fn test_from_uri_single_master_with_root() {
+        let cfg = GoosefsConfig::from_uri("gfs://10.0.0.1:9200/data").unwrap();
+        assert_eq!(cfg.master_addr, "10.0.0.1:9200");
+        assert!(!cfg.is_multi_master());
+        assert_eq!(cfg.master_addrs, Vec::<String>::new());
+        assert_eq!(cfg.root, "/data");
+    }
+
+    #[test]
+    fn test_from_uri_ha_three_masters_with_root() {
+        let cfg = GoosefsConfig::from_uri(
+            "gfs://172.16.16.27:9200,172.16.16.23:9200,172.16.16.38:9200/xxxx",
+        )
+        .unwrap();
+        assert_eq!(cfg.master_addr, "172.16.16.27:9200");
+        assert_eq!(cfg.master_addrs.len(), 3);
+        assert!(cfg.is_multi_master());
+        assert_eq!(cfg.root, "/xxxx");
+    }
+
+    #[test]
+    fn test_from_uri_no_root() {
+        let cfg = GoosefsConfig::from_uri("gfs://a:9200,b:9200").unwrap();
+        assert_eq!(cfg.master_addrs.len(), 2);
+        assert_eq!(cfg.root, "");
+    }
+
+    #[test]
+    fn test_from_uri_root_with_trailing_slash() {
+        let cfg = GoosefsConfig::from_uri("gfs://a:9200/goosefs-data/").unwrap();
+        assert_eq!(cfg.root, "/goosefs-data");
+    }
+
+    #[test]
+    fn test_from_uri_bare_slash_collapses_to_empty_root() {
+        let cfg = GoosefsConfig::from_uri("gfs://a:9200/").unwrap();
+        assert_eq!(cfg.root, "");
+    }
+
+    #[test]
+    fn test_from_uri_trims_whitespace_between_addresses() {
+        // Users occasionally paste with a stray space — accept it, matching
+        // the plain comma-list rule used by `apply_env` and the properties
+        // parser.
+        let cfg = GoosefsConfig::from_uri("gfs://a:9200, b:9200 ,c:9200/root").unwrap();
+        assert_eq!(cfg.master_addrs, vec!["a:9200", "b:9200", "c:9200"]);
+        assert_eq!(cfg.root, "/root");
+    }
+
+    #[test]
+    fn test_from_uri_rejects_invalid_scheme() {
+        assert!(matches!(
+            GoosefsConfig::from_uri("http://a:9200/x"),
+            Err(UriParseError::InvalidScheme { .. })
+        ));
+        assert!(matches!(
+            GoosefsConfig::from_uri("a:9200,b:9200"),
+            Err(UriParseError::InvalidScheme { .. })
+        ));
+    }
+
+    #[test]
+    fn test_from_uri_rejects_empty_authority() {
+        assert!(matches!(
+            GoosefsConfig::from_uri("gfs:///path"),
+            Err(UriParseError::EmptyAuthority { .. })
+        ));
+        assert!(matches!(
+            GoosefsConfig::from_uri("gfs:// , , /path"),
+            Err(UriParseError::EmptyAuthority { .. })
+        ));
+    }
+
+    #[test]
+    fn test_from_uri_full_path_uses_root() {
+        // Sanity-check that the URI-derived `root` flows through
+        // `full_path()` the same way a code-set root would.
+        let cfg = GoosefsConfig::from_uri("gfs://a:9200/data").unwrap();
+        assert_eq!(cfg.full_path("/file.txt"), "/data/file.txt");
+        assert_eq!(cfg.full_path("file.txt"), "/data/file.txt");
+    }
+
     #[test]
     fn test_full_path_with_root() {
         let config = GoosefsConfig {
@@ -2863,6 +3099,31 @@ goosefs.master.rpc.port=9200
         std::env::remove_var("GOOSEFS_MASTER_ADDR");
         assert_eq!(cfg.master_addrs.len(), 2);
         assert_eq!(cfg.master_addr, "10.0.0.1:9200");
+    }
+
+    #[test]
+    fn test_apply_env_uri_form() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(
+            "GOOSEFS_MASTER_ADDR",
+            "gfs://172.16.16.27:9200,172.16.16.23:9200,172.16.16.38:9200/xxxx",
+        );
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var("GOOSEFS_MASTER_ADDR");
+        assert_eq!(cfg.master_addr, "172.16.16.27:9200");
+        assert_eq!(cfg.master_addrs.len(), 3);
+        assert_eq!(cfg.root, "/xxxx");
+    }
+
+    #[test]
+    fn test_apply_env_uri_form_single_master() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GOOSEFS_MASTER_ADDR", "gfs://10.0.0.1:9200/data");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var("GOOSEFS_MASTER_ADDR");
+        assert_eq!(cfg.master_addr, "10.0.0.1:9200");
+        assert!(cfg.master_addrs.is_empty());
+        assert_eq!(cfg.root, "/data");
     }
 
     #[test]
