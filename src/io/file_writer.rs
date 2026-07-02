@@ -349,7 +349,8 @@ impl GoosefsFileWriter {
         if !self._router_needs_init.load(Ordering::Acquire) {
             return Ok(());
         }
-        if let Some(ctx) = &self._context {
+        // Production paths always set `_context` via `create_with_context`; `None` only appears in tests.
+        debug_assert!(self._context.is_some(), "`_context` must be set in production paths");
             let shared = ctx.acquire_router();
             let workers = (*shared.get_workers().await).clone();
             if workers.is_empty() {
