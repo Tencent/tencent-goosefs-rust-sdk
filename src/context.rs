@@ -313,7 +313,7 @@ if allow_start_without_worker {
     /// Return the shared `WorkerManagerClient` (zero-cost Arc clone).
     ///
     /// Returns `None` when the Master does not support `GetWorkerInfoList`.
-    pub fn acquire_worker_manager(&self) -> Option<Arc<WorkerManagerClient>> {
+pub fn acquire_worker_manager(&self) -> Option<Arc<WorkerManagerClient>> {
         self.worker_manager.clone()
     }
 
