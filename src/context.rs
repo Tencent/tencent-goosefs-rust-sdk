@@ -199,17 +199,13 @@ impl FileSystemContext {
                 match wm.get_worker_info_list().await {
                     Ok(workers) => {
                         if workers.is_empty() {
-if allow_start_without_worker {
-    warn!("WorkerManager returned empty worker list — proceeding without worker discovery");
-    None
-} else {
-    return Err(NoWorkerAvailable);
-}
+                            warn!("WorkerManager returned empty worker list — proceeding without worker discovery");
+                            None
                         } else {
                             debug!(count = workers.len(), "initial worker list fetched");
+                            worker_router.update_workers(workers).await;
+                            Some(Arc::new(wm))
                         }
-                        worker_router.update_workers(workers).await;
-                        Some(Arc::new(wm))
                     }
                     Err(e) => {
                         warn!("GetWorkerInfoList failed ({}), proceeding without worker discovery. \
