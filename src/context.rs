@@ -61,7 +61,7 @@ use crate::client::{
     WorkerClientPool, WorkerManagerClient,
 };
 use crate::config::{ConfigRefresher, GoosefsConfig, TransparentAccelerationSwitch};
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::metrics::heartbeat::{resolve_app_id, HeartbeatTask};
 #[cfg(feature = "metrics-pushgateway")]
 use crate::metrics::pushgateway::{PushgatewayConfig, PushgatewayTask};
@@ -99,7 +99,11 @@ pub struct FileSystemContext {
     master_pool: Arc<MasterClientPool>,
 
     /// Persistent WorkerManager gRPC connection (`GetWorkerInfoList`).
-    worker_manager: Arc<WorkerManagerClient>,
+    ///
+    /// `None` when the remote Master does not expose `WorkerManagerMasterClientService`
+    /// (e.g. older GooseFS versions).  In that case, operations that need worker
+    /// discovery will log a warning and fall back to the Master RPC path.
+    worker_manager: Option<Arc<WorkerManagerClient>>,
 
     /// Worker gRPC connection pool — shared across all readers and writers.
     worker_pool: Arc<WorkerClientPool>,
@@ -173,29 +177,49 @@ impl FileSystemContext {
         // same singleflight-deduped HA discovery.
         let inquire_client = create_master_inquire_client(&config);
 
-        // Connect Master pool and WorkerManager in parallel.
+        // Connect Master pool (required) and WorkerManager (optional on older clusters).
         let (pool_res, wm_res) = tokio::join!(
             MasterClientPool::connect_with_inquire(&config, inquire_client.clone()),
             WorkerManagerClient::connect_with_inquire(&config, inquire_client.clone()),
         );
         let master_pool = Arc::new(pool_res?);
-        let worker_manager = Arc::new(wm_res?);
-
-        // Fetch the initial worker list.
-        let workers = worker_manager.get_worker_info_list().await?;
-        if workers.is_empty() {
-            return Err(Error::NoWorkerAvailable {
-                message: "no workers available at startup".to_string(),
-            });
-        }
-        debug!(count = workers.len(), "initial worker list fetched");
 
         // Build the router with failure/refresh TTLs.
         let worker_router = Arc::new(WorkerRouter::with_ttls(
             Duration::from_secs(60), // failure_ttl
             Duration::from_secs(30), // worker_refresh_ttl (matches Go SDK)
         ));
-        worker_router.update_workers(workers).await;
+
+        // WorkerManager is optional — older Master versions may not expose
+        // WorkerManagerMasterClientService / GetWorkerInfoList.
+        let worker_manager = match wm_res {
+            Ok(wm) => {
+                // Try to fetch the initial worker list; if the RPC itself fails
+                // (e.g. Method not found), treat the WorkerManager as unavailable.
+                match wm.get_worker_info_list().await {
+                    Ok(workers) => {
+                        if workers.is_empty() {
+                            warn!("WorkerManager returned empty worker list — proceeding without worker discovery");
+                            None
+                        } else {
+                            debug!(count = workers.len(), "initial worker list fetched");
+                            worker_router.update_workers(workers).await;
+                            Some(Arc::new(wm))
+                        }
+                    }
+                    Err(e) => {
+                        warn!("GetWorkerInfoList failed ({}), proceeding without worker discovery. \
+                               Master-only operations (CreateFile, GetStatus, etc.) will still work.", e);
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("WorkerManager connection failed ({}), proceeding without worker discovery. \
+                       Master-only operations (CreateFile, GetStatus, etc.) will still work.", e);
+                None
+            }
+        };
 
         // Build the shared worker connection pool.
         let worker_pool = WorkerClientPool::new_shared((*config).clone());
@@ -283,7 +307,9 @@ impl FileSystemContext {
     }
 
     /// Return the shared `WorkerManagerClient` (zero-cost Arc clone).
-    pub fn acquire_worker_manager(&self) -> Arc<WorkerManagerClient> {
+    ///
+    /// Returns `None` when the Master does not support `GetWorkerInfoList`.
+pub fn acquire_worker_manager(&self) -> Option<Arc<WorkerManagerClient>> {
         self.worker_manager.clone()
     }
 
@@ -395,6 +421,12 @@ impl FileSystemContext {
         let worker_manager = self.worker_manager.clone();
         let closed = self.closed.clone();
 
+        // If no WorkerManager is available, skip the refresh task entirely.
+        let Some(wm) = worker_manager else {
+            debug!("worker refresh task skipped: no WorkerManager available");
+            return;
+        };
+
         let handle = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(REFRESH_CHECK_INTERVAL).await;
@@ -407,7 +439,7 @@ impl FileSystemContext {
 
                 // Refresh worker list if stale.
                 if worker_router.needs_refresh().await {
-                    if let Err(e) = worker_router.refresh_workers(&worker_manager).await {
+                    if let Err(e) = worker_router.refresh_workers(&wm).await {
                         warn!("worker refresh failed: {}", e);
                         // refresh_workers already resets the TTL clock to avoid
                         // hammering on repeated failures (stale-while-revalidate).

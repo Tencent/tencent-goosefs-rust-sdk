@@ -112,6 +112,11 @@ impl BaseFileSystem {
         &self.config
     }
 
+    /// Borrow the shared [`FileSystemContext`].
+    pub fn context(&self) -> &Arc<FileSystemContext> {
+        &self.ctx
+    }
+
     // ── Internal helpers ─────────────────────────────────────────────────────
 
     /// Obtain a `MasterClient` — O(1) Arc clone from the shared context.
@@ -192,6 +197,41 @@ impl BaseFileSystem {
         } else {
             Some(trimmed[..last_slash].to_string())
         }
+    }
+
+    // ── One-shot write convenience ─────────────────────────────────────────
+    //
+    // NOT part of the `FileSystem` trait; lives on `BaseFileSystem` directly.
+
+    /// Create a file, write data, and close it in a single async call.
+    ///
+    /// Equivalent to `create_file()` → `write()` → `close()`, but avoids the
+    /// extra tokio scheduler yield between create and close. Matches the
+    /// Python SDK's `write_file` API.
+    ///
+    /// Returns the number of bytes written.
+    pub async fn write_file(
+        &self,
+        path: &str,
+        data: &[u8],
+        options: CreateFileOptions,
+    ) -> Result<u64> {
+        let write_type = self.resolve_write_type(path, &options).await;
+
+        let proto_opts = CreateFilePOptions {
+            block_size_bytes: options.block_size_bytes,
+            recursive: Some(options.recursive),
+            write_type: Some(WritePType::from(write_type) as i32),
+            ..Default::default()
+        };
+
+        GoosefsFileWriter::write_file_with_context_and_options(
+            self.ctx.clone(),
+            path,
+            data,
+            Some(proto_opts),
+        )
+        .await
     }
 }
 

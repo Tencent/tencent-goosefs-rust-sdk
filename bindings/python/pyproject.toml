@@ -26,6 +26,12 @@ classifiers = [
   # Decision 3.B — Windows is best-effort; no classifier yet until P8 confirms.
 ]
 dynamic = ["version"]
+dependencies = [
+]
+
+[build-system]
+requires = ["maturin>=1.13.3"]
+build-backend = "maturin"
 
 [project.urls]
 Homepage   = "https://git.woa.com/tencent-cloud-datalake/goosefs-client-rust"
