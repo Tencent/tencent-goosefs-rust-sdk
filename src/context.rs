@@ -57,8 +57,8 @@ use crate::cache::{CacheManager, LocalCacheManager};
 use crate::client::metrics_master::MetricsClient;
 use crate::client::metrics_master::MetricsMasterClient;
 use crate::client::{
-    create_master_inquire_client, MasterClient, MasterClientPool, MasterInquireClient,
-    WorkerClientPool, WorkerManagerClient,
+    create_master_inquire_client, MasterClientPool, MasterInquireClient,
+    PooledClient, WorkerClientPool, WorkerManagerClient,
 };
 use crate::config::{ConfigRefresher, GoosefsConfig, TransparentAccelerationSwitch};
 use crate::error::Result;
@@ -324,12 +324,18 @@ impl FileSystemContext {
 
     // ── Acquisition API ──────────────────────────────────────────────────────
 
-    /// Return a shared `MasterClient` from the pool (zero-cost Arc clone).
+    /// Return a shared `MasterClient` from the pool via P2C (Power of Two Choices)
+    /// adaptive scheduling.
     ///
-    /// With `master_connection_pool_size > 1` this round-robins across the
-    /// pooled channels to spread concurrent metadata RPCs over multiple
-    /// HTTP/2 connections (Part V R3).
-    pub fn acquire_master(&self) -> Arc<MasterClient> {
+    /// Returns a [`PooledClient`] RAII guard that auto-decrements the per-connection
+    /// in-flight RPC counter on drop.  With `master_connection_pool_size > 1` this
+    /// picks the least-loaded connection out of two random candidates, spreading
+    /// concurrent metadata RPCs across multiple HTTP/2 connections (Part V R3).
+    ///
+    /// Callers interact with the returned value exactly as they would with
+    /// `Arc<MasterClient>` — it implements [`Deref`](std::ops::Deref) to
+    /// `MasterClient`.
+    pub fn acquire_master(&self) -> PooledClient {
         self.master_pool.pick()
     }
 
