@@ -22,6 +22,7 @@ pub mod worker_manager;
 
 pub use master::MasterClient;
 pub use master::MasterClientPool;
+pub use master::PooledClient;
 pub use master_inquire::{
     create_master_inquire_client, MasterInquireClient, PollingMasterInquireClient,
     SingleMasterInquireClient,

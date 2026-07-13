@@ -630,7 +630,7 @@ const DEFAULT_ACK_INTERVAL_CHUNKS: u32 = 1;
 /// HTTP/2 channel). Set to 4 or 8 in high-concurrency remote scenarios to
 /// spread requests across multiple channels and avoid HTTP/2
 /// `SETTINGS_MAX_CONCURRENT_STREAMS` queueing.
-const DEFAULT_MASTER_CONNECTION_POOL_SIZE: usize = 1;
+const DEFAULT_MASTER_CONNECTION_POOL_SIZE: usize = 8;
 
 // ── Worker connection pool (Part V worker-side multi-channel) ─
 /// Legacy per-worker connection-pool size (single HTTP/2 channel per worker).
@@ -3432,7 +3432,7 @@ mod tests {
         assert_eq!(config.read_buffer_messages, 16);
         assert_eq!(config.ack_interval_bytes, 0); // ACK every chunk (deadlock-safe)
         assert_eq!(config.ack_interval_chunks, 1);
-        assert_eq!(config.master_connection_pool_size, 1);
+        assert_eq!(config.master_connection_pool_size, 8);
 
         let tuned = GoosefsConfig::new("127.0.0.1:9200")
             .with_prefetch_window(16)

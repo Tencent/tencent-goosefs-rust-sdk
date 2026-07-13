@@ -32,6 +32,7 @@
 //! (`Unavailable`, `DeadlineExceeded`), the client will re-discover the
 //! Primary and rebuild the channel automatically.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -761,8 +762,6 @@ impl MasterClient {
 
 // ── Master connection pool (Part V R3) ───────────────────────────────────────
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 /// A round-robin pool of [`MasterClient`]s over independent HTTP/2 channels.
 ///
 /// # Why (Part V R3)
@@ -788,7 +787,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// half-switch window — is skipped. See doc Part V R3 constraint 5.
 pub struct MasterClientPool {
     clients: Vec<Arc<MasterClient>>,
-    next: AtomicUsize,
+    /// Per-connection in-flight RPC counters, aligned with clients by index.
+    /// Wrapped in `Arc` so `PooledClient` can hold an owned handle that outlives
+    /// any borrow on the pool and safely crosses `.await` points.
+    inflight: Arc<Vec<AtomicUsize>>,
+    /// Lightweight P2C random seed — a Relaxed counter avoids full-scan and
+    /// thundering-herd while still scattering picks across connections.
+    rr: AtomicUsize,
 }
 
 impl MasterClientPool {
@@ -807,25 +812,94 @@ impl MasterClientPool {
             let client = MasterClient::connect_with_inquire(config, inquire_client.clone()).await?;
             clients.push(Arc::new(client));
         }
+        let inflight = Arc::new((0..size).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
         debug!(pool_size = size, "MasterClientPool connected");
         Ok(Self {
             clients,
-            next: AtomicUsize::new(0),
+            inflight,
+            rr: AtomicUsize::new(0),
         })
     }
 
-    /// Pick the next client in round-robin order (wait-free).
-    pub fn pick(&self) -> Arc<MasterClient> {
-        if self.clients.len() == 1 {
-            return self.clients[0].clone();
+    /// P2C (Power of Two Choices) scheduling: randomly pick two connections,
+    /// select the one with fewer in-flight RPCs.
+    ///
+    /// Returns a [`PooledClient`] RAII guard whose [`Drop`] auto-decrements
+    /// the in-flight counter.  This is wait-free, O(1), and avoids the
+    /// thundering-herd problem of a full-scan min-pick.
+    ///
+    /// # Why P2C?
+    ///
+    /// Naïve "scan all, pick min → fetch_add" is a two-step non-atomic
+    /// operation under high concurrency: multiple threads simultaneously
+    /// select the same "current minimum" connection, creating a thundering
+    /// herd that *increases* lock contention on that connection.  P2C
+    /// (Power of Two Choices) randomises the candidate set to 2 and picks
+    /// the lighter, which is wait-free, O(1), and proven to bring the
+    /// maximum load from O(log n / log log n) down to O(log log n).
+    pub fn pick(&self) -> PooledClient {
+        let n = self.clients.len();
+        if n == 1 {
+            self.inflight[0].fetch_add(1, Ordering::Relaxed);
+            return PooledClient {
+                client: self.clients[0].clone(),
+                inflight: self.inflight.clone(),
+                idx: 0,
+            };
         }
-        let i = self.next.fetch_add(1, Ordering::Relaxed) % self.clients.len();
-        self.clients[i].clone()
+        // Derive two distinct indices from a Relaxed counter (no strong
+        // randomness needed — the purpose is just to scatter picks).
+        let base = self.rr.fetch_add(1, Ordering::Relaxed);
+        let a = base % n;
+        let b = (base / n + 1) % n;
+        let (a, b) = if a == b { (a, (a + 1) % n) } else { (a, b) };
+
+        let la = self.inflight[a].load(Ordering::Relaxed);
+        let lb = self.inflight[b].load(Ordering::Relaxed);
+        let idx = if la <= lb { a } else { b };
+
+        self.inflight[idx].fetch_add(1, Ordering::Relaxed);
+        PooledClient {
+            client: self.clients[idx].clone(),
+            inflight: self.inflight.clone(),
+            idx,
+        }
     }
 
     /// Number of pooled channels.
     pub fn size(&self) -> usize {
         self.clients.len()
+    }
+}
+
+/// RAII guard returned by [`MasterClientPool::pick`].
+///
+/// Wraps an `Arc<MasterClient>` and auto-decrements the per-connection
+/// in-flight RPC counter when dropped.  Implements [`Deref`](std::ops::Deref)
+/// to `MasterClient` so callers can invoke methods directly:
+///
+/// ```ignore
+/// let pooled = pool.pick();
+/// let info = pooled.get_status("/path").await?;
+/// // pooled is dropped here → in-flight-- automatically
+/// ```
+pub struct PooledClient {
+    pub client: Arc<MasterClient>,
+    inflight: Arc<Vec<AtomicUsize>>,
+    idx: usize,
+}
+
+impl std::ops::Deref for PooledClient {
+    type Target = MasterClient;
+
+    fn deref(&self) -> &Self::Target {
+        &self.client
+    }
+}
+
+impl Drop for PooledClient {
+    fn drop(&mut self) {
+        self.inflight[self.idx].fetch_sub(1, Ordering::Relaxed);
     }
 }
 

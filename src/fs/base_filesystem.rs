@@ -54,7 +54,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::client::MasterClient;
+use crate::client::PooledClient;
 use crate::config::{GoosefsConfig, WriteType};
 use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
@@ -133,8 +133,8 @@ impl BaseFileSystem {
 
     // ── Internal helpers ─────────────────────────────────────────────────────
 
-    /// Obtain a `MasterClient` — O(1) Arc clone from the shared context.
-    fn master(&self) -> Arc<MasterClient> {
+    /// Obtain a `PooledClient` via P2C adaptive scheduling from the shared pool.
+    fn master(&self) -> PooledClient {
         self.ctx.acquire_master()
     }
 
