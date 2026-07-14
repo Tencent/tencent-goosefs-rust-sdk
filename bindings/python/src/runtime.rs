@@ -54,6 +54,17 @@ pub const RUNTIME_MAX_BLOCKING_THREADS: usize = 64;
 /// - `max_blocking_threads`: bumped to 64 so blocking SDK hops (DNS, filesystem
 ///   fallbacks) do not queue behind one another under load.
 ///
+/// # Environment overrides (FLAMEGRAPH_OPTIMIZATION_PLAN §B4 opt-in)
+///
+/// - `GOOSEFS_TOKIO_WORKER_THREADS` — override `worker_threads`. Values are
+///   clamped to `>=1`. When unset, the default (`cpus.max(16)`) is used.
+///   Deployments that want to **cap** the pool per §B4 (`min(cores, 8)`) can
+///   set this explicitly, e.g. `GOOSEFS_TOKIO_WORKER_THREADS=8`. Left as an
+///   opt-in switch (rather than a default flip) because §B4 is explicit that
+///   under-sizing hurts throughput and needs per-workload benchmarking.
+/// - `GOOSEFS_TOKIO_MAX_BLOCKING_THREADS` — override `max_blocking_threads`.
+///   Same clamp / no-default-change semantics.
+///
 /// Note: this only helps IO tasks that have already released the GIL; it does
 /// **not** lift the GIL-serialisation ceiling on short Master-read ops.
 pub fn init_custom_runtime() {
@@ -63,17 +74,43 @@ pub fn init_custom_runtime() {
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(16);
-    let worker_threads = cpus.max(16);
+
+    // Default: at least 16 workers (see rationale above). §B4 (opt-in) lets
+    // deployments override this via env var without a default flip.
+    let default_worker_threads = cpus.max(16);
+    let worker_threads = env_usize("GOOSEFS_TOKIO_WORKER_THREADS")
+        .map(|n| n.max(1))
+        .unwrap_or(default_worker_threads);
+    let max_blocking_threads = env_usize("GOOSEFS_TOKIO_MAX_BLOCKING_THREADS")
+        .map(|n| n.max(1))
+        .unwrap_or(RUNTIME_MAX_BLOCKING_THREADS);
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder
         .worker_threads(worker_threads)
-        .max_blocking_threads(RUNTIME_MAX_BLOCKING_THREADS)
+        .max_blocking_threads(max_blocking_threads)
         .enable_all();
 
     // `init` returns `()`; if the runtime was somehow already built (it should
     // not be at module-init time), the stored builder is simply ignored later.
     pyo3_async_runtimes::tokio::init(builder);
+}
+
+/// Parse an environment variable as `usize`, returning `None` on missing /
+/// empty / unparsable values. Used by [`init_custom_runtime`] to expose the
+/// runtime knobs called out in FLAMEGRAPH_OPTIMIZATION_PLAN §B4.
+fn env_usize(key: &str) -> Option<usize> {
+    match std::env::var(key) {
+        Ok(v) => {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                trimmed.parse::<usize>().ok()
+            }
+        }
+        Err(_) => None,
+    }
 }
 
 /// Returns the process-wide Tokio runtime that backs both async and sync
@@ -101,4 +138,46 @@ pub fn runtime() -> &'static Runtime {
 #[inline]
 pub fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     runtime().block_on(fut)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FLAMEGRAPH_OPTIMIZATION_PLAN §B4: the env-var override plumbing must
+    /// return `None` for missing / empty / unparsable values (falling back
+    /// to the built-in default), and the parsed value otherwise. Uses a
+    /// process-unique key so parallel test threads do not stomp on each
+    /// other.
+    #[test]
+    fn env_usize_missing_and_empty_return_none() {
+        let key = "GOOSEFS_TEST_ENV_USIZE_MISSING_KEY_XYZ_1";
+        // SAFETY: single-writer, single-reader — this key is not shared with
+        // any other test in the crate.
+        std::env::remove_var(key);
+        assert_eq!(env_usize(key), None);
+
+        std::env::set_var(key, "");
+        assert_eq!(env_usize(key), None);
+
+        std::env::set_var(key, "   ");
+        assert_eq!(env_usize(key), None);
+
+        std::env::set_var(key, "not-a-number");
+        assert_eq!(env_usize(key), None);
+
+        std::env::remove_var(key);
+    }
+
+    #[test]
+    fn env_usize_parses_valid_values() {
+        let key = "GOOSEFS_TEST_ENV_USIZE_VALID_KEY_XYZ_2";
+        std::env::set_var(key, "8");
+        assert_eq!(env_usize(key), Some(8));
+
+        std::env::set_var(key, "  16  ");
+        assert_eq!(env_usize(key), Some(16));
+
+        std::env::remove_var(key);
+    }
 }

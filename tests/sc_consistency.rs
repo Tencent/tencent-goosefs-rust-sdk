@@ -114,10 +114,7 @@ mod consistency {
         Ok(())
     }
 
-    async fn open_stream(
-        ctx: &Arc<FileSystemContext>,
-        path: &str,
-    ) -> Result<GoosefsFileInStream> {
+    async fn open_stream(ctx: &Arc<FileSystemContext>, path: &str) -> Result<GoosefsFileInStream> {
         GoosefsFileInStream::open_with_context(ctx.clone(), path, OpenFileOptions::default()).await
     }
 
@@ -192,10 +189,7 @@ mod consistency {
                 expected,
                 "INV-D2: gRPC bytes drift from source at off={off} len={len}"
             );
-            assert_eq!(
-                a, b,
-                "INV-D2: SC vs gRPC mismatch at off={off} len={len}"
-            );
+            assert_eq!(a, b, "INV-D2: SC vs gRPC mismatch at off={off} len={len}");
         }
 
         ctx_sc.acquire_master().delete(&path, false).await.ok();
@@ -243,7 +237,11 @@ mod consistency {
             let a = s_sc.read_at(off, len).await?;
             let b = s_fb.read_at(off, len).await?;
             let expected = &payload[off as usize..off as usize + len];
-            assert_eq!(a.as_ref(), expected, "INV-S1: SC drift at off={off} len={len}");
+            assert_eq!(
+                a.as_ref(),
+                expected,
+                "INV-S1: SC drift at off={off} len={len}"
+            );
             assert_eq!(
                 b.as_ref(),
                 expected,
@@ -358,11 +356,7 @@ mod consistency {
             payload.as_slice(),
             "INV-S5: sequential read bytes drift from source"
         );
-        assert_eq!(
-            seq_buf.as_slice(),
-            all.as_ref(),
-            "INV-S5: read != read_all"
-        );
+        assert_eq!(seq_buf.as_slice(), all.as_ref(), "INV-S5: read != read_all");
 
         // ── (3) read_at (positioned) ────────────────────────────────
         // Reconstruct the file via positioned reads only and compare.
@@ -386,7 +380,11 @@ mod consistency {
             payload.as_slice(),
             "INV-S5: read_at bytes drift from source"
         );
-        assert_eq!(pr_buf.as_slice(), all.as_ref(), "INV-S5: read_at != read_all");
+        assert_eq!(
+            pr_buf.as_slice(),
+            all.as_ref(),
+            "INV-S5: read_at != read_all"
+        );
 
         ctx.acquire_master().delete(&path, false).await.ok();
         ctx.close().await?;

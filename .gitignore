@@ -9,3 +9,5 @@ docs/prompt/
 docs/images/
 /docs/bug/
 /docs/metrics/
+docs/perf/
+result_3.log

@@ -9,7 +9,7 @@ resolver = "2"
 
 [package]
 name = "goosefs-sdk"
-version = "0.1.6-beta.1"
+version = "0.1.6"
 edition = "2021"
 description = "Goosefs Rust gRPC Client - Direct gRPC client for Goosefs Master/Worker"
 license = "Apache-2.0"
@@ -71,6 +71,14 @@ bytes = "1.11.1"
 thiserror = "2"
 tracing = "0.1"
 dashmap = "6"
+# Fast integer-to-string formatting (P0-F.2): replaces the `write!` /
+# `format!("{}", n)` on the `host:port` keying hot path. `itoa::write` skips
+# the `core::fmt` machinery entirely, which shows up in flamegraphs as
+# `core::fmt::write` / `Formatter::write_fmt`. Pulled in as a direct dep
+# (was already in the graph transitively) so the helper function can use it
+# without per-call-site `use` ceremony. See
+# `docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md` P0-F.2.
+itoa = "1"
 # Lock-free atomic Arc swap, used by `MasterClient` to publish the authenticated
 # (channel + SASL guard) snapshot. Replaces the prior `RwLock<Client>` so that
 # the `get_status` hot-path becomes wait-free, while still keeping
@@ -106,12 +114,32 @@ hostname = "0.4"
 # Used only by the metrics pushgateway exporter; gated behind a feature so
 # downstream gRPC-only consumers can opt out.
 reqwest = { version = "^0.12", features = ["rustls-tls"], default-features = false, optional = true }
+# High-performance concurrent cache used by:
+# - `MokaCacheEvictor` (lock-free LRU eviction, see
+#   `src/cache/evictor/moka_evictor.rs` and
+#   `docs/perf/2026-07-09-oncpu6-concurrent-uring-analysis/MOKA_LRU_OPTIMIZATION.md`)
+# - io_uring page fd cache (Method E, mirrors Lance's `HANDLE_CACHE`)
+# Provides built-in W-TinyLFU eviction + per-segment locking, replacing the
+# previous `Mutex<LruState>` that caused 38x contention under 32 concurrent
+# reads. Pure Rust — works on all platforms.
+moka = { version = "0.12", features = ["future", "sync"] }
+# Drives variable-sized batches of cache page reads concurrently without
+# spawning per-page tasks; already used by benchmarks and now required on the
+# cache hit hot path.
+futures = "0.3"
 
 # Unix-only: raw `sigaction` for the short-circuit SIGBUS diagnostic handler
 # (SHORT_CIRCUIT_DESIGN §3.2 / §8.1). Already in the dependency graph
 # transitively; declared directly so the handler can be registered.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Linux-only: io_uring page-cache backend (CLIENT_PAGE_CACHE_IO_URING_DESIGN).
+# The io-uring crate provides the raw syscall wrappers; `libc` is already
+# declared for unix targets above. Only pulled in on Linux so the crate
+# continues to build on macOS / Windows.
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7"
 
 [build-dependencies]
 # Optional: only required when regenerating protobuf code in-tree.
@@ -121,9 +149,6 @@ tonic-prost-build = { version = "0.14", optional = true }
 [dev-dependencies]
 # Tests/examples may rely on the broader tokio feature set.
 tokio = { version = "1.23", features = ["full", "test-util"] }
-# Used by the `pr_runtime_ab` benchmark to demonstrate the recommended
-# bounded-concurrency caller pattern (`stream::iter(..).buffer_unordered(N)`).
-futures = "0.3"
 # Statistical micro-benchmarks for the GetFileStatus optimization
 # (see benchmarks/master_hotpath.rs and
 # docs/RUST_PYTHON_SDK_OPTIMIZATION.md Part II §1/§3/§4).
@@ -164,6 +189,30 @@ path = "benchmarks/page_cache_ab.rs"
 [[example]]
 name = "sc_pr_ab"
 path = "benchmarks/sc_pr_ab.rs"
+
+# Cache evictor A/B benchmark: Moka vs LRU vs LFU under concurrent cache-hit
+# workloads. Exercises the full LocalCacheManager::get() path (metadata lookup
+# + evictor on_access + PageStore IO). See
+# docs/perf/2026-07-09-oncpu6-concurrent-uring-analysis/MOKA_LRU_OPTIMIZATION.md.
+[[example]]
+name = "cache_evictor_bench"
+path = "benchmarks/cache_evictor_bench.rs"
+
+# P3 benchmark: io_uring vs tokio::fs page-cache backend comparison.
+# Local-only (no GooseFS cluster needed). Runs on any platform; io_uring path
+# is #[cfg(target_os = "linux")]-gated. See
+# docs/CLIENT_PAGE_CACHE_IO_URING_DESIGN.md §10.3.
+[[example]]
+name = "cache_uring_bench"
+path = "benchmarks/cache_uring_bench.rs"
+
+# B4 knee-finder: sweep tokio `worker_threads` over the same PR `read_at`
+# workload as `pr_runtime_ab`, so operators can pick a value on their own
+# hardware before flipping the shared-runtime default (see
+# docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md §B4).
+[[example]]
+name = "tokio_worker_ab"
+path = "benchmarks/tokio_worker_ab.rs"
 
 # Release profile tuning for the SDK hot paths.
 #

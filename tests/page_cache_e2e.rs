@@ -129,6 +129,10 @@ mod e2e {
         config.client_cache_size = 140 * 1024;
         config.client_cache_dirs = vec![dir.to_string_lossy().into_owned()];
         config.client_cache_async_write_enabled = false;
+        // `read_all()` below drives the sequential fast path, which by default
+        // bypasses the local page cache. Route it through the cache so that
+        // filling 8 pages into a ~2-page cache actually exercises eviction.
+        config.client_cache_sequential_read_enabled = true;
 
         let ctx = FileSystemContext::connect(config).await?;
         let master = ctx.acquire_master();

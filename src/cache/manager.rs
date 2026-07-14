@@ -5,21 +5,27 @@
 //! an in-memory metadata index, per-directory byte accounting and eviction, a
 //! striped page-lock pool, and a bounded async write-back pool.
 //!
-//! # Concurrency model (P2)
+//! # Concurrency model (E1+E2+E3)
 //!
 //! - **Striped page locks** (`LOCK_SIZE` `RwLock`s): `get` takes a read lock,
 //!   `put`/`delete` take a write lock for the page's stripe. Same-page
 //!   operations serialize; different pages run concurrently.
-//! - **Metadata lock** (`inner`): a single `Mutex` guards the index, the
-//!   reverse index and per-dir evictor + accounting. It is held only for short
-//!   in-memory critical sections — **never across page-store disk IO**, so
-//!   reads and writes scale.
-//! - Eviction removes victims' metadata under `inner`, then deletes their
-//!   files outside the lock. The `get` path resolves a page's directory under
-//!   the lock, releases it, then opens the file fresh: if `delete`/eviction
-//!   removed the file in between, the open returns `NotFound` and `get`
-//!   reports a miss (`0`); if the file was already open, the inode survives
-//!   until the fd closes. Either ordering is safe.
+//! - **Metadata lock** (`inner: RwLock<Inner>`): `get` takes a **read** lock
+//!   (concurrent meta lookup + LRU update via the evictor's own interior
+//!   mutability); `put`/`delete` take a **write** lock. The lock is held only
+//!   for short in-memory critical sections — **never across page-store disk
+//!   IO**. This eliminates the previous `Mutex` bottleneck where 20 concurrent
+//!   `get` calls serialized through a single exclusive lock (E3).
+//! - **Version lock** (`versions: RwLock<HashMap>`): `on_file_open` takes a
+//!   read lock for the common case (same file → no change) and a write lock
+//!   only when the file was overwritten. This lock is separate from `inner`
+//!   so `on_file_open` never blocks `get`/`put`/`delete` (E2).
+//! - **E1 (get lock merge)**: `get` previously locked `inner` twice (meta
+//!   lookup, then LRU update after IO). Now it takes a single read lock,
+//!   updates the LRU immediately (before IO), and releases. Even if the IO
+//!   later fails, a spurious LRU touch is harmless (no correctness risk).
+//! - Eviction removes victims' metadata under `inner.write()`, then deletes
+//!   their files outside the lock.
 //!
 //! **Platform note:** the store relies on POSIX semantics — atomic
 //! `tmp + rename` and deleting files that may be concurrently opened. The
@@ -34,12 +40,14 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
-use std::sync::{Arc, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use tokio::sync::{Mutex, RwLock, Semaphore};
+use dashmap::DashMap;
+use tokio::sync::{RwLock, Semaphore};
 use tracing::{debug, warn};
 use xxhash_rust::xxh3::Xxh3Default;
 
@@ -48,42 +56,67 @@ use crate::cache::evictor::{build_evictor, CacheEvictor};
 use crate::cache::metric_name as mn;
 use crate::cache::options::CacheManagerOptions;
 use crate::cache::page_id::{CacheScope, PageId, PageInfo};
-use crate::cache::store::{LocalPageStore, PageStore};
-use crate::cache::{CacheManager, CacheState};
+#[cfg(target_os = "linux")]
+use crate::cache::store::UringPageStore;
+use crate::cache::store::{init_uring_config, is_uring_available, LocalPageStore, PageStore};
+use crate::cache::{CacheManager, CacheState, PageReadRequest};
 use crate::config::GoosefsConfig;
 use crate::error::Result;
 use crate::metrics::{counter, gauge};
+use futures::future::join_all;
 
 /// Number of page-lock stripes (mirrors Java `LocalCacheManager.LOCK_SIZE`).
 const LOCK_SIZE: usize = 1024;
 
-/// Per-directory evictor + byte accounting (guarded by `inner`).
+/// Per-directory evictor + byte accounting.
+///
+/// The evictor uses interior mutability for reads (`on_access` takes `&self`).
+/// For writes (`evict_candidate`, `on_add`, `on_remove`), the per-dir
+/// `dir_locks[i]` `StdMutex` serialises the operation — but only for the
+/// same directory. Different directories can mutate concurrently.
 struct DirState {
     evictor: Box<dyn CacheEvictor>,
-    used_bytes: u64,
+    /// Used bytes in this directory. `AtomicU64` for lock-free reads on the
+    /// `get`/`put` hot path; updated via `fetch_add` / `fetch_sub`.
+    used_bytes: AtomicU64,
     capacity: u64,
 }
 
-/// Mutable, lock-guarded cache state.
-struct Inner {
-    /// `PageId → PageInfo` primary index.
-    meta: HashMap<PageId, PageInfo>,
-    /// `file_id → set(page_index)` reverse index (for `invalidate`).
-    by_file: HashMap<Arc<str>, HashSet<u64>>,
-    /// `file_id → (length, last_modification_time_ms)` known versions, used to
-    /// detect overwrites and invalidate stale pages on (re)open.
-    versions: HashMap<Arc<str>, (i64, i64)>,
-    /// Per-directory evictor and accounting.
-    dirs: Vec<DirState>,
-}
+/// Reverse index state: `file_id → set(page_index)` for `invalidate`.
+/// Under a `RwLock` because it's accessed on cold paths (invalidate, sweep)
+/// and needs atomic read-modify-write of the inner HashSet.
+type ByFileMap = HashMap<Arc<str>, HashSet<u64>>;
 
 /// Local, disk-backed page cache manager.
 pub struct LocalCacheManager {
     options: CacheManagerOptions,
-    /// One page store per cache directory (immutable; IO runs outside `inner`).
-    stores: Vec<LocalPageStore>,
+    /// One page store per cache directory (immutable; IO runs outside any lock).
+    stores: Vec<Arc<dyn PageStore>>,
     allocator: Box<dyn Allocator>,
-    inner: Mutex<Inner>,
+
+    // ── Phase C: lock-free metadata indices ───────────────────────────
+    /// `PageId → PageInfo` primary index. `DashMap` provides lock-free reads
+    /// (per-shard read guard) — the `get` hot path takes zero global locks.
+    meta: DashMap<PageId, PageInfo>,
+
+    /// Per-directory state. `dirs[i]` is accessed without locks for reads
+    /// (evictor.on_access is interior-mutable). Writes are serialised by
+    /// `dir_locks[i]`.
+    dirs: Vec<DirState>,
+    /// Per-directory `StdMutex` for serialising evictor write operations
+    /// (`evict_candidate`, `on_add`, `on_remove`) and `used_bytes` updates.
+    /// Each dir has its own mutex — different dirs evict concurrently.
+    dir_locks: Vec<StdMutex<()>>,
+
+    /// File reverse index (`file_id → set(page_index)`). Under a `RwLock`
+    /// because it's only touched on cold paths (`invalidate`, `sweep`,
+    /// `delete`) and the inner `HashSet` needs atomic insert/remove.
+    by_file: RwLock<ByFileMap>,
+
+    /// File-identity version table (`file_id → (length, mtime)`), used by
+    /// `on_file_open` to detect overwrites. Separate `RwLock` so the common
+    /// `on_file_open` path (same file → read lock) never blocks `get`/`put`.
+    versions: RwLock<HashMap<Arc<str>, (i64, i64)>>,
     /// Striped page locks.
     page_locks: Vec<RwLock<()>>,
     /// Bounded async write-back permits (`async_write_threads`).
@@ -113,30 +146,62 @@ impl LocalCacheManager {
             options.dirs.iter().map(|p| p.as_path()).collect()
         };
 
-        let mut stores = Vec::with_capacity(dir_paths.len());
+        // Detect io_uring availability. On non-Linux or when disabled by
+        // config, falls back transparently to LocalPageStore (tokio::fs).
+        let use_uring = options.uring_enabled && is_uring_available();
+        if options.uring_enabled && !use_uring {
+            warn!("io_uring requested but unavailable; falling back to tokio::fs backend");
+        }
+
+        // Initialise the io_uring thread pool configuration before any store
+        // operation. This ensures config-file values (not just env vars) are
+        // respected for queue_depth and thread_count.
+        if use_uring {
+            init_uring_config(options.uring_queue_depth, options.uring_thread_count);
+        }
+
+        let mut stores: Vec<Arc<dyn PageStore>> = Vec::with_capacity(dir_paths.len());
         let mut dirs = Vec::with_capacity(dir_paths.len());
         for dir in &dir_paths {
-            stores.push(LocalPageStore::create(dir, options.page_size).await?);
+            let store: Arc<dyn PageStore> = if use_uring {
+                #[cfg(target_os = "linux")]
+                {
+                    match UringPageStore::create(dir, options.page_size).await {
+                        Ok(s) => Arc::new(s),
+                        Err(e) => {
+                            warn!(error = %e, "UringPageStore creation failed; fallback to LocalPageStore");
+                            Arc::new(LocalPageStore::create(dir, options.page_size).await?)
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Arc::new(LocalPageStore::create(dir, options.page_size).await?)
+                }
+            } else {
+                Arc::new(LocalPageStore::create(dir, options.page_size).await?)
+            };
+            stores.push(store);
             dirs.push(DirState {
                 evictor: build_evictor(options.evictor),
-                used_bytes: 0,
+                used_bytes: AtomicU64::new(0),
                 capacity: options.dir_capacity,
             });
         }
 
         let page_locks = (0..LOCK_SIZE).map(|_| RwLock::new(())).collect();
         let async_write_sem = Arc::new(Semaphore::new(options.async_write_threads.max(1)));
+        let dir_locks: Vec<StdMutex<()>> = (0..dirs.len()).map(|_| StdMutex::new(())).collect();
 
         let mgr = Self {
             options,
             stores,
             allocator: Box::new(HashAllocator::new()),
-            inner: Mutex::new(Inner {
-                meta: HashMap::new(),
-                by_file: HashMap::new(),
-                versions: HashMap::new(),
-                dirs,
-            }),
+            meta: DashMap::new(),
+            dirs,
+            dir_locks,
+            by_file: RwLock::new(HashMap::new()),
+            versions: RwLock::new(HashMap::new()),
             page_locks,
             async_write_sem,
             state: CacheState::ReadWrite,
@@ -191,10 +256,14 @@ impl LocalCacheManager {
         gauge(mn::CLIENT_CACHE_STATE).set(self.state.as_i64());
     }
 
-    /// Refresh occupancy gauges. Caller must hold `inner`.
-    fn publish_occupancy(&self, inner: &Inner) {
-        let used: u64 = inner.dirs.iter().map(|d| d.used_bytes).sum();
-        let pages = inner.meta.len() as i64;
+    /// Refresh occupancy gauges. Lock-free (reads from `meta` and `dirs`).
+    fn publish_occupancy(&self) {
+        let used: u64 = self
+            .dirs
+            .iter()
+            .map(|d| d.used_bytes.load(Ordering::Relaxed))
+            .sum();
+        let pages = self.meta.len() as i64;
         gauge(mn::CLIENT_CACHE_PAGES).set(pages);
         gauge(mn::CLIENT_CACHE_SPACE_USED_COUNT).set(pages);
         gauge(mn::CLIENT_CACHE_SPACE_USED).set(used as i64);
@@ -208,21 +277,37 @@ impl LocalCacheManager {
     /// reclaim its identity sidecar). File deletion is the caller's
     /// responsibility, performed outside the lock.
     ///
-    /// Caller must hold `inner`.
-    fn pop_victim(inner: &mut Inner, dir_index: usize) -> Option<(PageId, u64, bool)> {
-        let victim = inner.dirs[dir_index].evictor.evict_candidate()?;
-        let info = inner.meta.remove(&victim);
-        inner.dirs[dir_index].evictor.on_remove(&victim);
+    /// Takes the per-dir `StdMutex` to serialise evictor write operations.
+    /// The Mutex is released before the `by_file.write().await` to keep the
+    /// guard `Send` across the await point.
+    async fn pop_victim(&self, dir_index: usize) -> Option<(PageId, u64, bool)> {
+        // Phase 1: under per-dir Mutex — evictor + meta + used_bytes.
+        let (victim, size) = {
+            let _guard = self.dir_locks[dir_index].lock().unwrap();
+            let victim = self.dirs[dir_index].evictor.evict_candidate()?;
+            let size = self
+                .meta
+                .remove(&victim)
+                .map(|(_, v)| v.page_size)
+                .unwrap_or(0);
+            self.dirs[dir_index].evictor.on_remove(&victim);
+            self.dirs[dir_index]
+                .used_bytes
+                .fetch_sub(size, Ordering::Relaxed);
+            (victim, size)
+        };
+        // Phase 2: by_file update (async, no Mutex held).
         let mut file_empty = false;
-        if let Some(set) = inner.by_file.get_mut(&victim.file_id) {
-            set.remove(&victim.page_index);
-            if set.is_empty() {
-                inner.by_file.remove(&victim.file_id);
-                file_empty = true;
+        {
+            let mut by_file = self.by_file.write().await;
+            if let Some(set) = by_file.get_mut(&victim.file_id) {
+                set.remove(&victim.page_index);
+                if set.is_empty() {
+                    by_file.remove(&victim.file_id);
+                    file_empty = true;
+                }
             }
         }
-        let size = info.as_ref().map(|i| i.page_size).unwrap_or(0);
-        inner.dirs[dir_index].used_bytes = inner.dirs[dir_index].used_bytes.saturating_sub(size);
         Some((victim, size, file_empty))
     }
 
@@ -309,16 +394,18 @@ impl LocalCacheManager {
                         }
 
                         let page_id = PageId::new(file_id.clone(), page_index);
-                        let mut inner = self.inner.lock().await;
                         // Respect per-dir capacity; drop the file if it would overflow.
-                        if inner.dirs[dir_index].used_bytes + size > inner.dirs[dir_index].capacity
-                            || inner.meta.contains_key(&page_id)
+                        // Phase C: `used_bytes` is atomic → no Mutex for the check.
+                        // Mutex is only taken briefly for evictor.on_add, then released
+                        // before the by_file write.
+                        if self.dirs[dir_index].used_bytes.load(Ordering::Relaxed) + size
+                            > self.dirs[dir_index].capacity
+                            || self.meta.contains_key(&page_id)
                         {
-                            drop(inner);
                             let _ = tokio::fs::remove_file(page.path()).await;
                             continue;
                         }
-                        inner.meta.insert(
+                        self.meta.insert(
                             page_id.clone(),
                             PageInfo {
                                 page_id: page_id.clone(),
@@ -328,13 +415,21 @@ impl LocalCacheManager {
                                 scope: CacheScope::Global,
                             },
                         );
-                        inner
-                            .by_file
-                            .entry(file_id.clone())
-                            .or_default()
-                            .insert(page_index);
-                        inner.dirs[dir_index].evictor.on_add(&page_id);
-                        inner.dirs[dir_index].used_bytes += size;
+                        {
+                            let _dir_guard = self.dir_locks[dir_index].lock().unwrap();
+                            self.dirs[dir_index].evictor.on_add(&page_id);
+                            drop(_dir_guard);
+                        }
+                        self.dirs[dir_index]
+                            .used_bytes
+                            .fetch_add(size, Ordering::Relaxed);
+                        {
+                            let mut by_file = self.by_file.write().await;
+                            by_file
+                                .entry(file_id.clone())
+                                .or_default()
+                                .insert(page_index);
+                        }
                         file_pages_restored += 1;
                         restored_pages += 1;
                         restored_bytes += size;
@@ -342,10 +437,9 @@ impl LocalCacheManager {
 
                     if file_pages_restored > 0 {
                         // Live file → keep its identity for overwrite detection.
-                        self.inner
-                            .lock()
+                        self.versions
+                            .write()
                             .await
-                            .versions
                             .insert(file_id.clone(), identity);
                     } else {
                         // Empty shell (sidecar but no data pages) → reclaim it
@@ -393,27 +487,69 @@ impl LocalCacheManager {
         let Some(ttl) = self.options.ttl else {
             return;
         };
-        let expired: Vec<PageId> = {
-            let inner = self.inner.lock().await;
-            inner
-                .meta
-                .values()
-                .filter(|info| info.created_at.elapsed() > ttl)
-                .map(|info| info.page_id.clone())
-                .collect()
-        };
+        // Lock-free read of `meta` (DashMap). Collect expired page ids, then
+        // call `delete` for each (which takes its own per-dir lock).
+        let expired: Vec<PageId> = self
+            .meta
+            .iter()
+            .filter(|entry| entry.value().created_at.elapsed() > ttl)
+            .map(|entry| entry.key().clone())
+            .collect();
         for pid in expired {
             self.delete(&pid).await;
         }
     }
 
-    /// Whether `page_id`'s entry has outlived the configured TTL.
-    /// Caller must hold `inner`.
-    fn is_expired(&self, inner: &Inner, page_id: &PageId) -> bool {
-        match (self.options.ttl, inner.meta.get(page_id)) {
-            (Some(ttl), Some(info)) => info.created_at.elapsed() > ttl,
-            _ => false,
+    /// Expired-page cleanup path: takes the per-dir Mutex to remove the stale
+    /// entry from the index, reverse index, and evictor.
+    ///
+    /// **Race safety**: between the DashMap read in `get()` and the per-dir
+    /// lock here, a concurrent `put()` may have replaced the entry with a fresh
+    /// one (new `created_at`). We re-check `created_at.elapsed() > ttl` under
+    /// the per-dir lock to avoid deleting a freshly cached page.
+    async fn get_expired_path(&self, page_id: &PageId) -> usize {
+        let Some(ttl) = self.options.ttl else {
+            return 0; // TTL disabled — should never reach here
+        };
+        // First find the dir_index via the lock-free DashMap read.
+        let dir_index = match self.meta.get(page_id) {
+            Some(info) => info.dir_index,
+            None => return 0,
+        };
+        // Phase 1 under per-dir Mutex: re-check expiry + meta.remove + evictor.on_remove.
+        // Mutex is released before the by_file write.
+        let info = {
+            let _guard = self.dir_locks[dir_index].lock().unwrap();
+            // Re-check under per-dir lock: a concurrent put may have refreshed the entry.
+            let is_expired = self
+                .meta
+                .get(page_id)
+                .is_some_and(|info| info.created_at.elapsed() > ttl);
+            if !is_expired {
+                return 0;
+            }
+            self.meta.remove(page_id).map(|(_, v)| v)
+        };
+        if let Some(info) = info {
+            let di = info.dir_index;
+            self.dirs[di].evictor.on_remove(page_id);
+            self.dirs[di]
+                .used_bytes
+                .fetch_sub(info.page_size, Ordering::Relaxed);
+            {
+                let mut by_file = self.by_file.write().await;
+                if let Some(set) = by_file.get_mut(&page_id.file_id) {
+                    set.remove(&page_id.page_index);
+                    if set.is_empty() {
+                        by_file.remove(&page_id.file_id);
+                    }
+                }
+            }
+            counter(mn::CLIENT_CACHE_PAGES_DISCARDED).inc(1);
+            counter(mn::CLIENT_CACHE_BYTES_DISCARDED).inc(info.page_size as i64);
+            self.publish_occupancy();
         }
+        0 // expired → miss (or concurrently refreshed → caller treats as miss, next get hits)
     }
 }
 
@@ -437,30 +573,52 @@ impl CacheManager for LocalCacheManager {
         // Reserve capacity (evicting as needed), collecting victims to delete
         // outside the lock. Each victim carries whether its file became empty
         // so the caller can also reclaim the file's identity sidecar.
+        //
+        // Phase C: `used_bytes` is an `AtomicU64`, so capacity checks are
+        // lock-free. The per-dir `StdMutex` is only acquired briefly inside
+        // `pop_victim` for evictor write operations, and is NEVER held across
+        // an `.await` point.
+        if self.meta.contains_key(page_id) {
+            counter(mn::CLIENT_CACHE_PUT_BENIGN_RACING_ERRORS).inc(1);
+            return false;
+        }
         let mut victims: Vec<(PageId, bool)> = Vec::new();
-        {
-            let mut inner = self.inner.lock().await;
-            if inner.meta.contains_key(page_id) {
-                counter(mn::CLIENT_CACHE_PUT_BENIGN_RACING_ERRORS).inc(1);
-                return false;
+        loop {
+            let current = self.dirs[dir_index].used_bytes.load(Ordering::Relaxed);
+            if current + page_len <= self.dirs[dir_index].capacity {
+                // Try to reserve (CAS loop — concurrent puts may have consumed
+                // some of the freed space, so retry on contention).
+                if self.dirs[dir_index]
+                    .used_bytes
+                    .compare_exchange(
+                        current,
+                        current + page_len,
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    break;
+                }
+                // CAS failed → another put reserved; re-check capacity.
+                continue;
             }
-            while inner.dirs[dir_index].used_bytes + page_len > inner.dirs[dir_index].capacity {
-                match Self::pop_victim(&mut inner, dir_index) {
-                    Some((victim, size, file_empty)) => {
-                        counter(mn::CLIENT_CACHE_BYTES_EVICTED).inc(size as i64);
-                        counter(mn::CLIENT_CACHE_PAGES_EVICTED).inc(1);
-                        victims.push((victim, file_empty));
-                    }
-                    None => {
-                        counter(mn::CLIENT_CACHE_PUT_INSUFFICIENT_SPACE_ERRORS).inc(1);
-                        counter(mn::CLIENT_CACHE_PUT_ERRORS).inc(1);
-                        return false;
-                    }
+            // Over capacity → evict one victim (pop_victim acquires/releases
+            // its own per-dir Mutex internally).
+            match self.pop_victim(dir_index).await {
+                Some((victim, size, file_empty)) => {
+                    counter(mn::CLIENT_CACHE_BYTES_EVICTED).inc(size as i64);
+                    counter(mn::CLIENT_CACHE_PAGES_EVICTED).inc(1);
+                    victims.push((victim, file_empty));
+                }
+                None => {
+                    counter(mn::CLIENT_CACHE_PUT_INSUFFICIENT_SPACE_ERRORS).inc(1);
+                    counter(mn::CLIENT_CACHE_PUT_ERRORS).inc(1);
+                    // Roll back any successful evictions? The evictions
+                    // already removed the page files; nothing to undo.
+                    return false;
                 }
             }
-            // Tentatively reserve so concurrent puts to this dir see the space
-            // as taken before we drop the lock for disk IO.
-            inner.dirs[dir_index].used_bytes += page_len;
         }
 
         // Delete evicted files outside the lock (best-effort).
@@ -476,14 +634,13 @@ impl CacheManager for LocalCacheManager {
             }
         }
 
-        // Write the new page outside the lock.
+        // Roll back the reservation on store write failure.
         if let Err(e) = self.stores[dir_index].put(page_id, &page).await {
             warn!(error = %e, "put: failed to write page to store");
-            // Roll back the reservation.
-            let mut inner = self.inner.lock().await;
-            inner.dirs[dir_index].used_bytes =
-                inner.dirs[dir_index].used_bytes.saturating_sub(page_len);
-            self.publish_occupancy(&inner);
+            self.dirs[dir_index]
+                .used_bytes
+                .fetch_sub(page_len, Ordering::Relaxed);
+            self.publish_occupancy();
             counter(mn::CLIENT_CACHE_PUT_STORE_WRITE_ERRORS).inc(1);
             counter(mn::CLIENT_CACHE_PUT_ERRORS).inc(1);
             return false;
@@ -491,7 +648,9 @@ impl CacheManager for LocalCacheManager {
 
         // Commit metadata.
         {
-            let mut inner = self.inner.lock().await;
+            // Per-dir Mutex: serialise evictor.on_add with any concurrent
+            // pop_victim for the same dir. Released before any await.
+            let _dir_guard = self.dir_locks[dir_index].lock().unwrap();
             let info = PageInfo {
                 page_id: page_id.clone(),
                 page_size: page_len,
@@ -499,137 +658,172 @@ impl CacheManager for LocalCacheManager {
                 created_at: Instant::now(),
                 scope: CacheScope::Global,
             };
-            inner.meta.insert(page_id.clone(), info);
-            // First page of this file → persist its identity sidecar so the
-            // overwrite check survives a restart. The identity comes from
-            // `versions`, populated by `on_file_open`; the file stream always
-            // opens (→ `on_file_open`) before reading (→ `put`), so it is
-            // present on the normal path. If it is somehow absent we simply
-            // skip the sidecar — restore is sidecar-gated, so any page left
-            // without an identity is dropped on the next startup rather than
-            // served stale (no correctness risk, only a lost cache entry).
-            let first_page = !inner.by_file.contains_key(&page_id.file_id);
-            let identity = if first_page {
-                inner.versions.get(&page_id.file_id).copied()
-            } else {
-                None
-            };
-            inner
-                .by_file
+            self.meta.insert(page_id.clone(), info);
+            self.dirs[dir_index].evictor.on_add(page_id);
+            counter(mn::CLIENT_CACHE_BYTES_WRITTEN_CACHE).inc(page_len as i64);
+            drop(_dir_guard);
+        }
+        self.publish_occupancy();
+
+        // First page of this file → persist its identity sidecar so the
+        // overwrite check survives a restart. The identity comes from
+        // `versions`, populated by `on_file_open`; the file stream always
+        // opens (→ `on_file_open`) before reading (→ `put`), so it is
+        // present on the normal path. If it is somehow absent we simply
+        // skip the sidecar — restore is sidecar-gated, so any page left
+        // without an identity is dropped on the next startup rather than
+        // served stale (no correctness risk, only a lost cache entry).
+        let first_page = {
+            let by_file = self.by_file.read().await;
+            !by_file.contains_key(&page_id.file_id)
+        };
+        let identity = if first_page {
+            self.versions.read().await.get(&page_id.file_id).copied()
+        } else {
+            None
+        };
+        {
+            let mut by_file = self.by_file.write().await;
+            by_file
                 .entry(page_id.file_id.clone())
                 .or_default()
                 .insert(page_id.page_index);
-            inner.dirs[dir_index].evictor.on_add(page_id);
-            counter(mn::CLIENT_CACHE_BYTES_WRITTEN_CACHE).inc(page_len as i64);
-            self.publish_occupancy(&inner);
-            drop(inner);
+        }
 
-            if let Some((length, mtime)) = identity {
-                if let Err(e) = self.stores[dir_index]
-                    .write_identity(&page_id.file_id, length, mtime)
-                    .await
-                {
-                    debug!(file_id = %page_id.file_id, error = %e,
-                        "failed to persist cache identity");
-                }
+        if let Some((length, mtime)) = identity {
+            if let Err(e) = self.stores[dir_index]
+                .write_identity(&page_id.file_id, length, mtime)
+                .await
+            {
+                debug!(file_id = %page_id.file_id, error = %e,
+                    "failed to persist cache identity");
             }
         }
         true
     }
 
     async fn get(&self, page_id: &PageId, page_offset: usize, dst: &mut [u8]) -> usize {
+        let bytes = self.get_bytes(page_id, page_offset, dst.len()).await;
+        let n = bytes.len().min(dst.len());
+        if n > 0 {
+            dst[..n].copy_from_slice(&bytes[..n]);
+        }
+        n
+    }
+
+    async fn get_bytes(&self, page_id: &PageId, page_offset: usize, len: usize) -> Bytes {
         if self.state == CacheState::NotInUse {
             counter(mn::CLIENT_CACHE_GET_NOT_READY_ERRORS).inc(1);
-            return 0;
+            return Bytes::new();
         }
-        if dst.is_empty() {
-            return 0;
+        if len == 0 {
+            return Bytes::new();
         }
 
         let _rl = self.page_locks[page_lock_index(page_id)].read().await;
 
-        // Resolve the page's directory under the lock, then release before IO.
-        // An expired page is dropped from the index (so a re-read can re-fill
-        // it) and reported as a miss; the on-disk file is reclaimed lazily on
-        // re-fill or by the TTL sweeper.
-        let dir_index = {
-            let mut inner = self.inner.lock().await;
-            if self.is_expired(&inner, page_id) {
-                if let Some(info) = inner.meta.remove(page_id) {
-                    let di = info.dir_index;
-                    inner.dirs[di].evictor.on_remove(page_id);
-                    if let Some(set) = inner.by_file.get_mut(&page_id.file_id) {
-                        set.remove(&page_id.page_index);
-                        if set.is_empty() {
-                            inner.by_file.remove(&page_id.file_id);
-                        }
+        // Phase C: `get` is now fully lock-free on the hot path.
+        // - `meta` is a `DashMap` → `get` takes a per-shard read guard (no global lock).
+        // - `dirs[i].evictor.on_access()` uses interior mutability (`&self`).
+        // - The page-lock stripe is the only contention point, and it shards
+        //   1024-way, so concurrent gets on different pages never block each other.
+        //
+        // If the page is expired (rare), we fall through to `get_expired_path`
+        // which takes the per-dir Mutex for cleanup.
+        let dir_index = match self.meta.get(page_id) {
+            Some(info) => {
+                // Check TTL (no-op when TTL is None).
+                if let Some(ttl) = self.options.ttl {
+                    if info.created_at.elapsed() > ttl {
+                        // Expired — fall through to the cleanup path.
+                        drop(info);
+                        let _ = self.get_expired_path(page_id).await;
+                        return Bytes::new();
                     }
-                    inner.dirs[di].used_bytes =
-                        inner.dirs[di].used_bytes.saturating_sub(info.page_size);
-                    counter(mn::CLIENT_CACHE_PAGES_DISCARDED).inc(1);
-                    counter(mn::CLIENT_CACHE_BYTES_DISCARDED).inc(info.page_size as i64);
-                    self.publish_occupancy(&inner);
                 }
-                return 0; // expired → miss
+                let di = info.dir_index;
+                // E1: Update LRU now (before IO), via evictor's `&self`.
+                self.dirs[di].evictor.on_access(page_id);
+                di
             }
-            match inner.meta.get(page_id) {
-                Some(info) => info.dir_index,
-                None => return 0, // miss
-            }
+            None => return Bytes::new(), // miss
         };
 
+        // Disk IO — completely lock-free.
         let start = Instant::now();
-        let n = match self.stores[dir_index].get(page_id, page_offset, dst).await {
-            Ok(n) => n,
+        let bytes = match self.stores[dir_index]
+            .get_bytes(page_id, page_offset, len)
+            .await
+        {
+            Ok(bytes) => bytes,
             Err(e) => {
                 warn!(error = %e, "get: failed to read page from store");
                 counter(mn::CLIENT_CACHE_GET_STORE_READ_ERRORS).inc(1);
                 counter(mn::CLIENT_CACHE_GET_ERRORS).inc(1);
-                return 0;
+                return Bytes::new();
             }
         };
-        if n == 0 {
-            return 0; // racy eviction → miss
+        if bytes.is_empty() {
+            return Bytes::new(); // racy eviction → miss
         }
 
-        {
-            let inner = self.inner.lock().await;
-            if let Some(info) = inner.meta.get(page_id) {
-                inner.dirs[info.dir_index].evictor.on_access(page_id);
-            }
-        }
-        counter(mn::CLIENT_CACHE_BYTES_READ_CACHE).inc(n as i64);
+        // No second lock needed — LRU was already updated in the read-lock
+        // block above (E1).
+        counter(mn::CLIENT_CACHE_BYTES_READ_CACHE).inc(bytes.len() as i64);
         counter(mn::CLIENT_CACHE_PAGE_READ_CACHE_TIME_NS).inc(start.elapsed().as_nanos() as i64);
-        // Refresh the hit-rate gauge now that the cache-hit counter moved.
         crate::cache::metrics::publish_hit_rate();
-        n
+        bytes
+    }
+
+    async fn get_batch_bytes(&self, requests: &[PageReadRequest]) -> Vec<Bytes> {
+        join_all(
+            requests
+                .iter()
+                .map(|req| self.get_bytes(&req.page_id, req.page_offset, req.len)),
+        )
+        .await
     }
 
     async fn delete(&self, page_id: &PageId) -> bool {
         let _wl = self.page_locks[page_lock_index(page_id)].write().await;
 
-        let (dir_index, file_empty) = {
-            let mut inner = self.inner.lock().await;
-            let Some(info) = inner.meta.remove(page_id) else {
+        // Phase C: lock-free DashMap read for dir_index, then per-dir Mutex
+        // for the multi-field atomic update. The Mutex is released before the
+        // by_file async write.
+        let dir_index = match self.meta.get(page_id) {
+            Some(info) => info.dir_index,
+            None => {
+                counter(mn::CLIENT_CACHE_DELETE_NON_EXISTING_PAGE_ERRORS).inc(1);
+                return false;
+            }
+        };
+        // Phase 1 under per-dir Mutex: meta.remove + evictor.on_remove + used_bytes.
+        let _info = {
+            let _dir_guard = self.dir_locks[dir_index].lock().unwrap();
+            let Some((_, info)) = self.meta.remove(page_id) else {
                 counter(mn::CLIENT_CACHE_DELETE_NON_EXISTING_PAGE_ERRORS).inc(1);
                 return false;
             };
-            let dir_index = info.dir_index;
-            inner.dirs[dir_index].evictor.on_remove(page_id);
-            let mut file_empty = false;
-            if let Some(set) = inner.by_file.get_mut(&page_id.file_id) {
+            self.dirs[info.dir_index].evictor.on_remove(page_id);
+            self.dirs[info.dir_index]
+                .used_bytes
+                .fetch_sub(info.page_size, Ordering::Relaxed);
+            info
+        };
+        // Phase 2: by_file update + file_empty detection (async, no Mutex).
+        let file_empty = {
+            let mut by_file = self.by_file.write().await;
+            let mut empty = false;
+            if let Some(set) = by_file.get_mut(&page_id.file_id) {
                 set.remove(&page_id.page_index);
                 if set.is_empty() {
-                    inner.by_file.remove(&page_id.file_id);
-                    file_empty = true;
+                    by_file.remove(&page_id.file_id);
+                    empty = true;
                 }
             }
-            inner.dirs[dir_index].used_bytes = inner.dirs[dir_index]
-                .used_bytes
-                .saturating_sub(info.page_size);
-            self.publish_occupancy(&inner);
-            (dir_index, file_empty)
+            empty
         };
+        self.publish_occupancy();
 
         if let Err(e) = self.stores[dir_index].delete(page_id).await {
             warn!(error = %e, "delete: failed to remove page from store");
@@ -647,8 +841,8 @@ impl CacheManager for LocalCacheManager {
 
     async fn invalidate(&self, file_id: &str) {
         let pages: Vec<PageId> = {
-            let inner = self.inner.lock().await;
-            match inner.by_file.get(file_id) {
+            let by_file = self.by_file.read().await;
+            match by_file.get(file_id) {
                 Some(set) => set.iter().map(|idx| PageId::new(file_id, *idx)).collect(),
                 None => return,
             }
@@ -660,19 +854,30 @@ impl CacheManager for LocalCacheManager {
     }
 
     async fn on_file_open(&self, file_id: &str, length: i64, last_modification_time_ms: i64) {
+        // E2: Use a separate RwLock for version checks so this never blocks
+        // `get`/`put`/`delete` (which use `inner`). The common case (same
+        // file → identical identity) takes a read lock and returns immediately.
         let changed = {
-            let mut inner = self.inner.lock().await;
-            match inner.versions.get(file_id) {
+            let versions = self.versions.read().await;
+            match versions.get(file_id) {
                 // Same identity → nothing to do.
                 Some(&(l, m)) if l == length && m == last_modification_time_ms => false,
                 // Known but different → the file was overwritten.
                 Some(_) => true,
-                // First time we see this file → record and continue.
+                // First time we see this file → need write lock to record it.
                 None => {
-                    inner
-                        .versions
-                        .insert(Arc::from(file_id), (length, last_modification_time_ms));
-                    false
+                    drop(versions); // release read lock before acquiring write lock
+                    let mut versions = self.versions.write().await;
+                    // Re-check (could have been inserted by another thread).
+                    match versions.get(file_id) {
+                        Some(&(l, m)) if l == length && m == last_modification_time_ms => false,
+                        Some(_) => true,
+                        None => {
+                            versions
+                                .insert(Arc::from(file_id), (length, last_modification_time_ms));
+                            false
+                        }
+                    }
                 }
             }
         };
@@ -682,9 +887,9 @@ impl CacheManager for LocalCacheManager {
             // refreshed identity is re-persisted lazily when the file is next
             // cached (see `put`).
             self.invalidate(file_id).await;
-            let mut inner = self.inner.lock().await;
-            inner
-                .versions
+            self.versions
+                .write()
+                .await
                 .insert(Arc::from(file_id), (length, last_modification_time_ms));
         }
     }
@@ -737,6 +942,9 @@ mod tests {
                 async_write_threads: async_threads.max(1),
                 quota_enabled: false,
                 ttl: None,
+                uring_enabled: false,
+                uring_queue_depth: 0,
+                uring_thread_count: 0,
             },
             dirs,
         )
@@ -804,6 +1012,55 @@ mod tests {
         assert_eq!(mgr.get(&p1, 0, &mut dst).await, 0, "p1 evicted");
         assert_eq!(mgr.get(&p0, 0, &mut dst).await, 8, "p0 survives");
         assert_eq!(mgr.get(&p2, 0, &mut dst).await, 8, "p2 present");
+        cleanup(&dirs).await;
+    }
+
+    #[tokio::test]
+    async fn eviction_per_dir_moka() {
+        // Same as eviction_per_dir_lru but explicitly using the moka-backed LRU evictor.
+        let (o, dirs) = opts(8, 16, 1, CacheEvictorType::Lru, 4);
+        let mgr = Arc::new(LocalCacheManager::create(o).await.unwrap());
+        let p0 = PageId::new("f", 0);
+        let p1 = PageId::new("f", 1);
+        let p2 = PageId::new("f", 2);
+        assert!(mgr.put(&p0, Bytes::from_static(b"00000000")).await);
+        assert!(mgr.put(&p1, Bytes::from_static(b"11111111")).await);
+        let mut dst = vec![0u8; 8];
+        assert_eq!(mgr.get(&p0, 0, &mut dst).await, 8); // touch p0
+        assert!(mgr.put(&p2, Bytes::from_static(b"22222222")).await); // evicts p1
+        assert_eq!(mgr.get(&p1, 0, &mut dst).await, 0, "p1 evicted");
+        assert_eq!(mgr.get(&p0, 0, &mut dst).await, 8, "p0 survives");
+        assert_eq!(mgr.get(&p2, 0, &mut dst).await, 8, "p2 present");
+        cleanup(&dirs).await;
+    }
+
+    #[tokio::test]
+    async fn moka_evictor_concurrent_gets_no_deadlock() {
+        // Verify that 32 concurrent gets on the same file don't deadlock
+        // with the moka-backed evictor (the primary motivation for the replacement).
+        let (o, dirs) = opts(256, 1024 * 1024, 1, CacheEvictorType::Lru, 4);
+        let mgr = Arc::new(LocalCacheManager::create(o).await.unwrap());
+        // Pre-populate one page.
+        let id = PageId::new("conc-file", 0);
+        assert!(
+            mgr.put(&id, Bytes::from(vec![0x42u8; 256])).await,
+            "put should succeed"
+        );
+        // 32 concurrent reads of the same page.
+        let mut handles = Vec::new();
+        for _ in 0..32 {
+            let m = mgr.clone();
+            let id = id.clone();
+            handles.push(tokio::spawn(async move {
+                let mut dst = vec![0u8; 256];
+                let n = m.get(&id, 0, &mut dst).await;
+                assert_eq!(n, 256);
+                assert_eq!(dst, vec![0x42u8; 256]);
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
         cleanup(&dirs).await;
     }
 
@@ -1033,6 +1290,9 @@ mod tests {
             async_write_threads: 1,
             quota_enabled: false,
             ttl: None,
+            uring_enabled: false,
+            uring_queue_depth: 0,
+            uring_thread_count: 0,
         };
         Arc::new(LocalCacheManager::create(options).await.unwrap())
     }
@@ -1197,6 +1457,62 @@ mod tests {
             0,
             "empty shell directory (sidecar but no pages) must be reclaimed on restore"
         );
+        cleanup(&dirs).await;
+    }
+
+    #[tokio::test]
+    async fn get_bytes_returns_page_slice_and_miss_is_empty() {
+        let (mgr, dirs) = manager(16, 1024, 1).await;
+        let id = PageId::new("bytes-file", 0);
+        assert!(mgr.put(&id, Bytes::from_static(b"0123456789abcdef")).await);
+
+        let hit = mgr.get_bytes(&id, 4, 6).await;
+        assert_eq!(&hit[..], b"456789");
+
+        let miss = mgr.get_bytes(&PageId::new("bytes-file", 99), 0, 8).await;
+        assert!(miss.is_empty(), "missing page must return empty Bytes");
+
+        let zero_len = mgr.get_bytes(&id, 0, 0).await;
+        assert!(zero_len.is_empty());
+
+        cleanup(&dirs).await;
+    }
+
+    #[tokio::test]
+    async fn get_batch_bytes_preserves_order_and_miss_slots() {
+        let (mgr, dirs) = manager(8, 1024, 1).await;
+        let p0 = PageId::new("batch", 0);
+        let p1 = PageId::new("batch", 1);
+        let p2 = PageId::new("batch", 2);
+        assert!(mgr.put(&p0, Bytes::from_static(b"00000000")).await);
+        assert!(mgr.put(&p2, Bytes::from_static(b"22222222")).await);
+        // p1 intentionally missing → empty Bytes at that index.
+
+        let out = mgr
+            .get_batch_bytes(&[
+                crate::cache::PageReadRequest {
+                    page_id: p0.clone(),
+                    page_offset: 0,
+                    len: 8,
+                },
+                crate::cache::PageReadRequest {
+                    page_id: p1.clone(),
+                    page_offset: 0,
+                    len: 8,
+                },
+                crate::cache::PageReadRequest {
+                    page_id: p2.clone(),
+                    page_offset: 2,
+                    len: 4,
+                },
+            ])
+            .await;
+
+        assert_eq!(out.len(), 3);
+        assert_eq!(&out[0][..], b"00000000");
+        assert!(out[1].is_empty(), "miss slot must be empty Bytes");
+        assert_eq!(&out[2][..], b"2222");
+
         cleanup(&dirs).await;
     }
 }

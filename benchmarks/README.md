@@ -16,6 +16,7 @@ cargo bench --bench master_hotpath
 |------|------|------|
 | `partv_perf_verify` | `--example` | **Part V 优化端到端验证 + 压测**（随机读 / 顺序读 / Master 池 / Worker 池），含逐字节正确性校验。**本文档重点。** |
 | `pr_runtime_ab` | `--example` | **B1 根因 A/B**：同一 `read_at`、同文件、同 offset，仅"驱动方式"不同（spawn / block_on / current_thread / per-call block_on），定位单线程随机读吞吐差异 |
+| `tokio_worker_ab` | `--example` | **B4 拐点定位**：同一 PR `read_at`、`buffer_unordered(CONC)` 姿势，扫 `worker_threads = {4, 8, cpus, cpus.max(16)}`（可用 `GFS_WORKERS` 覆盖），输出 MiB/s + p50/p99 + 建议 `GOOSEFS_TOKIO_WORKER_THREADS` 值 |
 | `repro_writer_write_with_concurrent` | `--example` | 并发写复现用例 |
 | `master_hotpath` | `--bench`（criterion）| GetFileStatus 热路径统计型微基准（`ArcSwap` / counter 缓存 / path move 优化对照）|
 
@@ -164,3 +165,32 @@ cargo bench --bench master_hotpath
 ```bash
 cargo run --release --example repro_writer_write_with_concurrent
 ```
+
+---
+
+## `tokio_worker_ab` — B4 tokio `worker_threads` 拐点定位
+
+`docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md` §B4 建议把 `worker_threads` 上限压到 `min(cores, 8)` 以削掉 ~40% 的 `tokio worker::run` self time；但**默认值反转前必须要有本 workload 的 4/8/16 数据**，否则容易在 IO 密集场景下反向掉性能。本 bench 就是"跑一条命令拿数据"这一步：
+
+- 同一份 SDK `read_at`、同一文件、同一 XorShift offset 序列
+- 同一份 `buffer_unordered(CONC)` 姿势（每 reader 一条持久 stream，与 `pr_runtime_ab` mode 6 一致）
+- **只改** `Builder::new_multi_thread().worker_threads(N)` 一处
+- 每行输出 MiB/s + p50/p99，最后打印"建议值 = 在最优行 3% 之内的最小 workers"
+
+```bash
+GFS_SIZE_MB=256 GFS_IO_KB=1024 GFS_CONC=16 GFS_READS=2000 \
+  cargo run --release --example tokio_worker_ab
+
+# 自定义扫参（逗号分隔正整数）
+GFS_WORKERS=1,2,4,8,16 cargo run --release --example tokio_worker_ab
+```
+
+拿到建议值后，在 Python binding 场景导出该值即生效（Python 绑定 runtime 会在 module init 时读环境变量，见 [`bindings/python/src/runtime.rs`](../bindings/python/src/runtime.rs)）：
+
+```bash
+export GOOSEFS_TOKIO_WORKER_THREADS=<knee value>
+```
+
+Rust 直接调用 SDK 的 embedder，则把该值写入自己的 `tokio::runtime::Builder`：SDK crate 本身不构造 runtime。环境变量：`GFS_ADDR` / `GFS_SIZE_MB` / `GFS_IO_KB` / `GFS_CONC` / `GFS_READS` / `GFS_TAG` / `GFS_WORKERS`。
+
+---

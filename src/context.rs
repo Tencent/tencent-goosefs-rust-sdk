@@ -62,6 +62,7 @@ use crate::client::{
 };
 use crate::config::{ConfigRefresher, GoosefsConfig, TransparentAccelerationSwitch};
 use crate::error::Result;
+use crate::file_info_cache::FileInfoCache;
 use crate::metrics::heartbeat::{resolve_app_id, HeartbeatTask};
 #[cfg(feature = "metrics-pushgateway")]
 use crate::metrics::pushgateway::{PushgatewayConfig, PushgatewayTask};
@@ -126,6 +127,17 @@ pub struct FileSystemContext {
     /// best-effort, so an init failure degrades to no-cache rather than
     /// failing `connect()`). Shared across all readers in this context.
     cache_manager: Option<Arc<dyn CacheManager>>,
+
+    /// Opt-in short-TTL `FileInfo` metadata cache
+    /// (FLAMEGRAPH_OPTIMIZATION_PLAN §A3).
+    ///
+    /// `None` when `config.file_info_cache_ttl == 0` (default). When enabled,
+    /// [`GoosefsFileReader::open_with_context`] and
+    /// [`GoosefsFileInStream::open_with_context`] consult this cache before
+    /// issuing `MasterClient::get_status`, and the write path
+    /// (create / delete / rename) explicitly invalidates entries so
+    /// through-client mutations are never observed as stale.
+    file_info_cache: Option<Arc<FileInfoCache>>,
 
     /// HA Master address discovery client (shared between master + wm).
     inquire_client: Arc<dyn MasterInquireClient>,
@@ -215,8 +227,11 @@ impl FileSystemContext {
                 }
             }
             Err(e) => {
-                warn!("WorkerManager connection failed ({}), proceeding without worker discovery. \
-                       Master-only operations (CreateFile, GetStatus, etc.) will still work.", e);
+                warn!(
+                    "WorkerManager connection failed ({}), proceeding without worker discovery. \
+                       Master-only operations (CreateFile, GetStatus, etc.) will still work.",
+                    e
+                );
                 None
             }
         };
@@ -259,6 +274,21 @@ impl FileSystemContext {
             None
         };
 
+        // Build the opt-in FileInfo (metadata) cache — §A3. `maybe_new`
+        // returns `None` when the TTL is zero (default), so this is a
+        // no-op unless the caller explicitly opted in via
+        // `with_file_info_cache_ttl`.
+        let file_info_cache =
+            FileInfoCache::maybe_new(config.file_info_cache_ttl, config.file_info_cache_capacity);
+        if let Some(c) = &file_info_cache {
+            debug!(
+                ttl_ms = config.file_info_cache_ttl.as_millis(),
+                capacity = config.file_info_cache_capacity,
+                "FileInfo metadata cache enabled (opt-in, §A3), ttl={:?}",
+                c.ttl(),
+            );
+        }
+
         let ctx = Arc::new(Self {
             config: config.clone(),
             master_pool,
@@ -267,6 +297,7 @@ impl FileSystemContext {
             worker_router,
             short_circuit,
             cache_manager,
+            file_info_cache,
             inquire_client,
             config_refresher: Arc::new(ConfigRefresher::from_config(&config)),
             closed: Arc::new(AtomicBool::new(false)),
@@ -309,7 +340,7 @@ impl FileSystemContext {
     /// Return the shared `WorkerManagerClient` (zero-cost Arc clone).
     ///
     /// Returns `None` when the Master does not support `GetWorkerInfoList`.
-pub fn acquire_worker_manager(&self) -> Option<Arc<WorkerManagerClient>> {
+    pub fn acquire_worker_manager(&self) -> Option<Arc<WorkerManagerClient>> {
         self.worker_manager.clone()
     }
 
@@ -336,6 +367,28 @@ pub fn acquire_worker_manager(&self) -> Option<Arc<WorkerManagerClient>> {
     /// to initialize. Readers consult this on the random-read path.
     pub fn acquire_cache_manager(&self) -> Option<Arc<dyn CacheManager>> {
         self.cache_manager.clone()
+    }
+
+    /// Return the shared opt-in `FileInfo` metadata cache
+    /// (FLAMEGRAPH_OPTIMIZATION_PLAN §A3).
+    ///
+    /// `None` when `config.file_info_cache_ttl == 0` (default).
+    pub fn acquire_file_info_cache(&self) -> Option<Arc<FileInfoCache>> {
+        self.file_info_cache.clone()
+    }
+
+    /// Convenience: invalidate the `FileInfo` cache entry for `path`, if the
+    /// cache is enabled. Idempotent no-op when the cache is disabled or the
+    /// path is not currently cached.
+    ///
+    /// **Contract**: every write path (create, delete, rename, setAttr...)
+    /// that mutates `path` on the master through this client MUST call this
+    /// after the mutation is acknowledged, so subsequent reads observe the
+    /// fresh metadata (§A3).
+    pub fn invalidate_file_info(&self, path: &str) {
+        if let Some(cache) = &self.file_info_cache {
+            cache.invalidate(path);
+        }
     }
 
     /// Return the shared `MasterInquireClient` (zero-cost Arc clone).
@@ -801,6 +854,61 @@ mod tests {
         assert!(
             config.metrics_enabled,
             "metrics_enabled defaults to true (opt-in enabled by default per Java SDK alignment)"
+        );
+    }
+
+    // ── A3: FileInfo cache opt-in semantics ─────────────────────────────
+
+    /// FLAMEGRAPH_OPTIMIZATION_PLAN §A3: the cache is **disabled** by
+    /// default so `FileSystemContext::acquire_file_info_cache()` must
+    /// return `None` on a plain `GoosefsConfig::default()`.
+    #[test]
+    fn file_info_cache_disabled_by_default() {
+        // We can't call `FileSystemContext::connect()` (needs live master),
+        // so exercise the field-population logic directly on the config
+        // + `FileInfoCache::maybe_new` gate.
+        let cfg = GoosefsConfig::default();
+        assert_eq!(
+            cfg.file_info_cache_ttl,
+            Duration::ZERO,
+            "default TTL must be ZERO (opt-in per §A3)"
+        );
+        assert!(
+            crate::file_info_cache::FileInfoCache::maybe_new(
+                cfg.file_info_cache_ttl,
+                cfg.file_info_cache_capacity,
+            )
+            .is_none(),
+            "FileInfoCache::maybe_new must return None when TTL == 0"
+        );
+    }
+
+    /// Explicit opt-in via `with_file_info_cache_ttl` must produce a live
+    /// cache with the requested TTL.
+    #[test]
+    fn file_info_cache_opt_in_produces_live_cache() {
+        let cfg = GoosefsConfig::new("127.0.0.1:9200")
+            .with_file_info_cache_ttl(Duration::from_secs(30))
+            .with_file_info_cache_capacity(256);
+        assert_eq!(cfg.file_info_cache_ttl, Duration::from_secs(30));
+        assert_eq!(cfg.file_info_cache_capacity, 256);
+
+        let cache = crate::file_info_cache::FileInfoCache::maybe_new(
+            cfg.file_info_cache_ttl,
+            cfg.file_info_cache_capacity,
+        )
+        .expect("opt-in TTL > 0 must produce a live cache");
+        assert_eq!(cache.ttl(), Duration::from_secs(30));
+    }
+
+    /// `with_file_info_cache_capacity(0)` must be clamped to `1` (LRU
+    /// requires non-zero capacity).
+    #[test]
+    fn file_info_cache_capacity_clamped_to_one() {
+        let cfg = GoosefsConfig::new("127.0.0.1:9200").with_file_info_cache_capacity(0);
+        assert_eq!(
+            cfg.file_info_cache_capacity, 1,
+            "with_file_info_cache_capacity(0) must clamp to 1"
         );
     }
 }

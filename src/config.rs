@@ -408,6 +408,102 @@ impl PropertiesMap {
         if let Some(enabled) = self.get_bool("goosefs.user.client.cache.sequential.read.enabled") {
             cfg.client_cache_sequential_read_enabled = enabled;
         }
+        if let Some(enabled) = self.get_bool("goosefs.user.client.cache.uring.enabled") {
+            cfg.client_cache_uring_enabled = enabled;
+        }
+        if let Some(n) = self.get_parsed::<usize>("goosefs.user.client.cache.uring.queue.depth") {
+            if n > 0 {
+                cfg.client_cache_uring_queue_depth = n;
+            }
+        }
+        if let Some(n) = self.get_parsed::<usize>("goosefs.user.client.cache.uring.thread.count") {
+            if n > 0 {
+                cfg.client_cache_uring_thread_count = n;
+            }
+        }
+
+        // ── Performance tuning knobs (FLAMEGRAPH_OPTIMIZATION_PLAN §A3 / §B3) ─
+        // Per-worker gRPC channel pool size:
+        //   goosefs.user.worker.connection.pool.size
+        // `0` is clamped to `1` to mirror the builder contract.
+        if let Some(n) = self.get_parsed::<usize>("goosefs.user.worker.connection.pool.size") {
+            cfg.worker_connection_pool_size = n.max(1);
+        }
+        // Client-side FileInfo cache TTL (milliseconds):
+        //   goosefs.user.file.info.cache.ttl.ms
+        // `0` disables the cache (default). Chosen milliseconds rather than
+        // seconds because the intended tuning range (100 ms – a few s) is
+        // sub-second-sensitive on Lance / DuckDB open-heavy queries.
+        if let Some(ms) = self.get_parsed::<u64>("goosefs.user.file.info.cache.ttl.ms") {
+            cfg.file_info_cache_ttl = Duration::from_millis(ms);
+        }
+        // FileInfo LRU cache capacity:
+        //   goosefs.user.file.info.cache.capacity
+        if let Some(n) = self.get_parsed::<usize>("goosefs.user.file.info.cache.capacity") {
+            cfg.file_info_cache_capacity = n.max(1);
+        }
+
+        // ── Short-circuit (local mmap) read path ─────────────────
+        // Master kill switch:
+        //   goosefs.user.short.circuit.enabled
+        if let Some(enabled) = self.get_bool("goosefs.user.short.circuit.enabled") {
+            cfg.short_circuit_enabled = enabled;
+        }
+        // Per-task hot-block LRU capacity:
+        //   goosefs.client.short.circuit.cache.capacity
+        if let Some(n) = self.get_parsed::<usize>("goosefs.client.short.circuit.cache.capacity") {
+            cfg.short_circuit_cache_capacity = n;
+        }
+        // Cached SC reader idle TTL (milliseconds):
+        //   goosefs.client.short.circuit.cache.ttl.ms
+        if let Some(ms) = self.get_parsed::<u64>("goosefs.client.short.circuit.cache.ttl.ms") {
+            cfg.short_circuit_cache_ttl = Duration::from_millis(ms);
+        }
+        // Negative-cache TTL for blocks that failed SC (milliseconds):
+        //   goosefs.client.short.circuit.neg.cache.ttl.ms
+        if let Some(ms) = self.get_parsed::<u64>("goosefs.client.short.circuit.neg.cache.ttl.ms") {
+            cfg.short_circuit_neg_cache_ttl = Duration::from_millis(ms);
+        }
+        // L1 kernel readahead hint (`sequential`/`random`/`normal`/`none`):
+        //   goosefs.client.short.circuit.advise
+        if let Some(hint) = self.get("goosefs.client.short.circuit.advise") {
+            if !hint.is_empty() {
+                cfg.short_circuit_advise = hint.to_string();
+            }
+        }
+        // L2 application-level prefetch master switch:
+        //   goosefs.client.short.circuit.prefetch.enabled
+        if let Some(enabled) = self.get_bool("goosefs.client.short.circuit.prefetch.enabled") {
+            cfg.short_circuit_prefetch_enabled = enabled;
+        }
+        // Max gap between adjacent ranges merged by `prefetch_many` (bytes):
+        //   goosefs.client.short.circuit.prefetch.coalesce.gap
+        if let Some(n) =
+            self.get_parsed::<usize>("goosefs.client.short.circuit.prefetch.coalesce.gap")
+        {
+            cfg.short_circuit_prefetch_coalesce_gap = n;
+        }
+        // Max `madvise` calls per `prefetch_many`:
+        //   goosefs.client.short.circuit.prefetch.max.batch
+        if let Some(n) = self.get_parsed::<usize>("goosefs.client.short.circuit.prefetch.max.batch")
+        {
+            cfg.short_circuit_prefetch_max_batch = n;
+        }
+        // Minimum block size (bytes) required to attempt SC (`0` = no minimum):
+        //   goosefs.client.short.circuit.min.block.size
+        if let Some(n) = self.get_parsed::<i64>("goosefs.client.short.circuit.min.block.size") {
+            cfg.short_circuit_min_block_size = n;
+        }
+        // Install a process-global SIGBUS diagnostic handler (Linux/macOS):
+        //   goosefs.client.short.circuit.sigbus.handler
+        if let Some(enabled) = self.get_bool("goosefs.client.short.circuit.sigbus.handler") {
+            cfg.short_circuit_sigbus_handler = enabled;
+        }
+        // Request Transparent Huge Pages via `madvise(MADV_HUGEPAGE)` (Linux):
+        //   goosefs.client.short.circuit.thp
+        if let Some(enabled) = self.get_bool("goosefs.client.short.circuit.thp") {
+            cfg.short_circuit_thp = enabled;
+        }
 
         cfg
     }
@@ -523,11 +619,27 @@ const DEFAULT_ACK_INTERVAL_CHUNKS: u32 = 1;
 const DEFAULT_MASTER_CONNECTION_POOL_SIZE: usize = 1;
 
 // ── Worker connection pool (Part V worker-side multi-channel) ─
-/// Default per-worker connection-pool size (1 = backward compatible, single
-/// HTTP/2 channel per worker). Raising it (e.g. 4) spreads concurrent block
-/// reads across multiple channels to the same worker, lifting the
-/// single-connection throughput cap observed in local benchmarks.
-const DEFAULT_WORKER_CONNECTION_POOL_SIZE: usize = 1;
+/// Legacy per-worker connection-pool size (single HTTP/2 channel per worker).
+///
+/// **Deprecated as the default** since [FLAMEGRAPH_OPTIMIZATION_PLAN.md §B3]:
+/// the current default is now [`default_worker_connection_pool_size`] which
+/// returns `min(available_cores, DEFAULT_WORKER_CONNECTION_POOL_MAX)`. The
+/// old value of `1` is kept as a floor / clamp target and as the single-shot
+/// value returned when the platform cannot report the CPU count.
+///
+/// [FLAMEGRAPH_OPTIMIZATION_PLAN.md §B3]: ../../docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md
+const DEFAULT_WORKER_CONNECTION_POOL_MIN: usize = 1;
+
+/// Upper cap for the worker connection pool default.
+///
+/// Chosen per [FLAMEGRAPH_OPTIMIZATION_PLAN.md §B3]: `min(cores, 4)`. Beyond
+/// 4, the H2 flow-control benefit plateaus while socket / buffer overhead
+/// grows linearly. Callers that want a larger pool for exotic hardware can
+/// still opt in explicitly via
+/// [`GoosefsConfig::with_worker_connection_pool_size`].
+///
+/// [FLAMEGRAPH_OPTIMIZATION_PLAN.md §B3]: ../../docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md
+const DEFAULT_WORKER_CONNECTION_POOL_MAX: usize = 4;
 /// Default connect timeout: 30 seconds.
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 30_000;
 /// Default request timeout: 5 minutes.
@@ -594,14 +706,23 @@ const DEFAULT_CLIENT_CACHE_DIR: &str = "/tmp/goosefs_cache";
 #[serde(rename_all = "UPPERCASE")]
 pub enum CacheEvictorType {
     /// Least-Recently-Used (default).
+    ///
+    /// Backed by `moka::sync::Cache` with `EvictionPolicy::lru()` and
+    /// per-segment write locks — replaces the old global `Mutex<LruState>`.
     Lru,
     /// Least-Frequently-Used.
+    ///
+    /// Backed by `moka::sync::Cache` with `EvictionPolicy::tiny_lfu()`
+    /// (W-TinyLFU: LRU eviction + LFU admission filter) and per-segment write
+    /// locks — replaces the old global `Mutex<LfuState>`.
     Lfu,
 }
 
 impl Default for CacheEvictorType {
     fn default() -> Self {
-        CacheEvictorType::Lru
+        // Match moka's default: TinyLFU (W-TinyLFU = LRU eviction + LFU
+        // admission filter). Suitable for most workloads.
+        CacheEvictorType::Lfu
     }
 }
 
@@ -782,6 +903,39 @@ pub const ENV_CLIENT_CACHE_TTL_SECS: &str = "GOOSEFS_USER_CLIENT_CACHE_TTL_SECON
 /// Whether sequential reads are routed through the local page cache (`true`/`false`).
 pub const ENV_CLIENT_CACHE_SEQUENTIAL_READ_ENABLED: &str =
     "GOOSEFS_USER_CLIENT_CACHE_SEQUENTIAL_READ_ENABLED";
+/// Whether to use the io_uring page-store backend (`true`/`false`).
+pub const ENV_CLIENT_CACHE_URING_ENABLED: &str = "GOOSEFS_USER_CLIENT_CACHE_URING_ENABLED";
+/// io_uring SQ/CQ queue depth.
+pub const ENV_CLIENT_CACHE_URING_QUEUE_DEPTH: &str = "GOOSEFS_USER_CLIENT_CACHE_URING_QUEUE_DEPTH";
+/// io_uring background thread count.
+pub const ENV_CLIENT_CACHE_URING_THREAD_COUNT: &str =
+    "GOOSEFS_USER_CLIENT_CACHE_URING_THREAD_COUNT";
+
+// ── Performance tuning env vars (FLAMEGRAPH_OPTIMIZATION_PLAN §A3 / §B3) ─
+/// Environment variable: per-worker gRPC channel pool size.
+///
+/// Mirrors [`GoosefsConfig::worker_connection_pool_size`]. Values `< 1` are
+/// clamped to `1`. Non-numeric values are ignored (leaves default in place),
+/// matching how the rest of `apply_env` handles malformed input.
+///
+/// Example: `export GOOSEFS_WORKER_CONNECTION_POOL_SIZE=4`.
+pub const ENV_WORKER_CONNECTION_POOL_SIZE: &str = "GOOSEFS_WORKER_CONNECTION_POOL_SIZE";
+
+/// Environment variable: client-side `FileInfo` cache TTL in **milliseconds**.
+///
+/// Mirrors [`GoosefsConfig::file_info_cache_ttl`]. Set to `0` (default) to
+/// disable the cache. Any positive value enables it and controls staleness
+/// bound for out-of-band mutations. See FLAMEGRAPH_OPTIMIZATION_PLAN §A3.
+///
+/// Example: `export GOOSEFS_FILE_INFO_CACHE_TTL_MS=2000` (2 s TTL).
+pub const ENV_FILE_INFO_CACHE_TTL_MS: &str = "GOOSEFS_FILE_INFO_CACHE_TTL_MS";
+
+/// Environment variable: maximum number of `(path, FileInfo)` LRU entries.
+///
+/// Mirrors [`GoosefsConfig::file_info_cache_capacity`]. Only consulted when
+/// [`ENV_FILE_INFO_CACHE_TTL_MS`] resolves to a value `> 0`. Values `< 1`
+/// are clamped to `1`.
+pub const ENV_FILE_INFO_CACHE_CAPACITY: &str = "GOOSEFS_FILE_INFO_CACHE_CAPACITY";
 
 /// Storage option key for config manager RPC addresses.
 pub const STORAGE_OPT_CONFIG_MANAGER_RPC_ADDRESSES: &str = "goosefs_config_manager_rpc_addresses";
@@ -815,6 +969,115 @@ pub const STORAGE_OPT_CLIENT_CACHE_SIZE: &str = "goosefs_client_cache_size";
 pub const STORAGE_OPT_CLIENT_CACHE_DIRS: &str = "goosefs_client_cache_dirs";
 /// Storage option key for the local page cache eviction policy (`LRU`/`LFU`).
 pub const STORAGE_OPT_CLIENT_CACHE_EVICTOR: &str = "goosefs_client_cache_eviction_policy";
+/// Storage option key for the io_uring backend enable flag.
+pub const STORAGE_OPT_CLIENT_CACHE_URING_ENABLED: &str = "goosefs_client_cache_uring_enabled";
+/// Storage option key for the io_uring queue depth.
+pub const STORAGE_OPT_CLIENT_CACHE_URING_QUEUE_DEPTH: &str =
+    "goosefs_client_cache_uring_queue_depth";
+/// Storage option key for the io_uring thread count.
+pub const STORAGE_OPT_CLIENT_CACHE_URING_THREAD_COUNT: &str =
+    "goosefs_client_cache_uring_thread_count";
+
+// ── Performance tuning storage-option keys (FLAMEGRAPH_OPTIMIZATION_PLAN §A3 / §B3) ─
+/// Storage option key for the per-worker gRPC channel pool size.
+///
+/// Companion to [`ENV_WORKER_CONNECTION_POOL_SIZE`]. Consumers such as
+/// `opendal_service_goosefs` should map `storage_options[goosefs_worker_connection_pool_size]`
+/// to [`GoosefsConfig::with_worker_connection_pool_size`].
+pub const STORAGE_OPT_WORKER_CONNECTION_POOL_SIZE: &str = "goosefs_worker_connection_pool_size";
+
+/// Storage option key for the client-side `FileInfo` cache TTL in **milliseconds**.
+///
+/// Companion to [`ENV_FILE_INFO_CACHE_TTL_MS`]. `0` (default) disables the
+/// cache; any positive value enables it.
+pub const STORAGE_OPT_FILE_INFO_CACHE_TTL_MS: &str = "goosefs_file_info_cache_ttl_ms";
+
+/// Storage option key for the `FileInfo` LRU cache capacity.
+///
+/// Companion to [`ENV_FILE_INFO_CACHE_CAPACITY`]. Only consulted when
+/// [`STORAGE_OPT_FILE_INFO_CACHE_TTL_MS`] resolves to a value `> 0`.
+pub const STORAGE_OPT_FILE_INFO_CACHE_CAPACITY: &str = "goosefs_file_info_cache_capacity";
+
+// ── Short-circuit (local mmap) read env vars (SHORT_CIRCUIT_DESIGN §6) ─
+/// Environment variable: master kill switch for the short-circuit local read path.
+///
+/// Mirrors [`GoosefsConfig::short_circuit_enabled`]. Accepts `true`/`false`
+/// (case-insensitive). Malformed values are ignored (default kept).
+pub const ENV_SHORT_CIRCUIT_ENABLED: &str = "GOOSEFS_SHORT_CIRCUIT_ENABLED";
+
+/// Environment variable: per-task LRU capacity for hot-block SC readers.
+pub const ENV_SHORT_CIRCUIT_CACHE_CAPACITY: &str = "GOOSEFS_SHORT_CIRCUIT_CACHE_CAPACITY";
+
+/// Environment variable: idle TTL (**milliseconds**) after which a cached SC
+/// reader is dropped.
+pub const ENV_SHORT_CIRCUIT_CACHE_TTL_MS: &str = "GOOSEFS_SHORT_CIRCUIT_CACHE_TTL_MS";
+
+/// Environment variable: negative-cache TTL (**milliseconds**) for blocks
+/// that failed SC (client falls back to gRPC for this long before retrying SC).
+pub const ENV_SHORT_CIRCUIT_NEG_CACHE_TTL_MS: &str = "GOOSEFS_SHORT_CIRCUIT_NEG_CACHE_TTL_MS";
+
+/// Environment variable: L1 kernel readahead hint issued via `madvise`.
+///
+/// Accepted values (case-insensitive): `sequential` / `random` / `normal` /
+/// `none`. Validation is deferred to [`ShortCircuitFactory`]; a bad value
+/// keeps the previous string in place rather than aborting startup.
+pub const ENV_SHORT_CIRCUIT_ADVISE: &str = "GOOSEFS_SHORT_CIRCUIT_ADVISE";
+
+/// Environment variable: L2 application-level prefetch master switch.
+///
+/// When `false`, `ShortCircuitReader::prefetch{,_many}` degrade to no-ops.
+pub const ENV_SHORT_CIRCUIT_PREFETCH_ENABLED: &str = "GOOSEFS_SHORT_CIRCUIT_PREFETCH_ENABLED";
+
+/// Environment variable: maximum gap (bytes) between adjacent ranges that
+/// `prefetch_many` will merge into a single `madvise` call.
+pub const ENV_SHORT_CIRCUIT_PREFETCH_COALESCE_GAP: &str =
+    "GOOSEFS_SHORT_CIRCUIT_PREFETCH_COALESCE_GAP";
+
+/// Environment variable: upper bound on how many `madvise` calls a single
+/// `prefetch_many` may issue.
+pub const ENV_SHORT_CIRCUIT_PREFETCH_MAX_BATCH: &str = "GOOSEFS_SHORT_CIRCUIT_PREFETCH_MAX_BATCH";
+
+/// Environment variable: minimum block size (bytes) required to attempt SC.
+///
+/// Blocks smaller than this go through gRPC. `0` (default) means "no minimum".
+pub const ENV_SHORT_CIRCUIT_MIN_BLOCK_SIZE: &str = "GOOSEFS_SHORT_CIRCUIT_MIN_BLOCK_SIZE";
+
+/// Environment variable: install a process-global SIGBUS diagnostic handler.
+///
+/// Linux / macOS only; a no-op elsewhere.
+pub const ENV_SHORT_CIRCUIT_SIGBUS_HANDLER: &str = "GOOSEFS_SHORT_CIRCUIT_SIGBUS_HANDLER";
+
+/// Environment variable: request Transparent Huge Pages for the SC mapping
+/// via `madvise(MADV_HUGEPAGE)` (**experimental**, Linux only).
+pub const ENV_SHORT_CIRCUIT_THP: &str = "GOOSEFS_SHORT_CIRCUIT_THP";
+
+// ── Short-circuit storage-option keys ────────────────────────
+/// Storage option key for the short-circuit master kill switch.
+pub const STORAGE_OPT_SHORT_CIRCUIT_ENABLED: &str = "goosefs_short_circuit_enabled";
+/// Storage option key for the per-task hot-block SC reader LRU capacity.
+pub const STORAGE_OPT_SHORT_CIRCUIT_CACHE_CAPACITY: &str = "goosefs_short_circuit_cache_capacity";
+/// Storage option key for the idle TTL of cached SC readers (**milliseconds**).
+pub const STORAGE_OPT_SHORT_CIRCUIT_CACHE_TTL_MS: &str = "goosefs_short_circuit_cache_ttl_ms";
+/// Storage option key for the SC negative-cache TTL (**milliseconds**).
+pub const STORAGE_OPT_SHORT_CIRCUIT_NEG_CACHE_TTL_MS: &str =
+    "goosefs_short_circuit_neg_cache_ttl_ms";
+/// Storage option key for the L1 `madvise` readahead hint.
+pub const STORAGE_OPT_SHORT_CIRCUIT_ADVISE: &str = "goosefs_short_circuit_advise";
+/// Storage option key for the L2 application-level prefetch master switch.
+pub const STORAGE_OPT_SHORT_CIRCUIT_PREFETCH_ENABLED: &str =
+    "goosefs_short_circuit_prefetch_enabled";
+/// Storage option key for `prefetch_many` adjacent-range coalesce gap (bytes).
+pub const STORAGE_OPT_SHORT_CIRCUIT_PREFETCH_COALESCE_GAP: &str =
+    "goosefs_short_circuit_prefetch_coalesce_gap";
+/// Storage option key for the upper bound on `madvise` calls per `prefetch_many`.
+pub const STORAGE_OPT_SHORT_CIRCUIT_PREFETCH_MAX_BATCH: &str =
+    "goosefs_short_circuit_prefetch_max_batch";
+/// Storage option key for the minimum block size (bytes) required to attempt SC.
+pub const STORAGE_OPT_SHORT_CIRCUIT_MIN_BLOCK_SIZE: &str = "goosefs_short_circuit_min_block_size";
+/// Storage option key for the process-global SIGBUS diagnostic handler switch.
+pub const STORAGE_OPT_SHORT_CIRCUIT_SIGBUS_HANDLER: &str = "goosefs_short_circuit_sigbus_handler";
+/// Storage option key for the Transparent Huge Pages hint (experimental).
+pub const STORAGE_OPT_SHORT_CIRCUIT_THP: &str = "goosefs_short_circuit_thp";
 
 // ── WriteType: ergonomic Rust enum wrapping WritePType ───────
 
@@ -1063,10 +1326,12 @@ pub struct GoosefsConfig {
     #[serde(default = "default_master_connection_pool_size")]
     pub master_connection_pool_size: usize,
 
-    /// Number of independent gRPC channels to pool **per worker** (default: 1).
+    /// Number of independent gRPC channels to pool **per worker**.
     ///
-    /// `1` keeps the legacy single-channel-per-worker behaviour. Raising it
-    /// (e.g. 4) round-robins concurrent block reads across multiple HTTP/2
+    /// **Default (since FLAMEGRAPH_OPTIMIZATION_PLAN §B3)**:
+    /// `min(available_cores, 4)`. `1` restores the legacy
+    /// single-channel-per-worker behaviour. Raising it (e.g. 4)
+    /// round-robins concurrent block reads across multiple HTTP/2
     /// connections to the same worker, lifting the per-connection throughput
     /// cap (a single channel is bounded by `SETTINGS_MAX_CONCURRENT_STREAMS`
     /// and one connection's flow control). Each channel performs its own SASL
@@ -1322,6 +1587,24 @@ pub struct GoosefsConfig {
     #[serde(default)]
     pub client_cache_ttl_secs: u64,
 
+    /// Whether to use the io_uring page-store backend (default: `true` on
+    /// Linux, `false` elsewhere).
+    ///
+    /// When enabled and io_uring is available (Linux kernel ≥ 5.1), the
+    /// cache-hit hot path uses io_uring SQE/CQE instead of `tokio::fs`
+    /// `spawn_blocking`, eliminating thread-switch overhead. Falls back
+    /// transparently to `LocalPageStore` when unavailable.
+    #[serde(default = "default_client_cache_uring_enabled")]
+    pub client_cache_uring_enabled: bool,
+
+    /// io_uring SQ/CQ queue depth (default: `16384`).
+    #[serde(default = "default_client_cache_uring_queue_depth")]
+    pub client_cache_uring_queue_depth: usize,
+
+    /// io_uring background thread count (default: `2`).
+    #[serde(default = "default_client_cache_uring_thread_count")]
+    pub client_cache_uring_thread_count: usize,
+
     /// Whether **sequential** reads (`read`) are routed through the local page
     /// cache (default: `false`).
     ///
@@ -1335,10 +1618,74 @@ pub struct GoosefsConfig {
     #[serde(default)]
     pub client_cache_sequential_read_enabled: bool,
 
+    // ── FileInfo metadata cache (FLAMEGRAPH_OPTIMIZATION_PLAN §A3) ──
+    /// TTL for the client-side `FileInfo` (`get_status`) cache.
+    ///
+    /// **Default**: `Duration::ZERO` — cache is **disabled**. This is a
+    /// deliberate opt-in per FLAMEGRAPH_OPTIMIZATION_PLAN §A3: caching
+    /// metadata trades away the "always live" guarantee (up to `ttl`
+    /// staleness on `length` / `block_ids` if the file is mutated
+    /// out-of-band). Enabling it amortises the ~2.8 % on-CPU cost of
+    /// `MasterClient::get_status` when the same file is opened multiple
+    /// times inside one query (typical Lance / DuckDB scan pattern).
+    ///
+    /// The SDK **explicitly invalidates** the cache entry for a path on
+    /// every write / delete / rename issued through this client, so the
+    /// staleness window only affects out-of-band mutations by other
+    /// writers.
+    #[serde(default = "default_file_info_cache_ttl")]
+    pub file_info_cache_ttl: Duration,
+
+    /// Maximum number of `(path, FileInfo)` entries kept in the metadata
+    /// cache when it is enabled.
+    ///
+    /// Only consulted when `file_info_cache_ttl > 0`. Backed by an LRU so
+    /// the memory footprint is bounded regardless of workload path
+    /// diversity. Default: 4096 entries (a `FileInfo` is on the order of
+    /// a few hundred bytes, so ~1 MiB).
+    #[serde(default = "default_file_info_cache_capacity")]
+    pub file_info_cache_capacity: usize,
+
+    // ── Range coalesce (FLAMEGRAPH_OPTIMIZATION_PLAN §B2) ──
+    /// Whether the multi-range read API
+    /// ([`GoosefsFileReader::read_ranges_with_context`]) coalesces
+    /// adjacent input ranges into fewer, larger `read_range` calls
+    /// (default: `false`).
+    ///
+    /// **Off by default per FLAMEGRAPH_OPTIMIZATION_PLAN §B2.** Merging
+    /// trades a small amount of over-read (the gap bytes between
+    /// adjacent sub-ranges) for a large reduction in H2 stream count on
+    /// workloads that issue many small `get_range` calls (e.g. Lance /
+    /// DuckDB scans). When `false`, `read_ranges_with_context` behaves
+    /// exactly like the caller doing sequential `read_range` calls —
+    /// zero behavioural change from earlier releases.
+    #[serde(default)]
+    pub range_coalesce_enabled: bool,
+
+    /// Maximum permitted gap (in bytes) between two adjacent input
+    /// ranges for them to be merged into a single fetch (default:
+    /// `65536` = 64 KiB). Only consulted when `range_coalesce_enabled`.
+    #[serde(default = "default_range_coalesce_gap_bytes")]
+    pub range_coalesce_gap_bytes: u64,
+
+    /// Upper bound (in bytes) on any merged range (default: `4 MiB`).
+    /// Prevents pathological blow-ups when many small ranges chain
+    /// through gaps that individually satisfy `range_coalesce_gap_bytes`.
+    /// Only consulted when `range_coalesce_enabled`.
+    #[serde(default = "default_range_coalesce_max_bytes")]
+    pub range_coalesce_max_bytes: u64,
+
     // ── Short-circuit (local mmap) read path (SHORT_CIRCUIT_DESIGN §6) ──
     /// Master kill switch for the short-circuit local read path (default:
-    /// `true`). Mirrors Java `goosefs.user.short.circuit.enabled`.
-    #[serde(default = "default_true_bool")]
+    /// `false`, **disabled**). Mirrors Java
+    /// `goosefs.user.short.circuit.enabled`. See
+    /// `docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md` §C6 for the rationale behind
+    /// the default. Set to `true` (via env var, storage option, property,
+    /// or the `.with_short_circuit_enabled(true)` builder) to opt back into
+    /// the local mmap fast path on deployments that genuinely benefit
+    /// from it (e.g. co-located small-object reads with a warm block
+    /// cache).
+    #[serde(default = "default_false_bool")]
     pub short_circuit_enabled: bool,
 
     /// Per-task LRU capacity for hot-block readers (default: 64).
@@ -1463,8 +1810,37 @@ fn default_client_cache_dirs() -> Vec<String> {
 fn default_client_cache_async_write_threads() -> usize {
     DEFAULT_CLIENT_CACHE_ASYNC_WRITE_THREADS
 }
+fn default_client_cache_uring_enabled() -> bool {
+    cfg!(target_os = "linux")
+}
+fn default_client_cache_uring_queue_depth() -> usize {
+    16384
+}
+fn default_client_cache_uring_thread_count() -> usize {
+    2
+}
 fn default_true_bool() -> bool {
     true
+}
+fn default_false_bool() -> bool {
+    false
+}
+
+// ── FileInfo metadata cache defaults (FLAMEGRAPH_OPTIMIZATION_PLAN §A3) ─
+fn default_file_info_cache_ttl() -> Duration {
+    // ZERO = disabled. Opt-in per §A3.
+    Duration::ZERO
+}
+fn default_file_info_cache_capacity() -> usize {
+    4096
+}
+
+// ── Range coalesce defaults (FLAMEGRAPH_OPTIMIZATION_PLAN §B2) ─────────
+fn default_range_coalesce_gap_bytes() -> u64 {
+    64 * 1024 // 64 KiB
+}
+fn default_range_coalesce_max_bytes() -> u64 {
+    4 * 1024 * 1024 // 4 MiB
 }
 
 // ── Short-circuit (local mmap) read defaults (SHORT_CIRCUIT_DESIGN §6) ─
@@ -1504,7 +1880,20 @@ fn default_master_connection_pool_size() -> usize {
     DEFAULT_MASTER_CONNECTION_POOL_SIZE
 }
 fn default_worker_connection_pool_size() -> usize {
-    DEFAULT_WORKER_CONNECTION_POOL_SIZE
+    // B3 (`docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md`): default = min(cores, 4).
+    //
+    // - `available_parallelism` respects cgroup CPU limits on Linux (containers).
+    // - `min` with the DEFAULT_WORKER_CONNECTION_POOL_MAX cap so we don't
+    //   fan out to dozens of channels per worker on big-core hosts, which
+    //   would trade H2 flow-control wins for RAM + FD overhead.
+    // - Fall back to the single-channel legacy behaviour when the platform
+    //   cannot report CPU count (extremely rare — same fall-back Tokio uses).
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(DEFAULT_WORKER_CONNECTION_POOL_MIN);
+    cores
+        .max(DEFAULT_WORKER_CONNECTION_POOL_MIN)
+        .min(DEFAULT_WORKER_CONNECTION_POOL_MAX)
 }
 
 impl Default for GoosefsConfig {
@@ -1557,8 +1946,30 @@ impl Default for GoosefsConfig {
             client_cache_async_write_threads: default_client_cache_async_write_threads(),
             client_cache_quota_enabled: false,
             client_cache_ttl_secs: 0,
+            client_cache_uring_enabled: default_client_cache_uring_enabled(),
+            client_cache_uring_queue_depth: default_client_cache_uring_queue_depth(),
+            client_cache_uring_thread_count: default_client_cache_uring_thread_count(),
             client_cache_sequential_read_enabled: false,
-            short_circuit_enabled: true,
+            file_info_cache_ttl: default_file_info_cache_ttl(),
+            file_info_cache_capacity: default_file_info_cache_capacity(),
+            range_coalesce_enabled: false,
+            range_coalesce_gap_bytes: default_range_coalesce_gap_bytes(),
+            range_coalesce_max_bytes: default_range_coalesce_max_bytes(),
+            // Short-circuit local-mmap read path is **disabled by default**.
+            // Rationale (2026-07-07 hotspot analysis, see
+            // docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md §C6 and
+            // docs/perf/2026-07-07-hotspot-optimizations/README.md §5.2):
+            // the demo binary reference flame graph (oncpu_4, ~1200 QPS)
+            // contains no short-circuit frames, and flipping this switch
+            // to `false` on the previously-default-`true` build empirically
+            // moved a 32-way Lance/DuckDB workload from ~600 to ~900 QPS
+            // (~50% end-to-end throughput). Callers that want the local
+            // fast path can opt back in via `.with_short_circuit_enabled(true)`,
+            // the `goosefs.user.short.circuit.enabled` property, the
+            // `goosefs_short_circuit_enabled` storage option, or the
+            // `GOOSEFS_SHORT_CIRCUIT_ENABLED=true` environment variable —
+            // the opt-in mechanism is unchanged and fully backwards compatible.
+            short_circuit_enabled: false,
             short_circuit_cache_capacity: default_short_circuit_cache_capacity(),
             short_circuit_cache_ttl: default_short_circuit_cache_ttl(),
             short_circuit_neg_cache_ttl: default_short_circuit_neg_cache_ttl(),
@@ -1806,6 +2217,135 @@ impl GoosefsConfig {
     /// clamped to at least `1`.
     pub fn with_worker_connection_pool_size(mut self, size: usize) -> Self {
         self.worker_connection_pool_size = size.max(1);
+        self
+    }
+
+    /// Enable the client-side `FileInfo` (metadata) cache with the given TTL
+    /// (FLAMEGRAPH_OPTIMIZATION_PLAN §A3).
+    ///
+    /// Passing `Duration::ZERO` disables the cache (matches the default).
+    /// The cache is consulted on the read path (`get_status` / `open`) and
+    /// **explicitly invalidated** on every write / delete / rename issued
+    /// through this client, so the staleness window of length `ttl` only
+    /// affects out-of-band mutations by other writers.
+    pub fn with_file_info_cache_ttl(mut self, ttl: Duration) -> Self {
+        self.file_info_cache_ttl = ttl;
+        self
+    }
+
+    /// Set the maximum number of `(path, FileInfo)` entries kept in the
+    /// metadata cache when it is enabled. Only consulted when the TTL is
+    /// non-zero. Values `< 1` are clamped to `1` (LRU cannot be empty).
+    pub fn with_file_info_cache_capacity(mut self, capacity: usize) -> Self {
+        self.file_info_cache_capacity = capacity.max(1);
+        self
+    }
+
+    // ── Short-circuit (local mmap) read builder methods ──────────
+    /// Master kill switch for the short-circuit local read path.
+    ///
+    /// `false` forces every read (even to a co-located worker) through the
+    /// gRPC data plane. Useful for A/B comparison. Mirrors Java
+    /// `goosefs.user.short.circuit.enabled` semantically.
+    pub fn with_short_circuit_enabled(mut self, enabled: bool) -> Self {
+        self.short_circuit_enabled = enabled;
+        self
+    }
+
+    /// Set the per-task LRU capacity for hot-block SC readers.
+    pub fn with_short_circuit_cache_capacity(mut self, capacity: usize) -> Self {
+        self.short_circuit_cache_capacity = capacity;
+        self
+    }
+
+    /// Set the idle TTL after which a cached SC reader is dropped.
+    pub fn with_short_circuit_cache_ttl(mut self, ttl: Duration) -> Self {
+        self.short_circuit_cache_ttl = ttl;
+        self
+    }
+
+    /// Set the negative-cache TTL for blocks that failed to open via SC.
+    pub fn with_short_circuit_neg_cache_ttl(mut self, ttl: Duration) -> Self {
+        self.short_circuit_neg_cache_ttl = ttl;
+        self
+    }
+
+    /// Set the L1 `madvise` readahead hint (`sequential` / `random` /
+    /// `normal` / `none`). Validation is deferred to `ShortCircuitFactory`.
+    pub fn with_short_circuit_advise(mut self, advise: impl Into<String>) -> Self {
+        self.short_circuit_advise = advise.into();
+        self
+    }
+
+    /// Toggle the L2 application-level prefetch master switch. When `false`,
+    /// `ShortCircuitReader::prefetch{,_many}` degrade to no-ops.
+    pub fn with_short_circuit_prefetch_enabled(mut self, enabled: bool) -> Self {
+        self.short_circuit_prefetch_enabled = enabled;
+        self
+    }
+
+    /// Set the maximum gap (bytes) between adjacent ranges that
+    /// `prefetch_many` will merge into a single `madvise` call.
+    pub fn with_short_circuit_prefetch_coalesce_gap(mut self, gap: usize) -> Self {
+        self.short_circuit_prefetch_coalesce_gap = gap;
+        self
+    }
+
+    /// Set the upper bound on how many `madvise` calls a single
+    /// `prefetch_many` may issue.
+    pub fn with_short_circuit_prefetch_max_batch(mut self, batch: usize) -> Self {
+        self.short_circuit_prefetch_max_batch = batch;
+        self
+    }
+
+    /// Set the minimum block size (bytes) required to attempt SC. Blocks
+    /// smaller than this skip SC and go through gRPC. `0` = no minimum.
+    pub fn with_short_circuit_min_block_size(mut self, size: i64) -> Self {
+        self.short_circuit_min_block_size = size;
+        self
+    }
+
+    /// Enable / disable the process-global SIGBUS diagnostic handler.
+    /// Linux / macOS only; a no-op elsewhere.
+    pub fn with_short_circuit_sigbus_handler(mut self, enabled: bool) -> Self {
+        self.short_circuit_sigbus_handler = enabled;
+        self
+    }
+
+    /// Request Transparent Huge Pages for the SC mapping via
+    /// `madvise(MADV_HUGEPAGE)`. Linux only, **experimental**.
+    pub fn with_short_circuit_thp(mut self, enabled: bool) -> Self {
+        self.short_circuit_thp = enabled;
+        self
+    }
+
+    /// Enable adjacent-range coalescing in
+    /// [`GoosefsFileReader::read_ranges_with_context`]
+    /// (FLAMEGRAPH_OPTIMIZATION_PLAN §B2).
+    ///
+    /// Off by default. When enabled, the `read_ranges` API sorts and
+    /// merges input ranges whose gap is `≤ range_coalesce_gap_bytes`,
+    /// capped at `range_coalesce_max_bytes` per merged fetch, then
+    /// splits the payload back to the caller so each output slice is
+    /// byte-identical to a standalone `read_range` for the same input.
+    pub fn with_range_coalesce_enabled(mut self, enabled: bool) -> Self {
+        self.range_coalesce_enabled = enabled;
+        self
+    }
+
+    /// Configure the maximum permitted gap between two adjacent input
+    /// ranges for them to be merged. Only consulted when the coalesce
+    /// feature is enabled.
+    pub fn with_range_coalesce_gap_bytes(mut self, gap: u64) -> Self {
+        self.range_coalesce_gap_bytes = gap;
+        self
+    }
+
+    /// Configure the upper bound on any single merged range.
+    /// Values `< 1` are clamped to `1` to guarantee forward progress
+    /// (a merged range cannot be empty).
+    pub fn with_range_coalesce_max_bytes(mut self, max_bytes: u64) -> Self {
+        self.range_coalesce_max_bytes = max_bytes.max(1);
         self
     }
 
@@ -2092,6 +2632,16 @@ impl GoosefsConfig {
             }
         }
 
+        // Metrics collection enabled — mirrors
+        // `goosefs.user.metrics.collection.enabled` (default `true`).
+        // Accepts `true` / `false` (case-insensitive); anything else is
+        // ignored so a typo cannot silently disable the heartbeat.
+        if let Ok(val) = env::var(ENV_METRICS_ENABLED) {
+            if let Ok(b) = val.to_lowercase().parse::<bool>() {
+                self.metrics_enabled = b;
+            }
+        }
+
         // Metrics heartbeat interval (unit: milliseconds)
         if let Ok(ms_str) = env::var(ENV_METRICS_HEARTBEAT_INTERVAL_MS) {
             if let Ok(ms) = ms_str.parse::<u64>() {
@@ -2204,6 +2754,108 @@ impl GoosefsConfig {
         if let Ok(val) = env::var(ENV_CLIENT_CACHE_SEQUENTIAL_READ_ENABLED) {
             if let Ok(b) = val.to_lowercase().parse::<bool>() {
                 self.client_cache_sequential_read_enabled = b;
+            }
+        }
+        if let Ok(val) = env::var(ENV_CLIENT_CACHE_URING_ENABLED) {
+            if let Ok(b) = val.to_lowercase().parse::<bool>() {
+                self.client_cache_uring_enabled = b;
+            }
+        }
+        if let Ok(val) = env::var(ENV_CLIENT_CACHE_URING_QUEUE_DEPTH) {
+            if let Ok(n) = val.parse::<usize>() {
+                if n > 0 {
+                    self.client_cache_uring_queue_depth = n;
+                }
+            }
+        }
+        if let Ok(val) = env::var(ENV_CLIENT_CACHE_URING_THREAD_COUNT) {
+            if let Ok(n) = val.parse::<usize>() {
+                if n > 0 {
+                    self.client_cache_uring_thread_count = n;
+                }
+            }
+        }
+
+        // ── Performance tuning knobs (FLAMEGRAPH_OPTIMIZATION_PLAN §A3 / §B3) ─
+        // Per-worker gRPC channel pool size. `0` is clamped to `1` (mirrors
+        // the `with_worker_connection_pool_size` builder contract); non-numeric
+        // values are ignored so a typo cannot silently degrade performance.
+        if let Ok(val) = env::var(ENV_WORKER_CONNECTION_POOL_SIZE) {
+            if let Ok(n) = val.parse::<usize>() {
+                self.worker_connection_pool_size = n.max(1);
+            }
+        }
+        // Client-side FileInfo cache TTL (milliseconds). `0` = disabled
+        // (default). This is the only knob that actually turns the cache on,
+        // so parse errors are ignored to keep default behaviour (off).
+        if let Ok(val) = env::var(ENV_FILE_INFO_CACHE_TTL_MS) {
+            if let Ok(ms) = val.parse::<u64>() {
+                self.file_info_cache_ttl = Duration::from_millis(ms);
+            }
+        }
+        // FileInfo LRU cache capacity. Mirrors the builder's `.max(1)` clamp.
+        if let Ok(val) = env::var(ENV_FILE_INFO_CACHE_CAPACITY) {
+            if let Ok(n) = val.parse::<usize>() {
+                self.file_info_cache_capacity = n.max(1);
+            }
+        }
+
+        // ── Short-circuit (local mmap) read path ─────────────────
+        // All parse failures are silently ignored so a typo cannot flip SC
+        // off (or on) at process start; the builder / struct value is kept.
+        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_ENABLED) {
+            if let Ok(b) = val.to_lowercase().parse::<bool>() {
+                self.short_circuit_enabled = b;
+            }
+        }
+        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_CACHE_CAPACITY) {
+            if let Ok(n) = val.parse::<usize>() {
+                self.short_circuit_cache_capacity = n;
+            }
+        }
+        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_CACHE_TTL_MS) {
+            if let Ok(ms) = val.parse::<u64>() {
+                self.short_circuit_cache_ttl = Duration::from_millis(ms);
+            }
+        }
+        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_NEG_CACHE_TTL_MS) {
+            if let Ok(ms) = val.parse::<u64>() {
+                self.short_circuit_neg_cache_ttl = Duration::from_millis(ms);
+            }
+        }
+        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_ADVISE) {
+            if !val.is_empty() {
+                self.short_circuit_advise = val;
+            }
+        }
+        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_PREFETCH_ENABLED) {
+            if let Ok(b) = val.to_lowercase().parse::<bool>() {
+                self.short_circuit_prefetch_enabled = b;
+            }
+        }
+        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_PREFETCH_COALESCE_GAP) {
+            if let Ok(n) = val.parse::<usize>() {
+                self.short_circuit_prefetch_coalesce_gap = n;
+            }
+        }
+        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_PREFETCH_MAX_BATCH) {
+            if let Ok(n) = val.parse::<usize>() {
+                self.short_circuit_prefetch_max_batch = n;
+            }
+        }
+        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_MIN_BLOCK_SIZE) {
+            if let Ok(n) = val.parse::<i64>() {
+                self.short_circuit_min_block_size = n;
+            }
+        }
+        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_SIGBUS_HANDLER) {
+            if let Ok(b) = val.to_lowercase().parse::<bool>() {
+                self.short_circuit_sigbus_handler = b;
+            }
+        }
+        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_THP) {
+            if let Ok(b) = val.to_lowercase().parse::<bool>() {
+                self.short_circuit_thp = b;
             }
         }
 
@@ -2546,6 +3198,42 @@ mod tests {
         assert_eq!(config.chunk_size, 1024 * 1024);
         assert!(!config.is_multi_master());
         assert!(config.validate().is_ok());
+    }
+
+    // ── B3: worker connection pool size default ─────────────────────────────
+
+    /// FLAMEGRAPH_OPTIMIZATION_PLAN §B3: default is `min(cores, 4)`, never
+    /// exceeds the cap, never drops below the legacy `1`. This holds on any
+    /// core count without hard-coding a specific number (CI runners vary).
+    #[test]
+    fn test_worker_connection_pool_size_default_is_capped_at_max() {
+        let config = GoosefsConfig::default();
+        assert!(
+            config.worker_connection_pool_size >= DEFAULT_WORKER_CONNECTION_POOL_MIN,
+            "default must be >= {} (single-channel legacy floor), got {}",
+            DEFAULT_WORKER_CONNECTION_POOL_MIN,
+            config.worker_connection_pool_size,
+        );
+        assert!(
+            config.worker_connection_pool_size <= DEFAULT_WORKER_CONNECTION_POOL_MAX,
+            "default must be <= {} (B3 cap), got {}",
+            DEFAULT_WORKER_CONNECTION_POOL_MAX,
+            config.worker_connection_pool_size,
+        );
+    }
+
+    /// The explicit `with_worker_connection_pool_size` builder still overrides
+    /// the default and clamps values `<1` to `1` (unchanged behaviour).
+    #[test]
+    fn test_worker_connection_pool_size_explicit_override() {
+        let cfg = GoosefsConfig::new("127.0.0.1:9200").with_worker_connection_pool_size(8);
+        assert_eq!(cfg.worker_connection_pool_size, 8);
+
+        let clamped = GoosefsConfig::new("127.0.0.1:9200").with_worker_connection_pool_size(0);
+        assert_eq!(
+            clamped.worker_connection_pool_size, 1,
+            "0 must be clamped to 1 (legacy semantics preserved)"
+        );
     }
 
     #[test]
@@ -3144,6 +3832,51 @@ goosefs.master.rpc.port=9200
         assert_eq!(cfg.block_size, 128 * 1024 * 1024);
     }
 
+    /// `GOOSEFS_USER_METRICS_COLLECTION_ENABLED` must be honoured by
+    /// `apply_env`. This regression-guards a bug where the constant
+    /// was declared but never applied — the env var was effectively
+    /// dead until this test locked it down.
+    #[test]
+    fn test_apply_env_metrics_enabled_false() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(ENV_METRICS_ENABLED, "false");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var(ENV_METRICS_ENABLED);
+        assert!(
+            !cfg.metrics_enabled,
+            "ENV_METRICS_ENABLED=false must disable metrics"
+        );
+    }
+
+    #[test]
+    fn test_apply_env_metrics_enabled_true_case_insensitive() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Start from a disabled baseline so we can prove the env
+        // toggles it back on regardless of casing.
+        std::env::set_var(ENV_METRICS_ENABLED, "TRUE");
+        let cfg = GoosefsConfig::default()
+            .with_metrics_enabled(false)
+            .apply_env();
+        std::env::remove_var(ENV_METRICS_ENABLED);
+        assert!(
+            cfg.metrics_enabled,
+            "ENV_METRICS_ENABLED=TRUE (any case) must enable metrics"
+        );
+    }
+
+    #[test]
+    fn test_apply_env_metrics_enabled_invalid_is_ignored() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A typo must NOT silently flip the default (true) to false.
+        std::env::set_var(ENV_METRICS_ENABLED, "yes");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var(ENV_METRICS_ENABLED);
+        assert!(
+            cfg.metrics_enabled,
+            "unparseable ENV_METRICS_ENABLED must leave the field at its previous value"
+        );
+    }
+
     // ── New config fields tests ──────────────────────────────
 
     #[test]
@@ -3272,6 +4005,381 @@ goosefs.user.network.data.transfer.chunk.size=1MB
         assert_eq!(
             STORAGE_OPT_LOGIN_IMPERSONATION_USERNAME,
             "goosefs_login_impersonation_username"
+        );
+    }
+
+    // ── Performance tuning knob env / properties tests
+    //    (FLAMEGRAPH_OPTIMIZATION_PLAN §A3 / §B3) ─────────────
+
+    #[test]
+    fn test_perf_tuning_constant_names() {
+        assert_eq!(
+            ENV_WORKER_CONNECTION_POOL_SIZE,
+            "GOOSEFS_WORKER_CONNECTION_POOL_SIZE"
+        );
+        assert_eq!(ENV_FILE_INFO_CACHE_TTL_MS, "GOOSEFS_FILE_INFO_CACHE_TTL_MS");
+        assert_eq!(
+            ENV_FILE_INFO_CACHE_CAPACITY,
+            "GOOSEFS_FILE_INFO_CACHE_CAPACITY"
+        );
+        assert_eq!(
+            STORAGE_OPT_WORKER_CONNECTION_POOL_SIZE,
+            "goosefs_worker_connection_pool_size"
+        );
+        assert_eq!(
+            STORAGE_OPT_FILE_INFO_CACHE_TTL_MS,
+            "goosefs_file_info_cache_ttl_ms"
+        );
+        assert_eq!(
+            STORAGE_OPT_FILE_INFO_CACHE_CAPACITY,
+            "goosefs_file_info_cache_capacity"
+        );
+    }
+
+    #[test]
+    fn test_apply_env_worker_connection_pool_size() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GOOSEFS_WORKER_CONNECTION_POOL_SIZE", "8");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var("GOOSEFS_WORKER_CONNECTION_POOL_SIZE");
+        assert_eq!(cfg.worker_connection_pool_size, 8);
+    }
+
+    /// `0` and negative-ish inputs are clamped to `1`, matching
+    /// [`GoosefsConfig::with_worker_connection_pool_size`].
+    #[test]
+    fn test_apply_env_worker_connection_pool_size_clamp() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GOOSEFS_WORKER_CONNECTION_POOL_SIZE", "0");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var("GOOSEFS_WORKER_CONNECTION_POOL_SIZE");
+        assert_eq!(cfg.worker_connection_pool_size, 1);
+    }
+
+    /// Non-numeric env value must leave the default in place — a typo
+    /// should not silently disable a perf knob.
+    #[test]
+    fn test_apply_env_worker_connection_pool_size_invalid_keeps_default() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let default_size = default_worker_connection_pool_size();
+        std::env::set_var("GOOSEFS_WORKER_CONNECTION_POOL_SIZE", "not-a-number");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var("GOOSEFS_WORKER_CONNECTION_POOL_SIZE");
+        assert_eq!(cfg.worker_connection_pool_size, default_size);
+    }
+
+    #[test]
+    fn test_apply_env_file_info_cache_ttl_ms() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GOOSEFS_FILE_INFO_CACHE_TTL_MS", "2500");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var("GOOSEFS_FILE_INFO_CACHE_TTL_MS");
+        assert_eq!(cfg.file_info_cache_ttl, Duration::from_millis(2500));
+    }
+
+    /// `0` is explicitly meaningful (= disabled) so it must round-trip.
+    #[test]
+    fn test_apply_env_file_info_cache_ttl_zero_disables() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GOOSEFS_FILE_INFO_CACHE_TTL_MS", "0");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var("GOOSEFS_FILE_INFO_CACHE_TTL_MS");
+        assert_eq!(cfg.file_info_cache_ttl, Duration::ZERO);
+    }
+
+    #[test]
+    fn test_apply_env_file_info_cache_capacity_clamp() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GOOSEFS_FILE_INFO_CACHE_CAPACITY", "0");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var("GOOSEFS_FILE_INFO_CACHE_CAPACITY");
+        assert_eq!(cfg.file_info_cache_capacity, 1);
+    }
+
+    #[test]
+    fn test_from_properties_str_perf_tuning_knobs() {
+        let props = "\
+goosefs.user.worker.connection.pool.size=6
+goosefs.user.file.info.cache.ttl.ms=1500
+goosefs.user.file.info.cache.capacity=2048
+";
+        let cfg = GoosefsConfig::from_properties_str(props);
+        assert_eq!(cfg.worker_connection_pool_size, 6);
+        assert_eq!(cfg.file_info_cache_ttl, Duration::from_millis(1500));
+        assert_eq!(cfg.file_info_cache_capacity, 2048);
+    }
+
+    /// Properties file with `0` for the pool size must be clamped to `1`
+    /// (never `0`, which would leave the worker with zero connections).
+    #[test]
+    fn test_from_properties_str_worker_pool_zero_clamped() {
+        let props = "goosefs.user.worker.connection.pool.size=0\n";
+        let cfg = GoosefsConfig::from_properties_str(props);
+        assert_eq!(cfg.worker_connection_pool_size, 1);
+    }
+
+    // ── Client local page cache knob parsing ─────────────────
+
+    /// Defaults keep the page cache opt-in (off) and range coalesce off so
+    /// existing deployments are unchanged after upgrade.
+    #[test]
+    fn test_default_client_cache_and_range_coalesce_knobs() {
+        let cfg = GoosefsConfig::default();
+        assert!(
+            !cfg.client_cache_enabled,
+            "client page cache must stay disabled by default"
+        );
+        assert_eq!(cfg.client_cache_page_size, default_client_cache_page_size());
+        assert_eq!(cfg.client_cache_size, default_client_cache_size());
+        assert_eq!(cfg.client_cache_dirs, default_client_cache_dirs());
+        assert_eq!(
+            cfg.client_cache_uring_enabled,
+            default_client_cache_uring_enabled()
+        );
+        assert_eq!(
+            cfg.client_cache_uring_queue_depth,
+            default_client_cache_uring_queue_depth()
+        );
+        assert_eq!(
+            cfg.client_cache_uring_thread_count,
+            default_client_cache_uring_thread_count()
+        );
+        assert!(!cfg.range_coalesce_enabled);
+        assert_eq!(
+            cfg.range_coalesce_gap_bytes,
+            default_range_coalesce_gap_bytes()
+        );
+        assert_eq!(
+            cfg.range_coalesce_max_bytes,
+            default_range_coalesce_max_bytes()
+        );
+    }
+
+    #[test]
+    fn test_apply_env_client_cache_knobs() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(ENV_CLIENT_CACHE_ENABLED, "true");
+        std::env::set_var(ENV_CLIENT_CACHE_PAGE_SIZE, "65536");
+        std::env::set_var(ENV_CLIENT_CACHE_SIZE, "1048576");
+        std::env::set_var(ENV_CLIENT_CACHE_DIRS, "/tmp/a,/tmp/b");
+        std::env::set_var(ENV_CLIENT_CACHE_EVICTOR, "lfu");
+        std::env::set_var(ENV_CLIENT_CACHE_URING_ENABLED, "false");
+        std::env::set_var(ENV_CLIENT_CACHE_URING_QUEUE_DEPTH, "4096");
+        std::env::set_var(ENV_CLIENT_CACHE_URING_THREAD_COUNT, "8");
+        std::env::set_var(ENV_CLIENT_CACHE_TTL_SECS, "30");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var(ENV_CLIENT_CACHE_ENABLED);
+        std::env::remove_var(ENV_CLIENT_CACHE_PAGE_SIZE);
+        std::env::remove_var(ENV_CLIENT_CACHE_SIZE);
+        std::env::remove_var(ENV_CLIENT_CACHE_DIRS);
+        std::env::remove_var(ENV_CLIENT_CACHE_EVICTOR);
+        std::env::remove_var(ENV_CLIENT_CACHE_URING_ENABLED);
+        std::env::remove_var(ENV_CLIENT_CACHE_URING_QUEUE_DEPTH);
+        std::env::remove_var(ENV_CLIENT_CACHE_URING_THREAD_COUNT);
+        std::env::remove_var(ENV_CLIENT_CACHE_TTL_SECS);
+
+        assert!(cfg.client_cache_enabled);
+        assert_eq!(cfg.client_cache_page_size, 65536);
+        assert_eq!(cfg.client_cache_size, 1_048_576);
+        assert_eq!(
+            cfg.client_cache_dirs,
+            vec!["/tmp/a".to_string(), "/tmp/b".to_string()]
+        );
+        assert_eq!(cfg.client_cache_evictor, CacheEvictorType::Lfu);
+        assert!(!cfg.client_cache_uring_enabled);
+        assert_eq!(cfg.client_cache_uring_queue_depth, 4096);
+        assert_eq!(cfg.client_cache_uring_thread_count, 8);
+        assert_eq!(cfg.client_cache_ttl_secs, 30);
+    }
+
+    #[test]
+    fn test_from_properties_str_client_cache_knobs() {
+        let props = "\
+goosefs.user.client.cache.enabled=true
+goosefs.user.client.cache.page.size=32768
+goosefs.user.client.cache.size=2097152
+goosefs.user.client.cache.dirs=/var/cache/a,/var/cache/b
+goosefs.user.client.cache.eviction.policy=lru
+goosefs.user.client.cache.uring.enabled=true
+goosefs.user.client.cache.uring.queue.depth=8192
+goosefs.user.client.cache.uring.thread.count=4
+goosefs.user.client.cache.ttl.seconds=60
+";
+        let cfg = GoosefsConfig::from_properties_str(props);
+        assert!(cfg.client_cache_enabled);
+        assert_eq!(cfg.client_cache_page_size, 32768);
+        assert_eq!(cfg.client_cache_size, 2_097_152);
+        assert_eq!(
+            cfg.client_cache_dirs,
+            vec!["/var/cache/a".to_string(), "/var/cache/b".to_string()]
+        );
+        assert_eq!(cfg.client_cache_evictor, CacheEvictorType::Lru);
+        assert!(cfg.client_cache_uring_enabled);
+        assert_eq!(cfg.client_cache_uring_queue_depth, 8192);
+        assert_eq!(cfg.client_cache_uring_thread_count, 4);
+        assert_eq!(cfg.client_cache_ttl_secs, 60);
+    }
+
+    // ── Short-circuit (SC) knob parsing coverage ─────────────
+    /// `apply_env` picks up every SC knob and applies it verbatim.
+    #[test]
+    fn test_apply_env_short_circuit_knobs() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_ENABLED", "false");
+        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_CACHE_CAPACITY", "128");
+        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_CACHE_TTL_MS", "45000");
+        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_NEG_CACHE_TTL_MS", "1500");
+        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_ADVISE", "sequential");
+        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_PREFETCH_ENABLED", "false");
+        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_PREFETCH_COALESCE_GAP", "131072");
+        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_PREFETCH_MAX_BATCH", "512");
+        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_MIN_BLOCK_SIZE", "4194304");
+        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_SIGBUS_HANDLER", "false");
+        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_THP", "true");
+
+        let cfg = GoosefsConfig::default().apply_env();
+
+        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_ENABLED");
+        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_CACHE_CAPACITY");
+        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_CACHE_TTL_MS");
+        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_NEG_CACHE_TTL_MS");
+        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_ADVISE");
+        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_PREFETCH_ENABLED");
+        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_PREFETCH_COALESCE_GAP");
+        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_PREFETCH_MAX_BATCH");
+        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_MIN_BLOCK_SIZE");
+        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_SIGBUS_HANDLER");
+        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_THP");
+
+        assert!(!cfg.short_circuit_enabled);
+        assert_eq!(cfg.short_circuit_cache_capacity, 128);
+        assert_eq!(cfg.short_circuit_cache_ttl, Duration::from_millis(45000));
+        assert_eq!(cfg.short_circuit_neg_cache_ttl, Duration::from_millis(1500));
+        assert_eq!(cfg.short_circuit_advise, "sequential");
+        assert!(!cfg.short_circuit_prefetch_enabled);
+        assert_eq!(cfg.short_circuit_prefetch_coalesce_gap, 131072);
+        assert_eq!(cfg.short_circuit_prefetch_max_batch, 512);
+        assert_eq!(cfg.short_circuit_min_block_size, 4 * 1024 * 1024);
+        assert!(!cfg.short_circuit_sigbus_handler);
+        assert!(cfg.short_circuit_thp);
+    }
+
+    /// `apply_properties` (via `from_properties_str`) picks up every SC knob.
+    #[test]
+    fn test_from_properties_str_short_circuit_knobs() {
+        let props = "\
+goosefs.user.short.circuit.enabled=false
+goosefs.client.short.circuit.cache.capacity=256
+goosefs.client.short.circuit.cache.ttl.ms=60000
+goosefs.client.short.circuit.neg.cache.ttl.ms=2500
+goosefs.client.short.circuit.advise=none
+goosefs.client.short.circuit.prefetch.enabled=false
+goosefs.client.short.circuit.prefetch.coalesce.gap=262144
+goosefs.client.short.circuit.prefetch.max.batch=2048
+goosefs.client.short.circuit.min.block.size=8388608
+goosefs.client.short.circuit.sigbus.handler=false
+goosefs.client.short.circuit.thp=true
+";
+        let cfg = GoosefsConfig::from_properties_str(props);
+        assert!(!cfg.short_circuit_enabled);
+        assert_eq!(cfg.short_circuit_cache_capacity, 256);
+        assert_eq!(cfg.short_circuit_cache_ttl, Duration::from_millis(60000));
+        assert_eq!(cfg.short_circuit_neg_cache_ttl, Duration::from_millis(2500));
+        assert_eq!(cfg.short_circuit_advise, "none");
+        assert!(!cfg.short_circuit_prefetch_enabled);
+        assert_eq!(cfg.short_circuit_prefetch_coalesce_gap, 262144);
+        assert_eq!(cfg.short_circuit_prefetch_max_batch, 2048);
+        assert_eq!(cfg.short_circuit_min_block_size, 8 * 1024 * 1024);
+        assert!(!cfg.short_circuit_sigbus_handler);
+        assert!(cfg.short_circuit_thp);
+    }
+
+    /// Chained builder methods override the struct defaults.
+    #[test]
+    fn test_builder_short_circuit_chain() {
+        let cfg = GoosefsConfig::new("127.0.0.1:9200")
+            .with_short_circuit_enabled(false)
+            .with_short_circuit_cache_capacity(200)
+            .with_short_circuit_cache_ttl(Duration::from_secs(45))
+            .with_short_circuit_neg_cache_ttl(Duration::from_secs(2))
+            .with_short_circuit_advise("sequential")
+            .with_short_circuit_prefetch_enabled(false)
+            .with_short_circuit_prefetch_coalesce_gap(1024)
+            .with_short_circuit_prefetch_max_batch(64)
+            .with_short_circuit_min_block_size(1_048_576)
+            .with_short_circuit_sigbus_handler(false)
+            .with_short_circuit_thp(true);
+
+        assert!(!cfg.short_circuit_enabled);
+        assert_eq!(cfg.short_circuit_cache_capacity, 200);
+        assert_eq!(cfg.short_circuit_cache_ttl, Duration::from_secs(45));
+        assert_eq!(cfg.short_circuit_neg_cache_ttl, Duration::from_secs(2));
+        assert_eq!(cfg.short_circuit_advise, "sequential");
+        assert!(!cfg.short_circuit_prefetch_enabled);
+        assert_eq!(cfg.short_circuit_prefetch_coalesce_gap, 1024);
+        assert_eq!(cfg.short_circuit_prefetch_max_batch, 64);
+        assert_eq!(cfg.short_circuit_min_block_size, 1_048_576);
+        assert!(!cfg.short_circuit_sigbus_handler);
+        assert!(cfg.short_circuit_thp);
+    }
+
+    /// Regression guard: the short-circuit local-mmap read path must stay
+    /// **disabled** by default across every construction path
+    /// (`Default::default`, `serde` with a missing field, and
+    /// `apply_env` with no env vars set). Rationale documented in
+    /// `docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md` §C6.
+    #[test]
+    fn test_short_circuit_enabled_default_is_false() {
+        // 1. Direct Default impl.
+        assert!(
+            !GoosefsConfig::default().short_circuit_enabled,
+            "Default::default() must ship with short-circuit OFF"
+        );
+
+        // 2. Serde/properties default when the SC field is absent.
+        //    `from_properties_str` runs the full serde deserialize path
+        //    and any custom `#[serde(default = ...)]` fallbacks; a
+        //    properties string without `goosefs.user.short.circuit.enabled`
+        //    must therefore still land on `false`.
+        let cfg = GoosefsConfig::from_properties_str("goosefs.master.hostname=127.0.0.1");
+        assert!(
+            !cfg.short_circuit_enabled,
+            "properties default (missing field) must be false"
+        );
+
+        // 3. apply_env with no SC env var set must not flip it back on.
+        // We do not remove pre-existing env vars because other tests in
+        // the same process may set them; instead we only assert the
+        // invariant when the env is genuinely clean.
+        if std::env::var(ENV_SHORT_CIRCUIT_ENABLED).is_err() {
+            let cfg = GoosefsConfig::default().apply_env();
+            assert!(
+                !cfg.short_circuit_enabled,
+                "apply_env with unset GOOSEFS_SHORT_CIRCUIT_ENABLED must keep it false"
+            );
+        }
+    }
+
+    /// Canonical env-var / storage-option key names must not drift.
+    #[test]
+    fn test_short_circuit_canonical_key_names() {
+        assert_eq!(ENV_SHORT_CIRCUIT_ENABLED, "GOOSEFS_SHORT_CIRCUIT_ENABLED");
+        assert_eq!(
+            ENV_SHORT_CIRCUIT_CACHE_TTL_MS,
+            "GOOSEFS_SHORT_CIRCUIT_CACHE_TTL_MS"
+        );
+        assert_eq!(ENV_SHORT_CIRCUIT_ADVISE, "GOOSEFS_SHORT_CIRCUIT_ADVISE");
+        assert_eq!(
+            STORAGE_OPT_SHORT_CIRCUIT_ENABLED,
+            "goosefs_short_circuit_enabled"
+        );
+        assert_eq!(
+            STORAGE_OPT_SHORT_CIRCUIT_CACHE_TTL_MS,
+            "goosefs_short_circuit_cache_ttl_ms"
+        );
+        assert_eq!(
+            STORAGE_OPT_SHORT_CIRCUIT_MIN_BLOCK_SIZE,
+            "goosefs_short_circuit_min_block_size"
         );
     }
 

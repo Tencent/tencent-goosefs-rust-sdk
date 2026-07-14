@@ -48,6 +48,14 @@ mod e2e {
     fn base_config() -> GoosefsConfig {
         let mut config = GoosefsConfig::new(master_addr());
         config.auth_type = auth_type();
+        // These tests specifically exercise the short-circuit read path. The
+        // SDK default for `short_circuit_enabled` was flipped to `false` in
+        // the 2026-07-07 hotspot pass (see docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md
+        // §C6), so opt back in explicitly here — otherwise all SC counters
+        // stay at zero and every assertion below trips.
+        // The one gRPC-baseline callsite (`short_circuit_matches_grpc`) still
+        // overrides this to `false` locally, so byte-parity is preserved.
+        config.short_circuit_enabled = true;
         config
     }
 
@@ -306,6 +314,216 @@ mod e2e {
 
         ctx.acquire_master().delete(&path, false).await.ok();
         ctx.close().await?;
+        Ok(())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GoosefsFileReader — streaming `read_next_block` path (OpenDAL / Lance).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The suite above validates short-circuit on `GoosefsFileInStream`. The one
+// below validates that short-circuit is also wired into `GoosefsFileReader`'s
+// per-block collection point `read_segment` (design §8.2), the path OpenDAL /
+// Lance drive. The page cache is disabled here so every read flows straight
+// through `read_file_range → read_segment → try_short_circuit_read`, isolating
+// the SC path. Same local-worker requirement + `#[ignore]` policy as above.
+
+#[cfg(test)]
+mod reader_sc {
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use goosefs_sdk::auth::AuthType;
+    use goosefs_sdk::config::GoosefsConfig;
+    use goosefs_sdk::context::FileSystemContext;
+    use goosefs_sdk::error::Result;
+    use goosefs_sdk::io::{GoosefsFileReader, GoosefsFileWriter};
+    use goosefs_sdk::metrics::{counter, name};
+
+    fn master_addr() -> String {
+        std::env::var("GOOSEFS_MASTER_ADDR").unwrap_or_else(|_| "127.0.0.1:9200".to_string())
+    }
+
+    fn auth_type() -> AuthType {
+        std::env::var("GOOSEFS_AUTH_TYPE")
+            .ok()
+            .and_then(|s| s.parse::<AuthType>().ok())
+            .unwrap_or(AuthType::NoSasl)
+    }
+
+    /// SC **on** (default), page cache **off** — isolates the short-circuit path.
+    fn sc_on_config() -> GoosefsConfig {
+        let mut c = GoosefsConfig::new(master_addr());
+        c.auth_type = auth_type();
+        c.short_circuit_enabled = true;
+        c.client_cache_enabled = false;
+        c
+    }
+
+    /// SC **off** — forces the gRPC read path (reference for byte-equality).
+    fn sc_off_config() -> GoosefsConfig {
+        let mut c = GoosefsConfig::new(master_addr());
+        c.auth_type = auth_type();
+        c.short_circuit_enabled = false;
+        c.client_cache_enabled = false;
+        c
+    }
+
+    fn make_payload(size: usize) -> Vec<u8> {
+        (0..size)
+            .map(|i| ((i.wrapping_mul(2654435761) >> 13) ^ i) as u8)
+            .collect()
+    }
+
+    fn unique_path(tag: &str) -> String {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("/reader-sc-e2e/{tag}_{}_{ts}.bin", std::process::id())
+    }
+
+    async fn write_blob(ctx: &Arc<FileSystemContext>, path: &str, payload: &[u8]) -> Result<()> {
+        let master = ctx.acquire_master();
+        let _ = master.create_directory("/reader-sc-e2e", true).await;
+        let _ = master.delete(path, false).await;
+        let mut w = GoosefsFileWriter::create_with_context(ctx.clone(), path, None).await?;
+        w.write(payload).await?;
+        w.close().await?;
+        Ok(())
+    }
+
+    /// Read `[offset, offset+len)` through the streaming reader path.
+    async fn read_range_via_reader(
+        ctx: &Arc<FileSystemContext>,
+        path: &str,
+        offset: u64,
+        len: u64,
+    ) -> Result<bytes::Bytes> {
+        let mut r =
+            GoosefsFileReader::open_range_with_context(ctx.clone(), path, offset, len).await?;
+        r.read_all().await
+    }
+
+    fn sc_open_success() -> i64 {
+        counter(name::CLIENT_SC_OPEN_SUCCESS).get()
+    }
+    fn sc_read_bytes() -> i64 {
+        counter(name::CLIENT_SC_READ_BYTES).get()
+    }
+
+    /// §8.2 — short-circuit engages on a local worker **through the
+    /// GoosefsFileReader read path** and returns the exact written bytes.
+    ///
+    /// Proves the reader's per-block collection point (`read_segment`) attempts
+    /// SC and that a local block is served from mmap (SC counters advance).
+    #[tokio::test]
+    #[ignore]
+    async fn reader_short_circuit_serves_local_reads() -> Result<()> {
+        let ctx = FileSystemContext::connect(sc_on_config()).await?;
+        let path = unique_path("local");
+        let payload = make_payload(4 * 1024 * 1024);
+        write_blob(&ctx, &path, &payload).await?;
+
+        let open_before = sc_open_success();
+        let bytes_before = sc_read_bytes();
+
+        // Whole-file read via the streaming reader (loops read_next_block →
+        // read_file_range → read_segment → short-circuit).
+        let whole = GoosefsFileReader::read_file_with_context(ctx.clone(), &path).await?;
+        assert_eq!(whole.len(), payload.len(), "whole read length");
+        assert_eq!(
+            whole.as_ref(),
+            payload.as_slice(),
+            "whole read bytes (§8.2)"
+        );
+
+        // A few range reads too, including a page-crossing and a tail read.
+        let cases: &[(u64, u64)] = &[
+            (0, 4096),
+            (4095, 4098),
+            (1_000_003, 65536),
+            ((payload.len() - 100) as u64, 100),
+        ];
+        for &(off, len) in cases {
+            let got = read_range_via_reader(&ctx, &path, off, len).await?;
+            assert_eq!(
+                got.as_ref(),
+                &payload[off as usize..(off + len) as usize],
+                "reader SC byte mismatch at off={off} len={len}"
+            );
+        }
+
+        // SC must have fired via the reader path (local worker). Lower bounds
+        // keep the assertion robust if other SC tests bump the same
+        // process-global counters concurrently.
+        assert!(
+            sc_open_success() > open_before,
+            "short-circuit did not engage via GoosefsFileReader — is a LOCAL worker \
+             registered? (sc_open_success did not advance)"
+        );
+        assert!(
+            sc_read_bytes() >= bytes_before + payload.len() as i64,
+            "short-circuit byte counter did not advance by at least the whole-file \
+             read via GoosefsFileReader"
+        );
+
+        ctx.acquire_master().delete(&path, false).await.ok();
+        ctx.close().await?;
+        Ok(())
+    }
+
+    /// The reader returns byte-for-byte identical data whether short-circuit is
+    /// **on** (local mmap) or **off** (gRPC), on every interesting boundary
+    /// (INV-S1 analogue for `GoosefsFileReader`). Cache is off on both sides so
+    /// the only variable is the SC path.
+    #[tokio::test]
+    #[ignore]
+    async fn reader_sc_vs_grpc_byte_diff() -> Result<()> {
+        let payload = make_payload(10 * 1024 * 1024); // cross several blocks
+        let ctx_sc = FileSystemContext::connect(sc_on_config()).await?;
+        let ctx_grpc = FileSystemContext::connect(sc_off_config()).await?;
+
+        let path = unique_path("d2");
+        write_blob(&ctx_sc, &path, &payload).await?;
+
+        let last = payload.len() as u64;
+        let cases: &[(u64, u64)] = &[
+            (0, 1),
+            (0, 4096),
+            (4095, 4098),
+            ((1 << 20) - 7, 14),
+            ((1 << 20) - 1, 1 << 20),
+            (777, 33_000),
+            (6 * 1024 * 1024, 200_000), // spans a 4 MiB block boundary
+            (last - 1, 1),
+            (last - 4096, 4096),
+        ];
+
+        for &(off, len) in cases {
+            let sc = read_range_via_reader(&ctx_sc, &path, off, len).await?;
+            let grpc = read_range_via_reader(&ctx_grpc, &path, off, len).await?;
+            let expected = &payload[off as usize..(off + len) as usize];
+            assert_eq!(
+                grpc.as_ref(),
+                expected,
+                "gRPC reader bytes drift from source at off={off} len={len}"
+            );
+            assert_eq!(
+                sc.as_ref(),
+                expected,
+                "SC reader bytes drift from source at off={off} len={len}"
+            );
+            assert_eq!(
+                sc, grpc,
+                "SC vs gRPC reader mismatch at off={off} len={len}"
+            );
+        }
+
+        ctx_sc.acquire_master().delete(&path, false).await.ok();
+        ctx_sc.close().await?;
+        ctx_grpc.close().await?;
         Ok(())
     }
 }

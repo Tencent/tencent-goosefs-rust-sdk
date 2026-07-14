@@ -32,6 +32,7 @@ pub mod async_reader;
 pub mod file_in_stream;
 pub mod file_reader;
 pub mod file_writer;
+pub(crate) mod range_coalesce;
 pub mod reader;
 pub mod writer;
 

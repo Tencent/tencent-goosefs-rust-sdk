@@ -306,14 +306,24 @@ impl FileSystem for BaseFileSystem {
 
     async fn delete(&self, path: &str, options: DeleteOptions) -> Result<()> {
         let master = self.master();
-        master.delete_with_options(path, options).await
+        master.delete_with_options(path, options).await?;
+        // A3 consistency: drop any cached FileInfo so a subsequent open sees
+        // NotFound (or the fresh state after re-create). No-op when the
+        // opt-in cache is disabled.
+        self.ctx.invalidate_file_info(path);
+        Ok(())
     }
 
     // ── Rename ────────────────────────────────────────────────────────────────
 
     async fn rename(&self, src: &str, dst: &str) -> Result<()> {
         let master = self.master();
-        master.rename(src, dst).await
+        master.rename(src, dst).await?;
+        // A3 consistency: both endpoints of the rename change identity — the
+        // src is gone, the dst now points at what src used to be.
+        self.ctx.invalidate_file_info(src);
+        self.ctx.invalidate_file_info(dst);
+        Ok(())
     }
 }
 

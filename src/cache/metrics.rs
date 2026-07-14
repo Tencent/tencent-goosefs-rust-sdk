@@ -113,6 +113,22 @@ pub mod name {
     pub const CLIENT_CACHE_STORE_PUT_TIMEOUT: &str = "Client.CacheStorePutTimeout";
     /// Store worker threads rejected.
     pub const CLIENT_CACHE_STORE_THREADS_REJECTED: &str = "Client.CacheStoreThreadsRejected";
+
+    // ── io_uring backend metrics ─────────────────────────────
+    /// 1 = io_uring backend active, 0 = tokio::fs backend.
+    pub const CLIENT_CACHE_URING_BACKEND_ACTIVE: &str = "Client.CacheUringBackendActive";
+    /// SQ/CQ queue depth.
+    pub const CLIENT_CACHE_URING_QUEUE_DEPTH: &str = "Client.CacheUringQueueDepth";
+    /// Background thread count.
+    pub const CLIENT_CACHE_URING_THREAD_COUNT: &str = "Client.CacheUringThreadCount";
+    /// Total SQE submitted (counter).
+    pub const CLIENT_CACHE_URING_SUBMITTED_TOTAL: &str = "Client.CacheUringSubmittedTotal";
+    /// Total CQE completed (counter).
+    pub const CLIENT_CACHE_URING_COMPLETED_TOTAL: &str = "Client.CacheUringCompletedTotal";
+    /// io_uring operation errors (counter).
+    pub const CLIENT_CACHE_URING_ERRORS_TOTAL: &str = "Client.CacheUringErrorsTotal";
+    /// Currently in-flight requests (gauge).
+    pub const CLIENT_CACHE_URING_IN_FLIGHT: &str = "Client.CacheUringInFlight";
 }
 
 use crate::metrics::{counter, gauge};

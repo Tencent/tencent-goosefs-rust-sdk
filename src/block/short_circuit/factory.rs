@@ -15,14 +15,14 @@
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use lru::LruCache;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-use crate::block::router::WorkerRouter;
+use crate::block::router::{rpc_endpoint, WorkerRouter};
 use crate::client::WorkerClientPool;
 use crate::config::GoosefsConfig;
 use crate::error::{Error, Result};
@@ -141,10 +141,16 @@ pub struct ShortCircuitFactory {
     worker_pool: Arc<WorkerClientPool>,
     /// Shared router (local-worker detection + addressing).
     router: Arc<WorkerRouter>,
-    /// Hot-block reader LRU (bounded + idle TTL).
-    cache: Mutex<LruCache<i64, CachedReader>>,
-    /// Bounded negative cache: `block_id -> last failure time`.
-    neg_cache: Mutex<LruCache<i64, Instant>>,
+    /// Hot-block reader LRU (bounded + idle TTL). Lazily initialised in
+    /// [`Self::cache`] / [`Self::neg_cache`] (P0-F.4): a `FileSystemContext`
+    /// created with SC enabled but used purely for non-local reads (or
+    /// never read from at all) never pays for the `Mutex<LruCache>` pair.
+    /// Mirrors the `OnceLock<DashMap>` pattern used for `WorkerRouter`'s
+    /// `failed_workers` (P0-F.1).
+    cache: OnceLock<Mutex<LruCache<i64, CachedReader>>>,
+    /// Bounded negative cache: `block_id -> last failure time`. See
+    /// [`Self::cache`] for the lazy-init rationale.
+    neg_cache: OnceLock<Mutex<LruCache<i64, Instant>>>,
     /// Sticky process-level disable (set on a permanent failure like EACCES).
     process_sc_disabled: AtomicBool,
     /// Optional capability provider for `OpenLocalBlock` (design §3.1). `None`
@@ -155,26 +161,66 @@ pub struct ShortCircuitFactory {
 
 impl ShortCircuitFactory {
     /// Create a factory from the shared pool + router and resolved SC config.
+    ///
+    /// **Lazy construction (P0-F.4 / table row #4)**: the LRU caches are NOT
+    /// allocated here — they are wrapped in `OnceLock<Mutex<LruCache<…>>>`
+    /// and only created on the first [`Self::get_or_open`] / [`Self::should_use`]
+    /// call that actually needs them. A factory created but never used (e.g.
+    /// a context that only does non-local reads) costs ~one `AtomicBool` and
+    /// a couple of `Option<Arc>` slots instead of two `Mutex<LruCache>`s.
     pub fn new(
         worker_pool: Arc<WorkerClientPool>,
         router: Arc<WorkerRouter>,
         cfg: ShortCircuitConfig,
     ) -> Self {
-        let cap = NonZeroUsize::new(cfg.cache_capacity.max(1)).unwrap();
-        // The negative cache is independently bounded; reuse the reader-cache
-        // capacity as a sensible upper bound on distinct recently-failed ids.
-        let neg_cap = NonZeroUsize::new(cfg.cache_capacity.max(1).max(64)).unwrap();
         // Install the process-global SIGBUS diagnostic handler (idempotent).
         super::sigbus::install_if_enabled(cfg.sigbus_handler);
         Self {
             worker_pool,
             router,
-            cache: Mutex::new(LruCache::new(cap)),
-            neg_cache: Mutex::new(LruCache::new(neg_cap)),
+            cache: OnceLock::new(),
+            neg_cache: OnceLock::new(),
             process_sc_disabled: AtomicBool::new(false),
             capability_provider: None,
             cfg,
         }
+    }
+
+    /// Construct the hot-block reader LRU on first use.
+    ///
+    /// P0-F.4: `OnceLock::get_or_init` is the standard once-initialised
+    /// pattern; the first caller pays the `Mutex::new` + `LruCache::new`
+    /// cost, every subsequent caller gets a `&Mutex<LruCache>` with no
+    /// extra atomic. The closure is `FnOnce` so we move the capacity in.
+    fn cache(&self) -> &Mutex<LruCache<i64, CachedReader>> {
+        self.cache.get_or_init(|| {
+            let cap = NonZeroUsize::new(self.cfg.cache_capacity.max(1)).unwrap();
+            Mutex::new(LruCache::new(cap))
+        })
+    }
+
+    /// Construct the negative cache on first use (see [`Self::cache`] for
+    /// the lazy-init rationale).
+    fn neg_cache_cell(&self) -> &Mutex<LruCache<i64, Instant>> {
+        self.neg_cache.get_or_init(|| {
+            // The negative cache is independently bounded; reuse the
+            // reader-cache capacity as a sensible upper bound on distinct
+            // recently-failed ids, with a 64-entry floor.
+            let neg_cap = NonZeroUsize::new(self.cfg.cache_capacity.max(1).max(64)).unwrap();
+            Mutex::new(LruCache::new(neg_cap))
+        })
+    }
+
+    /// Test-only accessor: whether the hot-block LRU has been allocated.
+    #[cfg(test)]
+    fn cache_is_uninitialised(&self) -> bool {
+        self.cache.get().is_none()
+    }
+
+    /// Test-only accessor: whether the negative cache has been allocated.
+    #[cfg(test)]
+    fn neg_cache_is_uninitialised(&self) -> bool {
+        self.neg_cache.get().is_none()
     }
 
     /// Attach a [`CapabilityProvider`] used to populate `OpenLocalBlock`
@@ -281,7 +327,7 @@ impl ShortCircuitFactory {
     /// Record a failed SC attempt for `block_id` so it is skipped until the
     /// negative-cache TTL expires.
     pub async fn mark_failure(&self, block_id: i64) {
-        let mut neg = self.neg_cache.lock().await;
+        let mut neg = self.neg_cache_cell().lock().await;
         neg.put(block_id, Instant::now());
     }
 
@@ -289,7 +335,7 @@ impl ShortCircuitFactory {
     /// inconsistency). The underlying mmap is released once the last
     /// outstanding `Bytes`/`Arc` reference is gone (INV-D3).
     pub async fn invalidate(&self, block_id: i64) {
-        let mut cache = self.cache.lock().await;
+        let mut cache = self.cache().lock().await;
         cache.pop(&block_id);
     }
 
@@ -298,7 +344,7 @@ impl ShortCircuitFactory {
     /// Look up a fresh (non-expired) cached reader, dropping it if its idle
     /// TTL has elapsed.
     async fn cache_get_fresh(&self, block_id: i64) -> Option<Arc<LocalBlockReader>> {
-        let mut cache = self.cache.lock().await;
+        let mut cache = self.cache().lock().await;
         if let Some(entry) = cache.get(&block_id) {
             if entry.inserted.elapsed() < self.cfg.cache_ttl {
                 return Some(entry.reader.clone());
@@ -312,7 +358,7 @@ impl ShortCircuitFactory {
 
     /// Insert `reader`, accounting for LRU capacity eviction.
     async fn cache_put(&self, block_id: i64, reader: Arc<LocalBlockReader>) {
-        let mut cache = self.cache.lock().await;
+        let mut cache = self.cache().lock().await;
         // `put` returns the previous value for the same key (not an eviction);
         // a capacity eviction is detected by the cache being full before insert.
         let was_full = cache.len() == cache.cap().get() && cache.peek(&block_id).is_none();
@@ -330,7 +376,7 @@ impl ShortCircuitFactory {
 
     /// Whether `block_id` has an unexpired negative-cache entry.
     async fn is_negative_cached(&self, block_id: i64) -> bool {
-        let mut neg = self.neg_cache.lock().await;
+        let mut neg = self.neg_cache_cell().lock().await;
         if let Some(t) = neg.get(&block_id) {
             if t.elapsed() < self.cfg.neg_cache_ttl {
                 metrics::counter(name::CLIENT_SC_NEG_CACHE_HITS).inc(1);
@@ -352,11 +398,7 @@ impl ShortCircuitFactory {
                 message: "short-circuit: worker has no address".to_string(),
                 source: None,
             })?;
-        let worker_addr = format!(
-            "{}:{}",
-            addr.host.as_deref().unwrap_or("127.0.0.1"),
-            addr.rpc_port.unwrap_or(9203)
-        );
+        let worker_addr = rpc_endpoint(addr);
         debug!(block_id = block_id, worker = %worker_addr, "short-circuit acquiring local worker");
         self.worker_pool.acquire(&worker_addr).await
     }
@@ -452,13 +494,72 @@ mod tests {
 
     #[test]
     fn config_from_goosefs_config_defaults() {
+        // P2-B (2026-07-07): `GoosefsConfig::default()` now emits
+        // `short_circuit_enabled: false` (see
+        // `docs/perf/2026-07-07-hotspot-optimizations/README.md` §5.2 and
+        // `config::tests::test_short_circuit_enabled_default_is_false`).
+        // `ShortCircuitConfig::from_config` faithfully mirrors that, so
+        // the default `enabled` is `false`, not `true`. Flip it on
+        // explicitly and re-derive to check the rest of the mapping.
         let cfg = GoosefsConfig::new("127.0.0.1:9200");
         let sc = ShortCircuitConfig::from_config(&cfg);
-        assert!(sc.enabled);
-        assert_eq!(sc.cache_capacity, 64);
-        assert_eq!(sc.cache_ttl, Duration::from_secs(30));
-        assert_eq!(sc.neg_cache_ttl, Duration::from_secs(5));
-        assert_eq!(sc.advise, AccessHint::Random);
-        assert!(sc.prefetch_enabled);
+        assert!(
+            !sc.enabled,
+            "SC must be OFF by default (P2-B) — flip on via env/storage-options/API to opt in"
+        );
+
+        let cfg_on = GoosefsConfig::new("127.0.0.1:9200").with_short_circuit_enabled(true);
+        let sc_on = ShortCircuitConfig::from_config(&cfg_on);
+        assert!(sc_on.enabled);
+        assert_eq!(sc_on.cache_capacity, 64);
+        assert_eq!(sc_on.cache_ttl, Duration::from_secs(30));
+        assert_eq!(sc_on.neg_cache_ttl, Duration::from_secs(5));
+        assert_eq!(sc_on.advise, AccessHint::Random);
+        assert!(sc_on.prefetch_enabled);
+    }
+
+    /// P0-F.4: `ShortCircuitFactory::new` must NOT allocate either
+    /// `Mutex<LruCache>`. A factory created but never used (e.g. a
+    /// `FileSystemContext` that only does non-local reads) should keep
+    /// both `OnceLock`s uninitialised until the first `should_use` /
+    /// `get_or_open` / `invalidate` / `mark_failure` / `is_process_disabled`
+    /// call. Mirrors the `WorkerRouter::failed_workers` P0-F.1
+    /// lazy-init test.
+    #[tokio::test]
+    async fn test_factory_caches_are_lazy_initialised() {
+        use crate::block::router::WorkerRouter;
+        use crate::client::WorkerClientPool;
+
+        let pool = WorkerClientPool::new_shared(GoosefsConfig::new("127.0.0.1:9200"));
+        let router = Arc::new(WorkerRouter::new());
+        // P0-F.4 needs SC actually enabled — otherwise `should_use` would
+        // short-circuit on `!self.cfg.enabled` (P2-B default) and never
+        // touch the negative cache, masking the lazy-init we want to test.
+        let cfg = GoosefsConfig::new("127.0.0.1:9200").with_short_circuit_enabled(true);
+        let sc_cfg = ShortCircuitConfig::from_config(&cfg);
+
+        let factory = ShortCircuitFactory::new(pool, router, sc_cfg);
+        assert!(
+            factory.cache_is_uninitialised(),
+            "hot-block LRU must stay uninitialised on the happy path (no reads)"
+        );
+        assert!(
+            factory.neg_cache_is_uninitialised(),
+            "negative cache must stay uninitialised on the happy path (no reads)"
+        );
+
+        // The decision path is the only thing that hits the negative
+        // cache eagerly (via `is_negative_cached`).
+        let _ = factory.should_use(1, 1024).await;
+        // `should_use` always allocates the neg cache (even if the
+        // decision turns out to be false) — confirm the OnceLock is now
+        // initialised, then the other side stays lazy.
+        assert!(!factory.neg_cache_is_uninitialised());
+        // The hot-block LRU must still be untouched because `should_use`
+        // never reads or writes to it.
+        assert!(
+            factory.cache_is_uninitialised(),
+            "hot-block LRU must stay uninitialised — should_use does not touch it"
+        );
     }
 }

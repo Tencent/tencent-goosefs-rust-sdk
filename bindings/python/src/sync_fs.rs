@@ -246,7 +246,8 @@ impl PyGoosefs {
         recursive: bool,
     ) -> PyResult<Vec<u64>> {
         let h = self.handle()?;
-        let proto_opts = crate::filesystem::build_create_file_options(write_type, block_size_bytes, recursive);
+        let proto_opts =
+            crate::filesystem::build_create_file_options(write_type, block_size_bytes, recursive);
         Self::guarded_block_on(py, async move {
             use futures::stream::{self, StreamExt};
             let ctx = h.ctx.clone();
@@ -295,11 +296,7 @@ impl PyGoosefs {
     }
 
     /// `fs.batch_rename(pairs)`.
-    fn batch_rename(
-        &self,
-        py: Python<'_>,
-        pairs: Vec<String>,
-    ) -> PyResult<()> {
+    fn batch_rename(&self, py: Python<'_>, pairs: Vec<String>) -> PyResult<()> {
         if pairs.len() % 2 != 0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "pairs must have even length (flat src, dst, src, dst, ...)",

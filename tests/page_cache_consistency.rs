@@ -71,7 +71,10 @@ mod consistency {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        format!("/page-cache-consistency/{tag}_{}_{ts}.bin", std::process::id())
+        format!(
+            "/page-cache-consistency/{tag}_{}_{ts}.bin",
+            std::process::id()
+        )
     }
 
     /// Position-dependent payload — any wrong offset / length surfaces as a
@@ -108,7 +111,9 @@ mod consistency {
 
     async fn write_blob(ctx: &Arc<FileSystemContext>, path: &str, payload: &[u8]) -> Result<()> {
         let master = ctx.acquire_master();
-        let _ = master.create_directory("/page-cache-consistency", true).await;
+        let _ = master
+            .create_directory("/page-cache-consistency", true)
+            .await;
         let _ = master.delete(path, false).await;
         let mut w = GoosefsFileWriter::create_with_context(ctx.clone(), path, None).await?;
         w.write(payload).await?;
@@ -116,10 +121,7 @@ mod consistency {
         Ok(())
     }
 
-    async fn open_stream(
-        ctx: &Arc<FileSystemContext>,
-        path: &str,
-    ) -> Result<GoosefsFileInStream> {
+    async fn open_stream(ctx: &Arc<FileSystemContext>, path: &str) -> Result<GoosefsFileInStream> {
         GoosefsFileInStream::open_with_context(ctx.clone(), path, OpenFileOptions::default()).await
     }
 
@@ -415,7 +417,8 @@ mod consistency {
 
         let cache_hits_after = cache_bytes_read();
         assert_eq!(
-            cache_hits_after, cache_hits_before,
+            cache_hits_after,
+            cache_hits_before,
             "INV-PC-S1: cache served bytes ({}) despite every fill having failed — \
              a poisoned page would be a correctness bug",
             cache_hits_after - cache_hits_before
@@ -449,7 +452,7 @@ mod consistency {
     #[ignore]
     async fn inv_pc_s2_restart_byte_parity() -> Result<()> {
         let v1 = make_payload(1_500_000); // odd, > 20 cache pages
-        // Different length so (length, mtime) is guaranteed to shift.
+                                          // Different length so (length, mtime) is guaranteed to shift.
         let v2 = {
             let mut p = make_payload(1_700_000);
             // Bias every byte so a stale-cache read can't accidentally
@@ -511,8 +514,8 @@ mod consistency {
             let ctx_writer = FileSystemContext::connect(cache_off_config()).await?;
             let master = ctx_writer.acquire_master();
             let _ = master.delete(&path, false).await;
-            let mut w = GoosefsFileWriter::create_with_context(ctx_writer.clone(), &path, None)
-                .await?;
+            let mut w =
+                GoosefsFileWriter::create_with_context(ctx_writer.clone(), &path, None).await?;
             w.write(&v2).await?;
             w.close().await?;
             ctx_writer.close().await?;
@@ -539,6 +542,437 @@ mod consistency {
         }
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
+        Ok(())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GoosefsFileReader — streaming `read_next_block` path (OpenDAL / Lance).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The suite above validates `GoosefsFileInStream`. The one below validates the
+// same page-cache invariants on `GoosefsFileReader`, whose streaming
+// `read_next_block` loop is the path OpenDAL / Lance actually drive (design §7).
+// Merge gate from the upgrade design §9.4 (HR-3) / §9.5 (HR-4):
+//
+// | Case                                       | Invariant                  |
+// |--------------------------------------------|----------------------------|
+// | `inv_reader_disabled_cold_warm_parity`     | `disabled == cold == warm` |
+// | `inv_reader_read_all_equals_source`        | whole-file read == source  |
+// | `inv_reader_range_equals_source`           | every range read == source |
+// | `inv_reader_concurrent_cold_read_same_page`| HR-4 concurrent fill safe  |
+//
+// Same cluster requirement + `#[ignore]` policy as the module above.
+
+#[cfg(test)]
+mod reader_consistency {
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use bytes::Bytes;
+
+    use goosefs_sdk::auth::AuthType;
+    use goosefs_sdk::cache::metric_name as mn;
+    use goosefs_sdk::config::GoosefsConfig;
+    use goosefs_sdk::context::FileSystemContext;
+    use goosefs_sdk::error::Result;
+    use goosefs_sdk::io::{GoosefsFileReader, GoosefsFileWriter};
+    use goosefs_sdk::metrics::counter;
+
+    // ── Test harness ─────────────────────────────────────────────────────────
+
+    fn master_addr() -> String {
+        std::env::var("GOOSEFS_MASTER_ADDR").unwrap_or_else(|_| "127.0.0.1:9200".to_string())
+    }
+
+    fn auth_type() -> AuthType {
+        std::env::var("GOOSEFS_AUTH_TYPE")
+            .ok()
+            .and_then(|s| s.parse::<AuthType>().ok())
+            .unwrap_or(AuthType::NoSasl)
+    }
+
+    fn unique_cache_dir(tag: &str) -> std::path::PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("gfs_reader_pc_{tag}_{}_{ts}", std::process::id()))
+    }
+
+    fn unique_path(tag: &str) -> String {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("/reader-page-cache/{tag}_{}_{ts}.bin", std::process::id())
+    }
+
+    /// Position-dependent payload — any wrong offset / length surfaces as a
+    /// byte mismatch rather than `0 == 0` luck (same generator as the
+    /// `GoosefsFileInStream` consistency suite, for parity).
+    fn make_payload(size: usize) -> Vec<u8> {
+        (0..size)
+            .map(|i| ((i.wrapping_mul(2654435761) >> 13) ^ i) as u8)
+            .collect()
+    }
+
+    /// Cache **on**, deterministic sync fills, small pages + modest block size
+    /// so a multi-MiB payload crosses several page and block boundaries.
+    fn cache_on_config(dir: &std::path::Path) -> GoosefsConfig {
+        let mut c = GoosefsConfig::new(master_addr());
+        c.auth_type = auth_type();
+        c.client_cache_enabled = true;
+        c.client_cache_page_size = 64 * 1024; // 64 KiB pages
+        c.client_cache_dirs = vec![dir.to_string_lossy().into_owned()];
+        c.client_cache_async_write_enabled = false; // deterministic fill
+        c.block_size = 4 * 1024 * 1024; // 4 MiB blocks
+        c
+    }
+
+    /// Sibling config: cache **off**, all other knobs identical so the
+    /// comparison isolates the cache layer.
+    fn cache_off_config() -> GoosefsConfig {
+        let mut c = GoosefsConfig::new(master_addr());
+        c.auth_type = auth_type();
+        c.client_cache_enabled = false;
+        c.block_size = 4 * 1024 * 1024;
+        c
+    }
+
+    async fn write_blob(ctx: &Arc<FileSystemContext>, path: &str, payload: &[u8]) -> Result<()> {
+        let master = ctx.acquire_master();
+        let _ = master.create_directory("/reader-page-cache", true).await;
+        let _ = master.delete(path, false).await;
+        let mut w = GoosefsFileWriter::create_with_context(ctx.clone(), path, None).await?;
+        w.write(payload).await?;
+        w.close().await?;
+        Ok(())
+    }
+
+    /// Read `[offset, offset+len)` through the **streaming** reader path
+    /// (`open_range_with_context` → `read_next_block` loop) — exactly the path
+    /// OpenDAL / Lance drive. This is what the §7 change routes through the
+    /// page cache.
+    async fn read_range_via_reader(
+        ctx: &Arc<FileSystemContext>,
+        path: &str,
+        offset: u64,
+        len: u64,
+    ) -> Result<Bytes> {
+        let mut reader =
+            GoosefsFileReader::open_range_with_context(ctx.clone(), path, offset, len).await?;
+        reader.read_all().await
+    }
+
+    fn cache_bytes_read() -> i64 {
+        counter(mn::CLIENT_CACHE_BYTES_READ_CACHE).get()
+    }
+
+    /// Curated (offset, len) set hitting every consistency-relevant boundary
+    /// for `size` bytes laid out in `block`-byte blocks and `page`-byte pages.
+    fn boundary_cases(size: usize, block: usize, page: usize) -> Vec<(u64, u64)> {
+        let last = size as u64;
+        let p = page as u64;
+        let b = block as u64;
+        vec![
+            // ── Trivial ───────────────────────────────────────────
+            (0, 1),
+            (0, 4096),
+            (0, p),
+            // ── Cache-page boundary ──────────────────────────────
+            (p - 1, 1),
+            (p - 1, 2),
+            (p, p),
+            (p - 1, p + 2),
+            // ── Sub-chunk straddle (1 MiB) ───────────────────────
+            ((1 << 20) - 7, 14),
+            ((1 << 20) - 1, 1 << 20),
+            // ── Block boundary (`block` bytes) ───────────────────
+            (b - 1, 2),
+            (b - 1, b + 1),
+            (b, 4096),
+            // ── Large random spread ──────────────────────────────
+            (777, 33_000),
+            (3 * b / 2, 200_000),
+            // ── Tail ─────────────────────────────────────────────
+            (last - 1, 1),
+            (last - 4096, 4096),
+        ]
+    }
+
+    // ── HR-3: disabled == cold == warm ───────────────────────────────────────
+
+    /// **HR-3** — for the same blob, `GoosefsFileReader` returns byte-for-byte
+    /// identical data whether the cache is **disabled**, enabled on a **cold**
+    /// (miss) pass, or enabled on a **warm** (hit) pass, on every interesting
+    /// boundary. A divergence here is a data-correctness bug — the hardest gate
+    /// for wiring the cache into the reader's hot path.
+    #[tokio::test]
+    #[ignore]
+    async fn inv_reader_disabled_cold_warm_parity() -> Result<()> {
+        // 10 MiB across ~3 × 4 MiB blocks — exercises cross-block reads.
+        let payload = make_payload(10 * 1024 * 1024);
+        let block = 4 * 1024 * 1024;
+        let page = 64 * 1024;
+
+        let dir = unique_cache_dir("hr3");
+        let ctx_cache = FileSystemContext::connect(cache_on_config(&dir)).await?;
+        let ctx_direct = FileSystemContext::connect(cache_off_config()).await?;
+
+        let path = unique_path("hr3");
+        write_blob(&ctx_cache, &path, &payload).await?;
+
+        let cases = boundary_cases(payload.len(), block, page);
+
+        // ── Pass 1: cold miss on the cache side vs disabled ──────────────
+        for (off, len) in &cases {
+            let cold = read_range_via_reader(&ctx_cache, &path, *off, *len).await?;
+            let disabled = read_range_via_reader(&ctx_direct, &path, *off, *len).await?;
+            let expected = &payload[*off as usize..(*off + *len) as usize];
+            assert_eq!(
+                disabled.as_ref(),
+                expected,
+                "HR-3 (disabled): reader bytes drift from source at off={off} len={len}"
+            );
+            assert_eq!(
+                cold.as_ref(),
+                expected,
+                "HR-3 (cold): cached reader bytes drift from source at off={off} len={len}"
+            );
+            assert_eq!(
+                cold, disabled,
+                "HR-3: disabled != cold at off={off} len={len}"
+            );
+        }
+
+        // ── Pass 2: warm hit on the cache side ───────────────────────────
+        let cache_before = cache_bytes_read();
+        for (off, len) in &cases {
+            let warm = read_range_via_reader(&ctx_cache, &path, *off, *len).await?;
+            let expected = &payload[*off as usize..(*off + *len) as usize];
+            assert_eq!(
+                warm.as_ref(),
+                expected,
+                "HR-3 (warm): cached reader bytes drift from source at off={off} len={len}"
+            );
+        }
+        // Canary: the warm pass must have served *some* bytes from cache,
+        // proving the reader is actually on the cache path (not silently
+        // bypassing it). Byte-equality above holds regardless.
+        assert!(
+            cache_bytes_read() > cache_before,
+            "HR-3: warm pass served zero bytes from cache — is GoosefsFileReader \
+             actually routed through read_through_cache?"
+        );
+
+        ctx_cache.acquire_master().delete(&path, false).await.ok();
+        ctx_cache.close().await?;
+        ctx_direct.close().await?;
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        Ok(())
+    }
+
+    // ── Whole-file + full range coverage ─────────────────────────────────────
+
+    /// The one-shot whole-file reader (`read_file_with_context`) returns the
+    /// exact source bytes under cache-on, on both cold and warm passes.
+    #[tokio::test]
+    #[ignore]
+    async fn inv_reader_read_all_equals_source() -> Result<()> {
+        let payload = make_payload(3 * 1024 * 1024 + 7); // odd tail
+        let dir = unique_cache_dir("all");
+        let ctx = FileSystemContext::connect(cache_on_config(&dir)).await?;
+
+        let path = unique_path("all");
+        write_blob(&ctx, &path, &payload).await?;
+
+        // Cold: primes the cache.
+        let cold = GoosefsFileReader::read_file_with_context(ctx.clone(), &path).await?;
+        assert_eq!(cold.len(), payload.len(), "read_all length (cold)");
+        assert_eq!(cold.as_ref(), payload.as_slice(), "read_all bytes (cold)");
+
+        // Warm: served (partly) from cache — must still match byte-for-byte.
+        let warm = GoosefsFileReader::read_file_with_context(ctx.clone(), &path).await?;
+        assert_eq!(warm.as_ref(), payload.as_slice(), "read_all bytes (warm)");
+        assert_eq!(warm, cold, "read_all cold vs warm mismatch");
+
+        ctx.acquire_master().delete(&path, false).await.ok();
+        ctx.close().await?;
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        Ok(())
+    }
+
+    /// Reading the whole file as a single range and as a sequence of adjacent
+    /// misaligned ranges both reconstruct the source exactly (cache-on).
+    #[tokio::test]
+    #[ignore]
+    async fn inv_reader_range_equals_source() -> Result<()> {
+        let payload = make_payload(2 * 1024 * 1024 + 123);
+        let dir = unique_cache_dir("range");
+        let ctx = FileSystemContext::connect(cache_on_config(&dir)).await?;
+
+        let path = unique_path("range");
+        write_blob(&ctx, &path, &payload).await?;
+
+        // Single full range.
+        let whole = read_range_via_reader(&ctx, &path, 0, payload.len() as u64).await?;
+        assert_eq!(whole.as_ref(), payload.as_slice(), "full range bytes");
+
+        // Reassemble from adjacent, intentionally-misaligned ranges.
+        let mut buf = Vec::with_capacity(payload.len());
+        let steps: [u64; 5] = [37, 65_521, 33_333, 1 << 20, 4096];
+        let mut off = 0u64;
+        let mut si = 0usize;
+        while off < payload.len() as u64 {
+            let len = steps[si % steps.len()].min(payload.len() as u64 - off);
+            si += 1;
+            let chunk = read_range_via_reader(&ctx, &path, off, len).await?;
+            assert_eq!(
+                chunk.as_ref(),
+                &payload[off as usize..(off + len) as usize],
+                "range chunk bytes at off={off} len={len}"
+            );
+            buf.extend_from_slice(&chunk);
+            off += len;
+        }
+        assert_eq!(
+            buf.as_slice(),
+            payload.as_slice(),
+            "reassembled range bytes"
+        );
+
+        ctx.acquire_master().delete(&path, false).await.ok();
+        ctx.close().await?;
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        Ok(())
+    }
+
+    // ── HR-4: concurrent cold-read fill safety ───────────────────────────────
+
+    /// **HR-4** — many tasks concurrently issue the *same* cold range read via
+    /// independent `GoosefsFileReader`s sharing one cache-on context. They race
+    /// to fill the same pages; the cache's striped per-page locks + atomic
+    /// `tmp + rename` page writes guarantee no reader ever observes a
+    /// half-written page. Assert every task returns the exact source bytes and
+    /// none panics. The visibility window only affects *hit/miss* (performance),
+    /// never the bytes returned (correctness) — this test locks that in.
+    #[tokio::test]
+    #[ignore]
+    async fn inv_reader_concurrent_cold_read_same_page() -> Result<()> {
+        let payload = make_payload(2 * 1024 * 1024 + 4096);
+        let dir = unique_cache_dir("hr4");
+        let ctx = FileSystemContext::connect(cache_on_config(&dir)).await?;
+
+        let path = unique_path("hr4");
+        write_blob(&ctx, &path, &payload).await?;
+
+        // A window spanning many 64 KiB pages, read concurrently from a cold
+        // cache so several tasks race to fill the *same* pages.
+        let off: u64 = 777;
+        let len: u64 = 512 * 1024 + 33;
+        let expected = payload[off as usize..(off + len) as usize].to_vec();
+
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let ctx = ctx.clone();
+                let path = path.clone();
+                tokio::spawn(async move { read_range_via_reader(&ctx, &path, off, len).await })
+            })
+            .collect();
+
+        for t in tasks {
+            let bytes = t.await.expect("HR-4: reader task panicked")?;
+            assert_eq!(
+                bytes.as_ref(),
+                expected.as_slice(),
+                "HR-4: concurrent cold read returned wrong bytes (half-written page?)"
+            );
+        }
+
+        ctx.acquire_master().delete(&path, false).await.ok();
+        ctx.close().await?;
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        Ok(())
+    }
+
+    // ── HR-3 matrix edges: empty file + exact page-multiple length ───────────
+
+    /// Closes the remaining §9.4 boundary dimensions for the reader: an
+    /// **empty file** (0 bytes) and a file whose length is an exact multiple of
+    /// the cache page size (final page full, no EOF remainder). Both must be
+    /// byte-identical across cache-off, cold, and warm.
+    #[tokio::test]
+    #[ignore]
+    async fn inv_reader_empty_and_page_multiple() -> Result<()> {
+        let page = 64 * 1024u64;
+
+        // (a) Empty file — read_all must return empty on every path.
+        {
+            let dir = unique_cache_dir("empty");
+            let ctx = FileSystemContext::connect(cache_on_config(&dir)).await?;
+            let ctx_direct = FileSystemContext::connect(cache_off_config()).await?;
+            let path = unique_path("empty");
+            write_blob(&ctx, &path, &[]).await?;
+
+            let disabled =
+                GoosefsFileReader::read_file_with_context(ctx_direct.clone(), &path).await?;
+            let cold = GoosefsFileReader::read_file_with_context(ctx.clone(), &path).await?;
+            let warm = GoosefsFileReader::read_file_with_context(ctx.clone(), &path).await?;
+            assert!(disabled.is_empty(), "empty file: disabled read not empty");
+            assert!(cold.is_empty(), "empty file: cold read not empty");
+            assert!(warm.is_empty(), "empty file: warm read not empty");
+
+            ctx.acquire_master().delete(&path, false).await.ok();
+            ctx.close().await?;
+            ctx_direct.close().await?;
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+        }
+
+        // (b) Length is an exact multiple of the page size (4 full pages) —
+        //     page-aligned ranges + whole file, cold==warm==disabled==source.
+        {
+            let payload = make_payload((page * 4) as usize);
+            let dir = unique_cache_dir("pmul");
+            let ctx = FileSystemContext::connect(cache_on_config(&dir)).await?;
+            let ctx_direct = FileSystemContext::connect(cache_off_config()).await?;
+            let path = unique_path("pmul");
+            write_blob(&ctx, &path, &payload).await?;
+
+            let cases: &[(u64, u64)] = &[
+                (0, page),        // first full page
+                (page, page),     // second full page
+                (page * 3, page), // last full page (no remainder)
+                (0, page * 4),    // whole file, exact multiple
+            ];
+            for &(off, len) in cases {
+                let expected = &payload[off as usize..(off + len) as usize];
+                let disabled = read_range_via_reader(&ctx_direct, &path, off, len).await?;
+                let cold = read_range_via_reader(&ctx, &path, off, len).await?;
+                let warm = read_range_via_reader(&ctx, &path, off, len).await?;
+                assert_eq!(
+                    disabled.as_ref(),
+                    expected,
+                    "page-multiple disabled off={off} len={len}"
+                );
+                assert_eq!(
+                    cold.as_ref(),
+                    expected,
+                    "page-multiple cold off={off} len={len}"
+                );
+                assert_eq!(
+                    warm.as_ref(),
+                    expected,
+                    "page-multiple warm off={off} len={len}"
+                );
+            }
+
+            ctx.acquire_master().delete(&path, false).await.ok();
+            ctx.close().await?;
+            ctx_direct.close().await?;
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+        }
+
         Ok(())
     }
 }

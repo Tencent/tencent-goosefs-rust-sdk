@@ -13,6 +13,21 @@
 //! cfg = Config.from_properties_file("/etc/goosefs/goosefs-site.properties")
 //! ```
 //!
+//! ## Precedence
+//!
+//! Every `PyConfig` constructor (`Config(...)`, `Config.from_uri(...)`,
+//! `Config.from_properties_file(...)`) applies configuration in the same
+//! order as `GoosefsConfig::from_properties_auto` on the Rust side:
+//!
+//!   1. built-in defaults,
+//!   2. properties file / `properties=` dict / `gfs://` URI,
+//!   3. `GOOSEFS_*` environment variables (highest priority).
+//!
+//! This means, for example, exporting
+//! `GOOSEFS_USER_METRICS_COLLECTION_ENABLED=false` in the shell that
+//! launches a Python process disables the metrics heartbeat regardless
+//! of what the `properties=` dict or `goosefs-site.properties` file says.
+//!
 //! ## Implementation note
 //!
 //! The SDK already knows how to parse a `goosefs-site.properties` file via
@@ -132,6 +147,15 @@ impl PyConfig {
             }
         }
 
+        // Overlay `GOOSEFS_*` environment variables on top of the caller's
+        // explicit configuration. This matches the precedence documented
+        // above (defaults → properties → env) and mirrors the SDK's own
+        // `from_properties_auto` helper. In particular this is what makes
+        // `GOOSEFS_USER_METRICS_COLLECTION_ENABLED=false` actually reach
+        // `PyConfig.metrics_enabled` — without this step the env var was
+        // parsed by the SDK constants but never applied to Python configs.
+        let cfg = cfg.apply_env();
+
         Ok(Self { inner: cfg })
     }
 
@@ -154,10 +178,14 @@ impl PyConfig {
     }
 
     /// Load a config from a `goosefs-site.properties` file on disk.
+    ///
+    /// `GOOSEFS_*` environment variables are overlaid on top of the file
+    /// (see the module-level *Precedence* note).
     #[staticmethod]
     fn from_properties_file(path: &str) -> PyResult<Self> {
         let cfg = GoosefsConfig::from_properties(path)
-            .map_err(|e| ConfigError::new_err(e.to_string()))?;
+            .map_err(|e| ConfigError::new_err(e.to_string()))?
+            .apply_env();
         Ok(Self { inner: cfg })
     }
 
