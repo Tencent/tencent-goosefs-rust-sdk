@@ -262,9 +262,9 @@ impl GoosefsFileReader {
         // **A3** (`docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md`): consult the opt-in
         // FileInfo metadata cache first. On hit, skip the RPC entirely; on
         // miss, populate the cache after a successful `get_status`. The
-        // cache is `None` when the caller has not opted in
-        // (`file_info_cache_ttl == 0`, the default), so this is a zero-cost
-        // branch on the disabled path.
+        // cache is `None` only when the caller has explicitly opted out
+        // (`file_info_cache_ttl == 0`). By default the TTL is 30 s, so this
+        // branch consults the live cache.
         //
         // **S3**: `get` returns `Arc<FileInfo>` — a cache hit is now a
         // single `Arc::clone` (atomic inc) instead of a deep

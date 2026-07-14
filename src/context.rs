@@ -131,7 +131,8 @@ pub struct FileSystemContext {
     /// Opt-in short-TTL `FileInfo` metadata cache
     /// (FLAMEGRAPH_OPTIMIZATION_PLAN §A3).
     ///
-    /// `None` when `config.file_info_cache_ttl == 0` (default). When enabled,
+    /// `None` only when `config.file_info_cache_ttl == 0`. By default the
+    /// TTL is 30 s, so this is a live cache. When enabled,
     /// [`GoosefsFileReader::open_with_context`] and
     /// [`GoosefsFileInStream::open_with_context`] consult this cache before
     /// issuing `MasterClient::get_status`, and the write path
@@ -372,7 +373,8 @@ impl FileSystemContext {
     /// Return the shared opt-in `FileInfo` metadata cache
     /// (FLAMEGRAPH_OPTIMIZATION_PLAN §A3).
     ///
-    /// `None` when `config.file_info_cache_ttl == 0` (default).
+    /// `None` only when `config.file_info_cache_ttl == 0` (opt-out).
+    /// By default the TTL is 30 s, so this returns the live cache.
     pub fn acquire_file_info_cache(&self) -> Option<Arc<FileInfoCache>> {
         self.file_info_cache.clone()
     }
@@ -859,27 +861,27 @@ mod tests {
 
     // ── A3: FileInfo cache opt-in semantics ─────────────────────────────
 
-    /// FLAMEGRAPH_OPTIMIZATION_PLAN §A3: the cache is **disabled** by
-    /// default so `FileSystemContext::acquire_file_info_cache()` must
-    /// return `None` on a plain `GoosefsConfig::default()`.
+    /// FLAMEGRAPH_OPTIMIZATION_PLAN §A3: the cache is **enabled** by default
+    /// with a 30 s TTL, so `FileSystemContext::acquire_file_info_cache()`
+    /// must return a live cache on a plain `GoosefsConfig::default()`.
     #[test]
-    fn file_info_cache_disabled_by_default() {
+    fn file_info_cache_enabled_by_default() {
         // We can't call `FileSystemContext::connect()` (needs live master),
         // so exercise the field-population logic directly on the config
         // + `FileInfoCache::maybe_new` gate.
         let cfg = GoosefsConfig::default();
         assert_eq!(
             cfg.file_info_cache_ttl,
-            Duration::ZERO,
-            "default TTL must be ZERO (opt-in per §A3)"
+            Duration::from_secs(30),
+            "default TTL must be 30 s (enabled by default per §A3)"
         );
         assert!(
             crate::file_info_cache::FileInfoCache::maybe_new(
                 cfg.file_info_cache_ttl,
                 cfg.file_info_cache_capacity,
             )
-            .is_none(),
-            "FileInfoCache::maybe_new must return None when TTL == 0"
+            .is_some(),
+            "FileInfoCache::maybe_new must return Some when default TTL > 0"
         );
     }
 

@@ -346,7 +346,7 @@ async fn main() -> goosefs_sdk::error::Result<()> {
     // ── Enable the local page cache ──────────────────────────────
     config.client_cache_enabled = true;                       // off by default
     config.client_cache_page_size = 1024 * 1024;              // 1 MiB pages
-    config.client_cache_size = 512 * 1024 * 1024;             // 512 MiB per dir
+    config.client_cache_size = 1024 * 1024 * 1024;           // 1 GiB per dir
     config.client_cache_dirs = vec!["/tmp/goosefs_cache".into()];
     // Optional knobs:
     // config.client_cache_evictor = goosefs_sdk::config::CacheEvictorType::Lru; // or Lfu

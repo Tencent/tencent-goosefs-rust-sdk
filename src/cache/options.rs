@@ -101,8 +101,8 @@ mod tests {
         let opts = CacheManagerOptions::from_config(&cfg);
 
         assert_eq!(opts.page_size, 1024 * 1024);
-        // 512 MiB * 0.95
-        assert_eq!(opts.dir_capacity, (512.0 * 1024.0 * 1024.0 * 0.95) as u64);
+        // 1 GiB * 0.95
+        assert_eq!(opts.dir_capacity, (1024.0 * 1024.0 * 1024.0 * 0.95) as u64);
         assert_eq!(opts.dirs.len(), 1);
         assert_eq!(opts.evictor, CacheEvictorType::Lfu);
         assert!(opts.async_write_enabled);

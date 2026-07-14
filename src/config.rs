@@ -692,8 +692,8 @@ const DEFAULT_PUSHGATEWAY_PUSH_INTERVAL_MS: u64 = 10_000;
 
 /// Default page size: 1 MiB (mirrors Java `USER_CLIENT_CACHE_PAGE_SIZE`).
 const DEFAULT_CLIENT_CACHE_PAGE_SIZE: u64 = 1024 * 1024;
-/// Default per-directory cache capacity: 512 MiB (mirrors Java `USER_CLIENT_CACHE_SIZE`).
-const DEFAULT_CLIENT_CACHE_SIZE: u64 = 512 * 1024 * 1024;
+/// Default per-directory cache capacity: 20 GiB (mirrors Java `USER_CLIENT_CACHE_SIZE`).
+const DEFAULT_CLIENT_CACHE_SIZE: u64 = 20 * 1024 * 1024 * 1024;
 /// Default async-write concurrency (mirrors Java `USER_CLIENT_CACHE_ASYNC_WRITE_THREADS`).
 const DEFAULT_CLIENT_CACHE_ASYNC_WRITE_THREADS: usize = 16;
 /// Default cache directory used when none is configured.
@@ -923,9 +923,10 @@ pub const ENV_WORKER_CONNECTION_POOL_SIZE: &str = "GOOSEFS_WORKER_CONNECTION_POO
 
 /// Environment variable: client-side `FileInfo` cache TTL in **milliseconds**.
 ///
-/// Mirrors [`GoosefsConfig::file_info_cache_ttl`]. Set to `0` (default) to
-/// disable the cache. Any positive value enables it and controls staleness
-/// bound for out-of-band mutations. See FLAMEGRAPH_OPTIMIZATION_PLAN §A3.
+/// Mirrors [`GoosefsConfig::file_info_cache_ttl`]. Default is `30000` (30 s),
+/// which enables the cache. Set to `0` to disable the cache. Any positive
+/// value controls staleness bound for out-of-band mutations. See
+/// FLAMEGRAPH_OPTIMIZATION_PLAN §A3.
 ///
 /// Example: `export GOOSEFS_FILE_INFO_CACHE_TTL_MS=2000` (2 s TTL).
 pub const ENV_FILE_INFO_CACHE_TTL_MS: &str = "GOOSEFS_FILE_INFO_CACHE_TTL_MS";
@@ -988,8 +989,8 @@ pub const STORAGE_OPT_WORKER_CONNECTION_POOL_SIZE: &str = "goosefs_worker_connec
 
 /// Storage option key for the client-side `FileInfo` cache TTL in **milliseconds**.
 ///
-/// Companion to [`ENV_FILE_INFO_CACHE_TTL_MS`]. `0` (default) disables the
-/// cache; any positive value enables it.
+/// Companion to [`ENV_FILE_INFO_CACHE_TTL_MS`]. Default is `30000` (30 s),
+/// which enables the cache; `0` disables it.
 pub const STORAGE_OPT_FILE_INFO_CACHE_TTL_MS: &str = "goosefs_file_info_cache_ttl_ms";
 
 /// Storage option key for the `FileInfo` LRU cache capacity.
@@ -1545,7 +1546,7 @@ pub struct GoosefsConfig {
     #[serde(default = "default_client_cache_page_size")]
     pub client_cache_page_size: u64,
 
-    /// Per-directory cache capacity in bytes (default: 512 MiB).
+    /// Per-directory cache capacity in bytes (default: 1 GiB).
     ///
     /// Mirrors Java `goosefs.user.client.cache.size`.
     #[serde(default = "default_client_cache_size")]
@@ -1814,7 +1815,7 @@ fn default_client_cache_uring_enabled() -> bool {
     cfg!(target_os = "linux")
 }
 fn default_client_cache_uring_queue_depth() -> usize {
-    16384
+    32768
 }
 fn default_client_cache_uring_thread_count() -> usize {
     2
@@ -1828,11 +1829,14 @@ fn default_false_bool() -> bool {
 
 // ── FileInfo metadata cache defaults (FLAMEGRAPH_OPTIMIZATION_PLAN §A3) ─
 fn default_file_info_cache_ttl() -> Duration {
-    // ZERO = disabled. Opt-in per §A3.
-    Duration::ZERO
+    // 30 s by default (FLAMEGRAPH_OPTIMIZATION_PLAN §A3): a non-zero TTL
+    // enables the client-side FileInfo metadata cache out of the box and
+    // bounds staleness for out-of-band mutations. Set the TTL to `0` to
+    // disable the cache (opt-out).
+    Duration::from_secs(30)
 }
 fn default_file_info_cache_capacity() -> usize {
-    4096
+    16384
 }
 
 // ── Range coalesce defaults (FLAMEGRAPH_OPTIMIZATION_PLAN §B2) ─────────
@@ -4077,7 +4081,8 @@ goosefs.user.network.data.transfer.chunk.size=1MB
         assert_eq!(cfg.file_info_cache_ttl, Duration::from_millis(2500));
     }
 
-    /// `0` is explicitly meaningful (= disabled) so it must round-trip.
+    /// `0` is explicitly meaningful (= disabled) and must override the
+    /// 30 s default when set via the env var.
     #[test]
     fn test_apply_env_file_info_cache_ttl_zero_disables() {
         let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());

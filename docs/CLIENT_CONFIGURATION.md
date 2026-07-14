@@ -240,19 +240,19 @@ never affect correctness). Mirrors Java's `goosefs.user.client.cache.*`.
 |-------|------|---------|-------------|
 | `client_cache_enabled` | `bool` | `false` | Master switch for the local page cache. When `false`, all reads bypass the cache (unchanged behavior). |
 | `client_cache_page_size` | `u64` | `1048576` (1 MiB) | Page size in bytes. Reads are split into pages of this size. |
-| `client_cache_size` | `u64` | `536870912` (512 MiB) | Per-directory capacity in bytes. ~5% is reserved for filesystem/metadata overhead. |
+| `client_cache_size` | `u64` | `21474836480` (20 GiB) | Per-directory capacity in bytes. ~5% is reserved for filesystem/metadata overhead. |
 | `client_cache_dirs` | `Vec<String>` | `["/tmp/goosefs_cache"]` | Cache directories. Multiple dirs spread pages by file affinity (`HashAllocator`). |
-| `client_cache_evictor` | `CacheEvictorType` | `Lru` | Eviction policy when a directory is full. See [CacheEvictorType](#75-cacheevictortype). |
+| `client_cache_evictor` | `CacheEvictorType` | `Lfu` | Eviction policy when a directory is full. See [CacheEvictorType](#75-cacheevictortype). |
 | `client_cache_async_write_enabled` | `bool` | `true` | Whether missed pages are back-filled asynchronously (bounded write-back pool). `false` = fill inline before the read returns. |
 | `client_cache_async_write_threads` | `usize` | `16` | Async write-back concurrency (permits). Excess fills are dropped (`CachePutAsyncRejectionErrors`). |
 | `client_cache_quota_enabled` | `bool` | `false` | Whether per-scope quota accounting is enabled (currently treated as Global). |
 | `client_cache_ttl_secs` | `u64` | `0` | Page time-to-live in seconds. `0` = no expiry. Expired pages are dropped lazily on `get` and by a background sweeper. |
 | `client_cache_sequential_read_enabled` | `bool` | `false` | Whether **sequential** reads (`read`) are routed through the cache. Random reads (`read_at`) always consult the cache when enabled. Off by default: routing large sequential scans through fixed-size pages turns one streamed request into many per-page positioned reads (read amplification), and a `NoCache` sequential read would re-fetch a whole page per small buffer with no caching benefit. Enable only when sequential reads are expected to be re-read. |
 | `client_cache_uring_enabled` | `bool` | `true` on Linux / `false` on other platforms | **io_uring backend selector (P4, Linux 5.1+).** When `true` and io_uring is available at runtime, cache-hit reads use io_uring SQE/CQE instead of `tokio::fs` `spawn_blocking`, eliminating the per-hit thread-switch overhead (the dominant cost in the 300 QPS `clientcache_oncpu_3` profile). Falls back transparently to `LocalPageStore` (tokio::fs) when io_uring is unavailable, so the setting is safe to leave on by default. See [`docs/CLIENT_PAGE_CACHE_IO_URING_DESIGN.md`](CLIENT_PAGE_CACHE_IO_URING_DESIGN.md). |
-| `client_cache_uring_queue_depth` | `usize` | `16384` | **io_uring SQ/CQ depth.** Per-ring entry capacity. Raise (e.g. `32768`) for high-concurrency workloads to avoid SQ-full back-pressure; lower to reduce per-process kernel memory. `0` falls back to the built-in default of 16384. |
+| `client_cache_uring_queue_depth` | `usize` | `32768` | **io_uring SQ/CQ depth.** Per-ring entry capacity. Raise further (e.g. `65536`) for high-concurrency workloads to avoid SQ-full back-pressure; lower to reduce per-process kernel memory. `0` falls back to the built-in default of 32768. |
 | `client_cache_uring_thread_count` | `usize` | `2` | **io_uring background thread count.** Each thread owns one `IoUring` instance; requests are dispatched round-robin. Raise to `4` on hosts with many idle cores and high concurrency; the threads spend most of their time in `io_uring_enter`, so over-provisioning wastes RAM without throughput gain. `0` falls back to the built-in default of 2. |
-| `file_info_cache_ttl` | `Duration` | `0` (**disabled**) | Client-side `FileInfo` (metadata) cache TTL. **Opt-in per FLAMEGRAPH_OPTIMIZATION_PLAN §A3.** When set (via `.with_file_info_cache_ttl()`), amortises the per-open `MasterClient::get_status` cost when the same file is opened multiple times inside one query. The SDK **explicitly invalidates** the entry on every write / delete / rename issued through this client, so the staleness window only affects **out-of-band** mutations by other writers. |
-| `file_info_cache_capacity` | `usize` | `4096` | Maximum `(path, FileInfo)` LRU entries kept when `file_info_cache_ttl > 0`. Values `< 1` are clamped to `1`. |
+| `file_info_cache_ttl` | `Duration` | `30s` (enabled) | Client-side `FileInfo` (metadata) cache TTL. **On by default per FLAMEGRAPH_OPTIMIZATION_PLAN §A3** (30 s) — amortises the per-open `MasterClient::get_status` cost when the same file is opened multiple times inside one query. Set to `Duration::ZERO` to opt out (disable the cache). The SDK **explicitly invalidates** the entry on every write / delete / rename issued through this client, so the staleness window only affects **out-of-band** mutations by other writers. |
+| `file_info_cache_capacity` | `usize` | `16384` | Maximum `(path, FileInfo)` LRU entries kept when `file_info_cache_ttl > 0`. Values `< 1` are clamped to `1`. |
 | `range_coalesce_enabled` | `bool` | `false` (**disabled**) | Whether [`GoosefsFileReader::read_ranges_with_context`] merges adjacent input ranges into fewer, larger `read_range` calls. **Opt-in per FLAMEGRAPH_OPTIMIZATION_PLAN §B2.** When off (default), the multi-range API serves each input verbatim — behaviour is bit-identical to a caller-side loop. When on, adjacent ranges within `range_coalesce_gap_bytes` are merged (subject to `range_coalesce_max_bytes`) and the payload is spliced back so each output slice is byte-identical to a standalone `read_range`. Trades small over-read (`≤ Σ gap_i` bytes) for a large drop in H2 stream count on Lance / DuckDB scan patterns. **Failure semantics.** Because a merged fetch shares one transport with all its constituent input ranges, a fetch failure fails **all** those ranges together (this matches the failure model the underlying H2 layer would produce anyway, but it does enlarge the blast radius compared with per-range independent reads — enable per-workload if failure isolation between adjacent small ranges matters). |
 | `range_coalesce_gap_bytes` | `u64` | `65536` (64 KiB) | Maximum permitted gap between two adjacent input ranges for them to be merged. Consulted only when `range_coalesce_enabled = true`. |
 | `range_coalesce_max_bytes` | `u64` | `4194304` (4 MiB) | Upper bound on any single **merged** fetch. A caller-requested range whose own length already exceeds this cap is served as one fetch of that size (splitting a single caller request would violate the byte-equivalence contract) — the cap only prevents *merging* from ballooning the request. Values `< 1` are clamped to `1`. |
@@ -408,20 +408,20 @@ properties file values and built-in defaults.
 | `GOOSEFS_LOGIN_IMPERSONATION_USERNAME` | `login_impersonation_username` | `"_HDFS_USER_"` | Login impersonation username. |
 | `GOOSEFS_USER_CLIENT_CACHE_ENABLED` | `client_cache_enabled` | `false` | Enable the local page cache (`true`/`false`). |
 | `GOOSEFS_USER_CLIENT_CACHE_PAGE_SIZE` | `client_cache_page_size` | `1048576` (1 MiB) | Page size in bytes (plain integer). |
-| `GOOSEFS_USER_CLIENT_CACHE_SIZE` | `client_cache_size` | `536870912` (512 MiB) | Per-directory capacity in bytes (plain integer). |
+| `GOOSEFS_USER_CLIENT_CACHE_SIZE` | `client_cache_size` | `21474836480` (20 GiB) | Per-directory capacity in bytes (plain integer). |
 | `GOOSEFS_USER_CLIENT_CACHE_DIRS` | `client_cache_dirs` | `["/tmp/goosefs_cache"]` | Cache directories (comma-separated). |
-| `GOOSEFS_USER_CLIENT_CACHE_EVICTION_POLICY` | `client_cache_evictor` | `Lru` | Eviction policy: `LRU` / `LFU` (case-insensitive). |
+| `GOOSEFS_USER_CLIENT_CACHE_EVICTION_POLICY` | `client_cache_evictor` | `Lfu` | Eviction policy: `LRU` / `LFU` (case-insensitive). |
 | `GOOSEFS_USER_CLIENT_CACHE_ASYNC_WRITE_ENABLED` | `client_cache_async_write_enabled` | `true` | Async back-fill enabled (`true`/`false`). |
 | `GOOSEFS_USER_CLIENT_CACHE_ASYNC_WRITE_THREADS` | `client_cache_async_write_threads` | `16` | Async write-back concurrency (plain integer). |
 | `GOOSEFS_USER_CLIENT_CACHE_QUOTA_ENABLED` | `client_cache_quota_enabled` | `false` | Quota accounting enabled (`true`/`false`). |
 | `GOOSEFS_USER_CLIENT_CACHE_TTL_SECONDS` | `client_cache_ttl_secs` | `0` (no expiry) | Page TTL in seconds (`0` = no expiry). |
 | `GOOSEFS_USER_CLIENT_CACHE_SEQUENTIAL_READ_ENABLED` | `client_cache_sequential_read_enabled` | `false` | Route sequential reads through the cache (`true`/`false`). |
 | `GOOSEFS_USER_CLIENT_CACHE_URING_ENABLED` | `client_cache_uring_enabled` | `true` on Linux / `false` on other platforms | Use the io_uring page-cache backend (`true`/`false`). Falls back to tokio::fs when io_uring is unavailable. |
-| `GOOSEFS_USER_CLIENT_CACHE_URING_QUEUE_DEPTH` | `client_cache_uring_queue_depth` | `16384` | io_uring SQ/CQ depth (plain integer). `0` is ignored. |
+| `GOOSEFS_USER_CLIENT_CACHE_URING_QUEUE_DEPTH` | `client_cache_uring_queue_depth` | `32768` | io_uring SQ/CQ depth (plain integer). `0` is ignored. |
 | `GOOSEFS_USER_CLIENT_CACHE_URING_THREAD_COUNT` | `client_cache_uring_thread_count` | `2` | io_uring background thread count (plain integer). `0` is ignored. |
 | `GOOSEFS_WORKER_CONNECTION_POOL_SIZE` | `worker_connection_pool_size` | `min(cores, 4)` | Per-worker gRPC channel pool size (plain integer). `0` is clamped to `1`; non-numeric values are ignored (default kept). See FLAMEGRAPH_OPTIMIZATION_PLAN §B3. |
-| `GOOSEFS_FILE_INFO_CACHE_TTL_MS` | `file_info_cache_ttl` | `0` (**disabled**) | Client-side `FileInfo` cache TTL in **milliseconds**. `0` (default) disables the cache; any positive value enables it. See FLAMEGRAPH_OPTIMIZATION_PLAN §A3. |
-| `GOOSEFS_FILE_INFO_CACHE_CAPACITY` | `file_info_cache_capacity` | `4096` | Maximum `(path, FileInfo)` LRU entries when the FileInfo cache is enabled (plain integer). `0` is clamped to `1`. |
+| `GOOSEFS_FILE_INFO_CACHE_TTL_MS` | `file_info_cache_ttl` | `30000` (30 s) | Client-side `FileInfo` cache TTL in **milliseconds**. Default is 30 s (cache enabled). `0` disables the cache; any positive value controls staleness bound for out-of-band mutations. See FLAMEGRAPH_OPTIMIZATION_PLAN §A3. |
+| `GOOSEFS_FILE_INFO_CACHE_CAPACITY` | `file_info_cache_capacity` | `16384` | Maximum `(path, FileInfo)` LRU entries when the FileInfo cache is enabled (plain integer). `0` is clamped to `1`. |
 | `GOOSEFS_SHORT_CIRCUIT_ENABLED` | `short_circuit_enabled` | `false` | Master kill switch for the short-circuit local-mmap read path (`true`/`false`). **Disabled by default** since 0.1.6 (see §2.9 and `docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md` §C6). |
 | `GOOSEFS_SHORT_CIRCUIT_CACHE_CAPACITY` | `short_circuit_cache_capacity` | `64` | Per-task LRU capacity for hot-block SC readers (plain integer). |
 | `GOOSEFS_SHORT_CIRCUIT_CACHE_TTL_MS` | `short_circuit_cache_ttl` | `30000` (30s) | Idle TTL of a cached SC reader in **milliseconds**. |
@@ -457,15 +457,15 @@ These constants are used in `storage_options` maps (e.g. Lance's
 | `STORAGE_OPT_LOGIN_IMPERSONATION_USERNAME` | `goosefs_login_impersonation_username` | `"_HDFS_USER_"` | Login impersonation username. |
 | `STORAGE_OPT_CLIENT_CACHE_ENABLED` | `goosefs_client_cache_enabled` | `false` | Enable the local page cache. |
 | `STORAGE_OPT_CLIENT_CACHE_PAGE_SIZE` | `goosefs_client_cache_page_size` | `1048576` (1 MiB) | Page size in bytes. |
-| `STORAGE_OPT_CLIENT_CACHE_SIZE` | `goosefs_client_cache_size` | `536870912` (512 MiB) | Per-directory capacity in bytes. |
+| `STORAGE_OPT_CLIENT_CACHE_SIZE` | `goosefs_client_cache_size` | `21474836480` (20 GiB) | Per-directory capacity in bytes. |
 | `STORAGE_OPT_CLIENT_CACHE_DIRS` | `goosefs_client_cache_dirs` | `["/tmp/goosefs_cache"]` | Cache directories (comma-separated). |
-| `STORAGE_OPT_CLIENT_CACHE_EVICTOR` | `goosefs_client_cache_eviction_policy` | `Lru` | Eviction policy (`LRU`/`LFU`). |
+| `STORAGE_OPT_CLIENT_CACHE_EVICTOR` | `goosefs_client_cache_eviction_policy` | `Lfu` | Eviction policy (`LRU`/`LFU`). |
 | `STORAGE_OPT_CLIENT_CACHE_URING_ENABLED` | `goosefs_client_cache_uring_enabled` | `true` on Linux / `false` on other platforms | Use the io_uring page-cache backend. |
-| `STORAGE_OPT_CLIENT_CACHE_URING_QUEUE_DEPTH` | `goosefs_client_cache_uring_queue_depth` | `16384` | io_uring SQ/CQ depth (integer as string). |
+| `STORAGE_OPT_CLIENT_CACHE_URING_QUEUE_DEPTH` | `goosefs_client_cache_uring_queue_depth` | `32768` | io_uring SQ/CQ depth (integer as string). |
 | `STORAGE_OPT_CLIENT_CACHE_URING_THREAD_COUNT` | `goosefs_client_cache_uring_thread_count` | `2` | io_uring background thread count (integer as string). |
 | `STORAGE_OPT_WORKER_CONNECTION_POOL_SIZE` | `goosefs_worker_connection_pool_size` | `min(cores, 4)` | Per-worker gRPC channel pool size (integer as string). `0` is clamped to `1`. |
-| `STORAGE_OPT_FILE_INFO_CACHE_TTL_MS` | `goosefs_file_info_cache_ttl_ms` | `0` (**disabled**) | Client-side `FileInfo` cache TTL in **milliseconds** (integer as string). `0` (default) = cache disabled. |
-| `STORAGE_OPT_FILE_INFO_CACHE_CAPACITY` | `goosefs_file_info_cache_capacity` | `4096` | `FileInfo` LRU capacity when the cache is enabled (integer as string). `0` is clamped to `1`. |
+| `STORAGE_OPT_FILE_INFO_CACHE_TTL_MS` | `goosefs_file_info_cache_ttl_ms` | `30000` (30 s) | Client-side `FileInfo` cache TTL in **milliseconds** (integer as string). Default is 30 s (cache enabled). `0` disables the cache; any positive value controls staleness bound for out-of-band mutations. |
+| `STORAGE_OPT_FILE_INFO_CACHE_CAPACITY` | `goosefs_file_info_cache_capacity` | `16384` | `FileInfo` LRU capacity when the cache is enabled (integer as string). `0` is clamped to `1`. |
 | `STORAGE_OPT_SHORT_CIRCUIT_ENABLED` | `goosefs_short_circuit_enabled` | `false` | Master kill switch for the short-circuit local-mmap read path. **Disabled by default** since 0.1.6. |
 | `STORAGE_OPT_SHORT_CIRCUIT_CACHE_CAPACITY` | `goosefs_short_circuit_cache_capacity` | `64` | Per-task LRU capacity for hot-block SC readers. |
 | `STORAGE_OPT_SHORT_CIRCUIT_CACHE_TTL_MS` | `goosefs_short_circuit_cache_ttl_ms` | `30000` (30s) | Idle TTL of a cached SC reader in **milliseconds**. |
@@ -514,20 +514,20 @@ These keys are used in `goosefs-site.properties` files (Java-style `key=value` f
 | `goosefs.user.client.transparent_acceleration.cosranger.enabled` | `transparent_acceleration_cosranger_enabled` | `true` / `false` | `false` | Transparent acceleration cosranger. |
 | `goosefs.user.client.cache.enabled` | `client_cache_enabled` | `true` / `false` | `false` | Enable the local page cache. |
 | `goosefs.user.client.cache.page.size` | `client_cache_page_size` | byte size (e.g. `1MB`) | `1048576` (1 MiB) | Page size. Supports `KB`/`MB`/`GB` suffixes. |
-| `goosefs.user.client.cache.size` | `client_cache_size` | byte size (e.g. `512MB`) | `536870912` (512 MiB) | Per-directory capacity. Supports `KB`/`MB`/`GB` suffixes. |
+| `goosefs.user.client.cache.size` | `client_cache_size` | byte size (e.g. `20GB`) | `21474836480` (20 GiB) | Per-directory capacity. Supports `KB`/`MB`/`GB` suffixes. |
 | `goosefs.user.client.cache.dirs` | `client_cache_dirs` | comma-separated paths | `/tmp/goosefs_cache` | Cache directories. |
-| `goosefs.user.client.cache.eviction.policy` | `client_cache_evictor` | `LRU` / `LFU` | `LRU` | Eviction policy. |
+| `goosefs.user.client.cache.eviction.policy` | `client_cache_evictor` | `LRU` / `LFU` | `LFU` | Eviction policy. |
 | `goosefs.user.client.cache.async.write.enabled` | `client_cache_async_write_enabled` | `true` / `false` | `true` | Async back-fill. |
 | `goosefs.user.client.cache.async.write.threads` | `client_cache_async_write_threads` | integer | `16` | Async write-back concurrency. |
 | `goosefs.user.client.cache.quota.enabled` | `client_cache_quota_enabled` | `true` / `false` | `false` | Quota accounting. |
 | `goosefs.user.client.cache.ttl.seconds` | `client_cache_ttl_secs` | integer (seconds) | `0` (no expiry) | Page TTL. `0` = no expiry. |
 | `goosefs.user.client.cache.sequential.read.enabled` | `client_cache_sequential_read_enabled` | `true` / `false` | `false` | Route sequential reads through the cache (off by default). |
 | `goosefs.user.client.cache.uring.enabled` | `client_cache_uring_enabled` | `true` / `false` | `true` on Linux / `false` elsewhere | Use the io_uring page-cache backend. Falls back to tokio::fs when unavailable. |
-| `goosefs.user.client.cache.uring.queue.depth` | `client_cache_uring_queue_depth` | integer | `16384` | io_uring SQ/CQ depth. `0` falls back to default. |
+| `goosefs.user.client.cache.uring.queue.depth` | `client_cache_uring_queue_depth` | integer | `32768` | io_uring SQ/CQ depth. `0` falls back to default. |
 | `goosefs.user.client.cache.uring.thread.count` | `client_cache_uring_thread_count` | integer | `2` | io_uring background thread count. `0` falls back to default. |
 | `goosefs.user.worker.connection.pool.size` | `worker_connection_pool_size` | integer | `min(cores, 4)` | Per-worker gRPC channel pool size. `0` is clamped to `1`. See FLAMEGRAPH_OPTIMIZATION_PLAN §B3. |
-| `goosefs.user.file.info.cache.ttl.ms` | `file_info_cache_ttl` | integer (milliseconds) | `0` (**disabled**) | Client-side `FileInfo` cache TTL. `0` (default) disables the cache. See FLAMEGRAPH_OPTIMIZATION_PLAN §A3. |
-| `goosefs.user.file.info.cache.capacity` | `file_info_cache_capacity` | integer | `4096` | `FileInfo` LRU capacity when the cache is enabled. `0` is clamped to `1`. |
+| `goosefs.user.file.info.cache.ttl.ms` | `file_info_cache_ttl` | integer (milliseconds) | `30000` (30 s) | Client-side `FileInfo` cache TTL. Default is 30 s (cache enabled). `0` disables the cache; any positive value controls staleness bound for out-of-band mutations. See FLAMEGRAPH_OPTIMIZATION_PLAN §A3. |
+| `goosefs.user.file.info.cache.capacity` | `file_info_cache_capacity` | integer | `16384` | `FileInfo` LRU capacity when the cache is enabled. `0` is clamped to `1`. |
 | `goosefs.user.short.circuit.enabled` | `short_circuit_enabled` | `true` / `false` | `false` | Master kill switch for the short-circuit local-mmap read path. **Disabled by default** since 0.1.6 (see §2.9). |
 | `goosefs.client.short.circuit.cache.capacity` | `short_circuit_cache_capacity` | integer | `64` | Per-task LRU capacity for hot-block SC readers. |
 | `goosefs.client.short.circuit.cache.ttl.ms` | `short_circuit_cache_ttl` | integer (milliseconds) | `30000` (30s) | Idle TTL of a cached SC reader. |
@@ -695,8 +695,8 @@ Eviction policy for the client local page cache (`client_cache_evictor`).
 
 | Variant | String Representation | Description |
 |---------|----------------------|-------------|
-| `Lru` (default) | `LRU` | Least-Recently-Used — evicts the page untouched for the longest time. |
-| `Lfu` | `LFU` | Least-Frequently-Used — evicts the page with the lowest access count. |
+| `Lfu` (default) | `LFU` | Least-Frequently-Used — evicts the page with the lowest access count. |
+| `Lru` | `LRU` | Least-Recently-Used — evicts the page untouched for the longest time. |
 
 **String parsing** is case-insensitive. Mirrors Java's
 `goosefs.user.client.cache.eviction.policy`.
@@ -924,7 +924,7 @@ async fn main() -> goosefs_sdk::error::Result<()> {
     // Enable the local page cache (off by default).
     config.client_cache_enabled = true;
     config.client_cache_page_size = 1024 * 1024;          // 1 MiB pages
-    config.client_cache_size = 512 * 1024 * 1024;         // 512 MiB per dir
+    config.client_cache_size = 1024 * 1024 * 1024;        // 1 GiB per dir
     config.client_cache_dirs = vec!["/data/goosefs_cache".into()];
     config.client_cache_evictor = CacheEvictorType::Lru;  // or Lfu
     config.client_cache_async_write_enabled = true;       // async back-fill
@@ -951,7 +951,7 @@ Equivalent via properties / environment variables:
 ```bash
 export GOOSEFS_USER_CLIENT_CACHE_ENABLED=true
 export GOOSEFS_USER_CLIENT_CACHE_PAGE_SIZE=1048576
-export GOOSEFS_USER_CLIENT_CACHE_SIZE=536870912
+export GOOSEFS_USER_CLIENT_CACHE_SIZE=1073741824
 export GOOSEFS_USER_CLIENT_CACHE_DIRS=/data/goosefs_cache
 export GOOSEFS_USER_CLIENT_CACHE_EVICTION_POLICY=LRU
 # io_uring backend (Linux 5.1+; optional — defaults are sensible)
@@ -1042,8 +1042,8 @@ ds = lance.dataset(
 |------|-----------|---------|---------------|---------|----------------|----------------|
 | `master_connection_pool_size` | High-concurrency metadata RPCs over remote RTT | `1` | `4`–`8` | *(programmatic only)* | *(programmatic only)* | *(programmatic only)* |
 | `worker_connection_pool_size` | Single-process high-throughput block reads | `min(cores, 4)` | `4`–`8` | `GOOSEFS_WORKER_CONNECTION_POOL_SIZE` | `goosefs.user.worker.connection.pool.size` | `goosefs_worker_connection_pool_size` |
-| `file_info_cache_ttl` | Repeated opens of the same file inside one query | `0` (**disabled**) | `1s`–`5s` | `GOOSEFS_FILE_INFO_CACHE_TTL_MS` | `goosefs.user.file.info.cache.ttl.ms` | `goosefs_file_info_cache_ttl_ms` |
-| `file_info_cache_capacity` | Wide fan-out workloads (many distinct paths) | `4096` | `4096`–`16384` | `GOOSEFS_FILE_INFO_CACHE_CAPACITY` | `goosefs.user.file.info.cache.capacity` | `goosefs_file_info_cache_capacity` |
+| `file_info_cache_ttl` | Repeated opens of the same file inside one query | `30000` (30 s) | `1s`–`5s` | `GOOSEFS_FILE_INFO_CACHE_TTL_MS` | `goosefs.user.file.info.cache.ttl.ms` | `goosefs_file_info_cache_ttl_ms` |
+| `file_info_cache_capacity` | Wide fan-out workloads (many distinct paths) | `16384` | `16384`–`32768` | `GOOSEFS_FILE_INFO_CACHE_CAPACITY` | `goosefs.user.file.info.cache.capacity` | `goosefs_file_info_cache_capacity` |
 | `prefetch_window` | Sequential (SR) read throughput | `8` | `16` | *(programmatic only)* | *(programmatic only)* | *(programmatic only)* |
 | `ack_interval_bytes` | SR throughput, **only** on workers honouring prefetch | `0` (ACK every chunk) | `4MB`–`8MB` | *(programmatic only)* | *(programmatic only)* | *(programmatic only)* |
 | `short_circuit_enabled` | Kill switch for the local mmap read path (see §2.9) | `false` | `false` (default; safe for Lance/DuckDB); `true` to opt into the local mmap fast path on co-located workloads that benefit | `GOOSEFS_SHORT_CIRCUIT_ENABLED` | `goosefs.user.short.circuit.enabled` | `goosefs_short_circuit_enabled` |
