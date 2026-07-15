@@ -7,11 +7,11 @@ network, so they always run — no ``GOOSEFS_MASTER_ADDR`` guard needed.
 from __future__ import annotations
 
 import pytest
-
 from goosefs import Config
-
+from goosefs.exceptions import ConfigError  # noqa: I001
 
 # ─── single-master ────────────────────────────────────────────────────
+
 
 def test_single_master_addr() -> None:
     cfg = Config("127.0.0.1:9200")
@@ -21,6 +21,7 @@ def test_single_master_addr() -> None:
 
 
 # ─── comma-separated HA list (legacy) ─────────────────────────────────
+
 
 def test_comma_separated_ha_list() -> None:
     cfg = Config("m1:9200,m2:9200,m3:9200")
@@ -35,6 +36,7 @@ def test_comma_separated_trims_whitespace() -> None:
 
 
 # ─── gfs:// URI form ──────────────────────────────────────────────────
+
 
 def test_uri_form_via_constructor() -> None:
     cfg = Config("gfs://172.16.16.27:9200,172.16.16.23:9200,172.16.16.38:9200/xxxx")
@@ -82,13 +84,14 @@ def test_uri_form_bare_slash_yields_empty_root() -> None:
 
 # ─── error cases ──────────────────────────────────────────────────────
 
+
 def test_empty_master_addr_rejected() -> None:
-    with pytest.raises(Exception):
+    with pytest.raises(ConfigError):
         Config("")
 
 
 def test_uri_missing_authority_rejected() -> None:
-    with pytest.raises(Exception):
+    with pytest.raises(ConfigError):
         Config("gfs:///data")
 
 

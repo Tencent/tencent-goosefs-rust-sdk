@@ -271,6 +271,8 @@ class Config:
     ) -> Config: ...
     @staticmethod
     def from_properties_file(path: str) -> Config: ...
+    @staticmethod
+    def from_uri(uri: str, *, properties: Mapping[str, str] | None = ...) -> Config: ...
     @property
     def master_addr(self) -> str: ...
     @property
@@ -579,8 +581,9 @@ class AsyncGoosefs:
     # ── Metadata
     def get_status(self, path: str) -> Awaitable[URIStatus]: ...
     def list_status(self, path: str, *, recursive: bool = ...) -> Awaitable[list[URIStatus]]: ...
-    def exists(self, path: str) -> Awaitable[bool]: ...
- # Maximum number of RPCs allowed in flight for batch operations.
+    def exists(self, path: str) -> Awaitable[bool]:
+        ...
+        # Maximum number of RPCs allowed in flight for batch operations.
     MAX_BATCH_RPC_IN_FLIGHT = 64
 
     def batch_get_status(self, paths: list[str]) -> Awaitable[list[URIStatus]]:
@@ -653,6 +656,19 @@ class AsyncGoosefs:
         """Concurrent ``delete`` for every path (single PyO3 crossing).
 
         Concurrency is bounded internally (at most `MAX_BATCH_RPC_IN_FLIGHT` RPCs in flight).
+        """
+        ...
+    def batch_list_status(
+        self,
+        dirs: list[str],
+        *,
+        recursive: bool = ...,
+    ) -> Awaitable[list[list[URIStatus]]]:
+        """Concurrent ``list_status`` for every directory (single PyO3 crossing).
+
+        Returns entries for each directory in input order as a list-of-lists.
+        The whole batch fails on the first error."""
+        ...
     def mkdir(self, path: str, *, recursive: bool = ...) -> Awaitable[None]: ...
     def delete(
         self,
@@ -786,12 +802,6 @@ class Goosefs:
 
         Concurrency is bounded internally (at most 64 RPCs in flight)."""
         ...
-    def batch_open_file(self, paths: list[str]) -> list[FileReader]:
-        """Concurrent ``open_file`` for every path (single GIL release).
-
-        Returns readers in input order. Concurrency is bounded internally
-        (at most 64 RPCs in flight)."""
-        ...
     def batch_create_file(
         self,
         paths: list[str],
@@ -826,6 +836,17 @@ class Goosefs:
         """Concurrent ``delete`` for every path (single GIL release).
 
         Concurrency is bounded internally (at most 64 RPCs in flight)."""
+        ...
+    def batch_list_status(
+        self,
+        dirs: list[str],
+        *,
+        recursive: bool = ...,
+    ) -> list[list[URIStatus]]:
+        """Concurrent ``list_status`` for every directory (single GIL release).
+
+        Returns entries for each directory in input order as a list-of-lists.
+        The whole batch fails on the first error."""
         ...
     def mkdir(self, path: str, *, recursive: bool = ...) -> None: ...
     def delete(
