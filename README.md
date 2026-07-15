@@ -351,8 +351,12 @@ async fn main() -> goosefs_sdk::error::Result<()> {
     // Optional knobs:
     // config.client_cache_evictor = goosefs_sdk::config::CacheEvictorType::Lru; // or Lfu
     // config.client_cache_async_write_enabled = true;        // async back-fill (default)
+    // config.client_cache_quota_enabled = false;             // per-scope quota accounting
     // config.client_cache_ttl_secs = 0;                      // 0 = no expiry
     // config.client_cache_sequential_read_enabled = false;   // cache sequential reads too (off by default)
+    // config.client_cache_uring_enabled = true;              // io_uring backend (Linux 5.1+); falls back to tokio::fs
+    // config.client_cache_uring_queue_depth = 32768;         // io_uring SQ/CQ depth
+    // config.client_cache_uring_thread_count = 2;            // io_uring background threads
 
     // The cache lives on the context and is shared by every reader it opens.
     let ctx: Arc<FileSystemContext> = FileSystemContext::connect(config).await?;
@@ -377,13 +381,17 @@ Configuration is also accepted via `goosefs-site.properties` keys,
 |---|---|---|
 | `goosefs.user.client.cache.enabled` | `client_cache_enabled` | `false` |
 | `goosefs.user.client.cache.page.size` | `client_cache_page_size` | `1MB` |
-| `goosefs.user.client.cache.size` | `client_cache_size` | `512MB` |
+| `goosefs.user.client.cache.size` | `client_cache_size` | `20 GiB` |
 | `goosefs.user.client.cache.dirs` | `client_cache_dirs` | `/tmp/goosefs_cache` |
-| `goosefs.user.client.cache.eviction.policy` | `client_cache_evictor` | `LRU` |
+| `goosefs.user.client.cache.eviction.policy` | `client_cache_evictor` | `LFU` |
 | `goosefs.user.client.cache.async.write.enabled` | `client_cache_async_write_enabled` | `true` |
 | `goosefs.user.client.cache.async.write.threads` | `client_cache_async_write_threads` | `16` |
+| `goosefs.user.client.cache.quota.enabled` | `client_cache_quota_enabled` | `false` |
 | `goosefs.user.client.cache.ttl.seconds` | `client_cache_ttl_secs` | `0` (no expiry) |
 | `goosefs.user.client.cache.sequential.read.enabled` | `client_cache_sequential_read_enabled` | `false` |
+| `goosefs.user.client.cache.uring.enabled` | `client_cache_uring_enabled` | `true` on Linux / `false` elsewhere |
+| `goosefs.user.client.cache.uring.queue.depth` | `client_cache_uring_queue_depth` | `32768` |
+| `goosefs.user.client.cache.uring.thread.count` | `client_cache_uring_thread_count` | `2` |
 
 Cache effectiveness is observable via `Client.Cache*` metrics (e.g.
 `CacheBytesReadCache` vs `CacheBytesReadExternal`, `CachePages`,
