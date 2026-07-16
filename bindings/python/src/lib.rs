@@ -85,6 +85,8 @@ fn _goosefs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::PyWriteType>()?;
     m.add_class::<types::PyReadType>()?;
     m.add_class::<status::PyURIStatus>()?;
+    m.add_class::<status::PyURIStatusList>()?;
+    m.add_class::<status::PyURIStatusListIter>()?;
     m.add_class::<options::PyOpenFileOptions>()?;
     m.add_class::<options::PyCreateFileOptions>()?;
     m.add_class::<options::PyDeleteOptions>()?;

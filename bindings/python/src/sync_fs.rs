@@ -62,7 +62,7 @@ use crate::context::PyFsHandle;
 use crate::errors::map_err;
 use crate::options::PyDeleteOptions;
 use crate::runtime::block_on;
-use crate::status::PyURIStatus;
+use crate::status::{PyURIStatus, PyURIStatusList};
 
 /// Synchronous (blocking) Goosefs filesystem client.
 ///
@@ -189,6 +189,24 @@ impl PyGoosefs {
         Self::guarded_block_on(py, async move {
             let v = h.fs.list_status(&path, recursive).await.map_err(map_err)?;
             Ok(v.into_iter().map(PyURIStatus::new).collect())
+        })
+    }
+
+    /// `fs.list_status_lazy(path, recursive=False)` → `URIStatusList`.
+    ///
+    /// Synchronous lazy counterpart to `list_status`. See
+    /// `AsyncGoosefs.list_status_lazy` for performance rationale.
+    #[pyo3(signature = (path, *, recursive=false))]
+    fn list_status_lazy(
+        &self,
+        py: Python<'_>,
+        path: String,
+        recursive: bool,
+    ) -> PyResult<PyURIStatusList> {
+        let h = self.handle()?;
+        Self::guarded_block_on(py, async move {
+            let v = h.fs.list_status(&path, recursive).await.map_err(map_err)?;
+            Ok(PyURIStatusList::new(v))
         })
     }
 
@@ -405,6 +423,38 @@ impl PyGoosefs {
             .await
             .into_iter()
             .collect::<PyResult<Vec<Vec<PyURIStatus>>>>()
+        })
+    }
+
+    /// `fs.batch_list_status_lazy(dirs, *, recursive=False)` → `list[URIStatusList]`.
+    ///
+    /// Synchronous lazy counterpart to `batch_list_status`. See
+    /// `AsyncGoosefs.batch_list_status_lazy` for performance rationale.
+    #[pyo3(signature = (dirs, *, recursive=false))]
+    fn batch_list_status_lazy(
+        &self,
+        py: Python<'_>,
+        dirs: Vec<String>,
+        recursive: bool,
+    ) -> PyResult<Vec<PyURIStatusList>> {
+        let h = self.handle()?;
+        Self::guarded_block_on(py, async move {
+            use futures::stream::{self, StreamExt};
+            let fs = h.fs.clone();
+            stream::iter(dirs.into_iter().map(move |d| {
+                let fs = fs.clone();
+                async move {
+                    fs.list_status(&d, recursive)
+                        .await
+                        .map_err(map_err)
+                        .map(PyURIStatusList::new)
+                }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<Vec<PyURIStatusList>>>()
         })
     }
 
