@@ -36,7 +36,7 @@ use crate::context::PyFsHandle;
 use crate::errors::map_err;
 use crate::options::PyDeleteOptions;
 use crate::positioned_read::{positioned_read_with_reauth, resolve_block_id, DEFAULT_CHUNK_SIZE};
-use crate::status::PyURIStatus;
+use crate::status::{PyURIStatus, PyURIStatusList};
 use crate::streaming::PyAsyncFileReader;
 use crate::worker::PyAsyncWorkerClient;
 
@@ -224,6 +224,37 @@ impl PyAsyncGoosefs {
         future_into_py(py, async move {
             let v = h.fs.list_status(&path, recursive).await.map_err(map_err)?;
             Ok(v.into_iter().map(PyURIStatus::new).collect::<Vec<_>>())
+        })
+    }
+
+    /// `await fs.list_status_lazy(path, recursive=False)` → `URIStatusList`.
+    ///
+    /// Like `list_status` but returns a lazy `URIStatusList` instead of
+    /// `list[URIStatus]`. The Rust-side `Vec<URIStatus>` is held in a single
+    /// Python object; individual `URIStatus` entries are created on-demand via
+    /// `__getitem__` / `__iter__`.
+    ///
+    /// **What is lazy**: only Rust-struct → Python-object materialisation is
+    /// deferred. The gRPC RPC, prost deserialisation, and `URIStatus::from_proto`
+    /// all complete during `await` — the data is fully loaded before return.
+    /// `len(lst)` creates zero objects; `lst[i]` creates one.
+    ///
+    /// **Performance**: for N entries this creates 1 Python object instead of N
+    /// in the GIL window, reducing completion GIL cost from ~33.4µs (N=100) to
+    /// ~0.3µs. Prefer this when you only need `len()` or a few entries, or under
+    /// high-concurrency GIL-contended scenarios. Use `list_status` (eager) if
+    /// you need a plain `list[URIStatus]` for slicing or library interop.
+    #[pyo3(signature = (path, *, recursive=false))]
+    fn list_status_lazy<'py>(
+        &self,
+        py: Python<'py>,
+        path: String,
+        recursive: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let h = self.handle()?;
+        future_into_py(py, async move {
+            let v = h.fs.list_status(&path, recursive).await.map_err(map_err)?;
+            Ok(PyURIStatusList::new(v))
         })
     }
 
@@ -553,6 +584,42 @@ impl PyAsyncGoosefs {
             .await
             .into_iter()
             .collect::<PyResult<Vec<Vec<PyURIStatus>>>>()
+        })
+    }
+
+    /// `await fs.batch_list_status_lazy(dirs, recursive=False)` → `list[URIStatusList]`.
+    ///
+    /// Lazy counterpart to `batch_list_status`. Each directory's entries are
+    /// returned as a `URIStatusList` (1 Python object per directory) instead
+    /// of `list[URIStatus]` (N Python objects per directory).
+    ///
+    /// For `batch_size=32` with 100 entries each, this creates 32 Python
+    /// objects in the completion phase instead of 3200.
+    #[pyo3(signature = (dirs, *, recursive=false))]
+    fn batch_list_status_lazy<'py>(
+        &self,
+        py: Python<'py>,
+        dirs: Vec<String>,
+        recursive: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let h = self.handle()?;
+        future_into_py(py, async move {
+            use futures::stream::{self, StreamExt};
+            let fs = h.fs.clone();
+            stream::iter(dirs.into_iter().map(move |d| {
+                let fs = fs.clone();
+                async move {
+                    fs.list_status(&d, recursive)
+                        .await
+                        .map_err(map_err)
+                        .map(PyURIStatusList::new)
+                }
+            }))
+            .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<PyResult<Vec<PyURIStatusList>>>()
         })
     }
 

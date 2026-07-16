@@ -19,6 +19,7 @@
 //! definition that Python users expect when stat-comparing snapshots.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -248,6 +249,106 @@ impl PyURIStatus {
     }
 }
 
+// ── Lazy list view ──────────────────────────────────────────────────────────
+
+/// Lazy list view of `list_status` results.
+///
+/// Holds the Rust-side `Vec<URIStatus>` in a single Python object without
+/// creating N `URIStatus` Python objects upfront. Individual entries are
+/// materialised on-demand via `__getitem__` / `__iter__`.
+///
+/// **Performance**: for a directory with N entries, the eager `list_status`
+/// creates N Python objects in the GIL window (~33.4µs for N=100), while this
+/// lazy wrapper creates 1 Python object (~0.3µs), reducing GIL occupancy by
+/// ~99%. See `docs/perf/ListDir懒加载优化方案.md` §3.
+///
+/// Accessing `len(lst)` is O(1) and creates zero objects. Accessing `lst[i]`
+/// clones one `URIStatus` (Rust struct, ~300-500ns) and creates one Python
+/// object. Iterating creates one object per `__next__`.
+///
+/// **What is lazy**: only the Rust-struct → Python-object materialisation is
+/// deferred. The gRPC RPC, prost deserialisation, and `URIStatus::from_proto`
+/// all complete during `await list_status_lazy(...)` — the data is fully
+/// loaded into `Arc<Vec<URIStatus>>` before the Python object is returned.
+#[pyclass(module = "goosefs._goosefs", name = "URIStatusList", frozen)]
+pub struct PyURIStatusList {
+    pub(crate) inner: Arc<Vec<URIStatus>>,
+}
+
+impl PyURIStatusList {
+    pub fn new(items: Vec<URIStatus>) -> Self {
+        Self {
+            inner: Arc::new(items),
+        }
+    }
+}
+
+#[pymethods]
+impl PyURIStatusList {
+    /// Number of entries. O(1), zero object creation.
+    fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Get the i-th entry as a `URIStatus`. Creates one Python object.
+    /// Supports negative indexing (e.g. `lst[-1]`).
+    fn __getitem__(&self, index: isize) -> PyResult<PyURIStatus> {
+        let len = self.inner.len() as isize;
+        let idx = if index < 0 { index + len } else { index };
+        if idx < 0 || idx >= len {
+            return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                "index {index} out of range for length {len}"
+            )));
+        }
+        Ok(PyURIStatus::new(self.inner[idx as usize].clone()))
+    }
+
+    /// Iterate over entries. Each `__next__` creates one `URIStatus`.
+    fn __iter__(slf: PyRef<'_, Self>) -> PyURIStatusListIter {
+        PyURIStatusListIter {
+            list: slf.inner.clone(),
+            pos: 0,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("URIStatusList(len={})", self.inner.len())
+    }
+
+    /// `True` if the list has entries.
+    fn __bool__(&self) -> bool {
+        !self.inner.is_empty()
+    }
+}
+
+/// Iterator yielded by `URIStatusList.__iter__`.
+///
+/// Holds an `Arc` clone of the backing `Vec<URIStatus>` so the iterator
+/// outlives any single borrow of the list. Each `__next__` clones one
+/// `URIStatus` and wraps it in a `PyURIStatus`.
+#[pyclass(module = "goosefs._goosefs", name = "_URIStatusListIter")]
+pub struct PyURIStatusListIter {
+    list: Arc<Vec<URIStatus>>,
+    pos: usize,
+}
+
+#[pymethods]
+impl PyURIStatusListIter {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self) -> Option<PyURIStatus> {
+        if self.pos < self.list.len() {
+            let item = PyURIStatus::new(self.list[self.pos].clone());
+            self.pos += 1;
+            Some(item)
+        } else {
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,5 +381,98 @@ mod tests {
         b_inner.length = 999; // length differs but path+mtime same
         let b = PyURIStatus::new(b_inner);
         assert!(a.__eq__(&b));
+    }
+
+    // ── PyURIStatusList tests ───────────────────────────────────────────
+
+    fn make_test_status(id: i64, name: &str) -> URIStatus {
+        URIStatus::from_proto(FileInfo {
+            file_id: Some(id),
+            name: Some(name.into()),
+            path: Some(format!("/d/{name}")),
+            ..Default::default()
+        })
+    }
+
+    fn make_test_list(n: i64) -> PyURIStatusList {
+        let items: Vec<URIStatus> = (0..n)
+            .map(|i| make_test_status(i, &format!("f{i}")))
+            .collect();
+        PyURIStatusList::new(items)
+    }
+
+    #[test]
+    fn test_lazy_list_len() {
+        let lst = make_test_list(5);
+        assert_eq!(lst.__len__(), 5);
+        assert!(lst.__bool__());
+    }
+
+    #[test]
+    fn test_lazy_list_getitem_positive() {
+        let lst = make_test_list(5);
+        let s0 = lst.__getitem__(0).unwrap();
+        assert_eq!(s0.inner.file_id, 0);
+        assert_eq!(s0.inner.name, "f0");
+        let s4 = lst.__getitem__(4).unwrap();
+        assert_eq!(s4.inner.file_id, 4);
+    }
+
+    #[test]
+    fn test_lazy_list_getitem_negative() {
+        let lst = make_test_list(5);
+        let s_last = lst.__getitem__(-1).unwrap();
+        assert_eq!(s_last.inner.file_id, 4);
+        let s_first = lst.__getitem__(-5).unwrap();
+        assert_eq!(s_first.inner.file_id, 0);
+    }
+
+    #[test]
+    fn test_lazy_list_getitem_out_of_range() {
+        let lst = make_test_list(5);
+        assert!(lst.__getitem__(5).is_err());
+        assert!(lst.__getitem__(-6).is_err());
+        assert!(lst.__getitem__(100).is_err());
+    }
+
+    #[test]
+    fn test_lazy_list_empty() {
+        let lst = PyURIStatusList::new(vec![]);
+        assert_eq!(lst.__len__(), 0);
+        assert!(!lst.__bool__());
+        assert!(lst.__getitem__(0).is_err());
+        assert!(lst.__getitem__(-1).is_err());
+    }
+
+    #[test]
+    fn test_lazy_list_iter_full() {
+        let lst = make_test_list(3);
+        let mut iter = PyURIStatusListIter {
+            list: lst.inner.clone(),
+            pos: 0,
+        };
+        let s0 = iter.__next__().unwrap();
+        assert_eq!(s0.inner.file_id, 0);
+        let s1 = iter.__next__().unwrap();
+        assert_eq!(s1.inner.file_id, 1);
+        let s2 = iter.__next__().unwrap();
+        assert_eq!(s2.inner.file_id, 2);
+        assert!(iter.__next__().is_none());
+    }
+
+    #[test]
+    fn test_lazy_list_iter_empty() {
+        let lst = PyURIStatusList::new(vec![]);
+        let mut iter = PyURIStatusListIter {
+            list: lst.inner.clone(),
+            pos: 0,
+        };
+        assert!(iter.__next__().is_none());
+    }
+
+    #[test]
+    fn test_lazy_list_repr() {
+        let lst = make_test_list(10);
+        assert_eq!(lst.__repr__(), "URIStatusList(len=10)");
     }
 }
