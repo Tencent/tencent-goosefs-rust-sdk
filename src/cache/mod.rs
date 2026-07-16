@@ -273,7 +273,10 @@ mod tests {
     #[test]
     fn page_cache_eligible_requires_positive_file_id() {
         assert!(!page_cache_eligible(0), "file_id=0 must disable cache");
-        assert!(!page_cache_eligible(-1), "negative file_id must disable cache");
+        assert!(
+            !page_cache_eligible(-1),
+            "negative file_id must disable cache"
+        );
         assert!(page_cache_eligible(1));
         assert!(page_cache_eligible(i64::MAX));
     }

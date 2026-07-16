@@ -30,7 +30,7 @@ from __future__ import annotations
 import os
 import time
 
-from goosefs import Goosefs, Config
+from goosefs import Config, Goosefs
 
 TEST_DIR = "/partv-bench"
 
@@ -91,8 +91,10 @@ def main() -> int:
             w.write(_chunk(written, this))
             written += this
     sw_secs = time.perf_counter() - t0
-    print(f"  SW {io_kb:>5} KiB: {file_size/(1024*1024):.0f} MiB in {sw_secs:.3f}s "
-          f"→ {mib_s(file_size, sw_secs):.0f} MiB/s")
+    print(
+        f"  SW {io_kb:>5} KiB: {file_size / (1024 * 1024):.0f} MiB in {sw_secs:.3f}s "
+        f"→ {mib_s(file_size, sw_secs):.0f} MiB/s"
+    )
 
     # ── SR: sequential read in `io`-sized chunks (P1 prefetch buffer) ────────
     r = fs.open_file(path)
@@ -108,9 +110,11 @@ def main() -> int:
         read_total += len(data)
     sr_secs = time.perf_counter() - t0
     r.close()
-    print(f"  SR {io_kb:>5} KiB: {read_total/(1024*1024):.0f} MiB in {sr_secs:.3f}s "
-          f"→ {mib_s(read_total, sr_secs):.0f} MiB/s "
-          f"{'✅' if ok and read_total == file_size else '❌'}")
+    print(
+        f"  SR {io_kb:>5} KiB: {read_total / (1024 * 1024):.0f} MiB in {sr_secs:.3f}s "
+        f"→ {mib_s(read_total, sr_secs):.0f} MiB/s "
+        f"{'✅' if ok and read_total == file_size else '❌'}"
+    )
 
     try:
         fs.delete(path, recursive=False)

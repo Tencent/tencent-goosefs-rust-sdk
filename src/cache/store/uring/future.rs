@@ -65,8 +65,8 @@ impl Future for UringOpFuture {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::requests::{RequestState, UringOpType};
+    use super::*;
     use bytes::BytesMut;
     use std::sync::Mutex;
     use std::task::{Context, Wake, Waker};
@@ -153,10 +153,7 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert!(matches!(
-            Pin::new(&mut fut).poll(&mut cx),
-            Poll::Pending
-        ));
+        assert!(matches!(Pin::new(&mut fut).poll(&mut cx), Poll::Pending));
         assert!(request.state.lock().unwrap().waker.is_some());
 
         {

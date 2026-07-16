@@ -33,6 +33,15 @@ This document records all notable changes to the `goosefs` Python binding. The f
 
 ---
 
+## [0.1.7] — 2026-07-16
+
+Aligned with `goosefs-sdk` 0.1.7. Version bump tracking the underlying SDK
+release; no Python-surface API changes. `bindings/python/Cargo.toml` version
+`0.1.6` → `0.1.7`, kept in sync with the root crate; `goosefs.__version__`
+now reports `0.1.7`.
+
+---
+
 ## [0.1.6] — 2026-07-02
 
 Aligned with `goosefs-sdk` 0.1.6. This release delivers two major new

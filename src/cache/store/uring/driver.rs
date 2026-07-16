@@ -368,7 +368,7 @@ fn push_to_sq(
         }
         UringOpType::OpenAt => {
             let state = request.state.lock().unwrap();
-            let path_ptr = state.buffer.as_ptr() as *const i8;
+            let path_ptr = state.buffer.as_ptr() as *const libc::c_char;
             opcode::OpenAt::new(types::Fd(request.fd), path_ptr)
                 .flags(request.open_flags | libc::O_CLOEXEC)
                 .mode(0o644)
@@ -377,7 +377,7 @@ fn push_to_sq(
         UringOpType::Close => opcode::Close::new(types::Fd(request.fd)).build(),
         UringOpType::UnlinkAt => {
             let state = request.state.lock().unwrap();
-            let path_ptr = state.buffer.as_ptr() as *const i8;
+            let path_ptr = state.buffer.as_ptr() as *const libc::c_char;
             opcode::UnlinkAt::new(types::Fd(request.fd), path_ptr).build()
         }
     }

@@ -19,6 +19,7 @@ use crate::error::Result;
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use moka::future::Cache;
+use std::ffi::CString;
 use std::fs::File;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
@@ -1393,7 +1394,10 @@ mod tests {
         let bytes = store.get_bytes(&id, 2, 5).await.unwrap();
         assert_eq!(&bytes[..], b"23456");
 
-        let missing = store.get_bytes(&unique_id("missing-bytes", 0), 0, 8).await.unwrap();
+        let missing = store
+            .get_bytes(&unique_id("missing-bytes", 0), 0, 8)
+            .await
+            .unwrap();
         assert!(missing.is_empty());
 
         PAGE_FD_CACHE.invalidate(&id).await;
