@@ -247,8 +247,30 @@ impl FileSystem for BaseFileSystem {
 
     async fn list_status(&self, path: &str, recursive: bool) -> Result<Vec<URIStatus>> {
         let master = self.master();
-        let items = master.list_status(path, recursive).await?;
-        Ok(items.into_iter().map(URIStatus::from_proto).collect())
+        if !recursive {
+            let items = master.list_status(path, false).await?;
+            return Ok(items.into_iter().map(URIStatus::from_proto).collect());
+        }
+        // The master's `recursive` option is best-effort and (on some cluster
+        // builds) only returns entries whose metadata is already loaded,
+        // collapsing a deep tree to its first level. To match the Java client
+        // and `goosefs fs ls -R` (which walk the namespace client-side), we
+        // perform the recursion ourselves: list one level at a time and
+        // descend into every directory child.
+        let mut out: Vec<URIStatus> = Vec::new();
+        let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+        queue.push_back(path.to_string());
+        while let Some(cur) = queue.pop_front() {
+            let items = master.list_status(&cur, false).await?;
+            for fi in items {
+                let status = URIStatus::from_proto(fi);
+                if status.is_folder() {
+                    queue.push_back(status.path.clone());
+                }
+                out.push(status);
+            }
+        }
+        Ok(out)
     }
 
     /// Return `true` if `path` exists and is either a completed file or a directory.
@@ -306,14 +328,24 @@ impl FileSystem for BaseFileSystem {
 
     async fn delete(&self, path: &str, options: DeleteOptions) -> Result<()> {
         let master = self.master();
-        master.delete_with_options(path, options).await
+        master.delete_with_options(path, options).await?;
+        // A3 consistency: drop any cached FileInfo so a subsequent open sees
+        // NotFound (or the fresh state after re-create). No-op when the
+        // opt-in cache is disabled.
+        self.ctx.invalidate_file_info(path);
+        Ok(())
     }
 
     // ── Rename ────────────────────────────────────────────────────────────────
 
     async fn rename(&self, src: &str, dst: &str) -> Result<()> {
         let master = self.master();
-        master.rename(src, dst).await
+        master.rename(src, dst).await?;
+        // A3 consistency: both endpoints of the rename change identity — the
+        // src is gone, the dst now points at what src used to be.
+        self.ctx.invalidate_file_info(src);
+        self.ctx.invalidate_file_info(dst);
+        Ok(())
     }
 }
 

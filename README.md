@@ -2,19 +2,19 @@
 
 ![Experimental](https://img.shields.io/badge/status-experimental-orange)
 ![Rust](https://img.shields.io/badge/rust-1.88%2B-blue)
-![Version](https://img.shields.io/badge/version-0.1.5-blue)
+![Version](https://img.shields.io/badge/version-0.1.7-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-green)
 
 A native Rust client library that communicates directly with [Goosefs](https://cloud.tencent.com/document/product/1424) Master/Worker via gRPC (tonic/protobuf).
 
-## What's New in v0.1.5
+## What's New in v0.1.7
 
-- **Prometheus Pushgateway support** — New `PushgatewayTask` periodically pushes all client metrics (counters & gauges) to a Prometheus Pushgateway endpoint via HTTP POST in the standard text exposition format. Configure with `PushgatewayConfig::new(endpoint, job)` and spawn a background task. See [`docs/METRICS.md`](docs/METRICS.md) for architecture and usage.
-- **Python SDK bindings** — New `bindings/python/` sub-crate providing a full-featured Python client (`goosefs` package) built on PyO3 + maturin. Supports sync/async APIs, streaming I/O, metrics, and tracing. See [`bindings/python/README.md`](bindings/python/README.md).
-- **AsyncRead/AsyncSeek** — `GoosefsAsyncReader` now implements `tokio::io::AsyncRead` + `tokio::io::AsyncSeek`, enabling seamless integration with the tokio ecosystem.
-- **FileInStream read fix** — Fixed a bug where `GoosefsFileInStream::read` could drop bytes when the caller-supplied buffer was smaller than the available chunk data.
-- **Dependency updates** — Pinned dependency versions (prost 0.14.1, tokio 1.23+, rand 0.9.1, reqwest 0.12 with `rustls-tls`). Adapted to rand 0.9 API changes (`thread_rng` → `rng`, `gen_range` → `random_range`).
-- **No breaking API changes** — Drop-in upgrade from `0.1.3` / `0.1.4`; downstream `OpenDAL` / `Lance` integrations require no code changes.
+- **Client-side local page cache** — New opt-in, disk-backed page cache mirroring the GooseFS Java client's `goosefs.user.client.cache.*` semantics. `LocalCacheManager` provides striped page locks, LRU/LFU evictors, multi-directory `HashAllocator`, bounded async write-back, TTL lazy expiry with a background sweeper, restart restore, and overwrite invalidation via `on_file_open`. Integrated into `GoosefsFileInStream::read` / `read_at` through `read_through_cache`; `ReadType::NoCache` still serves hits but skips back-fill. Best-effort by design — misses/errors always fall back to the worker without affecting read correctness. Adds `Client.Cache*` metrics (incl. `HitRate`, `SpaceUsedCount`, external read time). See [`docs/CLIENT_PAGE_CACHE_DESIGN.md`](docs/CLIENT_PAGE_CACHE_DESIGN.md) and [`docs/CLIENT_CONFIGURATION.md`](docs/CLIENT_CONFIGURATION.md).
+- **Short-Circuit local mmap read path** — New `short_circuit` module that bypasses the gRPC data plane when the client and worker are co-located. `LocalBlockReader` performs zero-copy reads via read-only `mmap` with `madvise` prefetch and optional Transparent Huge Pages (THP); `ShortCircuitFactory` provides per-task hot-block caches, negative caching, a `CapabilityProvider` hook, and a context-shared factory. A dedicated `SIGBUS` diagnostic handler surfaces mmap faults with actionable diagnostics and manages process-level signal installation. Local worker is auto-detected by interface bind. Every recoverable error transparently falls back to the standard gRPC path. Wired into both sequential (`read()`) and positioned-read (`read_at()`) paths through `file_in_stream` / `context` / `config`. Ships with an `sc_pr_ab` benchmark comparing local mmap vs gRPC positioned-read, gated E2E integration tests, and an INV-S3/INV-D1/INV-D2/INV-S1/INV-S2/INV-S5 consistency regression suite. Server-side companion: new `OpenLocalBlock` RPC + `OpenLocalBlockGuard` for block-lock lifecycle. See [`docs/SHORT_CIRCUIT_DESIGN.md`](docs/SHORT_CIRCUIT_DESIGN.md).
+- **Read-path performance optimization (wait-free hot paths)** — `WorkerClientPool.clients` and `WorkerRouter.workers` / `hash_ring` / `local_worker_id` are now `ArcSwap` instead of `RwLock<HashMap>`, mirroring the existing `ArcSwap<AuthedState>` model on `MasterClient`. The acquire and `select_worker` hot paths become a single atomic load + map lookup + cheap clone (no async `RwLock` round-trip); writes use `ArcSwap::rcu` copy-on-write, and same-key reconnects are still single-flighted by the per-key mutex — generation / single-flight / invalidate semantics preserved. Local A/B (`--transport=block`, 64 threads / 16 MiB): 64 KiB `742.8 → 897.1 MiB/s (+20.8%)`, 256 KiB `1381.8 → 1434.3 (+3.8%)`, 1 MiB `1564.4 → 1742.4 (+11.4%)`; p999 −64% (64 KiB) / −52% (256 KiB). See `benchmarks/pr_runtime_ab.rs` and `docs/RUST_PYTHON_SDK_OPTIMIZATION.md` V.6.
+- **Batch metadata / lifecycle APIs** — `BaseFileSystem` gains batch entry points that fan out over the concurrent path with a shared `Arc<BaseFileSystem>` (single Tokio spawn per batch, first-error-wins). Exposed to the Python binding as `AsyncGoosefs.batch_open_file` / `batch_create_file` / `batch_create_dir` / `batch_rename` / `batch_delete` / `batch_list_status` (plus their sync `Goosefs.batch_*` counterparts). One PyO3 boundary crossing per batch instead of N. Includes a `WorkerRouter` init deferral (`WorkerManager` optional, first-write initialization) so batch-metadata-only workloads avoid paying the Worker-plane setup cost.
+- **Reliability / robustness** — `PollingMasterInquireClient` HA primary discovery is now cancel-safe via a new RAII `LeaderGuard` (no more infinite recursion when the singleflight leader is cancelled by an outer `timeout` / `select!`). `WriteBlockHandle::Drop` now aborts the background gRPC task on early-error paths instead of leaking a detached future. `GoosefsFileWriter::Drop` performs best-effort cleanup (cancels in-flight cache/UFS streams, calls `master.remove_blocks` or falls back to `delete(unchecked=true)`). `LogSampler` uses monotonic `Instant` (safe under NTP / admin clock jumps). `MetricsMasterClient::with_retry` reconnects at the *top* of the next attempt. `WorkerClient::connect` now sets `request_timeout`. `config::parse_byte_size` overflow is a hard error (previously silently wrapped). `WorkerRouter` consistent-hash ring is pre-built on `update_workers` (O(log N) `binary_search` per request), and `pick_any_worker` uses `rand::Rng::random_range` for proper load spreading.
+- **No breaking API changes** — Drop-in upgrade from `0.1.6`; downstream `OpenDAL` / `Lance` integrations require no code changes.
 
 ## Why Goosefs?
 
@@ -346,13 +346,17 @@ async fn main() -> goosefs_sdk::error::Result<()> {
     // ── Enable the local page cache ──────────────────────────────
     config.client_cache_enabled = true;                       // off by default
     config.client_cache_page_size = 1024 * 1024;              // 1 MiB pages
-    config.client_cache_size = 512 * 1024 * 1024;             // 512 MiB per dir
+    config.client_cache_size = 1024 * 1024 * 1024;           // 1 GiB per dir
     config.client_cache_dirs = vec!["/tmp/goosefs_cache".into()];
     // Optional knobs:
     // config.client_cache_evictor = goosefs_sdk::config::CacheEvictorType::Lru; // or Lfu
     // config.client_cache_async_write_enabled = true;        // async back-fill (default)
+    // config.client_cache_quota_enabled = false;             // per-scope quota accounting
     // config.client_cache_ttl_secs = 0;                      // 0 = no expiry
     // config.client_cache_sequential_read_enabled = false;   // cache sequential reads too (off by default)
+    // config.client_cache_uring_enabled = true;              // io_uring backend (Linux 5.1+); falls back to tokio::fs
+    // config.client_cache_uring_queue_depth = 32768;         // io_uring SQ/CQ depth
+    // config.client_cache_uring_thread_count = 2;            // io_uring background threads
 
     // The cache lives on the context and is shared by every reader it opens.
     let ctx: Arc<FileSystemContext> = FileSystemContext::connect(config).await?;
@@ -377,13 +381,17 @@ Configuration is also accepted via `goosefs-site.properties` keys,
 |---|---|---|
 | `goosefs.user.client.cache.enabled` | `client_cache_enabled` | `false` |
 | `goosefs.user.client.cache.page.size` | `client_cache_page_size` | `1MB` |
-| `goosefs.user.client.cache.size` | `client_cache_size` | `512MB` |
+| `goosefs.user.client.cache.size` | `client_cache_size` | `20 GiB` |
 | `goosefs.user.client.cache.dirs` | `client_cache_dirs` | `/tmp/goosefs_cache` |
-| `goosefs.user.client.cache.eviction.policy` | `client_cache_evictor` | `LRU` |
+| `goosefs.user.client.cache.eviction.policy` | `client_cache_evictor` | `LFU` |
 | `goosefs.user.client.cache.async.write.enabled` | `client_cache_async_write_enabled` | `true` |
 | `goosefs.user.client.cache.async.write.threads` | `client_cache_async_write_threads` | `16` |
+| `goosefs.user.client.cache.quota.enabled` | `client_cache_quota_enabled` | `false` |
 | `goosefs.user.client.cache.ttl.seconds` | `client_cache_ttl_secs` | `0` (no expiry) |
 | `goosefs.user.client.cache.sequential.read.enabled` | `client_cache_sequential_read_enabled` | `false` |
+| `goosefs.user.client.cache.uring.enabled` | `client_cache_uring_enabled` | `true` on Linux / `false` elsewhere |
+| `goosefs.user.client.cache.uring.queue.depth` | `client_cache_uring_queue_depth` | `32768` |
+| `goosefs.user.client.cache.uring.thread.count` | `client_cache_uring_thread_count` | `2` |
 
 Cache effectiveness is observable via `Client.Cache*` metrics (e.g.
 `CacheBytesReadCache` vs `CacheBytesReadExternal`, `CachePages`,
@@ -458,6 +466,19 @@ To disable the entire metrics pipeline (no background task, no RPC overhead):
 let config = GoosefsConfig::new("127.0.0.1:9200")
     .with_metrics_enabled(false);
 ```
+
+Every knob below can also be set without touching Rust code:
+
+- **`goosefs-site.properties`** — e.g. `goosefs.user.metrics.collection.enabled=false`
+  (mirrors the Java client key). See [`docs/METRICS.md`](docs/METRICS.md) §5.4
+  for the full list.
+- **Environment variables** — e.g. `GOOSEFS_USER_METRICS_COLLECTION_ENABLED=false`
+  (highest priority, overlays both defaults and the properties file). This is
+  the recommended switch for operators who want to toggle the heartbeat on a
+  running deployment without redeploying application code. Python users get
+  the same behaviour: `Config(...)`, `Config.from_uri(...)` and
+  `Config.from_properties_file(...)` all overlay `GOOSEFS_*` env vars on top
+  of the caller-supplied configuration.
 
 **Configuration knobs**
 

@@ -8,7 +8,7 @@
 //!   → MasterClient.create_file()
 //!   → BlockMapper.plan_write()
 //!   → for each block:
-//!       → WorkerRouter.select_worker()
+//!       → WorkerRouterView.select_worker()
 //!       → WorkerClient.connect()        (pooled — zero new TCP+SASL)
 //!       → GrpcBlockWriter.open() → write_all() → flush() → close()
 //!   → MasterClient.complete_file()
@@ -44,7 +44,7 @@ use bytes::Bytes;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::block::router::WorkerRouter;
+use crate::block::router::{rpc_endpoint, WorkerRouterView};
 use crate::client::master::default_file_mode;
 use crate::client::worker::{WorkerClientPool, WriteBlockOptions};
 use crate::client::MasterClient;
@@ -183,7 +183,15 @@ pub struct GoosefsFileWriter {
     /// Master client for metadata operations.
     master: MasterClient,
     /// Worker router for block → worker mapping (with failed-worker exclusion).
-    router: WorkerRouter,
+    /// Worker router view for block → worker mapping.
+    ///
+    /// P0-D Step 2 (`docs/perf/2026-07-07-hotspot-optimizations/README.md`
+    /// §3.4): migrated from `WorkerRouter` (per-writer `ArcSwap`×3) to
+    /// `WorkerRouterView` (per-writer `Arc`×2 + `Option<i64>` value).
+    /// `create_with_context` stores a `WorkerRouterView::empty()` placeholder
+    /// so zero-byte writes never touch the hash ring; the first `write()`
+    /// swaps in a `from_shared` view via `ensure_router_init`.
+    router: WorkerRouterView,
     /// Connection pool for reusing authenticated worker gRPC channels.
     /// Matches Java's `FileSystemContext.acquireBlockWorkerClient()`.
     worker_pool: Arc<WorkerClientPool>,
@@ -299,6 +307,14 @@ impl GoosefsFileWriter {
             "file created on Master (via context)"
         );
 
+        // A3 consistency: on overwrite (WritePType::CACHE_THROUGH etc.), a
+        // previously cached FileInfo now points at a defunct file identity
+        // (block_ids / file_id changed). Drop it immediately so any read
+        // issued after `create_file` returns — even before this writer is
+        // closed — never observes the stale metadata. No-op when the
+        // opt-in cache is disabled.
+        ctx.invalidate_file_info(path);
+
         let effective_write_type = create_options.write_type.or(config.write_type);
         let write_strategy = resolve_write_strategy(effective_write_type, &file_info);
 
@@ -308,7 +324,7 @@ impl GoosefsFileWriter {
         // hash-ring builds for zero-byte writes (e.g. CreateFile-then-close),
         // which is the dominant pattern in metadata-only benchmarks.
         let worker_pool = ctx.acquire_worker_pool();
-        let router = WorkerRouter::new();
+        let router = WorkerRouterView::empty();
 
         let operation_id = Uuid::new_v4();
 
@@ -345,21 +361,33 @@ impl GoosefsFileWriter {
     /// without any data), the expensive `build_hash_ring` is never invoked.
     ///
     /// Safe to call multiple times — once initialized, this immediately returns.
+    ///
+    /// **A1** (`docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md`): the local router is
+    /// **replaced** by a snapshot of the shared context router, so no hash
+    /// ring is rebuilt on the first `write()`. Failure isolation is preserved
+    /// via the snapshot's own `failed_workers` DashMap.
     async fn ensure_router_init(&mut self) -> Result<()> {
         if !self._router_needs_init.load(Ordering::Acquire) {
             return Ok(());
         }
         // Production paths always set `_context` via `create_with_context`; `None` only appears in tests.
-        debug_assert!(self._context.is_some(), "`_context` must be set in production paths");
+        debug_assert!(
+            self._context.is_some(),
+            "`_context` must be set in production paths"
+        );
         if let Some(ctx) = &self._context {
             let shared = ctx.acquire_router();
-            let workers = (*shared.get_workers().await).clone();
-            if workers.is_empty() {
+            if shared.get_workers().await.is_empty() {
                 return Err(Error::NoWorkerAvailable {
                     message: "no workers available for writing".to_string(),
                 });
             }
-            self.router.update_workers(workers).await;
+            // Wait-free view: clones two `Arc`s (workers + hash_ring) plus a
+            // value copy of `local_worker_id`. Does NOT rebuild the ring and
+            // does NOT allocate any `ArcSwap` — the whole point of P0-D
+            // Step 2 (`docs/perf/2026-07-07-hotspot-optimizations/README.md`
+            // §3.4).
+            self.router = WorkerRouterView::from_shared(&shared);
             self._router_needs_init.store(false, Ordering::Release);
         }
         Ok(())
@@ -577,11 +605,7 @@ impl GoosefsFileWriter {
                 source: None,
             })?;
 
-        let worker_addr = format!(
-            "{}:{}",
-            addr.host.as_deref().unwrap_or("127.0.0.1"),
-            addr.rpc_port.unwrap_or(9203)
-        );
+        let worker_addr = rpc_endpoint(addr);
 
         debug!(
             block_id = block_id,
@@ -737,11 +761,7 @@ impl GoosefsFileWriter {
                 source: None,
             })?;
 
-        let worker_addr = format!(
-            "{}:{}",
-            addr.host.as_deref().unwrap_or("127.0.0.1"),
-            addr.rpc_port.unwrap_or(9203)
-        );
+        let worker_addr = rpc_endpoint(addr);
 
         debug!(
             worker = %worker_addr,
@@ -934,6 +954,13 @@ impl GoosefsFileWriter {
 
         self.do_cancel_cleanup().await;
 
+        // A3 consistency: cancel path may have removed blocks or deleted
+        // the inode entirely, so any cached FileInfo now points at a
+        // defunct state.
+        if let Some(ctx) = &self._context {
+            ctx.invalidate_file_info(&self.path);
+        }
+
         info!(
             path = %self.path,
             committed_blocks = self.committed_block_ids.len(),
@@ -1119,6 +1146,15 @@ impl GoosefsFileWriter {
             ufs_stream = self.write_strategy.ufs_stream,
             "file write completed"
         );
+
+        // A3 consistency: the file's `length` / `block_ids` / `completed` /
+        // `ufs_length` are now different from what the master reported (or
+        // would have reported) at any earlier `get_status`. Drop any cached
+        // FileInfo so subsequent readers observe the fresh metadata. No-op
+        // when the opt-in cache is disabled.
+        if let Some(ctx) = &self._context {
+            ctx.invalidate_file_info(&self.path);
+        }
 
         Ok(())
     }
@@ -1541,7 +1577,7 @@ mod tests {
         let config = GoosefsConfig::new("127.0.0.1:9200");
         let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
         let master = MasterClient::from_channel(channel, config.clone());
-        let router = WorkerRouter::new();
+        let router = WorkerRouterView::empty();
         let worker_pool = Arc::new(WorkerClientPool::new(config.clone()));
         let file_info = make_test_file_info();
         let strategy = resolve_write_strategy(Some(1), &file_info);

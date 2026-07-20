@@ -837,7 +837,7 @@ docs/perf/2026-06-24-sc-pr-256t/
 
 | 配置 | 默认 | 说明 |
 |---|---|---|
-| goosefs.user.short.circuit.enabled | true | 总开关 |
+| goosefs.user.short.circuit.enabled | false | Master kill switch (disabled by default since 0.1.6, see FLAMEGRAPH_OPTIMIZATION_PLAN §C6) |
 | goosefs.user.short.circuit.preferred | true | 与 Java 同名；Rust 因无 DS，恒视为 true |
 | goosefs.client.short.circuit.cache.capacity | 64 | per-task LRU 大小 |
 | goosefs.client.short.circuit.cache.ttl | 30s | reader 空闲过期 |

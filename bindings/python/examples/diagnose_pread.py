@@ -38,7 +38,16 @@ def main() -> int:
     # PyO3 extensions need an explicit subscriber install.
     goosefs.enable_tracing(level="debug")
 
-    cfg = Config(os.environ["GOOSEFS_MASTER_ADDR"])
+    master_addr = os.environ.get("GOOSEFS_MASTER_ADDR")
+    if not master_addr:
+        print("GOOSEFS_MASTER_ADDR is not set. Example: export GOOSEFS_MASTER_ADDR=127.0.0.1:9200")
+        sys.exit(1)
+    auth_type = os.environ.get("GOOSEFS_AUTH_TYPE", "NOSASL")
+
+    cfg = Config(
+        master_addr,
+        properties={"goosefs.security.authentication.type": auth_type},
+    )
     fs = Goosefs(cfg)
 
     base = "/tmp/pygoosefs-diag"

@@ -239,7 +239,7 @@ Tencent Cloud instances (see the per-approach ARM commands above).
 Or use twine:
 
 ```bash
- twine upload dist/* \
+ uvx twine upload dist/* \
      --username __token__ \
      --password <your-pypi-token>
 ```
@@ -262,7 +262,7 @@ Or use twine:
 ### Upload Command
 
 ```bash
- twine upload dist/*.whl \
+ uvx twine upload dist/*.whl \
      --repository-url https://mirrors.tencent.com/repository/pypi/tencent_pypi/simple \
      --username <username> \
      --password <Token>
@@ -312,10 +312,10 @@ Or use twine:
      --target aarch64-unknown-linux-gnu --manylinux 2_28 --zig --out dist
 
 # 4a. Upload to official PyPI
- twine upload dist/* --username __token__ --password <your-pypi-token>
+ uvx twine upload dist/* --username __token__ --password <your-pypi-token>
 
 # 4b. Or upload to the Tencent internal repository
- twine upload dist/* \
+ uvx twine upload dist/* \
      --repository-url https://mirrors.tencent.com/repository/pypi/tencent_pypi/simple \
      --username <username> \
      --password <Token>

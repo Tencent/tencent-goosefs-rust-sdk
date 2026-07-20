@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
 
-use crate::cache::{metric_name, CacheManager, PageId};
+use crate::cache::{metric_name, CacheManager, PageId, PageReadRequest};
 use crate::error::{Error, Result};
 use crate::metrics::counter;
 
@@ -63,8 +63,9 @@ pub async fn read_through_cache<R: ExternalRangeReader + ?Sized>(
     fill_mode: FillMode,
 ) -> Result<Bytes> {
     let page_size = page_size.max(1);
-    let mut out = BytesMut::with_capacity((end - offset).max(0) as usize);
+    let requested_len = (end - offset).max(0) as usize;
     let mut cur = offset;
+    let mut pages = Vec::new();
 
     while cur < end {
         let page_index = (cur as u64) / page_size;
@@ -72,14 +73,39 @@ pub async fn read_through_cache<R: ExternalRangeReader + ?Sized>(
         let page_end = (((page_index + 1) * page_size) as i64).min(file_length);
         let in_page_off = (cur - page_start) as usize;
         let want = (end.min(page_end) - cur) as usize;
-        let page_id = PageId::new(file_id.clone(), page_index);
+        pages.push((
+            PageId::new(file_id.clone(), page_index),
+            page_index,
+            page_start,
+            page_end,
+            in_page_off,
+            want,
+        ));
+        cur += want as i64;
+    }
 
-        // 1) Try the cache.
-        let mut tmp = vec![0u8; want];
-        let got = cache.get(&page_id, in_page_off, &mut tmp).await;
-        if got == want {
-            out.extend_from_slice(&tmp);
-            cur += want as i64;
+    let cache_requests: Vec<PageReadRequest> = pages
+        .iter()
+        .map(|(page_id, _, _, _, in_page_off, want)| PageReadRequest {
+            page_id: page_id.clone(),
+            page_offset: *in_page_off,
+            len: *want,
+        })
+        .collect();
+    let mut cached = cache.get_batch_bytes(&cache_requests).await;
+    if cached.len() != pages.len() {
+        cached = vec![Bytes::new(); pages.len()];
+    }
+
+    let mut chunks: Vec<Bytes> = Vec::with_capacity(pages.len());
+    for ((page_id, page_index, page_start, page_end, in_page_off, want), cached_bytes) in
+        pages.into_iter().zip(cached.into_iter())
+    {
+        // 1) Cache hit: keep the returned Bytes directly. For the io_uring
+        // backend this is the kernel-filled buffer, so single-page reads avoid
+        // the old tmp-buffer copy entirely.
+        if cached_bytes.len() == want {
+            chunks.push(cached_bytes);
             continue;
         }
 
@@ -92,6 +118,24 @@ pub async fn read_through_cache<R: ExternalRangeReader + ?Sized>(
         counter(metric_name::CLIENT_CACHE_BYTES_REQUESTED_EXTERNAL).inc(page_end - page_start);
         // Refresh the hit-rate gauge now that the external-read counter moved.
         crate::cache::metrics::publish_hit_rate();
+
+        let expected_page_len = (page_end - page_start) as usize;
+        if page_bytes.len() < expected_page_len {
+            return Err(Error::Internal {
+                message: format!(
+                    "read_through_cache: short external read for page {}: got {} of {} bytes",
+                    page_index,
+                    page_bytes.len(),
+                    expected_page_len
+                ),
+                source: None,
+            });
+        }
+        let page_bytes = if page_bytes.len() > expected_page_len {
+            page_bytes.slice(0..expected_page_len)
+        } else {
+            page_bytes
+        };
 
         // 3) Back-fill per the fill mode (best-effort).
         if !page_bytes.is_empty() {
@@ -106,25 +150,36 @@ pub async fn read_through_cache<R: ExternalRangeReader + ?Sized>(
             }
         }
 
-        // 4) Copy the requested slice out of the freshly read page.
+        // 4) Return the requested slice from the freshly read page.
         let avail = page_bytes.len();
         let s = in_page_off.min(avail);
         let e = (in_page_off + want).min(avail);
-        out.extend_from_slice(&page_bytes[s..e]);
-
         let advanced = (e - s) as i64;
         if advanced == 0 {
             return Err(Error::Internal {
                 message: format!(
                     "read_through_cache: 0 bytes for page {} (cur={}, end={})",
-                    page_index, cur, end
+                    page_index,
+                    page_start + in_page_off as i64,
+                    end
                 ),
                 source: None,
             });
         }
-        cur += advanced;
+        chunks.push(page_bytes.slice(s..e));
     }
 
+    if chunks.is_empty() {
+        return Ok(Bytes::new());
+    }
+    if chunks.len() == 1 {
+        return Ok(chunks.pop().unwrap());
+    }
+
+    let mut out = BytesMut::with_capacity(requested_len);
+    for chunk in chunks {
+        out.extend_from_slice(&chunk);
+    }
     Ok(out.freeze())
 }
 
@@ -155,6 +210,19 @@ mod tests {
         }
     }
 
+    struct ShortExternal {
+        data: Vec<u8>,
+    }
+
+    #[async_trait::async_trait]
+    impl ExternalRangeReader for ShortExternal {
+        async fn read_range(&mut self, offset: i64, end: i64) -> Result<Bytes> {
+            let s = offset as usize;
+            let e = (end as usize).min(self.data.len()).saturating_sub(1);
+            Ok(Bytes::copy_from_slice(&self.data[s..e]))
+        }
+    }
+
     async fn mgr(page_size: u64, capacity: u64) -> (Arc<dyn CacheManager>, std::path::PathBuf) {
         let base = std::env::temp_dir().join(format!("gfs_cr_test_{}", uuid::Uuid::new_v4()));
         let options = CacheManagerOptions {
@@ -166,6 +234,9 @@ mod tests {
             async_write_threads: 1,
             quota_enabled: false,
             ttl: None,
+            uring_enabled: false,
+            uring_queue_depth: 0,
+            uring_thread_count: 0,
         };
         let mgr: Arc<dyn CacheManager> =
             Arc::new(LocalCacheManager::create(options).await.unwrap());
@@ -287,6 +358,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn short_external_page_read_errors_and_does_not_fill_cache() {
+        let (cache, base) = mgr(8, 4096).await;
+        let data: Vec<u8> = (0u8..=50).collect();
+        let file_id: Arc<str> = Arc::from("file-short-read");
+        let mut ext = ShortExternal { data: data.clone() };
+
+        let err = read_through_cache(
+            &cache,
+            &mut ext,
+            &file_id,
+            8,
+            data.len() as i64,
+            0,
+            8,
+            FillMode::Sync,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{}", err).contains("short external read"));
+
+        let mut dst = vec![0u8; 8];
+        assert_eq!(
+            cache
+                .get(&PageId::new(file_id.clone(), 0), 0, &mut dst)
+                .await,
+            0
+        );
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    #[tokio::test]
     async fn async_fill_eventually_caches() {
         let (cache, base) = mgr(4, 4096).await;
         let data: Vec<u8> = (0u8..=50).collect();
@@ -336,6 +438,66 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert!(cached, "async fill should eventually populate the cache");
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    /// Partial hit: some pages warm, some cold. Cold pages must hit external
+    /// once; warm pages must not. Validates the P6 `get_batch_bytes` path.
+    #[tokio::test]
+    async fn mixed_hit_miss_only_fetches_cold_pages() {
+        let (cache, base) = mgr(4, 4096).await;
+        let data: Vec<u8> = (0u8..=63).collect();
+        let served = Arc::new(AtomicUsize::new(0));
+        let file_id: Arc<str> = Arc::from("file-mixed");
+        let mut ext = FakeExternal {
+            data: data.clone(),
+            bytes_served: served.clone(),
+        };
+
+        // Warm pages 0 and 1 ([0,8)).
+        let _ = read_through_cache(
+            &cache,
+            &mut ext,
+            &file_id,
+            4,
+            data.len() as i64,
+            0,
+            8,
+            FillMode::Sync,
+        )
+        .await
+        .unwrap();
+        let after_warm = served.load(Ordering::SeqCst);
+        assert!(after_warm > 0);
+
+        // Range [2, 14) spans pages 0..3: pages 0-1 warm, 2-3 cold.
+        let got = read_through_cache(
+            &cache,
+            &mut ext,
+            &file_id,
+            4,
+            data.len() as i64,
+            2,
+            14,
+            FillMode::Sync,
+        )
+        .await
+        .unwrap();
+        assert_eq!(&got[..], &data[2..14]);
+
+        let after_mixed = served.load(Ordering::SeqCst);
+        assert!(
+            after_mixed > after_warm,
+            "cold pages must still hit external"
+        );
+        // Warm pages must not be re-fetched: external only serves the two cold
+        // 4-byte pages (indices 2 and 3) = 8 bytes.
+        assert_eq!(
+            after_mixed - after_warm,
+            8,
+            "only the two cold pages should be fetched from external"
+        );
+
         let _ = tokio::fs::remove_dir_all(&base).await;
     }
 }

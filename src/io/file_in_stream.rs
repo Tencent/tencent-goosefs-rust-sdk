@@ -48,9 +48,9 @@ use std::sync::Arc;
 use bytes::{Bytes, BytesMut};
 use tracing::{debug, warn};
 
-use crate::block::router::WorkerRouter;
+use crate::block::router::{rpc_endpoint, WorkerRouterView};
 use crate::block::short_circuit::{ShortCircuitError, ShortCircuitFactory};
-use crate::cache::{CacheManager, ExternalRangeReader};
+use crate::cache::{page_cache_eligible, CacheManager, ExternalRangeReader};
 use crate::client::{WorkerClient, WorkerClientPool, WorkerManagerClient};
 use crate::config::GoosefsConfig;
 use crate::context::FileSystemContext;
@@ -141,7 +141,16 @@ pub struct GoosefsFileInStream {
 
     // ── Worker routing ────────────────────────────────────────────────────────
     /// Worker router for block → worker selection.
-    router: WorkerRouter,
+    /// Worker router view for block → worker mapping.
+    ///
+    /// P0-D Step 2 (`docs/perf/2026-07-07-hotspot-optimizations/README.md`
+    /// §3.4): migrated from `WorkerRouter` (per-stream `ArcSwap`×3) to
+    /// `WorkerRouterView` (per-stream `Arc`×2 + `Option<i64>` value).
+    /// The legacy `open()` path builds the view via
+    /// [`WorkerRouterView::from_workers`] (in-line ring build,
+    /// `local_worker_id = None`); the context path uses
+    /// [`WorkerRouterView::from_shared`] (wait-free `Arc::clone`).
+    router: WorkerRouterView,
 
     // ── Shared connection pool (optional) ─────────────────────────────────────
     /// Worker connection pool shared across all streams in the same context.
@@ -172,7 +181,7 @@ pub struct GoosefsFileInStream {
 
     // ── Short-circuit (local mmap) read path ─────────────────────────────────
     /// Short-circuit factory, when SC is enabled **and** the stream was built
-    /// in context mode (it needs the shared `WorkerClientPool` + `WorkerRouter`).
+    /// in context mode (it needs the shared `WorkerClientPool` + `WorkerRouterView`).
     ///
     /// `None` disables SC for this stream (legacy `open()`, or SC kill switch
     /// off). When `Some`, both the positioned-read path (`read_external_range`)
@@ -238,8 +247,18 @@ impl GoosefsFileInStream {
             });
         }
 
-        let router = WorkerRouter::new();
-        router.update_workers(workers).await;
+        // Legacy path: build a view directly from the worker list. This is
+        // O(N · virtual_nodes) once here, matching the pre-Step-2 cost of
+        // `WorkerRouter::new() + update_workers(workers).await`. The view
+        // deliberately captures `local_worker_id = None` on this path
+        // (see `WorkerRouterView::from_workers` doc): the legacy `open()`
+        // has no probed shared router to inherit from, and running
+        // `detect_local_worker` here would drag the `hostname::get()`
+        // syscall onto the caller. Local-first is a context-path
+        // optimisation only — pinned by
+        // `test_view_from_workers_no_local_first_when_not_probed`.
+        let router =
+            WorkerRouterView::from_workers(workers, WorkerRouterView::default_failure_ttl());
 
         let file_length = status.length;
 
@@ -281,7 +300,7 @@ impl GoosefsFileInStream {
     ///
     /// This is the recommended constructor in production.  It:
     /// - Reuses the context's persistent `MasterClient` (zero extra TCP)
-    /// - Reuses the context's `WorkerRouter` (already populated)
+    /// - Reuses the context's `WorkerRouterView` (via `from_shared`)
     /// - Uses the context's `WorkerClientPool` so block reads reuse connections
     ///
     /// # Errors
@@ -298,8 +317,34 @@ impl GoosefsFileInStream {
             .map_err(|e| Error::ConfigError { message: e })?;
 
         // Reuse persistent Master connection — no network I/O.
-        let master = ctx.acquire_master();
-        let file_info = master.get_status(path).await?;
+        //
+        // **A3** (`docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md`): consult the opt-in
+        // FileInfo metadata cache first. On hit, skip the RPC entirely; on
+        // miss, populate the cache after a successful `get_status`. Cache is
+        // `None` unless the caller has opted in via `with_file_info_cache_ttl`.
+        let file_info_cache = ctx.acquire_file_info_cache();
+        let file_info = if let Some(cached) = file_info_cache.as_ref().and_then(|c| c.get(path)) {
+            debug!(path = %path, "FileInfo cache hit (§A3 + S3)");
+            // S3: `cached` is `Arc<FileInfo>`; `from_proto` needs owned
+            // `FileInfo`, so one clone is unavoidable here (it moves
+            // the fields into URIStatus). The win is that the cache
+            // itself no longer deep-copies on every hit — only the
+            // `from_proto` conversion does.
+            (*cached).clone()
+        } else {
+            let master = ctx.acquire_master();
+            let fetched = master.get_status(path).await?;
+            // S3: insert_arc shares the Arc with the cache (atomic inc),
+            // avoiding the old `fetched.clone()` for the cache. The
+            // caller still needs owned `FileInfo` for `from_proto`, so
+            // we clone once here — but that's one clone instead of two.
+            let arc_fetched = Arc::new(fetched);
+            if let Some(cache) = &file_info_cache {
+                cache.insert_arc(path, Arc::clone(&arc_fetched));
+            }
+            // Clone out of the Arc for `from_proto` (which moves).
+            (*arc_fetched).clone()
+        };
         let status = URIStatus::from_proto(file_info);
 
         // Reject INCOMPLETE non-folder files
@@ -315,14 +360,12 @@ impl GoosefsFileInStream {
         }
 
         // Reuse shared router — already populated and TTL-refreshed.
+        // A1 (`docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md`): clone the workers +
+        // hash_ring `Arc`s wait-free instead of rebuilding the ring. Failure
+        // isolation is preserved via the new router's own `failed_workers`
+        // DashMap.
         let shared_router = ctx.acquire_router();
-        let router = WorkerRouter::with_ttls(
-            std::time::Duration::from_secs(60),
-            std::time::Duration::from_secs(30),
-        );
-        // Sync initial worker snapshot from the shared router.
-        let workers = shared_router.get_workers().await;
-        router.update_workers((*workers).clone()).await;
+        let router = WorkerRouterView::from_shared(&shared_router);
 
         let file_length = status.length;
         let worker_pool = ctx.acquire_worker_pool();
@@ -334,7 +377,15 @@ impl GoosefsFileInStream {
         let short_circuit = ctx.acquire_short_circuit();
 
         // Inject the shared page cache (best-effort; `None` when disabled).
-        let cache = ctx.acquire_cache_manager();
+        //
+        // HR-1 (design §9.2): see [`page_cache_eligible`]. This guard MUST run
+        // before `on_file_open` below, otherwise a "0"-keyed open would pollute
+        // the version table for the next id-less file.
+        let cache = if page_cache_eligible(status.file_id) {
+            ctx.acquire_cache_manager()
+        } else {
+            None
+        };
         let cache_file_id: Arc<str> = Arc::from(status.file_id.to_string());
         // Only back-fill the local page cache when the read allows caching.
         // A `NoCache` read still serves cache *hits* (free speedup) but must
@@ -938,10 +989,20 @@ impl GoosefsFileInStream {
         offset_in_block: i64,
         length: i64,
     ) -> Option<Result<Bytes>> {
-        let factory = self.short_circuit.as_ref()?;
+        // §B1: SC decision histogram — count SKIPPED when the factory itself
+        // is absent so hit_rate = HIT / (HIT + SKIPPED + FALLBACK_*) has a
+        // stable denominator across `short_circuit_enabled` toggles.
+        let factory = match self.short_circuit.as_ref() {
+            Some(f) => f,
+            None => {
+                crate::metrics::counter(crate::metrics::name::CLIENT_SC_DECISION_SKIPPED).inc(1);
+                return None;
+            }
+        };
         let block_size = self.block_logical_size(block_idx);
 
         if !factory.should_use(block_id, block_size).await {
+            crate::metrics::counter(crate::metrics::name::CLIENT_SC_DECISION_SKIPPED).inc(1);
             return None;
         }
 
@@ -956,12 +1017,17 @@ impl GoosefsFileInStream {
                     error = %e,
                     "short-circuit open failed, falling back to gRPC"
                 );
+                crate::metrics::counter(crate::metrics::name::CLIENT_SC_DECISION_FALLBACK_OPEN)
+                    .inc(1);
                 return None;
             }
         };
 
         match reader.read_bytes(offset_in_block as usize, length as usize) {
-            Ok(bytes) => Some(Ok(bytes)),
+            Ok(bytes) => {
+                crate::metrics::counter(crate::metrics::name::CLIENT_SC_DECISION_HIT).inc(1);
+                Some(Ok(bytes))
+            }
             Err(ShortCircuitError::OutOfRange {
                 off,
                 len,
@@ -971,6 +1037,8 @@ impl GoosefsFileInStream {
                 // clamped to file_length this should not occur; if it does it
                 // signals a real metadata/block-size inconsistency worth
                 // surfacing rather than masking behind a fallback.
+                crate::metrics::counter(crate::metrics::name::CLIENT_SC_DECISION_SEMANTIC_ERROR)
+                    .inc(1);
                 Some(Err(Error::InvalidArgument {
                     message: format!(
                         "short-circuit read out of range on block {block_id}: \
@@ -1191,11 +1259,7 @@ impl GoosefsFileInStream {
                 source: None,
             })?;
 
-        let worker_addr = format!(
-            "{}:{}",
-            addr.host.as_deref().unwrap_or("127.0.0.1"),
-            addr.rpc_port.unwrap_or(9203)
-        );
+        let worker_addr = rpc_endpoint(addr);
 
         // Use pool when available (context mode)
         let result = if let Some(pool) = &self.worker_pool {
@@ -1239,11 +1303,7 @@ impl GoosefsFileInStream {
                         message: "retry worker has no address".to_string(),
                         source: None,
                     })?;
-                let retry_addr = format!(
-                    "{}:{}",
-                    retry_addr_info.host.as_deref().unwrap_or("127.0.0.1"),
-                    retry_addr_info.rpc_port.unwrap_or(9203)
-                );
+                let retry_addr = rpc_endpoint(retry_addr_info);
                 if let Some(pool) = &self.worker_pool {
                     pool.acquire(&retry_addr).await
                 } else {
@@ -1277,11 +1337,7 @@ impl GoosefsFileInStream {
                 source: None,
             })?;
 
-        let worker_addr = format!(
-            "{}:{}",
-            addr.host.as_deref().unwrap_or("127.0.0.1"),
-            addr.rpc_port.unwrap_or(9203)
-        );
+        let worker_addr = rpc_endpoint(addr);
 
         if let Some(pool) = &self.worker_pool {
             match stale_generation {
@@ -1455,7 +1511,7 @@ mod tests {
             block_in_stream: None,
             block_in_stream_block_id: -1,
             cached_positioned_block_id: -1,
-            router: WorkerRouter::new(),
+            router: WorkerRouterView::empty(),
             worker_pool: None,
             cache: None,
             cache_page_size: 1024 * 1024,
@@ -1482,6 +1538,29 @@ mod tests {
         assert_eq!(stream.block_index_for_pos(bs - 1), 0);
         assert_eq!(stream.block_index_for_pos(bs), 1);
         assert_eq!(stream.block_index_for_pos(2 * bs), 2);
+    }
+
+    /// HR-1: `URIStatus.file_id <= 0` must not attach a page cache.
+    #[test]
+    fn hr1_non_positive_file_id_disables_page_cache_eligibility() {
+        use crate::cache::page_cache_eligible;
+
+        let mut status = make_status(1024, 1024);
+        status.file_id = 0;
+        assert!(!page_cache_eligible(status.file_id));
+        let stream = make_stream(status);
+        assert!(
+            stream.cache.is_none(),
+            "synthetic stream without open must not enable cache"
+        );
+
+        let mut status_neg = make_status(1024, 1024);
+        status_neg.file_id = -1;
+        assert!(!page_cache_eligible(status_neg.file_id));
+
+        let mut status_ok = make_status(1024, 1024);
+        status_ok.file_id = 1001;
+        assert!(page_cache_eligible(status_ok.file_id));
     }
 
     #[test]

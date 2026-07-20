@@ -137,9 +137,7 @@ def _drive_get_status(
     return wall, samples
 
 
-def scenario_single_thread(
-    fs: Goosefs, paths: Sequence[str], calls: int
-) -> ScenarioResult:
+def scenario_single_thread(fs: Goosefs, paths: Sequence[str], calls: int) -> ScenarioResult:
     """Scenario A: single-threaded steady state.
 
     Tightest signal for §3 (path take) and §4 (counter cache) — no concurrency,
@@ -182,9 +180,7 @@ def scenario_concurrency(
     )
 
 
-def scenario_exists(
-    fs: Goosefs, paths: Sequence[str], calls: int
-) -> ScenarioResult:
+def scenario_exists(fs: Goosefs, paths: Sequence[str], calls: int) -> ScenarioResult:
     """``exists`` walks the same hot path, just with a different return type;
     useful as a sanity check that the optimisation extends to all metadata
     RPCs, not only ``get_status``."""
@@ -282,7 +278,7 @@ def _load_results(path: str) -> dict[str, ScenarioResult]:
 def compare_runs(baseline_path: str, candidate_path: str) -> None:
     base = _load_results(baseline_path)
     cand = _load_results(candidate_path)
-    print(f"\n=== A/B comparison ===")
+    print("\n=== A/B comparison ===")
     print(f"  baseline  = {baseline_path}")
     print(f"  candidate = {candidate_path}")
     header = (
@@ -323,9 +319,7 @@ def _parse_threads(spec: str) -> list[int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--paths", type=int, default=200, help="size of the path pool"
-    )
+    parser.add_argument("--paths", type=int, default=200, help="size of the path pool")
     parser.add_argument(
         "--calls",
         type=int,
@@ -357,9 +351,7 @@ def main() -> None:
         default=None,
         help="skip the bench and print an A/B comparison from two JSON files",
     )
-    parser.add_argument(
-        "--skip-exists", action="store_true", help="skip the exists() probe"
-    )
+    parser.add_argument("--skip-exists", action="store_true", help="skip the exists() probe")
     args = parser.parse_args()
 
     # Compare-only mode does not touch the cluster.
@@ -369,9 +361,7 @@ def main() -> None:
 
     master = os.environ.get("GOOSEFS_MASTER_ADDR")
     if not master:
-        print(
-            "GOOSEFS_MASTER_ADDR is not set (e.g. 127.0.0.1:9200)", file=sys.stderr
-        )
+        print("GOOSEFS_MASTER_ADDR is not set (e.g. 127.0.0.1:9200)", file=sys.stderr)
         raise SystemExit(2)
 
     cfg = Config(master)
@@ -389,10 +379,7 @@ def main() -> None:
     try:
         t0 = time.perf_counter()
         paths = setup_paths(fs, root, args.paths)
-        print(
-            f"setup    = created {len(paths)} dirs in "
-            f"{time.perf_counter() - t0:.2f}s"
-        )
+        print(f"setup    = created {len(paths)} dirs in {time.perf_counter() - t0:.2f}s")
 
         print("warmup   = priming connections + caches ...")
         warmup(fs, paths, rounds=2)

@@ -16,24 +16,53 @@
 
 ## What's New
 
-- **Unreleased** — adds a synchronous `WorkerClient` (mirror of
-  `AsyncWorkerClient`). Blocking escape hatch for callers that already
-  know a worker address and want a one-shot positioned read without
-  going through `Goosefs.positioned_read` (which routes via the master).
+- **v0.1.6** — aligned with `goosefs-sdk` 0.1.6. Two major SDK-side
+  data-plane features land automatically for every Python read:
 
-  ```python
-  from goosefs import WorkerClient, Config
+  - **Client-side local page cache** — opt-in, disk-backed page cache
+    mirroring the GooseFS Java client's `goosefs.user.client.cache.*`
+    semantics (LRU/LFU eviction, multi-directory `HashAllocator`, TTL
+    lazy expiry, restart restore, overwrite invalidation). Best-effort
+    by design — misses / errors always fall back to the worker without
+    affecting read correctness. Enable via config / ENV / properties;
+    see `bindings/python/examples/page_cache.py` and
+    [`docs/CLIENT_PAGE_CACHE_DESIGN.md`](../../docs/CLIENT_PAGE_CACHE_DESIGN.md).
+  - **Short-Circuit local mmap read** — when the client and worker are
+    co-located, block reads are served via zero-copy `mmap` (with
+    `madvise` prefetch and optional Transparent Huge Pages) instead of
+    the gRPC data plane. Local worker is auto-detected by interface
+    bind; every recoverable error transparently falls back to gRPC.
+    See [`docs/SHORT_CIRCUIT_DESIGN.md`](../../docs/SHORT_CIRCUIT_DESIGN.md).
 
-  with WorkerClient.connect("127.0.0.1:9203", Config("127.0.0.1:9200")) as wc:
-      data = wc.read_block_positioned(block_id, offset=0, length=64 * 1024)
-  ```
+  New Python-side surface:
 
-  Same Tokio-runtime constraints as the sync `Goosefs` class — must not
-  be called from inside an asyncio loop or a Tokio worker thread.
-  Inherits a batch of SDK-side correctness fixes (HA primary discovery
+  - **Batch file-lifecycle APIs**: `AsyncGoosefs.batch_open_file` /
+    `batch_create_file` / `batch_create_dir` / `batch_rename` /
+    `batch_delete` / `batch_list_status`, plus their sync `Goosefs`
+    counterparts. Single Tokio spawn per batch, first-error-wins,
+    one PyO3 boundary crossing per batch instead of N.
+  - **`goosefs.WorkerClient`** — synchronous mirror of
+    `AsyncWorkerClient`. Blocking escape hatch for callers that already
+    know a worker address and want a one-shot positioned read without
+    going through `Goosefs.positioned_read` (which routes via the
+    master).
+
+    ```python
+    from goosefs import WorkerClient, Config
+
+    with WorkerClient.connect("127.0.0.1:9203", Config("127.0.0.1:9200")) as wc:
+        data = wc.read_block_positioned(block_id, offset=0, length=64 * 1024)
+    ```
+
+  Also inherits the Worker/router wait-free hot-path rewrite (`ArcSwap`
+  based `WorkerClientPool` / `WorkerRouter`, +11–21% throughput and
+  ~50–65% p999 reduction on positioned-read block traffic), deferred
+  `WorkerRouter` initialization for metadata-only workloads, and a
+  batch of SDK-side correctness fixes (HA primary discovery
   cancel-safety, `WriteBlockHandle` Drop abort, `GoosefsFileInStream`
-  forward-seek byte-loss, `GoosefsFileWriter` Drop cleanup, `LogSampler`
-  clock-jump safety, etc.) — see [`CHANGELOG.md`](./CHANGELOG.md) for the
+  forward-seek byte-loss, `GoosefsFileWriter` Drop cleanup,
+  `LogSampler` clock-jump safety, etc.). Drop-in upgrade from 0.1.5 —
+  no breaking API changes. See [`CHANGELOG.md`](./CHANGELOG.md) for the
   full list.
 
 - **v0.1.5** — aligned with `goosefs-sdk` 0.1.5. Inherits Prometheus

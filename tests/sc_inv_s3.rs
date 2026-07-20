@@ -109,10 +109,7 @@ mod inv_s3 {
         Ok(())
     }
 
-    async fn open_stream(
-        ctx: &Arc<FileSystemContext>,
-        path: &str,
-    ) -> Result<GoosefsFileInStream> {
+    async fn open_stream(ctx: &Arc<FileSystemContext>, path: &str) -> Result<GoosefsFileInStream> {
         GoosefsFileInStream::open_with_context(ctx.clone(), path, OpenFileOptions::default()).await
     }
 
@@ -204,10 +201,7 @@ mod inv_s3 {
                 expected,
                 "INV-S3-b: gRPC bytes drift from source at off={off} len={len}"
             );
-            assert_eq!(
-                a, b,
-                "INV-S3-b: SC vs gRPC mismatch at off={off} len={len}"
-            );
+            assert_eq!(a, b, "INV-S3-b: SC vs gRPC mismatch at off={off} len={len}");
         }
 
         ctx_sc.acquire_master().delete(&path, false).await.ok();

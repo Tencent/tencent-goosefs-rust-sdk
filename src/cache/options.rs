@@ -32,6 +32,13 @@ pub struct CacheManagerOptions {
     pub quota_enabled: bool,
     /// Page TTL; `None` means no expiry.
     pub ttl: Option<Duration>,
+    /// Whether to use the io_uring page-store backend (Linux 5.1+).
+    /// When `false` or unavailable, falls back to `LocalPageStore` (tokio::fs).
+    pub uring_enabled: bool,
+    /// io_uring SQ/CQ queue depth (0 = use driver default of 16384).
+    pub uring_queue_depth: usize,
+    /// io_uring background thread count (0 = use driver default of 2).
+    pub uring_thread_count: usize,
 }
 
 impl CacheManagerOptions {
@@ -68,6 +75,9 @@ impl CacheManagerOptions {
             async_write_threads: config.client_cache_async_write_threads.max(1),
             quota_enabled: config.client_cache_quota_enabled,
             ttl,
+            uring_enabled: config.client_cache_uring_enabled,
+            uring_queue_depth: config.client_cache_uring_queue_depth,
+            uring_thread_count: config.client_cache_uring_thread_count,
         }
     }
 
@@ -91,10 +101,13 @@ mod tests {
         let opts = CacheManagerOptions::from_config(&cfg);
 
         assert_eq!(opts.page_size, 1024 * 1024);
-        // 512 MiB * 0.95
-        assert_eq!(opts.dir_capacity, (512.0 * 1024.0 * 1024.0 * 0.95) as u64);
+        // DEFAULT_CLIENT_CACHE_SIZE (20 GiB) * (1 - LOCAL_STORE_OVERHEAD = 0.95)
+        assert_eq!(
+            opts.dir_capacity,
+            (20.0 * 1024.0 * 1024.0 * 1024.0 * 0.95) as u64
+        );
         assert_eq!(opts.dirs.len(), 1);
-        assert_eq!(opts.evictor, CacheEvictorType::Lru);
+        assert_eq!(opts.evictor, CacheEvictorType::Lfu);
         assert!(opts.async_write_enabled);
         assert_eq!(opts.async_write_threads, 16);
         assert!(!opts.quota_enabled);

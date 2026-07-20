@@ -73,11 +73,6 @@ impl LocalPageStore {
         Ok(Self { root })
     }
 
-    /// Root directory of this store (`<dir>/<page_size>`). Used by restore.
-    pub fn root_dir(&self) -> &Path {
-        &self.root
-    }
-
     /// Absolute path of the file holding `page_id`.
     fn page_path(&self, page_id: &PageId) -> PathBuf {
         let bucket = hash_file_id(&page_id.file_id) % NUM_BUCKETS;
@@ -101,37 +96,6 @@ impl LocalPageStore {
         name == IDENTITY_FILE
     }
 
-    /// Persist `file_id`'s `(length, mtime)` identity (best-effort).
-    ///
-    /// Written atomically via a temp sibling + rename so a reader/restore never
-    /// observes a half-written identity. The parent dir is created if needed.
-    pub async fn write_identity(&self, file_id: &str, length: i64, mtime: i64) -> Result<()> {
-        let final_path = self.identity_path(file_id);
-        let parent = final_path
-            .parent()
-            .expect("identity path always has a parent")
-            .to_path_buf();
-        tokio::fs::create_dir_all(&parent)
-            .await
-            .map_err(|e| io_error(format!("create identity dir {}", parent.display()), e))?;
-        let tmp_path = parent.join(format!("{}.tmp-{}", IDENTITY_FILE, uuid::Uuid::new_v4()));
-        let contents = format!("{length},{mtime}");
-        let write_result = async {
-            tokio::fs::write(&tmp_path, contents.as_bytes())
-                .await
-                .map_err(|e| io_error("write temp identity file", e))?;
-            tokio::fs::rename(&tmp_path, &final_path)
-                .await
-                .map_err(|e| io_error("rename temp identity file", e))?;
-            Ok::<(), Error>(())
-        }
-        .await;
-        if write_result.is_err() {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-        }
-        write_result
-    }
-
     /// Parse a `(length, mtime)` identity from the sidecar contents.
     ///
     /// Returns `None` if the file is missing or malformed (restore then treats
@@ -139,29 +103,6 @@ impl LocalPageStore {
     pub fn parse_identity(contents: &str) -> Option<(i64, i64)> {
         let (l, m) = contents.trim().split_once(',')?;
         Some((l.trim().parse().ok()?, m.trim().parse().ok()?))
-    }
-
-    /// Read and parse `file_id`'s persisted `(length, mtime)` identity.
-    ///
-    /// Returns `None` when the sidecar is absent or malformed, which restore
-    /// treats as "identity unknown" (such a file's pages are not restored).
-    pub async fn read_identity(&self, file_id: &str) -> Option<(i64, i64)> {
-        let path = self.identity_path(file_id);
-        let contents = tokio::fs::read_to_string(&path).await.ok()?;
-        Self::parse_identity(&contents)
-    }
-
-    /// Remove `file_id`'s identity sidecar (best-effort; missing is OK).
-    ///
-    /// Keeps the on-disk invariant "identity exists ⇔ the file has cached
-    /// pages" so sidecars do not accumulate after a file's pages are removed.
-    pub async fn delete_identity(&self, file_id: &str) -> Result<()> {
-        let path = self.identity_path(file_id);
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(io_error("delete identity file", e)),
-        }
     }
 }
 
@@ -247,6 +188,52 @@ impl PageStore for LocalPageStore {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(io_error("delete page file", e)),
+        }
+    }
+
+    fn root_dir(&self) -> &Path {
+        &self.root
+    }
+
+    async fn write_identity(&self, file_id: &str, length: i64, mtime: i64) -> Result<()> {
+        let final_path = self.identity_path(file_id);
+        let parent = final_path
+            .parent()
+            .expect("identity path always has a parent")
+            .to_path_buf();
+        tokio::fs::create_dir_all(&parent)
+            .await
+            .map_err(|e| io_error(format!("create identity dir {}", parent.display()), e))?;
+        let tmp_path = parent.join(format!("{}.tmp-{}", IDENTITY_FILE, uuid::Uuid::new_v4()));
+        let contents = format!("{length},{mtime}");
+        let write_result = async {
+            tokio::fs::write(&tmp_path, contents.as_bytes())
+                .await
+                .map_err(|e| io_error("write temp identity file", e))?;
+            tokio::fs::rename(&tmp_path, &final_path)
+                .await
+                .map_err(|e| io_error("rename temp identity file", e))?;
+            Ok::<(), Error>(())
+        }
+        .await;
+        if write_result.is_err() {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+        }
+        write_result
+    }
+
+    async fn read_identity(&self, file_id: &str) -> Option<(i64, i64)> {
+        let path = self.identity_path(file_id);
+        let contents = tokio::fs::read_to_string(&path).await.ok()?;
+        Self::parse_identity(&contents)
+    }
+
+    async fn delete_identity(&self, file_id: &str) -> Result<()> {
+        let path = self.identity_path(file_id);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io_error("delete identity file", e)),
         }
     }
 }
@@ -341,5 +328,37 @@ mod tests {
         assert_eq!(hash_file_id(""), 3244421341483603138);
         assert_eq!(hash_file_id("a"), 16629034431890738719);
         assert_eq!(hash_file_id("foobar"), 15532873758901296260);
+    }
+
+    #[test]
+    fn parse_identity_accepts_well_formed_and_rejects_malformed() {
+        assert_eq!(
+            LocalPageStore::parse_identity("4096,1700000000000\n"),
+            Some((4096, 1_700_000_000_000))
+        );
+        assert_eq!(
+            LocalPageStore::parse_identity("  12 , 34  "),
+            Some((12, 34))
+        );
+        assert_eq!(LocalPageStore::parse_identity(""), None);
+        assert_eq!(LocalPageStore::parse_identity("only-one"), None);
+        assert_eq!(LocalPageStore::parse_identity("a,b"), None);
+        // Trailing junk after the second field makes the mtime unparsable.
+        assert_eq!(LocalPageStore::parse_identity("1,2,3"), None);
+    }
+
+    #[tokio::test]
+    async fn get_bytes_returns_owned_page_slice() {
+        let (store, base) = temp_store(1024).await;
+        let id = PageId::new("file-bytes", 0);
+        store.put(&id, b"abcdefghij").await.unwrap();
+
+        let bytes = store.get_bytes(&id, 3, 4).await.unwrap();
+        assert_eq!(&bytes[..], b"defg");
+
+        let empty = store.get_bytes(&id, 0, 0).await.unwrap();
+        assert!(empty.is_empty());
+
+        let _ = tokio::fs::remove_dir_all(&base).await;
     }
 }

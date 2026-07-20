@@ -103,9 +103,7 @@ def setup_paths(fs: Goosefs, root: str, n: int) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def bench_sync_metadata(
-    fs: Goosefs, paths: Sequence[str], iters: int, threads: int
-) -> None:
+def bench_sync_metadata(fs: Goosefs, paths: Sequence[str], iters: int, threads: int) -> None:
     n = len(paths)
     plist = list(paths)
     print(f"\n[sync] get_status over {n} paths  (iters={iters}, threads={threads})")
@@ -157,9 +155,7 @@ def bench_sync_metadata(
 # ---------------------------------------------------------------------------
 
 
-async def bench_async_metadata(
-    afs: AsyncGoosefs, paths: Sequence[str], iters: int
-) -> None:
+async def bench_async_metadata(afs: AsyncGoosefs, paths: Sequence[str], iters: int) -> None:
     n = len(paths)
     plist = list(paths)
     print(f"\n[async] get_status over {n} paths  (iters={iters})")
@@ -212,9 +208,7 @@ def bench_read_throughput(fs: Goosefs, root: str, iters: int) -> None:
             samples = _timeit(read_once, iters)
             med = statistics.median(samples)
             mbps = (size / (1024 * 1024)) / med if med > 0 else float("inf")
-            human = (
-                f"{size // 1024}KiB" if size < 1024 * 1024 else f"{size // (1024 * 1024)}MiB"
-            )
+            human = f"{size // 1024}KiB" if size < 1024 * 1024 else f"{size // (1024 * 1024)}MiB"
             print(f"  {human:>8}: median={med * 1e3:8.2f} ms  {mbps:8.1f} MiB/s")
         finally:
             try:
@@ -232,7 +226,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--paths", type=int, default=200, help="number of metadata paths")
     parser.add_argument("--iters", type=int, default=5, help="timed iterations per case")
-    parser.add_argument("--threads", type=int, default=16, help="ThreadPool size for sync concurrency")
+    parser.add_argument(
+        "--threads", type=int, default=16, help="ThreadPool size for sync concurrency"
+    )
     parser.add_argument("--skip-read", action="store_true", help="skip read-throughput probe")
     args = parser.parse_args()
 

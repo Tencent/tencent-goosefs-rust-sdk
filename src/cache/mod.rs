@@ -61,6 +61,26 @@ pub use page_id::{CacheScope, PageId, PageInfo};
 use bytes::Bytes;
 use std::sync::Arc;
 
+/// One cached page read request.
+#[derive(Debug, Clone)]
+pub struct PageReadRequest {
+    pub page_id: PageId,
+    pub page_offset: usize,
+    pub len: usize,
+}
+
+/// Whether a file may participate in the local page cache (HR-1).
+///
+/// `file_id <= 0` means the server reported no stable inode identity. The
+/// cache key namespace is `file_id.to_string()`, so a non-positive id collapses
+/// to the shared bucket `"0"` and distinct files with equal `(length, mtime)`
+/// could cross-read each other's pages. Callers must disable the page cache
+/// for such files (neither read nor fill).
+#[inline]
+pub(crate) fn page_cache_eligible(file_id: i64) -> bool {
+    file_id > 0
+}
+
 /// Operational state of a [`CacheManager`].
 ///
 /// Mirrors Java `CacheManager.State`.
@@ -127,6 +147,36 @@ pub trait CacheManager: Send + Sync {
     /// Returns the number of bytes actually read. `0` means a cache miss (or
     /// any internal error): the caller must read from the worker/UFS instead.
     async fn get(&self, page_id: &PageId, page_offset: usize, dst: &mut [u8]) -> usize;
+
+    /// Read bytes from a cached page and return the owned [`Bytes`] directly.
+    ///
+    /// The default implementation preserves the legacy `get` contract by
+    /// reading into a caller-owned buffer. io_uring-backed implementations
+    /// override this to return the kernel-filled buffer directly, avoiding one
+    /// extra copy on cache hits.
+    async fn get_bytes(&self, page_id: &PageId, page_offset: usize, len: usize) -> Bytes {
+        if len == 0 {
+            return Bytes::new();
+        }
+        let mut dst = vec![0u8; len];
+        let n = self.get(page_id, page_offset, &mut dst).await;
+        if n == 0 {
+            Bytes::new()
+        } else {
+            dst.truncate(n);
+            Bytes::from(dst)
+        }
+    }
+
+    /// Read multiple cached pages. Each output corresponds to the request at
+    /// the same index; an empty [`Bytes`] means miss or cache error.
+    async fn get_batch_bytes(&self, requests: &[PageReadRequest]) -> Vec<Bytes> {
+        let mut out = Vec::with_capacity(requests.len());
+        for req in requests {
+            out.push(self.get_bytes(&req.page_id, req.page_offset, req.len).await);
+        }
+        out
+    }
 
     /// Delete a single page. Returns `true` if a page was removed.
     async fn delete(&self, page_id: &PageId) -> bool;
@@ -217,5 +267,17 @@ mod tests {
         assert!(!mgr.delete(&id).await);
         mgr.invalidate("file-1").await; // no panic
         assert_eq!(mgr.state(), CacheState::NotInUse);
+    }
+
+    /// HR-1: only strictly positive file ids may key the page cache.
+    #[test]
+    fn page_cache_eligible_requires_positive_file_id() {
+        assert!(!page_cache_eligible(0), "file_id=0 must disable cache");
+        assert!(
+            !page_cache_eligible(-1),
+            "negative file_id must disable cache"
+        );
+        assert!(page_cache_eligible(1));
+        assert!(page_cache_eligible(i64::MAX));
     }
 }

@@ -29,10 +29,6 @@ dynamic = ["version"]
 dependencies = [
 ]
 
-[build-system]
-requires = ["maturin>=1.13.3"]
-build-backend = "maturin"
-
 [project.urls]
 Homepage   = "https://git.woa.com/tencent-cloud-datalake/goosefs-client-rust"
 Repository = "https://git.woa.com/tencent-cloud-datalake/goosefs-client-rust"

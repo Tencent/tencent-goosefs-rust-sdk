@@ -112,6 +112,66 @@ Tracks block-level read/write concurrency and completion counts.
 
 ---
 
+### 2.6 Short-Circuit Read Metrics
+
+Tracks the local-mmap ("short-circuit", SC) read path
+([`docs/SHORT_CIRCUIT_DESIGN.md`](SHORT_CIRCUIT_DESIGN.md)). Two
+disjoint layers:
+
+**(a) Fine-grained per-step counters** (already present, exported here for completeness):
+
+| Internal Name | Type | Description |
+|---|---|---|
+| `Client.ShortCircuitOpenSuccess` | Counter | Successful `OpenLocalBlock` + mmap sessions |
+| `Client.ShortCircuitOpenLocalFail` | Counter | `OpenLocalBlock` RPC failures (block not local / IO / auth) |
+| `Client.ShortCircuitFileOpenFail` | Counter | `File::open` failures on the local block path (e.g. EACCES) |
+| `Client.ShortCircuitMmapFail` | Counter | `Mmap::map` failures (ENOMEM / EINVAL) |
+| `Client.ShortCircuitReadCalls` | Counter | Number of SC `read` / `read_bytes` / `read_to_slice` calls |
+| `Client.ShortCircuitReadBytes` | Counter | Total bytes served from the SC (mmap) path |
+| `Client.ShortCircuitCacheHits` | Counter | Factory LRU reader-cache hits |
+| `Client.ShortCircuitCacheEvictions` | Counter | Factory LRU reader-cache evictions |
+| `Client.ShortCircuitNegCacheHits` | Counter | Negative-cache hits (recently-failed block → SC skipped) |
+| `Client.ShortCircuitActiveReaders` | Gauge | Currently-live SC readers |
+| `Client.ShortCircuitPrefetchCalls` | Counter | `prefetch` / `prefetch_many` calls |
+| `Client.ShortCircuitPrefetchBytes` | Counter | Cumulative bytes requested for prefetch |
+| `Client.ShortCircuitPrefetchMadvise` | Counter | Actual `madvise(WILLNEED)` syscalls issued (after coalescing) |
+
+**(b) Top-level decision histogram** (added per FLAMEGRAPH_OPTIMIZATION_PLAN §B1)
+— five enum-tagged counters exposing the caller-visible SC outcome for each
+positioned/random read attempt:
+
+| Internal Name | Type | Description |
+|---|---|---|
+| `Client.ShortCircuitDecisionHit` | Counter | SC actually served the read (zero-copy mmap slice). Hit-rate numerator. |
+| `Client.ShortCircuitDecisionSkipped` | Counter | SC not attempted — pre-filter (`should_use`) rejected the block: SC disabled by config, block source not local, block size below threshold, block on the negative cache, or the reader has no SC factory attached. |
+| `Client.ShortCircuitDecisionFallbackOpen` | Counter | SC attempted but the **open** step failed and the read fell back to gRPC. Break down the cause via `ShortCircuitOpenLocalFail` / `ShortCircuitFileOpenFail` / `ShortCircuitMmapFail`. |
+| `Client.ShortCircuitDecisionFallbackRead` | Counter | SC opened successfully but a subsequent **read** failed with a recoverable error and this individual read fell back to gRPC. |
+| `Client.ShortCircuitDecisionSemanticError` | Counter | SC read produced a semantic error (`OutOfRange`) that must be surfaced unchanged (INV-S4). Should stay at `0` on healthy deployments. |
+
+**Hit-rate calculation** (Prometheus / PromQL):
+
+```promql
+sum(rate(Client_ShortCircuitDecisionHit[5m]))
+/
+sum(rate(Client_ShortCircuitDecisionHit[5m]))
++ sum(rate(Client_ShortCircuitDecisionSkipped[5m]))
++ sum(rate(Client_ShortCircuitDecisionFallbackOpen[5m]))
++ sum(rate(Client_ShortCircuitDecisionFallbackRead[5m]))
+```
+
+The FLAMEGRAPH_OPTIMIZATION_PLAN §B1 target is `≥ 0.95` on the profiling
+host. If hit-rate is low, use the fine-grained counters in (a) to
+identify the top fallback reason and drive per-cause fixes.
+
+**Scope**: the decision histogram covers the **positioned / random** read
+path (`GoosefsFileReader::next_read_bytes`, `GoosefsFileInStream::read_at`),
+which is the workload the flame graph is dominated by. The **sequential**
+read path decides SC once per block and reuses the mmap slice for every
+chunk, so it is intentionally excluded from this histogram — its throughput
+remains observable via `ShortCircuitReadCalls` / `ShortCircuitReadBytes`.
+
+---
+
 ## 3. Metric Naming Convention
 
 ### Internal Name → Prometheus Name Conversion Rules
@@ -196,21 +256,37 @@ let config = GoosefsConfig::new("10.0.0.1:9200")
 
 | Environment Variable | Description | Example |
 |---------|------|------|
-| `GOOSEFS_METRICS_PUSHGATEWAY_ENABLED` | Enable push | `true` |
+| `GOOSEFS_USER_METRICS_COLLECTION_ENABLED` | Master switch: enable metrics collection + heartbeat | `true` / `false` |
+| `GOOSEFS_USER_METRICS_HEARTBEAT_INTERVAL_MS` | Heartbeat interval to the Master (milliseconds, `≥ 1000`) | `10000` |
+| `GOOSEFS_USER_APP_ID` | Client tag attached to every heartbeat | `my_service` |
+| `GOOSEFS_METRICS_PUSHGATEWAY_ENABLED` | Enable Prometheus Pushgateway push | `true` |
 | `GOOSEFS_METRICS_PUSHGATEWAY_ENDPOINT` | Pushgateway address | `http://10.0.0.2:9091` |
 | `GOOSEFS_METRICS_PUSHGATEWAY_PUSH_INTERVAL_MS` | Push interval (milliseconds) | `15000` |
 | `GOOSEFS_METRICS_PUSHGATEWAY_JOB` | job label | `my_service` |
 | `GOOSEFS_METRICS_PUSHGATEWAY_INSTANCE` | instance label | `host-001` |
 
 ```bash
+# Disable both master heartbeat and pushgateway from the shell:
+export GOOSEFS_USER_METRICS_COLLECTION_ENABLED=false
+
+# Or enable pushgateway only:
 export GOOSEFS_METRICS_PUSHGATEWAY_ENABLED=true
 export GOOSEFS_METRICS_PUSHGATEWAY_ENDPOINT=http://10.0.0.2:9091
 cargo run --example metrics_pushgateway
 ```
 
+> Environment variables are overlaid on top of `goosefs-site.properties`
+> and the `properties=` dict, so an operator can always disable the
+> heartbeat without touching application code.
+
 ### 5.4 Properties File Configuration (`goosefs-site.properties`)
 
 ```properties
+# Master switch for the metrics heartbeat pipeline (default: true).
+goosefs.user.metrics.collection.enabled=true
+goosefs.user.metrics.heartbeat.interval=10000
+
+# Optional Prometheus Pushgateway sink.
 goosefs.metrics.pushgateway.enabled=true
 goosefs.metrics.pushgateway.endpoint=http://10.0.0.2:9091
 goosefs.metrics.pushgateway.push.interval=15000

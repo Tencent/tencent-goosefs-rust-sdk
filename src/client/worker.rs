@@ -21,7 +21,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, Mutex as AsyncMutex, RwLock};
+use dashmap::DashMap;
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tonic::service::interceptor::InterceptedService;
@@ -741,10 +742,19 @@ pub struct WorkerClientPool {
     /// the reconnect handshake (which performs network I/O) does not hold the
     /// clients-map write lock. Acquiring this mutex for one channel does not
     /// block other channels' reconnects.
-    reconnect_locks: RwLock<HashMap<String, Arc<AsyncMutex<()>>>>,
+    ///
+    /// **H2** (`docs/perf/2026-07-07-hotspot-optimizations/README.md`):
+    /// changed from `tokio::sync::RwLock<HashMap<…>>` to `DashMap<…>` so the
+    /// `reconnect_lock_for` read path is lock-free (shard-level striped lock
+    /// inside DashMap, no async `.read().await` round-trip) — the old pattern
+    /// contended under 32+ concurrent readers hitting the same address.
+    reconnect_locks: DashMap<String, Arc<AsyncMutex<()>>>,
     /// Per-address round-robin counter used to pick the next channel slot when
     /// `pool_size > 1`. Lazily created on first `acquire` for an address.
-    addr_rr: RwLock<HashMap<String, Arc<AtomicU64>>>,
+    ///
+    /// **H2**: same `RwLock<HashMap> → DashMap` swap as `reconnect_locks`
+    /// above; `next_slot`'s hot path no longer takes an async read lock.
+    addr_rr: DashMap<String, Arc<AtomicU64>>,
     /// Number of channels to pool per worker address (≥ 1).
     pool_size: usize,
     /// Monotonic counter used to hand out a unique `generation` for every
@@ -760,8 +770,8 @@ impl WorkerClientPool {
         let pool_size = config.worker_connection_pool_size.max(1);
         Self {
             clients: ArcSwap::from_pointee(HashMap::new()),
-            reconnect_locks: RwLock::new(HashMap::new()),
-            addr_rr: RwLock::new(HashMap::new()),
+            reconnect_locks: DashMap::new(),
+            addr_rr: DashMap::new(),
             pool_size,
             // Start generations at 1 so `0` (the default on constructed-but-
             // never-pooled clients) is always "stale" relative to any pooled
@@ -779,27 +789,41 @@ impl WorkerClientPool {
 
     /// Channel-map key for `(addr, slot)`. For a single-channel pool this is
     /// just `addr` (byte-identical to the legacy behaviour).
+    ///
+    /// **H1** (`docs/perf/2026-07-07-hotspot-optimizations/README.md`):
+    /// replaced `format!("{addr}#{slot}")` with a pre-sized `String` +
+    /// `itoa::Buffer` to avoid the `core::fmt` machinery on every `acquire`
+    /// when `pool_size > 1`.
     fn slot_key(&self, addr: &str, slot: usize) -> String {
         if self.pool_size <= 1 {
-            addr.to_string()
-        } else {
-            format!("{addr}#{slot}")
+            return addr.to_string();
         }
+        // `addr` + '#' + up-to-20-digit usize.
+        let mut s = String::with_capacity(addr.len() + 21);
+        s.push_str(addr);
+        s.push('#');
+        let mut buf = itoa::Buffer::new();
+        s.push_str(buf.format(slot));
+        s
     }
 
     /// Pick the next round-robin slot for `addr` (always `0` when `pool_size == 1`).
+    ///
+    /// **H2**: the `DashMap` read path is lock-free (shard-level striped
+    /// lock inside DashMap, no async `.read().await` round-trip). The old
+    /// `tokio::sync::RwLock<HashMap>` pattern took an async read lock on
+    /// every `acquire`, which contended under 32+ concurrent readers.
     async fn next_slot(&self, addr: &str) -> usize {
         if self.pool_size <= 1 {
             return 0;
         }
-        {
-            let rr = self.addr_rr.read().await;
-            if let Some(c) = rr.get(addr) {
-                return (c.fetch_add(1, Ordering::Relaxed) % self.pool_size as u64) as usize;
-            }
+        // Fast path: existing counter for this address.
+        if let Some(c) = self.addr_rr.get(addr) {
+            return (c.fetch_add(1, Ordering::Relaxed) % self.pool_size as u64) as usize;
         }
-        let mut rr = self.addr_rr.write().await;
-        let c = rr
+        // Miss: lazily create the counter. `entry()` is atomic.
+        let c = self
+            .addr_rr
             .entry(addr.to_string())
             .or_insert_with(|| Arc::new(AtomicU64::new(0)));
         (c.fetch_add(1, Ordering::Relaxed) % self.pool_size as u64) as usize
@@ -902,33 +926,29 @@ impl WorkerClientPool {
         // Best-effort cleanup of the per-channel reconnect locks + the
         // round-robin counter to prevent unbounded growth of the maps over
         // the lifetime of a long-running process.
-        {
-            let mut locks = self.reconnect_locks.write().await;
-            for k in &keys {
-                if locks.remove(k).is_some() {
-                    debug!(key = %k, "removed reconnect lock for invalidated worker");
-                }
+        //
+        // H2: `DashMap::remove` is a per-shard striped-lock operation — no
+        // async write lock round-trip, no blocking other addresses.
+        for k in &keys {
+            if self.reconnect_locks.remove(k).is_some() {
+                debug!(key = %k, "removed reconnect lock for invalidated worker");
             }
         }
         if self.pool_size > 1 {
-            self.addr_rr.write().await.remove(addr);
+            self.addr_rr.remove(addr);
         }
     }
 
     /// Get (or lazily create) the per-address reconnect mutex.
+    ///
+    /// **H2**: `DashMap::entry` is atomic (shard-level striped lock), so the
+    /// double-checked-locking pattern is no longer needed — a single
+    /// `entry().or_insert_with()` call replaces the read-then-write pattern.
     async fn reconnect_lock_for(&self, addr: &str) -> Arc<AsyncMutex<()>> {
-        {
-            let locks = self.reconnect_locks.read().await;
-            if let Some(m) = locks.get(addr) {
-                return Arc::clone(m);
-            }
-        }
-        let mut locks = self.reconnect_locks.write().await;
-        Arc::clone(
-            locks
-                .entry(addr.to_string())
-                .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
-        )
+        self.reconnect_locks
+            .entry(addr.to_string())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
     }
 
     /// **Single-flight reconnect**: invalidate + reconnect only if the
@@ -1105,7 +1125,7 @@ impl WorkerClientPool {
     /// Snapshot the number of entries in the `reconnect_locks` map.
     #[cfg(test)]
     async fn test_reconnect_locks_len(&self) -> usize {
-        self.reconnect_locks.read().await.len()
+        self.reconnect_locks.len()
     }
 }
 
@@ -1147,9 +1167,15 @@ mod tests {
 
     /// Single-channel pool (default) keeps the legacy `addr`-keyed behaviour
     /// byte-for-byte, so existing single-flight tests are unaffected.
+    ///
+    /// Explicitly forces `worker_connection_pool_size = 1` so this test
+    /// exercises the intended `slot_key(addr, 0) == addr` branch regardless
+    /// of the SDK-level default (which is `min(cores, 4)` since B3).
     #[tokio::test]
     async fn worker_pool_single_channel_keys_by_addr() {
-        let pool = WorkerClientPool::new(GoosefsConfig::new("127.0.0.1:9200"));
+        let pool = WorkerClientPool::new(
+            GoosefsConfig::new("127.0.0.1:9200").with_worker_connection_pool_size(1),
+        );
         assert_eq!(pool.pool_size(), 1);
         assert_eq!(pool.slot_key("h:1", 0), "h:1");
         assert_eq!(pool.next_slot("h:1").await, 0);
@@ -1163,7 +1189,14 @@ mod tests {
         // critical section, caller B has already replaced gen 5 with gen 6
         // (simulated by manually bumping via test_install).  Caller A must
         // NOT trigger a second reconnect — it should return gen 6 as-is.
-        let pool = WorkerClientPool::new(GoosefsConfig::new("127.0.0.1:9200"));
+        //
+        // Pool is pinned to `pool_size = 1` so `test_install(addr, …)` and
+        // the pool's own key derivation share the same key `addr`. This
+        // isolates the test from the default (`min(cores, 4)`) which uses
+        // `addr#slot` keys.
+        let pool = WorkerClientPool::new(
+            GoosefsConfig::new("127.0.0.1:9200").with_worker_connection_pool_size(1),
+        );
         let addr = "test-worker:9203";
 
         // Install a gen-1 client, then another gen-2 client (simulating
@@ -1220,7 +1253,12 @@ mod tests {
     /// scale-up / scale-down).
     #[tokio::test]
     async fn test_invalidate_clears_reconnect_lock_to_prevent_leak() {
-        let pool = WorkerClientPool::new(GoosefsConfig::new("127.0.0.1:9200"));
+        // Pinned to single-channel so `test_install(addr, …)` uses the same
+        // key as `reconnect_lock_for(addr)` (which the multi-channel default
+        // would key by `addr#slot`).
+        let pool = WorkerClientPool::new(
+            GoosefsConfig::new("127.0.0.1:9200").with_worker_connection_pool_size(1),
+        );
 
         // Touch the reconnect-lock map for several addresses (simulates
         // reconnect activity over time).
@@ -1301,7 +1339,10 @@ mod tests {
     /// ```
     #[tokio::test]
     async fn test_auth_retry_reconnect_if_stale_returns_fresh_after_rpc_failure() {
-        let pool = WorkerClientPool::new(GoosefsConfig::new("127.0.0.1:9200"));
+        // Pinned to single-channel so `test_install`/`acquire` share keys.
+        let pool = WorkerClientPool::new(
+            GoosefsConfig::new("127.0.0.1:9200").with_worker_connection_pool_size(1),
+        );
         let addr = "test-worker:9203";
 
         // Step 1: Install and acquire a cached client (SASL-stale, but pool
@@ -1406,7 +1447,10 @@ mod tests {
     /// (installs N+1) → second observer with stale gen N gets N+1.
     #[tokio::test]
     async fn test_auth_retry_multiple_observers_collapse_to_one_reconnect() {
-        let pool = WorkerClientPool::new(GoosefsConfig::new("127.0.0.1:9200"));
+        // Pinned to single-channel so `test_install`/`acquire` share keys.
+        let pool = WorkerClientPool::new(
+            GoosefsConfig::new("127.0.0.1:9200").with_worker_connection_pool_size(1),
+        );
         let addr = "test-worker:9203";
 
         // Install initial client (SASL-stale)

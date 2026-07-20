@@ -135,7 +135,7 @@ def ensure_file(fs: Goosefs, path: str, file_size: int) -> None:
     try:
         st = fs.get_status(path)
         if st.length == file_size:
-            print(f"[setup] reusing existing {file_size // (1024*1024)} MiB file → {path}")
+            print(f"[setup] reusing existing {file_size // (1024 * 1024)} MiB file → {path}")
             return
         fs.delete(path, recursive=False)
     except Exception:
@@ -146,7 +146,7 @@ def ensure_file(fs: Goosefs, path: str, file_size: int) -> None:
     except Exception:
         pass
 
-    print(f"[setup] writing {file_size // (1024*1024)} MiB test file → {path} ...")
+    print(f"[setup] writing {file_size // (1024 * 1024)} MiB test file → {path} ...")
     # The payload depends on the absolute offset, so each 8 MiB chunk is built
     # from a rotated view of the precomputed 251-byte pattern.
     chunk = 8 * 1024 * 1024
@@ -162,13 +162,16 @@ def ensure_file(fs: Goosefs, path: str, file_size: int) -> None:
             w.write(buf)
             written += this
     secs = time.perf_counter() - t0
-    print(f"[setup] wrote {file_size // (1024*1024)} MiB in {secs:.2f}s "
-          f"({mib_per_s(file_size, secs):.0f} MiB/s)")
+    print(
+        f"[setup] wrote {file_size // (1024 * 1024)} MiB in {secs:.2f}s "
+        f"({mib_per_s(file_size, secs):.0f} MiB/s)"
+    )
 
 
 # ── PR sync (ThreadPoolExecutor) — the model most likely used by the stress ──
-def pr_sync(fs: Goosefs, path: str, file_size: int, io_size: int,
-            conc: int, reads_per_task: int) -> tuple[float, int]:
+def pr_sync(
+    fs: Goosefs, path: str, file_size: int, io_size: int, conc: int, reads_per_task: int
+) -> tuple[float, int]:
     max_off = max(file_size - io_size, 1)
 
     def worker(seed: int) -> tuple[int, int]:
@@ -195,16 +198,19 @@ def pr_sync(fs: Goosefs, path: str, file_size: int, io_size: int,
             total_bytes += b
             total_mism += m
     secs = time.perf_counter() - t0
-    print(f"    [sync ThreadPool({conc})] {conc * reads_per_task} reads, "
-          f"{total_bytes / (1024*1024):.1f} MiB in {secs:.3f}s → "
-          f"{mib_per_s(total_bytes, secs):.0f} MiB/s "
-          f"{'✅' if total_mism == 0 else f'❌ {total_mism} mismatch'}")
+    print(
+        f"    [sync ThreadPool({conc})] {conc * reads_per_task} reads, "
+        f"{total_bytes / (1024 * 1024):.1f} MiB in {secs:.3f}s → "
+        f"{mib_per_s(total_bytes, secs):.0f} MiB/s "
+        f"{'✅' if total_mism == 0 else f'❌ {total_mism} mismatch'}"
+    )
     return mib_per_s(total_bytes, secs), total_mism
 
 
 # ── PR async (asyncio.gather, bounded by semaphore) ──────────────────────────
-async def _pr_async(addr: str, path: str, file_size: int, io_size: int,
-                    conc: int, reads_per_task: int) -> tuple[float, int]:
+async def _pr_async(
+    addr: str, path: str, file_size: int, io_size: int, conc: int, reads_per_task: int
+) -> tuple[float, int]:
     max_off = max(file_size - io_size, 1)
     fs = await AsyncGoosefs.connect(Config(addr))
     sem = asyncio.Semaphore(conc)
@@ -232,10 +238,12 @@ async def _pr_async(addr: str, path: str, file_size: int, io_size: int,
     await fs.close()
     total_bytes = sum(b for b, _ in results)
     total_mism = sum(m for _, m in results)
-    print(f"    [async gather({conc})]    {conc * reads_per_task} reads, "
-          f"{total_bytes / (1024*1024):.1f} MiB in {secs:.3f}s → "
-          f"{mib_per_s(total_bytes, secs):.0f} MiB/s "
-          f"{'✅' if total_mism == 0 else f'❌ {total_mism} mismatch'}")
+    print(
+        f"    [async gather({conc})]    {conc * reads_per_task} reads, "
+        f"{total_bytes / (1024 * 1024):.1f} MiB in {secs:.3f}s → "
+        f"{mib_per_s(total_bytes, secs):.0f} MiB/s "
+        f"{'✅' if total_mism == 0 else f'❌ {total_mism} mismatch'}"
+    )
     return mib_per_s(total_bytes, secs), total_mism
 
 
@@ -276,8 +284,11 @@ def main() -> int:
         rc |= 1 if m else 0
 
     print("\n====================================")
-    print("✅ PR benchmark complete — reads verified." if rc == 0
-          else "❌ PR benchmark FAILED — byte mismatch detected.")
+    print(
+        "✅ PR benchmark complete — reads verified."
+        if rc == 0
+        else "❌ PR benchmark FAILED — byte mismatch detected."
+    )
     return rc
 
 

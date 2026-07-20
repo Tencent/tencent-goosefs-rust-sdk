@@ -36,8 +36,9 @@ use crate::proto::grpc::file::{
     CompleteFilePOptions, CompleteFilePRequest, CreateDirectoryPOptions, CreateDirectoryPRequest,
     CreateFilePOptions, CreateFilePRequest, DeletePOptions, DeletePRequest, FileInfo,
     FileSystemMasterCommonPOptions, FsOpPId, GetStatusPOptions, GetStatusPRequest,
-    ListStatusPOptions, ListStatusPRequest, RemoveBlocksPRequest, RenamePOptions, RenamePRequest,
-    ScheduleAsyncPersistencePOptions, ScheduleAsyncPersistencePRequest,
+    ListStatusPOptions, ListStatusPRequest, LoadMetadataPType, RemoveBlocksPRequest,
+    RenamePOptions, RenamePRequest, ScheduleAsyncPersistencePOptions,
+    ScheduleAsyncPersistencePRequest,
 };
 use crate::proto::grpc::{Bits, PMode};
 
@@ -437,6 +438,13 @@ impl MasterClient {
 
     /// List the contents of a directory. Returns all FileInfo entries.
     ///
+    /// When `recursive` is `true`, the master is asked to load metadata for
+    /// every descendant (`load_metadata_type = Always`) — mirroring the Java
+    /// `listStatusOptions.setRecursive(true)` default and the `goosefs fs ls -R`
+    /// shell behaviour. Without this, the server only returns entries whose
+    /// metadata is already loaded, which collapses a deep tree to its first
+    /// level.
+    ///
     /// This wraps a **server-side streaming** RPC — the server sends
     /// multiple `ListStatusPResponse` messages, each containing a batch
     /// of `FileInfo`.
@@ -444,6 +452,11 @@ impl MasterClient {
     pub async fn list_status(&self, path: &str, recursive: bool) -> Result<Vec<FileInfo>> {
         let start = std::time::Instant::now();
         let path = path.to_string();
+        let load_metadata_type = if recursive {
+            Some(LoadMetadataPType::Always as i32)
+        } else {
+            None
+        };
         let result = self
             .with_retry("list_status", |mut client| {
                 let path = path.clone();
@@ -452,6 +465,7 @@ impl MasterClient {
                         path: Some(path),
                         options: Some(ListStatusPOptions {
                             recursive: Some(recursive),
+                            load_metadata_type,
                             ..Default::default()
                         }),
                         request_id: None,

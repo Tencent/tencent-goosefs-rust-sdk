@@ -622,7 +622,7 @@ pub struct GoosefsConfig {
     /// page 大小（字节），默认 1 MiB。
     #[serde(default = "default_cache_page_size")]
     pub client_cache_page_size: u64,
-    /// 每个缓存目录容量（字节），默认 512 MiB。与 dirs 一一对应或统一值。
+    /// 每个缓存目录容量（字节），默认 1 GiB。与 dirs 一一对应或统一值。
     #[serde(default = "default_cache_size")]
     pub client_cache_size: u64,
     /// 缓存目录列表，默认 ["/tmp/goosefs_cache"]。
@@ -885,7 +885,7 @@ Not covered by this suite (intentional, lower-tier coverage suffices):
    `goosefs.user.client.cache.dirs` / `GOOSEFS_USER_CLIENT_CACHE_DIRS` /
    `goosefs_client_cache_dirs` 覆盖。容器场景建议显式指定挂载盘。单进程独占目录假设见 §10.4。
 4. **Java `PropertyKey.USER_CLIENT_CACHE_*` 默认值核对？**
-   ✅ 已对齐：page size `1 MiB`、单目录容量 `512 MiB`（使用前预留 5% overhead）、
+✅ 已对齐：page size `1 MiB`、单目录容量 `1 GiB`（使用前预留 5% overhead）、
    async write threads `16`、async write enabled `true`、quota/ttl 默认关闭、enabled 默认
    `false`、evictor 默认 `LRU`。详见 `src/config.rs` 默认值常量。
 5. **是否需要与 Java/Go 客户端共享同一磁盘缓存目录格式（跨语言互通）？**

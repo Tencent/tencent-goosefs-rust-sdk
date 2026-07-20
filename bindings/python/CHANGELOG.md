@@ -6,18 +6,128 @@ This document records all notable changes to the `goosefs` Python binding. The f
 
 ## [Unreleased]
 
+### Changed
+
+- **Default `worker_connection_pool_size` bumped from `1` to `min(cores, 4)`**
+  (SDK, FLAMEGRAPH_OPTIMIZATION_PLAN §B3). This is the **only** default-
+  behaviour change in this release cycle; every other flame-graph
+  optimisation (A3 file-info cache, B2 range coalesce, B4 tokio worker
+  cap) is opt-in. `available_parallelism` is used, so cgroup CPU limits
+  are respected on Linux (containers see the container's core count, not
+  the host's), and the value is capped at `DEFAULT_WORKER_CONNECTION_POOL_MAX`
+  so big-core hosts do not fan out to dozens of channels per worker.
+  Falls back to the legacy `1` when the platform cannot report the CPU
+  count.
+  - **Operational impact.** Each pooled channel establishes its own
+    HTTP/2 connection and performs an **independent SASL handshake** on
+    first use, so first-open latency and steady-state FD / RAM cost per
+    worker scale with the pool size. On hosts with many co-resident
+    Python processes (e.g. a 16-core box running 16 workers × 4 channels
+    each = 64 channels/worker on the master side), operators should
+    observe worker-side FD counts and master-side authentication
+    request rate during rollout, and confirm no rate-limit / auth-flood
+    alarm fires on the GooseFS master. To restore the legacy single-
+    channel behaviour explicitly, set `.with_worker_connection_pool_size(1)`
+    on the config builder or the `goosefs.client.worker.connection.pool.size=1`
+    property.
+
+---
+
+## [0.1.7] — 2026-07-16
+
+Aligned with `goosefs-sdk` 0.1.7. Version bump tracking the underlying SDK
+release; no Python-surface API changes. `bindings/python/Cargo.toml` version
+`0.1.6` → `0.1.7`, kept in sync with the root crate; `goosefs.__version__`
+now reports `0.1.7`.
+
+---
+
+## [0.1.6] — 2026-07-02
+
+Aligned with `goosefs-sdk` 0.1.6. This release delivers two major new
+data-plane features (**client-side local page cache** and **short-circuit
+local mmap read**), a wait-free rewrite of the Worker/router hot paths,
+a full set of **batch metadata / lifecycle APIs**, and a large batch of
+SDK-side correctness fixes. All Python surfaces inherit these
+improvements transparently — most require no API change.
+
 ### Added
 
-- **`goosefs.WorkerClient`** — synchronous mirror of `AsyncWorkerClient`. New
-  blocking escape hatch for callers that already know a worker address and
-  want a one-shot `read_block_positioned` without going through
-  `Goosefs.positioned_read` (which routes via the master). Mirrors the async
-  surface 1:1: `WorkerClient.connect(addr, config)` static factory,
-  `WorkerClient.connect_simple(addr, ...)` (deprecated NOSASL), instance
-  methods `read_block_positioned` / `close`, `addr` getter, and a regular
-  `with` context manager. Same Tokio-runtime guarantees as the sync `Goosefs`
-  class — must not be called from inside an asyncio loop or a Tokio worker
-  thread.
+- **Client-side local page cache** (SDK). New opt-in, disk-backed page
+  cache mirroring the GooseFS Java client's
+  `goosefs.user.client.cache.*` semantics. `LocalCacheManager` provides
+  striped page locks + a single metadata mutex, LRU/LFU evictors, a
+  multi-directory `HashAllocator`, bounded async write-back, TTL lazy
+  expiry with a background sweeper, restart restore, and overwrite
+  invalidation via `on_file_open`. Integrated into
+  `GoosefsFileInStream::read` / `read_at` through `read_through_cache`;
+  `ReadType::NoCache` still serves hits but skips back-fill. Best-effort
+  by design — misses / errors always fall back to the worker without
+  affecting read correctness. Enabled via config fields plus ENV /
+  properties / storage-option keys; adds `Client.Cache*` metrics
+  including `HitRate`, `SpaceUsedCount`, and external read time. See
+  [`docs/CLIENT_PAGE_CACHE_DESIGN.md`](../../docs/CLIENT_PAGE_CACHE_DESIGN.md)
+  and [`docs/CLIENT_CONFIGURATION.md`](../../docs/CLIENT_CONFIGURATION.md).
+  A new `bindings/python/examples/page_cache.py` example plus the
+  `bindings/python/tests/test_page_cache.py` regression suite exercise
+  the feature end-to-end from Python.
+
+- **Short-Circuit local mmap read path** (SDK). New `short_circuit`
+  module that bypasses the gRPC data plane when the client and worker
+  are co-located. `LocalBlockReader` performs zero-copy reads via
+  read-only `mmap` with `madvise` prefetch and optional Transparent
+  Huge Pages (THP). `ShortCircuitFactory` provides per-task hot-block
+  caches, negative caching, a `CapabilityProvider` hook, and a
+  context-shared factory. A dedicated `SIGBUS` diagnostic handler
+  surfaces mmap faults with actionable diagnostics and manages
+  process-level signal installation. Local worker is auto-detected by
+  interface bind. Every recoverable error transparently falls back to
+  the standard gRPC path. Wired into both sequential (`read()`) and
+  positioned-read (`read_at()`) paths through `file_in_stream` /
+  `context` / `config`. Server-side companion: new `OpenLocalBlock`
+  RPC + `OpenLocalBlockGuard` for block-lock lifecycle. Ships with an
+  `sc_pr_ab` benchmark comparing local mmap vs gRPC positioned-read,
+  gated E2E integration tests, and an INV-S3 / INV-D1 / INV-D2 /
+  INV-S1 / INV-S2 / INV-S5 consistency regression suite. See
+  [`docs/SHORT_CIRCUIT_DESIGN.md`](../../docs/SHORT_CIRCUIT_DESIGN.md).
+  Python inherits this transparently — every `open_file` / `read_file`
+  / `read_range` / `positioned_read` call automatically prefers the
+  local mmap path when the target block resides on the co-located
+  worker.
+
+- **Batch metadata / lifecycle APIs.** `BaseFileSystem` gains a full
+  batch surface (`batch_open_file`, `batch_create_file`,
+  `batch_create_dir`, `batch_rename`, `batch_delete`,
+  `batch_list_status`) that fans out over the concurrent path with a
+  shared `Arc<BaseFileSystem>` (single Tokio spawn per batch,
+  first-error-wins). Exposed to the Python binding as:
+
+  - `AsyncGoosefs.batch_open_file(paths, options=None)` /
+    `batch_create_file(paths, options=None)` /
+    `batch_create_dir(paths, options=None)` /
+    `batch_rename(pairs)` /
+    `batch_delete(paths, options=None)` /
+    `batch_list_status(paths, options=None)`.
+  - Synchronous `Goosefs.batch_*` counterparts, sharing the same
+    deadlock + fork guards as the rest of the sync surface.
+
+  One PyO3 boundary crossing per batch instead of N. Type stubs
+  (`python/goosefs/__init__.pyi`) updated for both classes. Includes a
+  regression test (`tests/test_batch_open_file_leak.py`) that verifies
+  `batch_open_file` no longer leaks worker-side reader handles when
+  one path in the batch fails partway through.
+
+- **`goosefs.WorkerClient`** — synchronous mirror of
+  `AsyncWorkerClient`. New blocking escape hatch for callers that
+  already know a worker address and want a one-shot
+  `read_block_positioned` without going through
+  `Goosefs.positioned_read` (which routes via the master). Mirrors the
+  async surface 1:1: `WorkerClient.connect(addr, config)` static
+  factory, `WorkerClient.connect_simple(addr, ...)` (deprecated
+  NOSASL), instance methods `read_block_positioned` / `close`, `addr`
+  getter, and a regular `with` context manager. Same Tokio-runtime
+  guarantees as the sync `Goosefs` class — must not be called from
+  inside an asyncio loop or a Tokio worker thread.
 
   ```python
   from goosefs import WorkerClient, Config
@@ -26,14 +136,38 @@ This document records all notable changes to the `goosefs` Python binding. The f
       data = wc.read_block_positioned(block_id, offset=0, length=64 * 1024)
   ```
 
-  Exported from `goosefs._goosefs`, re-exported from `goosefs`, and listed
-  in `__all__` (top-level package + type stub).
+  Exported from `goosefs._goosefs`, re-exported from `goosefs`, and
+  listed in `__all__` (top-level package + type stub).
 
 ### Changed
 
-- `tests/test_worker_block_direct.py` translated from Chinese to English;
-  the previously-`@pytest.mark.xfail`'d sync-`WorkerClient` export checks
-  are now regular passing tests guarding the new public surface.
+- **Underlying SDK upgrade**: `goosefs-sdk` 0.1.5 → 0.1.6.
+- **`bindings/python/Cargo.toml`** version `0.1.5` → `0.1.6`, kept in
+  sync with the root crate; `goosefs.__version__` now reports `0.1.6`.
+- **Wait-free Worker / router hot paths** (SDK, transparent to Python).
+  `WorkerClientPool.clients` and
+  `WorkerRouter.workers` / `hash_ring` / `local_worker_id` are now
+  `ArcSwap` instead of `RwLock<HashMap>`, mirroring the existing
+  `ArcSwap<AuthedState>` model on `MasterClient`. The acquire and
+  `select_worker` hot paths become a single atomic load + map lookup +
+  cheap clone (no async `RwLock` round-trip); writes use
+  `ArcSwap::rcu` copy-on-write, and same-key reconnects are still
+  single-flighted by the per-key mutex — generation / single-flight /
+  invalidate semantics preserved. Local A/B (`--transport=block`,
+  64 threads / 16 MiB): 64 KiB `742.8 → 897.1 MiB/s` (+20.8%),
+  256 KiB `1381.8 → 1434.3` (+3.8%), 1 MiB `1564.4 → 1742.4` (+11.4%);
+  p999 −64% (64 KiB) / −52% (256 KiB). Every Python read routing
+  through the pool / router picks up the improvement automatically.
+- **Deferred `WorkerRouter` initialization** (SDK). `WorkerManager` is
+  now optional and only initialized on the first write, so
+  metadata-only workloads (batch APIs, `list_status`, `get_status`,
+  `exists`, `mkdir`, `rename`, `delete`) no longer pay the Worker-plane
+  setup cost on connect. `WorkerManager` also compatibility-degrades
+  against older Master versions.
+- `tests/test_worker_block_direct.py` translated from Chinese to
+  English; the previously-`@pytest.mark.xfail`'d sync-`WorkerClient`
+  export checks are now regular passing tests guarding the new public
+  surface.
 
 ### Fixed
 
@@ -101,6 +235,18 @@ the affected paths.
 - **`ExponentialTimeBoundedRetry::should_retry`** — `current_sleep * 2`
   now uses `saturating_mul` and can no longer panic under pathological
   configurations.
+- **`batch_open_file` resource leak** (Python). Fixed a resource leak
+  where `AsyncGoosefs.batch_open_file` / `Goosefs.batch_open_file`
+  could leave worker-side reader handles open when one path in the
+  batch failed midway; regression covered by
+  `tests/test_batch_open_file_leak.py`.
+
+### Notes
+
+- No breaking API changes — drop-in upgrade from `0.1.5`.
+- Public PyPI publication is still gated on P8 (CI/Wheel) and P9
+  (canary + regression); wheels in this directory continue to be
+  produced manually via `maturin build --release` for internal use.
 
 ---
 
