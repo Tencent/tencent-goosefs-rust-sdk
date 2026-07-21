@@ -1,3 +1,17 @@
+// Copyright (C) 2026 Tencent. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Goosefs Master gRPC client for file system metadata operations.
 //!
 //! Wraps `FileSystemMasterClientService` (Master:9200) providing:
@@ -845,7 +859,7 @@ mod tests {
     //! `MasterClient` relies on.
 
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -903,12 +917,19 @@ mod tests {
         let drop_counter = Arc::new(AtomicUsize::new(0));
         let state = Arc::new(ArcSwap::from(new_state(0, drop_counter.clone())));
         let stop = Arc::new(AtomicBool::new(false));
+        // Wait for every reader (and the writer) to be scheduled before the
+        // reconnect loop starts — otherwise a slow CI runner can finish all
+        // rounds before some reader threads ever enter their loop, which
+        // falsely fails with "reader observed nothing".
+        let ready = Arc::new(Barrier::new(READERS + 1));
 
         let mut readers = Vec::with_capacity(READERS);
         for _ in 0..READERS {
             let state = state.clone();
             let stop = stop.clone();
+            let ready = ready.clone();
             readers.push(thread::spawn(move || {
+                ready.wait();
                 let mut observed_epochs: Vec<u64> = Vec::new();
                 while !stop.load(Ordering::Relaxed) {
                     let snap = state.load();
@@ -922,9 +943,16 @@ mod tests {
                     );
                     observed_epochs.push(snap.epoch);
                 }
+                // One final load after stop so every reader records at least
+                // the terminal published epoch even if scheduling was tight.
+                let snap = state.load();
+                assert_eq!(snap.epoch, *snap.guard_epoch);
+                observed_epochs.push(snap.epoch);
                 observed_epochs
             }));
         }
+
+        ready.wait();
 
         // Writer: simulate `reconnect` events by store()'ing fresh states.
         for round in 1..=RECONNECT_ROUNDS {

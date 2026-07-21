@@ -1,6 +1,6 @@
 # Rust Short-Circuit Design and Implementation (Rust SC Short-Circuit Variant)
 
-> Project: `goosefs-client-rust`
+> Project: `tencent-goosefs-rust-sdk`
 > Goal: Under the precondition of functional equivalence with the Java `LocalFileDataReader` / `LocalFileBlockReader`, **strictly outperform** the Java SC implementation (especially achieving a 5×~50× throughput improvement under high-concurrency PositionedRead scenarios).
 > Applicable version: from the `feature/short-circuit` branch.
 > Revision date: 2026-06-24
@@ -652,7 +652,7 @@ cargo install samply            # not perf-dependent; preferred fallback on Tenc
 > [source.crates-io]
 > replace-with = "tencent"
 > [source.tencent]
-> registry = "https://mirrors.tencent.com/crates.io-index"
+> registry = "https://github.com/rust-lang/crates.io-index"
 > ```
 
 **A.3 macOS environment** (no perf; use `samply` or `dtrace`):
@@ -921,7 +921,7 @@ Only 1 unsafe location:
 
 #### 8.1.1 INV-D1 already verified against GooseFS source (block_id not reused ∧ lock-held immutable)
 
-Addressing the concern "could a cached `LocalBlockReader` (LRU TTL 30s) read stale/reused content": we have checked point by point against the `/opt/sourcecode/cos/goosefs` source, **conclusion: no `(length, version)` sidecar check or other extra protection is needed** — INV-D1 is doubly guaranteed by the GooseFS protocol:
+Addressing the concern "could a cached `LocalBlockReader` (LRU TTL 30s) read stale/reused content": we have checked point by point against the GooseFS server source, **conclusion: no `(length, version)` sidecar check or other extra protection is needed** — INV-D1 is doubly guaranteed by the GooseFS protocol:
 
 **(1) block_id is globally monotonic and never reused** — source `core/server/master/.../block/BlockContainerIdGenerator.java`:
 
@@ -1066,8 +1066,8 @@ Each phase must attach a PR + bench report + flame graph.
 - [Java] core/client/fs/.../LocalFileDataReader.java
 - [Java] core/client/fs/.../BlockInStream.java
 - [Rust SC prototype] goosefs-lance-tests/short_circuit.rs
-- [Rust, to be added] `goosefs-client-rust/src/client/worker.rs`'s OpenLocalBlock wrapper (currently `open_local_block` exists only as the generated gRPC stub in `src/generated/com.qcloud.cos.goosefs.grpc.block.rs`; the client-side wrapper is not yet implemented)
-- [Rust, current state] `goosefs-client-rust/src/block/router.rs`: local Worker determination is currently implemented via `detect_local_worker` / `local_worker_id` (hostname match); the `is_local_worker(id)` in §2/§3.7 is an abstract name for its semantics, align to this implementation when landing
+- [Rust, to be added] `tencent-goosefs-rust-sdk/src/client/worker.rs`'s OpenLocalBlock wrapper (currently `open_local_block` exists only as the generated gRPC stub in `src/generated/com.qcloud.cos.goosefs.grpc.block.rs`; the client-side wrapper is not yet implemented)
+- [Rust, current state] `tencent-goosefs-rust-sdk/src/block/router.rs`: local Worker determination is currently implemented via `detect_local_worker` / `local_worker_id` (hostname match); the `is_local_worker(id)` in §2/§3.7 is an abstract name for its semantics, align to this implementation when landing
 - [Comparison doc] goosefs-lance-tests/docs/stress-testing/Java_vs_Rust_ShortCircuit_PositionedRead_comparison.md
 - Linux mmap(2), madvise(2), pread(2) man pages
 - "What every programmer should know about memory" — Drepper, 2007

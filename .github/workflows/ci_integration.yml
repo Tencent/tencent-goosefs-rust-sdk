@@ -1,0 +1,213 @@
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Integration (GooseFS Docker)
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_macos_docker:
+        description: >-
+          Also run Docker IT on a macOS runner that already has Docker
+          (self-hosted M4 / Mac with Docker Desktop). GitHub-hosted
+          macos-14 ARM cannot nest VMs.
+        type: boolean
+        default: false
+      macos_runner:
+        description: Runner label for macOS Docker IT (e.g. macos-14 or self-hosted label)
+        type: string
+        default: macos-14
+
+concurrency:
+  group: integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  GOOSEFS_MASTER_ADDR: 127.0.0.1:9200
+  GOOSEFS_AUTH_TYPE: simple
+  GFS_ADDR: 127.0.0.1:9200
+
+# Default Docker GooseFS IT: Linux amd64 + arm64.
+# GitHub-hosted macOS ARM (macos-14 / M-series) has no nested virtualization,
+# so Colima/Docker Desktop cannot start there. Apple Silicon coverage for
+# compile/unit/offline benches is in ci.yml (macos-14). Arm64 Docker path is
+# covered by ubuntu-24.04-arm (same multi-arch GooseFS image used on M4).
+# Optional macOS Docker IT: workflow_dispatch with run_macos_docker=true on a
+# runner that already provides Docker (self-hosted Mac M4 recommended).
+
+jobs:
+  rust-integration:
+    name: rust-it (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup
+
+      - name: Setup GooseFS
+        uses: ./.github/actions/setup-goosefs
+
+      - name: Start Pushgateway (for metrics_pushgateway example)
+        run: |
+          docker run -d --name goosefs-sdk-pushgateway -p 127.0.0.1:9091:9091 prom/pushgateway:v1.9.0
+          python3 - <<'PY'
+          import socket, time, sys
+          for _ in range(30):
+              try:
+                  socket.create_connection(("127.0.0.1", 9091), 1).close()
+                  print("pushgateway ready")
+                  sys.exit(0)
+              except OSError:
+                  time.sleep(1)
+          sys.exit("pushgateway did not become ready")
+          PY
+
+      - name: Rust ignored integration tests
+        run: bash scripts/ci/run_rust_integration.sh
+
+      - name: Rust examples
+        run: bash scripts/ci/run_rust_examples.sh
+
+      - name: Rust cluster benchmarks
+        run: bash scripts/ci/run_rust_benchmarks.sh cluster
+
+      - name: Tear down GooseFS
+        if: always()
+        working-directory: fixtures/goosefs
+        run: |
+          docker compose -f docker-compose-goosefs.yml down -v || true
+          docker rm -f goosefs-sdk-pushgateway || true
+
+  python-integration:
+    name: python-it (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+        python-version: ["3.11"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Sync + build binding
+        working-directory: bindings/python
+        run: |
+          uv sync --all-extras --group dev --group test
+          uv run maturin develop --uv --release
+
+      - name: Setup GooseFS
+        uses: ./.github/actions/setup-goosefs
+
+      - name: Pytest (full, with cluster)
+        working-directory: bindings/python
+        run: uv run --group test pytest -v --tb=short
+
+      - name: Python examples
+        run: bash scripts/ci/run_python_examples.sh
+
+      - name: Python benchmarks
+        run: bash scripts/ci/run_python_benchmarks.sh
+
+      - name: Tear down GooseFS
+        if: always()
+        working-directory: fixtures/goosefs
+        run: docker compose -f docker-compose-goosefs.yml down -v || true
+
+  # Optional: Mac M4 / Apple Silicon with a working Docker daemon.
+  macos-docker-integration:
+    name: macos-docker-it (${{ inputs.macos_runner }})
+    if: github.event_name == 'workflow_dispatch' && inputs.run_macos_docker
+    runs-on: ${{ inputs.macos_runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Docker
+        run: |
+          docker info
+          docker compose version
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Sync + build binding
+        working-directory: bindings/python
+        run: |
+          uv sync --all-extras --group dev --group test
+          uv run maturin develop --uv --release
+
+      - name: Setup GooseFS
+        uses: ./.github/actions/setup-goosefs
+
+      - name: Rust ignored integration tests
+        run: bash scripts/ci/run_rust_integration.sh
+
+      - name: Rust examples
+        run: bash scripts/ci/run_rust_examples.sh
+
+      - name: Rust cluster benchmarks
+        run: bash scripts/ci/run_rust_benchmarks.sh cluster
+
+      - name: Pytest (full, with cluster)
+        working-directory: bindings/python
+        run: uv run --group test pytest -v --tb=short
+
+      - name: Python examples
+        run: bash scripts/ci/run_python_examples.sh
+
+      - name: Python benchmarks
+        run: bash scripts/ci/run_python_benchmarks.sh
+
+      - name: Tear down GooseFS
+        if: always()
+        working-directory: fixtures/goosefs
+        run: docker compose -f docker-compose-goosefs.yml down -v || true

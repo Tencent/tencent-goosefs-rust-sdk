@@ -1,15 +1,14 @@
 # Python Release Guide
 
 This document describes how to package and publish the `goosefs` Python client
-to a PyPI repository (official PyPI or the Tencent internal PyPI mirror), and how
-to make sure the published wheels are **installable and usable on Tencent Cloud
-Linux environments**.
+to [PyPI](https://pypi.org/), and how to make sure the published wheels are
+**installable on common Linux distributions** (including TencentOS / CentOS /
+Ubuntu).
 
 Unlike a pure-Python package, `goosefs` is a **native extension** built from Rust
-via [PyO3](https://pyo3.rs/) + [maturin](https://www.maturin.rs/). To run on
-Tencent Cloud Linux (TencentOS Server / CentOS / Ubuntu, etc.) the wheel must be
-built as a **manylinux** wheel so that it does not depend on the build machine's
-glibc/toolchain.
+via [PyO3](https://pyo3.rs/) + [maturin](https://www.maturin.rs/). Linux wheels
+must be built as **manylinux** wheels so they do not depend on the build
+machine's glibc/toolchain.
 
 The project root for all commands below is `bindings/python`.
 
@@ -26,7 +25,7 @@ cd bindings/python
 | **uv** | 0.5+ | Project package manager; runs maturin and pulls `ziglang`. |
 | **maturin** | 1.5+ | Build backend that produces the wheels. |
 | **ziglang** | latest | C cross-compiler/linker for the zig build (Approach A). |
-| **twine** | 4.0+ | Optional; only needed for manual upload to a generic PyPI mirror. |
+| **twine** | 4.0+ | Optional; used for manual upload to PyPI when not using maturin upload. |
 
 ```bash
 # Rust toolchain
@@ -226,7 +225,7 @@ Tencent Cloud instances (see the per-approach ARM commands above).
 
 ---
 
-## Option 1: Upload to Official PyPI
+## Upload to PyPI
 
 `maturin` can upload directly (it wraps twine):
 
@@ -244,7 +243,7 @@ Or use twine:
      --password <your-pypi-token>
 ```
 
-### Installation Verification (on Tencent Cloud Linux)
+### Installation Verification
 
 ```bash
  pip install goosefs
@@ -254,26 +253,6 @@ Or use twine:
 ### Project URL
 
 - https://pypi.org/project/goosefs/
-
----
-
-## Option 2: Upload to Tencent Internal PyPI Repository
-
-### Upload Command
-
-```bash
- uvx twine upload dist/*.whl \
-     --repository-url https://mirrors.tencent.com/repository/pypi/tencent_pypi/simple \
-     --username <username> \
-     --password <Token>
-```
-
-### Installation Verification (on Tencent Cloud Linux)
-
-```bash
- pip install goosefs -i https://mirrors.tencent.com/pypi/simple
- python -c "import goosefs; print(goosefs.__version__)"
-```
 
 ---
 
@@ -311,18 +290,12 @@ Or use twine:
  uv run --with ziglang maturin build --release \
      --target aarch64-unknown-linux-gnu --manylinux 2_28 --zig --out dist
 
-# 4a. Upload to official PyPI
+# 4. Upload to PyPI
  uvx twine upload dist/* --username __token__ --password <your-pypi-token>
 
-# 4b. Or upload to the Tencent internal repository
- uvx twine upload dist/* \
-     --repository-url https://mirrors.tencent.com/repository/pypi/tencent_pypi/simple \
-     --username <username> \
-     --password <Token>
-
 # 5. Create a Git tag
- git tag py-v0.1.5
- git push origin py-v0.1.5
+ git tag py-v0.1.7
+ git push origin py-v0.1.7
 ```
 
 ## Notes

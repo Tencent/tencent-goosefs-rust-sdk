@@ -10,9 +10,9 @@ A native Rust client library that communicates directly with [Goosefs](https://c
 ## What's New in v0.1.7
 
 - **Client-side local page cache** — New opt-in, disk-backed page cache mirroring the GooseFS Java client's `goosefs.user.client.cache.*` semantics. `LocalCacheManager` provides striped page locks, LRU/LFU evictors, multi-directory `HashAllocator`, bounded async write-back, TTL lazy expiry with a background sweeper, restart restore, and overwrite invalidation via `on_file_open`. Integrated into `GoosefsFileInStream::read` / `read_at` through `read_through_cache`; `ReadType::NoCache` still serves hits but skips back-fill. Best-effort by design — misses/errors always fall back to the worker without affecting read correctness. Adds `Client.Cache*` metrics (incl. `HitRate`, `SpaceUsedCount`, external read time). See [`docs/CLIENT_PAGE_CACHE_DESIGN.md`](docs/CLIENT_PAGE_CACHE_DESIGN.md) and [`docs/CLIENT_CONFIGURATION.md`](docs/CLIENT_CONFIGURATION.md).
-- **Short-Circuit local mmap read path** — New `short_circuit` module that bypasses the gRPC data plane when the client and worker are co-located. `LocalBlockReader` performs zero-copy reads via read-only `mmap` with `madvise` prefetch and optional Transparent Huge Pages (THP); `ShortCircuitFactory` provides per-task hot-block caches, negative caching, a `CapabilityProvider` hook, and a context-shared factory. A dedicated `SIGBUS` diagnostic handler surfaces mmap faults with actionable diagnostics and manages process-level signal installation. Local worker is auto-detected by interface bind. Every recoverable error transparently falls back to the standard gRPC path. Wired into both sequential (`read()`) and positioned-read (`read_at()`) paths through `file_in_stream` / `context` / `config`. Ships with an `sc_pr_ab` benchmark comparing local mmap vs gRPC positioned-read, gated E2E integration tests, and an INV-S3/INV-D1/INV-D2/INV-S1/INV-S2/INV-S5 consistency regression suite. Server-side companion: new `OpenLocalBlock` RPC + `OpenLocalBlockGuard` for block-lock lifecycle. See [`docs/SHORT_CIRCUIT_DESIGN.md`](docs/SHORT_CIRCUIT_DESIGN.md).
-- **Read-path performance optimization (wait-free hot paths)** — `WorkerClientPool.clients` and `WorkerRouter.workers` / `hash_ring` / `local_worker_id` are now `ArcSwap` instead of `RwLock<HashMap>`, mirroring the existing `ArcSwap<AuthedState>` model on `MasterClient`. The acquire and `select_worker` hot paths become a single atomic load + map lookup + cheap clone (no async `RwLock` round-trip); writes use `ArcSwap::rcu` copy-on-write, and same-key reconnects are still single-flighted by the per-key mutex — generation / single-flight / invalidate semantics preserved. Local A/B (`--transport=block`, 64 threads / 16 MiB): 64 KiB `742.8 → 897.1 MiB/s (+20.8%)`, 256 KiB `1381.8 → 1434.3 (+3.8%)`, 1 MiB `1564.4 → 1742.4 (+11.4%)`; p999 −64% (64 KiB) / −52% (256 KiB). See `benchmarks/pr_runtime_ab.rs` and `../goosefs-lance-tests/docs/design/RUST_PYTHON_SDK_OPTIMIZATION.md` V.6.
-- **Batch metadata / lifecycle APIs** — `BaseFileSystem` gains batch entry points that fan out over the concurrent path with a shared `Arc<BaseFileSystem>` (single Tokio spawn per batch, first-error-wins). Exposed to the Python binding as `AsyncGoosefs.batch_open_file` / `batch_create_file` / `batch_create_dir` / `batch_rename` / `batch_delete` / `batch_list_status` (plus their sync `Goosefs.batch_*` counterparts). One PyO3 boundary crossing per batch instead of N. Includes a `WorkerRouter` init deferral (`WorkerManager` optional, first-write initialization) so batch-metadata-only workloads avoid paying the Worker-plane setup cost.
+- **Short-Circuit local mmap read path** — New `short_circuit` module that bypasses the gRPC data plane when the client and worker are co-located. `LocalBlockReader` performs zero-copy reads via read-only `mmap` with `madvise` prefetch and optional Transparent Huge Pages (THP); `ShortCircuitFactory` provides per-task hot-block caches, negative caching, a `CapabilityProvider` hook, and a context-shared factory. A dedicated `SIGBUS` diagnostic handler surfaces mmap faults with actionable diagnostics and manages process-level signal installation. Local worker is auto-detected by interface bind. Every recoverable error transparently falls back to the standard gRPC path. Wired into both sequential (`read()`) and positioned-read (`read_at()`) paths through `file_in_stream` / `context` / `config`. Ships with gated E2E integration tests and an INV-S3/INV-D1/INV-D2/INV-S1/INV-S2/INV-S5 consistency regression suite (`tests/short_circuit_e2e.rs`, `tests/sc_consistency.rs`, `tests/sc_inv_s3.rs`), plus `examples/short_circuit_demo.rs`. Server-side companion: new `OpenLocalBlock` RPC + `OpenLocalBlockGuard` for block-lock lifecycle. See [`docs/SHORT_CIRCUIT_DESIGN.md`](docs/SHORT_CIRCUIT_DESIGN.md).
+- **Read-path performance optimization (wait-free hot paths)** — `WorkerClientPool.clients` and `WorkerRouter.workers` / `hash_ring` / `local_worker_id` are now `ArcSwap` instead of `RwLock<HashMap>`, mirroring the existing `ArcSwap<AuthedState>` model on `MasterClient`. The acquire and `select_worker` hot paths become a single atomic load + map lookup + cheap clone (no async `RwLock` round-trip); writes use `ArcSwap::rcu` copy-on-write, and same-key reconnects are still single-flighted by the per-key mutex — generation / single-flight / invalidate semantics preserved. Related local micro-benchmarks live under `benchmarks/` (e.g. `master_hotpath.rs`, `cache_uring_bench.rs`, `cache_evictor_bench.rs`).
+- **Batch metadata / lifecycle APIs (Python binding)** — The Python SDK gains batch entry points (`AsyncGoosefs.batch_get_status` / `batch_exists` / `batch_open_file` / `batch_create_file` / `batch_create_dir` / `batch_rename` / `batch_delete` / `batch_list_status`; sync `Goosefs` exposes the same set except `batch_open_file`) that fan out with bounded concurrency (`futures::stream::buffered`), preserving input order. The whole batch completes before results are collected; the first error in input order is returned (other in-flight RPCs are **not** cancelled on failure — use individual calls if you need per-path error isolation). One PyO3 boundary crossing per batch instead of N. The Rust `BaseFileSystem` itself remains single-op; downstream Rust callers can build equivalent fan-out with `tokio::spawn` + `Arc<BaseFileSystem>` directly.
 - **Reliability / robustness** — `PollingMasterInquireClient` HA primary discovery is now cancel-safe via a new RAII `LeaderGuard` (no more infinite recursion when the singleflight leader is cancelled by an outer `timeout` / `select!`). `WriteBlockHandle::Drop` now aborts the background gRPC task on early-error paths instead of leaking a detached future. `GoosefsFileWriter::Drop` performs best-effort cleanup (cancels in-flight cache/UFS streams, calls `master.remove_blocks` or falls back to `delete(unchecked=true)`). `LogSampler` uses monotonic `Instant` (safe under NTP / admin clock jumps). `MetricsMasterClient::with_retry` reconnects at the *top* of the next attempt. `WorkerClient::connect` now sets `request_timeout`. `config::parse_byte_size` overflow is a hard error (previously silently wrapped). `WorkerRouter` consistent-hash ring is pre-built on `update_workers` (O(log N) `binary_search` per request), and `pick_any_worker` uses `rand::Rng::random_range` for proper load spreading.
 - **No breaking API changes** — Drop-in upgrade from `0.1.6`; downstream `OpenDAL` / `Lance` integrations require no code changes.
 
@@ -69,46 +69,42 @@ This is a standalone Rust gRPC client crate (Layer 3) in the **Lance → OpenDAL
 
 ## Quick Start
 
-### Step 1: Start a Goosefs Cluster
+### Step 1: Start a GooseFS Cluster
 
-#### Requirements
-
-Goosefs runs on all UNIX-like environments (Linux, macOS). Make sure you have:
-
-- **Java 11** (required — set `JAVA_HOME` accordingly)
-- A running Goosefs Master (default RPC port `9200`) and at least one Worker (default data port `9203`)
+The easiest path for contributors is the Docker fixture shipped in this repo:
 
 ```shell
-# Example: start Goosefs locally (adjust paths to your installation)
-export JAVA_HOME=/path/to/jdk-11
-cd /path/to/goosefs
-./bin/goosefs-start.sh local SudoMount
+bash scripts/ci/goosefs-up.sh
+export GOOSEFS_MASTER_ADDR=127.0.0.1:9200
+export GOOSEFS_AUTH_TYPE=simple
 ```
 
-Verify the cluster is healthy:
+If pulls from `goosefs.tencentcloudcr.com` fail (seen on some GitHub-hosted runners),
+mirror the image and override:
 
 ```shell
-./bin/goosefs fs ls /
+export GOOSEFS_IMAGE=ghcr.io/<org>/goosefs:v2.1.0.1
+bash scripts/ci/goosefs-up.sh
 ```
+
+Alternatively, point the SDK at any existing GooseFS Master/Worker (default RPC
+ports `9200` / `9203`). A Java GooseFS install needs **Java 11** and a healthy
+cluster (`goosefs fs ls /`).
 
 #### Requirements (Rust side)
 
 - **Rust 1.88+** — Install via [rustup](https://www.rust-lang.org/tools/install)
-- **protoc** — Protocol Buffers compiler (needed by `tonic-build` at compile time)
 
-```shell
-# macOS
-brew install protobuf
-
-# Ubuntu / Debian
-sudo apt install -y protobuf-compiler
-```
+> Downstream builds do **not** need `protoc`. This crate ships pre-generated
+> protobuf code under [`src/generated/`](src/generated/). Install `protoc` only
+> if you change files under [`proto/`](proto/) and need to regenerate (see
+> [Re-generate Proto Code](#re-generate-proto-code)).
 
 ### Step 2: Build the Client
 
 ```shell
-git clone <repo-url> goosefs-client-rust
-cd goosefs-client-rust
+git clone https://github.com/Tencent/tencent-goosefs-rust-sdk.git
+cd tencent-goosefs-rust-sdk
 cargo build
 ```
 
@@ -118,7 +114,9 @@ Add to your project's `Cargo.toml`:
 
 ```toml
 [dependencies]
-goosefs-sdk = { path = "../goosefs-client-rust" }
+goosefs-sdk = "0.1"
+# Or, until the crate is published:
+# goosefs-sdk = { git = "https://github.com/Tencent/tencent-goosefs-rust-sdk" }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -234,20 +232,23 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 ### Example: High-Level File Write (Recommended)
 
 ```rust
+use std::sync::Arc;
+use goosefs_sdk::config::{GoosefsConfig, WriteType};
+use goosefs_sdk::context::FileSystemContext;
+use goosefs_sdk::fs::BaseFileSystem;
+use goosefs_sdk::fs::options::CreateFileOptions;
 use goosefs_sdk::io::GoosefsFileWriter;
-use goosefs_sdk::config::GoosefsConfig;
-use goosefs_sdk::WritePType;
 
 #[tokio::main]
 async fn main() -> goosefs_sdk::error::Result<()> {
     let config = GoosefsConfig::new("127.0.0.1:9200");
+    let ctx: Arc<FileSystemContext> = FileSystemContext::connect(config).await?;
 
-    // One-shot write: creates file, writes data, completes file in one call
-    // Default WriteType is MUST_CACHE (data in cache only)
-    GoosefsFileWriter::write_file(&config, "/data/hello.txt", b"Hello, Goosefs!").await?;
+    // One-shot write (creates file, writes data, completes file in one call)
+    GoosefsFileWriter::write_file_with_context(ctx.clone(), "/data/hello.txt", b"Hello, Goosefs!").await?;
 
     // Or use the builder for multi-chunk streaming writes
-    let mut writer = GoosefsFileWriter::create(&config, "/data/large-file.bin").await?;
+    let mut writer = GoosefsFileWriter::create_with_context(ctx.clone(), "/data/large-file.bin", None).await?;
     writer.write(b"first chunk ").await?;
     writer.write(b"second chunk ").await?;
     writer.write(b"final chunk").await?;
@@ -255,23 +256,19 @@ async fn main() -> goosefs_sdk::error::Result<()> {
     println!("wrote {} bytes", writer.bytes_written());
 
     // ── Write with different WriteTypes ──
+    // Prefer BaseFileSystem::write_file — it maps config::WriteType → proto WritePType.
+    let fs = BaseFileSystem::from_context(ctx.clone());
 
-    // CACHE_THROUGH — write to cache + sync persist to UFS (COS/S3/HDFS)
-    let ct_config = GoosefsConfig::new("127.0.0.1:9200")
-        .with_write_type(WritePType::CacheThrough);
-    GoosefsFileWriter::write_file(&ct_config, "/data/durable.txt", b"persisted!").await?;
+    let ct_opts = CreateFileOptions::with_write_type(WriteType::CacheThrough);
+    fs.write_file("/data/durable.txt", b"persisted!", ct_opts).await?;
 
-    // THROUGH — write directly to UFS, bypass cache
-    let th_config = GoosefsConfig::new("127.0.0.1:9200")
-        .with_write_type(WritePType::Through);
-    GoosefsFileWriter::write_file(&th_config, "/data/direct.txt", b"direct to UFS").await?;
+    let th_opts = CreateFileOptions::with_write_type(WriteType::Through);
+    fs.write_file("/data/direct.txt", b"direct to UFS", th_opts).await?;
 
-    // ASYNC_THROUGH — write to cache, async persist after close()
-    let at_config = GoosefsConfig::new("127.0.0.1:9200")
-        .with_write_type(WritePType::AsyncThrough);
-    GoosefsFileWriter::write_file(&at_config, "/data/async.txt", b"eventually persisted").await?;
-    // close() automatically calls scheduleAsyncPersistence
+    let at_opts = CreateFileOptions::with_write_type(WriteType::AsyncThrough);
+    fs.write_file("/data/async.txt", b"eventually persisted", at_opts).await?;
 
+    ctx.close().await?;
     Ok(())
 }
 ```
@@ -279,26 +276,31 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 ### Example: High-Level File Read (Recommended)
 
 ```rust
-use goosefs_sdk::io::GoosefsFileReader;
+use std::sync::Arc;
 use goosefs_sdk::config::GoosefsConfig;
+use goosefs_sdk::context::FileSystemContext;
+use goosefs_sdk::io::GoosefsFileReader;
 
 #[tokio::main]
 async fn main() -> goosefs_sdk::error::Result<()> {
     let config = GoosefsConfig::new("127.0.0.1:9200");
+    let ctx: Arc<FileSystemContext> = FileSystemContext::connect(config).await?;
 
     // One-shot: read entire file
-    let data = GoosefsFileReader::read_file(&config, "/data/hello.txt").await?;
+    let data = GoosefsFileReader::read_file_with_context(ctx.clone(), "/data/hello.txt").await?;
     println!("content: {}", String::from_utf8_lossy(&data));
 
     // Range read: read 500 bytes starting at offset 100
-    let range = GoosefsFileReader::read_range(&config, "/data/hello.txt", 100, 500).await?;
+    let range = GoosefsFileReader::read_range_with_context(ctx.clone(), "/data/hello.txt", 100, 500).await?;
+    println!("range bytes: {}", range.len());
 
     // Streaming read: process block-by-block
-    let mut reader = GoosefsFileReader::open(&config, "/data/hello.txt").await?;
+    let mut reader = GoosefsFileReader::open_with_context(ctx.clone(), "/data/hello.txt").await?;
     while let Some(chunk) = reader.read_next_block().await? {
         println!("got {} bytes from block", chunk.len());
     }
 
+    ctx.close().await?;
     Ok(())
 }
 ```
@@ -404,7 +406,7 @@ as other client metrics.
 > runs without SASL.)
 >
 > More cache coverage:
-> - A/B throughput benchmark: `cargo run --release --example page_cache_ab`
+> - Local page-store A/B: `cargo run --release --example cache_uring_bench` / `cache_evictor_bench`
 > - Integration tests (live cluster): `GOOSEFS_AUTH_TYPE=nosasl cargo test --test page_cache_e2e -- --ignored`
 > - Python e2e: `GOOSEFS_MASTER_ADDR=127.0.0.1:9200 GOOSEFS_AUTH_TYPE=nosasl uv run --group test pytest tests/test_page_cache.py` (in `bindings/python`)
 
@@ -681,8 +683,8 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 | **`fs::BaseFileSystem`** | **Production FileSystem implementation** — supports shared-context mode via `FileSystemContext` and legacy per-call mode. Implements WriteType xattr inheritance. `exists()` follows Java semantics (INCOMPLETE non-folder → false). |
 | **`context::FileSystemContext`** | **Shared connection pool** — three-layer architecture eliminating repeated TCP+SASL handshakes. Holds `Arc<MasterClient>` + `Arc<WorkerClientPool>` + `Arc<WorkerRouter>`. Background worker-list refresh (30s) and config hot-reload (60s). |
 | **`io::GoosefsFileInStream`** | **Seekable dual-path file input stream** — sequential reads via `block_in_stream` (streaming, prefetch) and random reads via `positioned_read` (`position_short=true`). Auto-switches based on 8 KiB threshold. Supports `seek(SeekFrom)` and `read_at()`. |
-| **`io::GoosefsFileWriter`** | **High-level file writer** — one-shot `write_file()` or builder pattern `create()` → `write()` → `close()`. Supports all 4 WriteTypes. Cancel/close state machine with UUID-based idempotent `FsOpPId`. |
-| `io::GoosefsFileReader` | **High-level file reader** — one-shot `read_file()` / `read_range()` or streaming `open()` → `read_next_block()`. Orchestrates `GetStatus` → `BlockMapper` → `WorkerRouter` → `GrpcBlockReader` |
+| **`io::GoosefsFileWriter`** | **High-level file writer** — one-shot `write_file_with_context()` or builder pattern `create_with_context()` → `write()` → `close()`. Supports all 4 WriteTypes. Cancel/close state machine with UUID-based idempotent `FsOpPId`. |
+| `io::GoosefsFileReader` | **High-level file reader** — one-shot `read_file_with_context()` / `read_range_with_context()` or streaming `open_with_context()` → `read_next_block()`. Orchestrates `GetStatus` → `BlockMapper` → `WorkerRouter` → `GrpcBlockReader` |
 | `io::GoosefsAsyncReader` | **AsyncRead/AsyncSeek adapter** — wraps `GoosefsFileInStream` and implements `tokio::io::AsyncRead` + `tokio::io::AsyncSeek` for seamless integration with the tokio I/O ecosystem. |
 | `fs::URIStatus` | Immutable file/directory metadata snapshot converted from proto `FileInfo`. Typed accessors for all metadata fields. |
 | `fs::options` | Rust-native options structs — `OpenFileOptions`, `CreateFileOptions`, `DeleteOptions`, `InStreamOptions`, `ReadType` |
@@ -706,23 +708,29 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 
 ## gRPC Services
 
-This client wraps **5 Goosefs gRPC services** defined in 12 proto files:
+This client wraps **6 Goosefs gRPC services** defined in 14 proto files:
 
 | Service | Port | Proto | Key RPCs |
 |---------|------|-------|----------|
-| `FileSystemMasterClientService` | Master:9200 | `file_system_master.proto` | GetStatus, ListStatus, CreateFile, CompleteFile, Delete, Rename, CreateDirectory … (37 RPCs) |
+| `FileSystemMasterClientService` | Master:9200 | `file_system_master.proto` | GetStatus, ListStatus, CreateFile, CompleteFile, Delete, Rename, CreateDirectory … (42 RPCs) |
 | `BlockWorker` | Worker:9203 | `block_worker.proto` | ReadBlock *(bidi-stream)*, WriteBlock *(bidi-stream)*, AsyncCache, RemoveBlock … (12 RPCs) |
-| `WorkerManagerMasterClientService` | Master:9200 | `worker_manager_master.proto` | GetWorkerInfoList, GetCapacityBytes, GetUsedBytes … (9 RPCs) |
+| `WorkerManagerMasterClientService` | Master:9200 | `worker_manager_master.proto` | GetWorkerInfoList, GetCapacityBytes, GetUsedBytes … (10 RPCs) |
+| `MetricsMasterClientService` | Master:9200 | `metric_master.proto` | MetricsHeartbeat, ClearMetrics, GetMetrics (3 RPCs) |
 | `ServiceVersionClientService` | Master:9200 | `version.proto` | GetServiceVersion |
 | `SaslAuthenticationService` | Master:9200 / Worker:9203 | `sasl_server.proto` | Authenticate *(bidi-stream)* — SASL handshake for channel authentication |
+
+Metrics pipeline details: [`docs/METRICS.md`](docs/METRICS.md).
 
 ## Project Structure
 
 ```
-goosefs-client-rust/
+tencent-goosefs-rust-sdk/
 ├── Cargo.toml              # crate manifest
-├── build.rs                # tonic-build proto compilation
-├── proto/                  # Goosefs protobuf definitions (11 files)
+├── build.rs                # opt-in tonic-build proto regeneration
+├── CONTRIBUTING.md
+├── SECURITY.md
+├── NOTICE
+├── proto/                  # Goosefs protobuf definitions (14 files)
 │   ├── grpc/               #   Master/Worker service protos
 │   └── proto/              #   Shared data types (security, acl, status)
 ├── src/
@@ -764,19 +772,23 @@ goosefs-client-rust/
 │   │   └── pushgateway.rs  # ★ PushgatewayTask (Prometheus Pushgateway push)
 │   └── generated/          # prost/tonic generated code (checked-in; shipped with the crate)
 ├── examples/
-│   ├── highlevel_file_rw.rs     # ★ High-level file read/write (recommended)
-│   ├── streaming_file_read.rs   # ★ Streaming read — constant O(block) memory
-│   ├── seekable_file_read.rs    # ★ Seekable read via GoosefsFileInStream (seek / read_at)
-│   ├── context_file_rw.rs       # ★ FileSystemContext shared connection pool
-│   ├── page_cache_demo.rs       # ★ Client local page cache (cold miss → back-fill → warm hit)
-│   ├── write_types.rs           # ★ WriteType comparison
-│   ├── ha_multi_master.rs       # ★ Multi-master mode
+│   ├── async_persistence.rs     # Async persistence scheduling
+│   ├── async_read_trait.rs      # GoosefsAsyncReader (AsyncRead + AsyncSeek adapter)
 │   ├── auth_demo.rs             # ★ Authentication demo (NOSASL / SIMPLE)
-│   ├── metrics_heartbeat.rs     # ★ Client metrics & heartbeat demo
+│   ├── context_file_rw.rs       # ★ FileSystemContext shared connection pool
+│   ├── ha_multi_master.rs       # ★ Multi-master mode
+│   ├── highlevel_file_rw.rs     # ★ High-level file read/write (recommended)
 │   ├── lowlevel_block_read.rs   # Low-level block streaming read
 │   ├── lowlevel_create_file.rs  # Low-level file creation (metadata only)
 │   ├── metadata_crud.rs         # File/directory metadata CRUD
-│   └── async_persistence.rs     # Async persistence scheduling
+│   ├── metrics_heartbeat.rs     # ★ Client metrics & heartbeat demo
+│   ├── metrics_pushgateway.rs   # Prometheus Pushgateway reporter demo
+│   ├── page_cache_demo.rs       # ★ Client local page cache (cold miss → back-fill → warm hit)
+│   ├── reader_page_cache_demo.rs # Reader-level page cache demo
+│   ├── seekable_file_read.rs    # ★ Seekable read via GoosefsFileInStream (seek / read_at)
+│   ├── short_circuit_demo.rs    # Short-circuit local mmap read demo
+│   ├── streaming_file_read.rs   # ★ Streaming read — constant O(block) memory
+│   └── write_types.rs           # ★ WriteType comparison
 ├── tests/
 │   └── connection_reuse.rs      # Connection reuse integration test
 ├── bindings/
@@ -831,8 +843,8 @@ build/test/lint loop.
 
 | Artifact | Guide |
 |----------|-------|
-| Rust crate (`goosefs-sdk`) → crates.io / Cargo registry | [`docs/RELEASE.md`](docs/release/RELEASE.md) |
-| Python package (`goosefs`) → PyPI (manylinux wheels) | [`docs/PYTHON_RELEASE.md`](docs/release/PYTHON_RELEASE.md) |
+| Rust crate (`goosefs-sdk`) → crates.io | [`docs/release/RELEASE.md`](docs/release/RELEASE.md) |
+| Python package (`goosefs`) → PyPI (manylinux wheels) | [`docs/release/PYTHON_RELEASE.md`](docs/release/PYTHON_RELEASE.md) |
 
 ### Re-generate Proto Code
 
@@ -863,7 +875,7 @@ The updated `.rs` files will be written back to `src/generated/` — **commit th
 | `tracing` | 0.1 | Structured logging |
 | `serde` | 1.x | Config serialization |
 | `uuid` | 1.x | Channel-id generation for SASL authentication |
-| `hostname` | 0.3 | Local worker detection for routing preference |
+| `hostname` | 0.4 | Local worker detection for routing preference |
 | `reqwest` | 0.12 | HTTP client for Pushgateway push |
 | `rand` | 0.9 | Random jitter for retry backoff |
 | `async-trait` | 0.1 | Async trait support for FileSystem trait |
@@ -876,6 +888,13 @@ The updated `.rs` files will be written back to `src/generated/` — **commit th
 
 > **Note:** Goosefs requires **Java 11**. Make sure `JAVA_HOME` points to a JDK 11 installation when running the Goosefs cluster.
 
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). Please also read
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) and [`SECURITY.md`](SECURITY.md).
+
 ## License
 
-Licensed under the [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0).
+Licensed under the [Apache License, Version 2.0](LICENSE).
+
+Copyright (C) 2026 Tencent. See [`NOTICE`](NOTICE) for attribution details.

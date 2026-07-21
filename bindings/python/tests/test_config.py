@@ -1,7 +1,26 @@
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Unit tests for :class:`goosefs.Config` construction.
 
 These tests exercise pure construction behaviour and never touch the
 network, so they always run — no ``GOOSEFS_MASTER_ADDR`` guard needed.
+
+``Config`` overlays ``GOOSEFS_*`` env vars after the constructor arguments
+(documented precedence: defaults → properties → env). CI / local shells
+often export ``GOOSEFS_MASTER_ADDR``, which would otherwise rewrite the
+addresses under test — clear those vars for this module.
 """
 
 from __future__ import annotations
@@ -9,6 +28,19 @@ from __future__ import annotations
 import pytest
 from goosefs import Config
 from goosefs.exceptions import ConfigError  # noqa: I001
+
+# Env keys that rewrite master address / root if left set during construction.
+_CONFIG_ADDR_ENV = (
+    "GOOSEFS_MASTER_ADDR",
+    "GOOSEFS_MASTER_ADDRESSES",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_master_addr_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in _CONFIG_ADDR_ENV:
+        monkeypatch.delenv(key, raising=False)
+
 
 # ─── single-master ────────────────────────────────────────────────────
 

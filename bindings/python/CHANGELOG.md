@@ -2,7 +2,9 @@
 
 This document records all notable changes to the `goosefs` Python binding. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and version numbers follow [SemVer](https://semver.org/).
 
-> Note: Version numbers stay aligned with the underlying `goosefs-sdk` crate. While P8 (CI/Wheel) is on hold, the wheels under this directory are released internally only (produced manually via `maturin build --release`); public PyPI releases will start from 0.1.0 once P8/P9 are restarted.
+> Note: Version numbers stay aligned with the underlying `goosefs-sdk` crate.
+> Public releases are published to [PyPI](https://pypi.org/project/goosefs/).
+> See [`docs/release/PYTHON_RELEASE.md`](../../docs/release/PYTHON_RELEASE.md).
 
 ## [Unreleased]
 
@@ -481,6 +483,8 @@ The first internally usable alpha release. Covers all milestones from P0 through
 
 ## Notes
 
-- 0.1.0 / 0.1.1 were used as internal milestones during P0–P5 and were never publicly released; this changelog starts from 0.1.2 (the first releasable version with P7 complete).
-- For the full development cadence and per-stage deliverables, see [`docs/PYTHON_BINDING_PROGRESS.md`](../../docs/PYTHON_BINDING_PROGRESS.md).
-- Version-number changes related to PyPI releases (including the 0.1.0 public release) will be backfilled once P8/P9 are restarted. P8 (CI / Wheel) and P9 (canary + regression) are both currently on hold; see [`docs/PYTHON_BINDING_PROGRESS.md`](../../docs/PYTHON_BINDING_PROGRESS.md) for details.
+- Early 0.1.x milestones were used during binding bring-up; this changelog starts
+  from 0.1.2 as the first documented releasable line.
+- Keep Python package versions aligned with the Rust crate `goosefs-sdk`.
+- Public releases target [PyPI](https://pypi.org/project/goosefs/); see
+  [`docs/release/PYTHON_RELEASE.md`](../../docs/release/PYTHON_RELEASE.md).

@@ -1,0 +1,60 @@
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Setup Rust
+description: Prepare Rust toolchain and common CI env for GooseFS SDK
+
+inputs:
+  need-nextest:
+    description: Install cargo-nextest
+    default: "false"
+  components:
+    description: Extra rustup components (comma-separated), e.g. rustfmt,clippy
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Rust env
+      shell: bash
+      run: |
+        echo "RUSTFLAGS=-C force-frame-pointers=yes -C debuginfo=1" >> "$GITHUB_ENV"
+        echo "RUST_BACKTRACE=1" >> "$GITHUB_ENV"
+        echo "RUST_LOG=goosefs_sdk=info,goosefs=info" >> "$GITHUB_ENV"
+        echo "CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse" >> "$GITHUB_ENV"
+        echo "CARGO_TERM_COLOR=always" >> "$GITHUB_ENV"
+        rustc --version
+        cargo --version
+
+    - name: Install rustup components
+      if: inputs.components != ''
+      shell: bash
+      run: |
+        IFS=',' read -ra COMPS <<< "${{ inputs.components }}"
+        for c in "${COMPS[@]}"; do
+          c="$(echo "$c" | xargs)"
+          [ -n "$c" ] && rustup component add "$c"
+        done
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: goosefs-sdk
+        save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+
+    - name: Install cargo-nextest
+      if: inputs.need-nextest == 'true'
+      uses: taiki-e/install-action@v2
+      with:
+        tool: nextest

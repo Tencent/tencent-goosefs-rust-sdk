@@ -1758,15 +1758,17 @@ tokio = { workspace = true }
 
 # GooseFS Rust gRPC Client — core dependencies
 # Used during local development phase path Quote, changed to when published git or crates.io
-goosefs-sdk = { path = "../../../../goosefs-client-rust" }
+goosefs-sdk = { path = "../../../../tencent-goosefs-rust-sdk" }
 # In the future it can be changed to:
-# goosefs-sdk = { git = "https://github.com/xxx/goosefs-client-rust.git", tag = "v0.1.0" }
+# goosefs-sdk = { git = "https://github.com/Tencent/tencent-goosefs-rust-sdk.git", tag = "v0.1.0" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 ```
 
-> **Notice**:`goosefs-sdk` Referenced by path (development phase). Officially released to Apache OpenDAL When , it needs to be published to crates.io or use git URL. path `../../../../goosefs-client-rust` Corresponding from `opendal/core/services/goosefs/` arrive `/opt/sourcecode/cos/goosefs-client-rust` relative relationship. The actual submission needs to be adjusted according to the final directory structure.
+> **Notice:** During development OpenDAL may depend on a local path checkout of
+> `tencent-goosefs-rust-sdk`. For public builds, publish `goosefs-sdk` to crates.io
+> or use a git dependency.
 
 ### 11.4 lib.rs — Service entrance
 
@@ -2909,7 +2911,7 @@ GooseFsBackend (impl Access)
 
 ## 12. Lance GooseFS Provider detailed design — ✅ Completed
 
-> based on completed `goosefs-sdk` (Layer 3) and OpenDAL GooseFS Service (Layer 2),Lance `GooseFsStoreProvider` (Layer 1) **Already in `/opt/sourcecode/lance` warehouse `feature/goosefs-provider` Completely implemented on the branch and passed all tests**.
+> based on completed `goosefs-sdk` (Layer 3) and OpenDAL GooseFS Service (Layer 2),Lance `GooseFsStoreProvider` (Layer 1) **Already implemented on the Lance `feature/goosefs-provider` branch and passed all tests**.
 >
 > **Based on version**:Lance 5.0.0-beta.1 / Rust edition 2024 / snafu 0.9
 >
@@ -3041,7 +3043,7 @@ because `opendal/services-goosefs` Not yet published to crates.io, need to be in
 # Development patch: Use local opendal with services-goosefs support
 # Remove this patch after opendal services-goosefs is published to crates.io
 [patch.crates-io]
-opendal = { path = "/opt/sourcecode/opendal-src/core" }
+opendal = { git = "https://github.com/apache/opendal", package = "opendal" }
 ```
 
 #### 12.4.2 `lance-io/Cargo.toml` — Add to goosefs feature
@@ -3105,7 +3107,7 @@ exist `commit_handler_from_url()` Functional scheme Add to match `"goosefs"`:
 
 ### 12.6 goosefs.rs — GooseFsStoreProvider Complete implementation (✅ has landed)
 
-> **storehouse**:`/opt/sourcecode/lance`, branch `feature/goosefs-provider`
+> **Repository:** Lance, branch `feature/goosefs-provider`
 > **document**:`rust/lance-io/src/object_store/providers/goosefs.rs`
 > **adaptation**:Lance 5.0.0-beta.1 / Rust edition 2024 / snafu 0.9(none `location!()` parameter)
 
@@ -3584,7 +3586,7 @@ lance-io (feature = "goosefs")
 ```toml
 # development stage patch(formally merged into opendal removed later)
 [patch.crates-io]
-opendal = { path = "/opt/sourcecode/opendal-src/core" }
+opendal = { git = "https://github.com/apache/opendal", package = "opendal" }
 ```
 
 > **opendal-src branch**:`goosefs-for-lance-v0.55`, confirmed to contain `services-goosefs` feature.
@@ -3629,7 +3631,7 @@ test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
 ```
 commit cd53a79a (HEAD -> feature/goosefs-provider)
-Author: forward.xu <forward.xu.work@gmail.com>
+Author: (redacted for public docs)
 
 feat(lance-io): add GooseFS object store provider
 

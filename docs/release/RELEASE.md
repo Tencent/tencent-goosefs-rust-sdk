@@ -1,8 +1,11 @@
 # Release Guide
 
-This document describes how to package and publish the **Rust crate** `goosefs-sdk` to a Cargo registry (crates.io or the Tencent internal Cargo Registry).
+This document describes how to package and publish the **Rust crate** `goosefs-sdk`
+to [crates.io](https://crates.io/).
 
-> Looking to release the **Python** client (`goosefs`)? See [`PYTHON_RELEASE.md`](PYTHON_RELEASE.md) instead — it builds native manylinux wheels via maturin and publishes to PyPI.
+> Looking to release the **Python** client (`goosefs`)? See
+> [`PYTHON_RELEASE.md`](PYTHON_RELEASE.md) instead — it builds native manylinux
+> wheels via maturin and publishes to PyPI.
 
 ## Prerequisites
 
@@ -34,9 +37,7 @@ cargo publish --dry-run
 cargo package --list
 ```
 
----
-
-## Option 1: Publish to the Official crates.io
+## Publish to crates.io
 
 ### Upload Command
 
@@ -54,49 +55,11 @@ cargo add goosefs-sdk
 
 - https://crates.io/crates/goosefs-sdk
 
----
-
-## Option 2: Publish to the Tencent Internal Cargo Registry
-
-### Configure the Registry
-
-Add to `~/.cargo/config.toml`:
-
-```toml
-[registries.tencent]
-index = "TODO: Tencent internal Cargo Registry URL"
-```
-
-### Upload Command
-
-```bash
-cargo publish --registry tencent --token <your-token>
-```
-
-### Install Verification
-
-Add the dependency to your project's `Cargo.toml`:
-
-```toml
-[dependencies]
-goosefs-sdk = { version = "0.1", registry = "tencent" }
-```
-
-Or, after configuring the default registry globally via `.cargo/config.toml`, use it directly:
-
-```toml
-[dependencies]
-goosefs-sdk = "0.1"
-```
-
----
-
 ## Argument Reference
 
 | Argument | Description |
 |----------|-------------|
-| `--token` | Access token (for crates.io, create one at https://crates.io/settings/tokens) |
-| `--registry` | Target registry name (defaults to crates.io when omitted) |
+| `--token` | Access token (create one at https://crates.io/settings/tokens) |
 | `--dry-run` | Simulate the publish only, do not actually upload |
 | `--allow-dirty` | Allow publishing with uncommitted changes (not recommended) |
 
@@ -115,23 +78,21 @@ cargo doc --no-deps
 # 4. Simulate the publish and inspect package contents
 cargo publish --dry-run
 
-# 5a. Publish to the official crates.io
+# 5. Publish to crates.io
 cargo publish --token <your-crates-io-token>
 
-# 5b. Or publish to the Tencent internal registry
-cargo publish --registry tencent --token <your-token>
-
 # 6. Create a Git tag
-git tag v0.1.5
-git push origin v0.1.5
+git tag v0.1.7
+git push origin v0.1.7
 ```
 
 ## Notes
 
-1. Before releasing a new version, always update the `version` field in `Cargo.toml`.
-2. crates.io **does not allow deleting or overwriting published versions**; you can only yank (mark as not recommended).
-3. After publishing to crates.io, the source code inside the crate package becomes publicly visible (even if the Git repository is private).
-4. It is recommended to run `cargo publish --dry-run` for verification before releasing.
-5. Keep tokens safe and never commit them to a code repository.
-6. crates.io tokens can be created and managed at https://crates.io/settings/tokens.
-7. If you do not want the source code to be publicly visible, use the Tencent internal Cargo Registry (Option 2).
+1. Before releasing a new version, always update the `version` field in `Cargo.toml`
+   (keep `bindings/python` versions aligned).
+2. crates.io **does not allow deleting or overwriting published versions**; you can
+   only yank (mark as not recommended).
+3. After publishing, the source inside the crate package is publicly visible.
+4. Run `cargo publish --dry-run` before releasing.
+5. Keep tokens safe and never commit them to the repository.
+6. Update [`CHANGELOG.md`](../../CHANGELOG.md) for the release notes.

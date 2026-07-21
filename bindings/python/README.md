@@ -12,7 +12,7 @@
 | **Python support** | abi3 wheel, runtime floor CPython 3.9+ |
 | **Platforms** | Linux x86_64 / aarch64 (manylinux_2_28), macOS x86_64 / arm64; Windows best-effort |
 | **API style** | Synchronous blocking (`Goosefs`) + coroutine-based async (`AsyncGoosefs`) |
-| **Status** | alpha — see the [development roadmap](../../docs/PYTHON_BINDING_PROGRESS.md) |
+| **Status** | alpha — see [`CHANGELOG.md`](CHANGELOG.md) and [`DEVELOPMENT.md`](DEVELOPMENT.md) |
 
 ## What's New
 
@@ -97,7 +97,6 @@ See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
   - [`pandas_csv.py`](./examples/pandas_csv.py) — pandas DataFrame ↔ CSV round-trip
 - **Development guide (build, test, release)**: [`DEVELOPMENT.md`](./DEVELOPMENT.md)
 - **Changelog**: [`CHANGELOG.md`](./CHANGELOG.md)
-- **Full development tracker**: [`docs/PYTHON_BINDING_PROGRESS.md`](../../docs/PYTHON_BINDING_PROGRESS.md)
 - **Complete API type stubs (with docstrings)**: [`python/goosefs/__init__.pyi`](./python/goosefs/__init__.pyi)
 
 ## One-Minute Try-Out

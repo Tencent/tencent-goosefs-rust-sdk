@@ -1,0 +1,87 @@
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Bindings Python
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "bindings/python/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ci_bindings_python.yml"
+      - ".github/actions/**"
+  pull_request:
+    paths:
+      - "bindings/python/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ci_bindings_python.yml"
+      - ".github/actions/**"
+  workflow_dispatch:
+
+concurrency:
+  group: python-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-wheel:
+    name: wheel (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-14
+        python-version: ["3.11"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Sync deps
+        working-directory: bindings/python
+        run: uv sync --all-extras --group dev --group test
+
+      - name: maturin build
+        working-directory: bindings/python
+        run: uv run maturin build --release --out dist
+
+      - name: Install wheel + import smoke
+        working-directory: bindings/python
+        run: |
+          uv pip install dist/*.whl
+          uv run python -c "import goosefs; print(goosefs.__version__ if hasattr(goosefs, '__version__') else 'ok')"
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: goosefs-wheel-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: bindings/python/dist/*
+          if-no-files-found: error
