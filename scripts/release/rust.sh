@@ -102,9 +102,11 @@ if [[ "${ALLOW_DIRTY}" -eq 1 ]]; then
   EXTRA+=(--allow-dirty)
 fi
 
+# Bash 3.2 (macOS /bin/bash) + `set -u` treats an empty `"${EXTRA[@]}"` as
+# unbound; `${EXTRA[@]+"${EXTRA[@]}"}` expands to nothing safely.
 if [[ "${PUBLISH}" -eq 0 ]]; then
   echo "==> cargo publish --dry-run"
-  cargo publish --dry-run "${EXTRA[@]}"
+  cargo publish --dry-run ${EXTRA[@]+"${EXTRA[@]}"}
   echo
   echo "Dry-run OK. To publish for real:"
   echo "  export CARGO_REGISTRY_TOKEN=..."
@@ -120,7 +122,7 @@ if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
 fi
 
 echo "==> cargo publish"
-cargo publish --token "${CARGO_REGISTRY_TOKEN}" "${EXTRA[@]}"
+cargo publish --token "${CARGO_REGISTRY_TOKEN}" ${EXTRA[@]+"${EXTRA[@]}"}
 echo
 echo "Published goosefs-sdk ${SDK_VER} to crates.io."
 echo "Tag when ready: git tag v${SDK_VER} && git push origin v${SDK_VER}"

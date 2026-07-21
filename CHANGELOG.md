@@ -11,7 +11,14 @@ kept aligned. Python-specific notes also appear in
 
 ## [Unreleased]
 
+## [0.1.8] — 2026-07-21
+
 ### Changed
 
+- Default `worker_connection_pool_size` bumped from `1` to `min(cores, 4)`
+  (capped via `available_parallelism`); restore legacy behaviour with
+  `.with_worker_connection_pool_size(1)` or
+  `goosefs.client.worker.connection.pool.size=1`.
 - Open-source scrub: public contribution docs, scrubbed internal paths / registry
   instructions, and Docker fixture image override via `GOOSEFS_IMAGE`.
+- Version bump: `goosefs-sdk` / `goosefs` `0.1.7` → `0.1.8`.

@@ -16,6 +16,16 @@
 
 ## What's New
 
+- **v0.1.8** — aligned with `goosefs-sdk` 0.1.8. Default
+  `worker_connection_pool_size` bumped from `1` to `min(cores, 4)`
+  (capped); restore legacy behaviour with
+  `.with_worker_connection_pool_size(1)` or
+  `goosefs.client.worker.connection.pool.size=1`. Drop-in upgrade from
+  0.1.7 — see [`CHANGELOG.md`](./CHANGELOG.md).
+
+- **v0.1.7** — aligned with `goosefs-sdk` 0.1.7. Version bump tracking
+  the underlying SDK; no Python-surface API changes.
+
 - **v0.1.6** — aligned with `goosefs-sdk` 0.1.6. Two major SDK-side
   data-plane features land automatically for every Python read:
 

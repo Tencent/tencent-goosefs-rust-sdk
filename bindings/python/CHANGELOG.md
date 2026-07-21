@@ -8,6 +8,10 @@ This document records all notable changes to the `goosefs` Python binding. The f
 
 ## [Unreleased]
 
+---
+
+## [0.1.8] — 2026-07-21
+
 ### Changed
 
 - **Default `worker_connection_pool_size` bumped from `1` to `min(cores, 4)`**
@@ -32,6 +36,9 @@ This document records all notable changes to the `goosefs` Python binding. The f
     channel behaviour explicitly, set `.with_worker_connection_pool_size(1)`
     on the config builder or the `goosefs.client.worker.connection.pool.size=1`
     property.
+- **Underlying SDK upgrade**: `goosefs-sdk` 0.1.7 → 0.1.8.
+- **`bindings/python/Cargo.toml`** version `0.1.7` → `0.1.8`, kept in
+  sync with the root crate; `goosefs.__version__` now reports `0.1.8`.
 
 ---
 
