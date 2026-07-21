@@ -160,7 +160,9 @@ bash scripts/release/python.sh --publish
 
 See [`../../docs/release/PYTHON_RELEASE.md`](../../docs/release/PYTHON_RELEASE.md).
 
-> **Release automation:** GitHub Actions already builds wheels in CI. Tag-triggered
-> PyPI Trusted Publisher (OIDC) publish may be added later; until then, release
-> manually via the scripts above and confirm version alignment between `goosefs-sdk`
-> and the Python binding `Cargo.toml` before publishing.
+> **Release automation:** GitHub Actions (`ci_bindings_python.yml`) builds a
+> native wheel **and** manylinux_2_28 wheels via zig (`x86_64` + `aarch64`) to
+> verify release artifacts. Tag-triggered PyPI Trusted Publisher (OIDC) publish
+> may be added later; until then, release manually via the scripts above and
+> confirm version alignment between `goosefs-sdk` and the Python binding
+> `Cargo.toml` before publishing.

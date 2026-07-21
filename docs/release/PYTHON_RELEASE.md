@@ -41,6 +41,9 @@ Useful flags:
 The script always checks that root `Cargo.toml` and `bindings/python/Cargo.toml`
 versions match.
 
+CI (`ci_bindings_python.yml`) also runs the zig manylinux path (`x86_64` +
+`aarch64`) so release artifacts are verified on every relevant push/PR.
+
 ## Manual checklist (still required)
 
 1. Bump `version` in root `Cargo.toml` **and** `bindings/python/Cargo.toml` (keep identical).

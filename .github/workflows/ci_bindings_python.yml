@@ -22,6 +22,7 @@ on:
       - "src/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "scripts/release/python.sh"
       - ".github/workflows/ci_bindings_python.yml"
       - ".github/actions/**"
   pull_request:
@@ -30,6 +31,7 @@ on:
       - "src/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "scripts/release/python.sh"
       - ".github/workflows/ci_bindings_python.yml"
       - ".github/actions/**"
   workflow_dispatch:
@@ -69,19 +71,48 @@ jobs:
         working-directory: bindings/python
         run: uv sync --all-extras --group dev --group test
 
-      - name: maturin build
+      # Host-native wheel: fast smoke that the binding links and imports.
+      - name: maturin build (native)
         working-directory: bindings/python
         run: uv run maturin build --release --out dist
 
-      - name: Install wheel + import smoke
+      - name: Install native wheel + import smoke
         working-directory: bindings/python
         run: |
           uv pip install dist/*.whl
           uv run python -c "import goosefs; print(goosefs.__version__ if hasattr(goosefs, '__version__') else 'ok')"
 
-      - name: Upload wheel
+      # Same path as scripts/release/python.sh: zig cross-compile manylinux
+      # wheels (x86_64 + aarch64). Validates release artifacts on both Linux
+      # and macOS runners without needing a Linux host for the aarch64 wheel.
+      - name: maturin build (manylinux via zig)
+        working-directory: bindings/python
+        run: |
+          set -euo pipefail
+          mkdir -p dist-manylinux
+          for triple in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            echo "==> rustup target add ${triple}"
+            rustup target add "${triple}"
+            echo "==> maturin --zig ${triple}"
+            uv run --with ziglang maturin build --release \
+              --target "${triple}" \
+              --manylinux 2_28 \
+              --zig \
+              --out dist-manylinux
+          done
+          echo "==> manylinux wheels"
+          ls -la dist-manylinux
+
+      - name: Upload native wheel
         uses: actions/upload-artifact@v4
         with:
-          name: goosefs-wheel-${{ matrix.os }}-py${{ matrix.python-version }}
+          name: goosefs-wheel-native-${{ matrix.os }}-py${{ matrix.python-version }}
           path: bindings/python/dist/*
+          if-no-files-found: error
+
+      - name: Upload manylinux wheels (zig)
+        uses: actions/upload-artifact@v4
+        with:
+          name: goosefs-wheel-manylinux-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: bindings/python/dist-manylinux/*
           if-no-files-found: error
