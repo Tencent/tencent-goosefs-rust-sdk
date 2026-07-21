@@ -1,0 +1,98 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "goosefs"
+description = "Tencent Cloud GooseFS Python Client (powered by Rust)"
+readme = "PYPI_README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Tencent Cloud Datalake", email = "datalake@tencent.com" }]
+keywords = ["goosefs", "tencent", "cloud", "filesystem", "storage", "cache"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: System :: Filesystems",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  # Decision 3.B — Windows is best-effort; no classifier yet until P8 confirms.
+]
+dynamic = ["version"]
+dependencies = [
+]
+
+[project.urls]
+Homepage   = "https://github.com/Tencent/tencent-goosefs-rust-sdk"
+Repository = "https://github.com/Tencent/tencent-goosefs-rust-sdk"
+
+[project.optional-dependencies]
+arrow  = ["pyarrow>=10.0"]
+pandas = ["pandas>=2.0", "pyarrow>=10.0"]
+# Convenience meta-extra: ``pip install goosefs[examples]`` pulls every
+# library used by the scripts under ``bindings/python/examples/``.
+examples = ["pyarrow>=10.0", "pandas>=2.0"]
+
+[dependency-groups]
+dev = [
+  "maturin>=1.5",
+  "ruff>=0.5",
+  "mypy>=1.10",
+]
+test = [
+  "mypy>=1.19.1",
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "pytest-timeout>=2.3",
+]
+docs = [
+  "mkdocs>=1.6",
+  "mkdocs-material",
+  "mkdocstrings[python]",
+]
+
+[tool.maturin]
+python-source = "python"
+module-name   = "goosefs._goosefs"
+features      = ["pyo3/extension-module", "abi3"]
+strip         = true
+
+[tool.uv]
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "Cargo.toml" },
+  { file = "src/**/*.rs" },
+  { file = "../../src/**/*.rs" },
+  { file = "../../proto/**/*.proto" },
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+timeout = 60
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+# Note: this is mypy's own *type-checker target* — it is unrelated to the
+# runtime baseline. mypy >=1.19 dropped support for `python_version = "3.9"`
+# (it requires 3.10+ as the analysis target), so we keep this at "3.10".
+#
+# The user-facing runtime baseline is still **CPython 3.9** and is enforced
+# elsewhere (single abi3 wheel via `pyo3/abi3-py39` + `requires-python = ">=3.9"`).
+# `python -m mypy.stubtest goosefs` continues to validate the stubs against
+# the actually-built abi3 module regardless of this setting.
+python_version = "3.10"
+warn_return_any = true
+ignore_missing_imports = true

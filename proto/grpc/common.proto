@@ -1,0 +1,179 @@
+syntax = "proto2";
+
+option java_multiple_files = true;
+option java_package = "com.qcloud.cos.goosefs.grpc";
+option java_outer_classname = "CommonProto";
+
+package com.qcloud.cos.goosefs.grpc;
+
+enum Bits {
+  NONE = 1;
+  EXECUTE = 2;
+  WRITE = 3;
+  WRITE_EXECUTE = 4;
+  READ = 5;
+  READ_EXECUTE = 6;
+  READ_WRITE = 7;
+  ALL = 8;
+}
+
+message PMode {
+  required Bits ownerBits = 1;
+  required Bits groupBits = 2;
+  required Bits otherBits = 3;
+}
+
+/**
+ * Contains the information of a block in GooseFS. It maintains the worker nodes where the replicas
+ * of the blocks are stored.
+ */
+message BlockInfo {
+  optional int64 blockId = 1;
+  optional int64 length = 2;
+  optional int32 maxReplicas = 3;
+  repeated BlockLocation locations = 4;
+}
+
+/**
+ * Information about blocks.
+ */
+message BlockLocation {
+  optional int64 workerId = 1;
+  optional WorkerNetAddress workerAddress = 2;
+}
+
+/**
+ * Information about metrics.
+ */
+message Metric {
+  optional string instance = 1;
+  optional string source = 2;
+  optional string name = 3;
+  optional double value = 4;
+  required MetricType metricType = 5;
+  map<string,string> tags = 6;
+}
+
+enum MetricType {
+  // GAUGE is the simplest type of metric. If you're not sure which to use, gauge is a safe choice. It is represents a
+  // general K-V pair.
+  GAUGE = 0;
+  // COUNTER represents values which can be incremented or decremented over time by certain operations. It does not rely
+  // on timing to determine the value.
+  COUNTER = 1;
+  // METER represents a metric value at a _rate_. The value of the metric varies with the time over which events are
+  // recorded
+  METER = 2;
+  // TIMER represents a histogram of the rate of the specified events.
+  TIMER = 3;
+  // HISTOGRAM gives statistics about the value of past occurrences of an event.
+  HISTOGRAM = 4;
+}
+
+enum CommandType {
+  Unknown = 0;
+  Nothing = 1;
+  Register = 2; // Ask the worker to re-register.
+  Free = 3;     // Ask the worker to free files.
+}
+
+message ConfigProperty {
+  optional string name = 1;
+  optional string source = 2;
+  optional string value = 3;
+}
+
+message Command {
+  optional CommandType commandType = 1;
+  repeated int64 data = 2;
+}
+
+message LocalityTier {
+  optional string tierName = 1;
+  optional string value = 2;
+}
+
+message TieredIdentity {
+  repeated LocalityTier tiers = 1;
+}
+
+/**
+ * Address information about masters.
+ */
+message NetAddress {
+  optional string host = 1;
+  optional int32 rpcPort = 2;
+  // Host and Port for accessing the physical machine hosted in the underlay environment via VIP through Tencent Cloud VPC.
+  optional string tencentCloudVPCMappingHost = 3;
+  optional int32 tencentCloudVPCMappingPort = 4;
+}
+
+/**
+ * Address information about workers.
+ */
+message WorkerNetAddress {
+  optional string host = 1;
+  optional int32 rpcPort = 2;
+  optional int32 dataPort = 3;
+  optional int32 webPort = 4;
+  optional string domainSocketPath = 5;
+  optional TieredIdentity tieredIdentity = 6;
+  optional string containerHost = 7;
+  optional int32 secureRpcPort = 8;
+  optional string tencentCloudVPCMappingHost = 9;
+  optional int32 tencentCloudVPCMappingPort = 10;
+  optional int32 tencentCloudVPCMappingDataPort = 11;
+}
+
+message RetryInfo {
+  optional bool isRetryable = 1;
+}
+
+enum ErrorType {
+  User = 0;
+  Internal = 1;
+  External = 2;
+}
+
+message ErrorInfo {
+  optional ErrorType errorType = 1;
+}
+
+enum WorkerStatus {
+  INIT = 0;
+  ACTIVE = 1;
+  INACTIVE = 2;
+}
+
+enum ManageWorkerAction {
+  DELETE = 1;
+  ISOLATE = 2;
+  ACTIVATE = 3;
+  UPDATE_ATTRIBUTE = 4;
+}
+
+message WorkerRateLimit {
+  optional double rateLimit = 1;
+}
+
+message Checksum {
+  required ChecksumTypeProto crcType = 1;
+  required uint32 bytesPerChecksum = 2;
+}
+
+enum ChecksumTypeProto {
+  CHECKSUM_NULL = 0;
+  CHECKSUM_CRC32 = 1;
+  CHECKSUM_CRC32C = 2;
+}
+
+/**
+ * Probe timing information, used to convey server-side sub-phase timings via gRPC Trailer.
+ * Only used in probe mode (when request Header carries probe-enabled: true).
+ */
+message ProbeTimingInfo {
+  // Server total processing duration (microseconds)
+  optional int64 server_total_us = 1;
+  // Sub-phase timings (microseconds), key is the phase name
+  map<string, int64> sub_timings_us = 2;
+}

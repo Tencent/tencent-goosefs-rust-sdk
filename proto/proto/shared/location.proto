@@ -1,0 +1,10 @@
+syntax = "proto2";
+
+package com.qcloud.cos.goosefs.proto.shared;
+
+message FileLocation {
+  optional int64 blockId = 1;
+  optional int64 offset = 2;
+  optional int64 length = 3;
+  repeated int64 worker_id = 4;
+}

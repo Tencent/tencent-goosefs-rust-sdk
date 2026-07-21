@@ -1,0 +1,288 @@
+syntax = "proto2";
+
+option java_multiple_files = true;
+option java_package = "com.qcloud.cos.goosefs.grpc";
+option java_outer_classname = "WorkerManagerMasterProto";
+
+package com.qcloud.cos.goosefs.grpc.block;
+
+import "grpc/common.proto";
+
+enum WorkerManagerMasterInfoField {
+  CAPACITY_BYTES = 1;
+  FREE_BYTES = 2;
+  LIVE_WORKER_NUM = 3;
+  LOST_WORKER_NUM = 4;
+  USED_BYTES = 5;
+}
+
+message WorkerManagerMasterInfo {
+  optional int64 capacityBytes = 1;
+  optional int64 freeBytes = 2;
+  optional int32 liveWorkerNum = 3;
+  optional int32 lostWorkerNum = 4;
+  optional int64 usedBytes = 5;
+}
+
+message GetCapacityBytesPOptions {}
+message GetCapacityBytesPResponse {
+  optional int64 bytes = 1;
+}
+
+message GetWorkerManagerMasterInfoPOptions {
+ repeated WorkerManagerMasterInfoField filters = 1;
+}
+message GetWorkerManagerMasterInfoPResponse {
+ optional WorkerManagerMasterInfo workerManagerMasterInfo = 1;
+}
+
+message GetUsedBytesPOptions {}
+message GetUsedBytesPResponse {
+  optional int64 bytes = 1;
+}
+
+message WorkerInfo {
+  optional int64 id = 1;
+  optional grpc.WorkerNetAddress address = 2;
+  optional int32 lastContactSec = 3;
+  optional WorkerStatus state = 4;
+  optional int64 capacityBytes = 5;
+  optional int64 usedBytes = 6;
+  optional int64 readCacheUsedBytes = 7;
+  optional int64 writeCacheUsedBytes = 8;
+  optional int64 startTimeMs = 9;
+  optional int32 virtualNodeNum = 10;
+  optional bool alive = 11;
+  optional double syncCacheRateLimit = 12;
+  optional bool forbidWrite = 13 [default = false];
+}
+
+enum WorkerRange {
+  ALL = 1;
+  LIVE = 2;
+  LOST = 3;
+  SPECIFIED = 4;
+  FORBID_WRITE = 5;
+}
+
+enum WorkerInfoField {
+  WORKER_CAPACITY_BYTES = 1;
+  ID = 2;
+  LAST_CONTACT_SEC = 3;
+  START_TIME_MS = 4;
+  WORKER_USED_BYTES = 5;
+  WORKER_SYNC_CACHE_RATE_LIMIT = 6;
+  WORKER_FORBID_WRITE = 7;
+  WORKER_READ_CACHE_USED_BYTES = 8;
+  WORKER_WRITE_CACHE_USED_BYTES = 9;
+}
+
+message GetWorkerReportPOptions {
+  /** addresses are only valid when workerRange is SPECIFIED */
+  repeated string addresses = 1;
+  repeated WorkerInfoField fieldRanges = 2;
+  optional WorkerRange workerRange = 3;
+}
+message GetWorkerInfoListPOptions {}
+message GetWorkerInfoListPResponse {
+  repeated WorkerInfo workerInfos = 1;
+  optional int64 lastUpdatedTimestamp = 2;
+}
+
+message WorkerLostStorageInfo {
+  optional grpc.WorkerNetAddress address = 1;
+  optional StorageList lostStorage = 2;
+}
+
+message GetWorkerLostStoragePOptions {}
+message GetWorkerLostStoragePResponse {
+  repeated WorkerLostStorageInfo workerLostStorageInfo = 1;
+}
+
+message ManageWorkerPRequest {
+  optional grpc.WorkerNetAddress address = 1;
+  optional grpc.ManageWorkerAction action = 2;
+  optional UpdateAttributeParams update_attribute_params = 3;
+}
+message ManageWorkerPResponse {}
+
+/**
+ * Parameters for UPDATE_ATTRIBUTE action.
+ * Uses optional fields so that only specified attributes are updated.
+ */
+message UpdateAttributeParams {
+  optional bool forbidWrite = 1;
+  optional int32 virtualNodeNum = 2;
+}
+
+message UpdateClusterRateLimitPRequest {
+  optional double rateLimit = 1;
+}
+message UpdateClusterRateLimitPResponse {}
+
+message GetClusterRateLimitPRequest {}
+message GetClusterRateLimitPResponse {
+  optional double rateLimit = 1;
+}
+
+enum BlockApplyRateType {
+  RATE_READ = 1;
+  RATE_WRITE = 2;
+  RATE_READ_WRITE = 3;
+  RATE_PERSIST = 4;
+}
+
+message BlockApplyRatePRequest {
+  optional BlockApplyRateType type = 1;
+  optional string host = 2;
+  optional int64 id = 3;
+  optional int64 curBandwidth = 4;
+  optional int64 curQps = 5;
+  optional int64 maxBandwidth = 6;
+  optional int64 maxQps = 7;
+}
+
+message BlockApplyRatePResponse {
+  optional int64 quotaBandwidth = 1;
+  optional int64 quotaQps = 2;
+}
+
+/**
+ * This interface contains block master service endpoints for GooseFS clients.
+ */
+service WorkerManagerMasterClientService {
+  /**
+    * Returns block master information.
+    */
+  rpc GetWorkerManagerMasterInfo(GetWorkerManagerMasterInfoPOptions) returns (GetWorkerManagerMasterInfoPResponse);
+
+  /**
+   * Returns the capacity (in bytes).
+   */
+  rpc GetCapacityBytes(GetCapacityBytesPOptions) returns(GetCapacityBytesPResponse);
+
+  /**
+   * Returns the used storage (in bytes).
+   */
+  rpc GetUsedBytes(GetUsedBytesPOptions) returns (GetUsedBytesPResponse);
+
+  /**
+   * Returns a list of workers information.
+   */
+  rpc GetWorkerInfoList(GetWorkerInfoListPOptions) returns (GetWorkerInfoListPResponse);
+
+  /**
+   * Returns a list of workers information for report CLI.
+   */
+  rpc GetWorkerReport(GetWorkerReportPOptions) returns (GetWorkerInfoListPResponse);
+
+  /**
+   * Returns a list of worker lost storage information
+   */
+  rpc GetWorkerLostStorage(GetWorkerLostStoragePOptions) returns (GetWorkerLostStoragePResponse);
+
+  rpc ManageWorker(ManageWorkerPRequest) returns (ManageWorkerPResponse);
+
+  rpc UpdateClusterRateLimit(UpdateClusterRateLimitPRequest) returns (UpdateClusterRateLimitPResponse);
+
+  rpc GetClusterRateLimit(GetClusterRateLimitPRequest) returns (GetClusterRateLimitPResponse);
+
+  /**
+    * Periodic block worker report and apply data rate.
+    */
+  rpc BlockApplyRate(BlockApplyRatePRequest) returns (BlockApplyRatePResponse);
+}
+
+message TierList {
+  repeated int64 tiers = 1;
+}
+
+message BlockIdList {
+  repeated int64 blockId = 1;
+}
+/**
+ * A list of lost storage paths inside a worker
+ */
+message StorageList {
+  /** a lost storage path */
+  repeated string storage = 1;
+}
+
+message BlockHeartbeatPOptions {
+  repeated grpc.Metric metrics = 1;
+  optional int64 capacityBytes = 2;
+}
+
+message BlockMeta {
+  optional int64 blockId = 1;
+  optional int64 length = 2;
+}
+
+message BlockHeartbeatPRequest {
+  /** the id of the worker */
+  optional int64 workerId = 1;
+  /** the space used in bytes on Worker*/
+  optional int64 usedBytes = 2;
+  /** the map of added blocks on all tiers (deprecated since 2.0, replaced by addedBlocks) */
+  optional BlockHeartbeatPOptions options = 3;
+  /** the space used by read cache directories in bytes */
+  optional int64 readCacheUsedBytes = 4;
+  /** the space used by write cache directories in bytes */
+  optional int64 writeCacheUsedBytes = 5;
+  /** the lost storage paths */
+  optional StorageList lostStorage = 6;
+}
+
+message BlockHeartbeatPResponse {
+  optional grpc.Command command = 1;
+  optional grpc.WorkerRateLimit syncCacheRateLimit = 2;
+}
+
+message GetWorkerIdPOptions {}
+message GetWorkerIdPRequest {
+  /** the worker network address */
+  optional grpc.WorkerNetAddress workerNetAddress = 1;
+  optional GetWorkerIdPOptions options = 2;
+}
+message GetWorkerIdPResponse {
+  optional int64 workerId = 1;
+}
+
+message RegisterWorkerPRequest {
+  /** the id of the worker */
+  optional int64 workerId = 1;
+  optional int64 capacityBytes = 2;
+  optional int64 usedBytes = 3;
+  /** the space used by read cache directories in bytes */
+  optional int64 readCacheUsedBytes = 4;
+  /** the space used by write cache directories in bytes */
+  optional int64 writeCacheUsedBytes = 5;
+  optional StorageList lostStorage = 6;
+}
+message RegisterWorkerPResponse {}
+
+/**
+ * This interface contains block master service endpoints for GooseFS workers.
+ */
+service WorkerManagerMasterWorkerService {
+
+  /**
+   * Periodic block worker heartbeat returns an optional command for the block worker to execute.
+   */
+  rpc BlockHeartbeat(BlockHeartbeatPRequest) returns (BlockHeartbeatPResponse);
+
+  /**
+   * Returns a worker id for the given network address.
+   */
+  rpc GetWorkerId(GetWorkerIdPRequest) returns (GetWorkerIdPResponse);
+
+  /**
+   * Registers a worker.
+   */
+  rpc RegisterWorker(RegisterWorkerPRequest) returns (RegisterWorkerPResponse);
+
+  /**
+   * Periodic block worker report and apply data rate.
+   */
+  rpc BlockApplyRate(BlockApplyRatePRequest) returns (BlockApplyRatePResponse);
+}

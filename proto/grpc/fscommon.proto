@@ -1,0 +1,13 @@
+syntax = "proto2";
+
+option java_multiple_files = true;
+option java_package = "com.qcloud.cos.goosefs.grpc";
+option java_outer_classname = "FsCommonProto";
+
+package com.qcloud.cos.goosefs.grpc.fscommon;
+
+enum LoadDescendantPType {
+  NONE = 0;
+  ONE = 1;
+  ALL = 2;
+}

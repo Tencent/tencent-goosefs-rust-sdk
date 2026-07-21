@@ -1,0 +1,6 @@
+/target
+.idea
+.codebuddy
+/goosefs-client-rust.code-workspace
+.DS_Store
+bindings/python/.venv/

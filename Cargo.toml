@@ -1,0 +1,219 @@
+[workspace]
+members = [
+    ".",
+    "bindings/python",
+]
+# Prevents cargo from auto-discovering unrelated directories as members.
+# Only the root SDK crate and its Python binding are members.
+resolver = "2"
+
+[package]
+name = "goosefs-sdk"
+version = "0.1.7"
+edition = "2021"
+description = "Goosefs Rust gRPC Client - Direct gRPC client for Goosefs Master/Worker"
+license = "Apache-2.0"
+authors = ["Goosefs Team"]
+readme = "README.md"
+repository = "https://github.com/Tencent/tencent-goosefs-rust-sdk"
+homepage = "https://github.com/Tencent/tencent-goosefs-rust-sdk"
+documentation = "https://docs.rs/goosefs-sdk"
+keywords = ["goosefs", "grpc", "storage", "filesystem", "cache"]
+categories = ["network-programming", "filesystem"]
+rust-version = "1.88"
+exclude = [
+    ".idea/*",
+    ".codebuddy/*",
+    ".DS_Store",
+    "**/.DS_Store",
+    "docs/gap/*",
+    "docs/design/*",
+    "docs/prompt/*",
+    "docs/images/*",
+    "docs/RELEASE.md",
+    "goosefs-client-rust.code-workspace",
+    "target/*",
+]
+
+[lib]
+name = "goosefs_sdk"
+
+[features]
+# Default features keep backward-compatible behaviour: pushgateway HTTP exporter
+# and the original `tokio = "full"` feature set used by examples/tests.
+default = ["metrics-pushgateway"]
+
+# Pushgateway exporter pulls in `reqwest` (HTTP/TLS stack). Disabling this
+# feature significantly shrinks the dependency graph for downstream crates
+# that only need the gRPC client.
+metrics-pushgateway = ["dep:reqwest"]
+
+# Opt-in re-generation of protobuf code from .proto files. Pulls in
+# `tonic-prost-build` (which depends on `prettyplease`, `proc-macro2`, etc.)
+# only when explicitly requested. Triggered together with the
+# `GOOSEFS_SDK_REGEN_PROTO=1` env var by build.rs.
+regen-proto = ["dep:tonic-prost-build"]
+
+[dependencies]
+# `default-features = false` removes the `router` feature (and its `axum`,
+# `matchit`, `axum-core`, `tower-http` chain) which is server-side only.
+# We keep `transport` (Channel/Endpoint/Server types used by the SDK) and
+# `codegen` (required by tonic-prost generated client stubs).
+tonic = { version = "0.14", default-features = false, features = ["transport", "codegen"] }
+tonic-prost = "0.14"
+prost = "0.14.1"
+prost-types = "0.14.1"
+# Trim `tokio = "full"` to the concrete features actually used by the SDK
+# (runtime, sync primitives, IO, time, signal/process are NOT needed).
+tokio = { version = "1.23", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "io-util", "net", "fs"] }
+tokio-stream = "0.1.14"
+bytes = "1.11.1"
+thiserror = "2"
+tracing = "0.1"
+dashmap = "6"
+# Fast integer-to-string formatting (P0-F.2): replaces the `write!` /
+# `format!("{}", n)` on the `host:port` keying hot path. `itoa::write` skips
+# the `core::fmt` machinery entirely, which shows up in flamegraphs as
+# `core::fmt::write` / `Formatter::write_fmt`. Pulled in as a direct dep
+# (was already in the graph transitively) so the helper function can use it
+# without per-call-site `use` ceremony. See
+# `docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md` P0-F.2.
+itoa = "1"
+# Lock-free atomic Arc swap, used by `MasterClient` to publish the authenticated
+# (channel + SASL guard) snapshot. Replaces the prior `RwLock<Client>` so that
+# the `get_status` hot-path becomes wait-free, while still keeping
+# `(channel, sasl_guard)` together as a single atomically-swapped unit during
+# HA failover (`reconnect`). See docs/RUST_PYTHON_SDK_OPTIMIZATION.md Part II
+# §1 + §II.3 for the consistency contract.
+arc-swap = "1"
+# Stable, spec-defined, high-performance hash (xxHash3) — the single hash the
+# whole crate is standardised on. Two usage shapes:
+#  - Ephemeral / in-process (dir allocation, page-lock striping, the block
+#    routing ring): the `Xxh3Default` Hasher replaces `std`'s SipHash
+#    `DefaultHasher` on hot paths where no DoS resistance is needed.
+#  - On-disk page store bucket selection (`file_id` → directory): the
+#    `xxh3_64` one-shot, whose output must stay byte-for-byte stable across
+#    Rust versions / platforms (the cache survives restarts & toolchain
+#    upgrades). Mirrors Lance's `xxhash_rust::xxh3` usage. Version aligned with
+#    Lance.
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+serde = { version = "1", features = ["derive"] }
+async-trait = "0.1"
+# Short-circuit (local) block read data plane: whole-block read-only mmap +
+# `madvise` hints (MADV_RANDOM / SEQUENTIAL / WILLNEED). See
+# docs/SHORT_CIRCUIT_DESIGN.md §3.2. `Mmap::advise` is unix-only; all advise
+# calls are `cfg(unix)`-gated so the crate still builds on other targets.
+memmap2 = "0.9"
+# Bounded LRU used by `ShortCircuitFactory` for the per-task hot-block reader
+# cache and the (also bounded) negative cache. See SHORT_CIRCUIT_DESIGN.md
+# §3.5 / §4.2.
+lru = "0.12"
+rand = "0.9.1"
+uuid = { version = "1.2", features = ["v4"] }
+hostname = "0.4"
+# Used only by the metrics pushgateway exporter; gated behind a feature so
+# downstream gRPC-only consumers can opt out.
+reqwest = { version = "^0.12", features = ["rustls-tls"], default-features = false, optional = true }
+# High-performance concurrent cache used by:
+# - `MokaCacheEvictor` (lock-free LRU eviction, see
+#   `src/cache/evictor/moka_evictor.rs` and
+#   `docs/perf/2026-07-09-oncpu6-concurrent-uring-analysis/MOKA_LRU_OPTIMIZATION.md`)
+# - io_uring page fd cache (Method E, mirrors Lance's `HANDLE_CACHE`)
+# Provides built-in W-TinyLFU eviction + per-segment locking, replacing the
+# previous `Mutex<LruState>` that caused 38x contention under 32 concurrent
+# reads. Pure Rust — works on all platforms.
+moka = { version = "0.12", features = ["future", "sync"] }
+# Drives variable-sized batches of cache page reads concurrently without
+# spawning per-page tasks; already used by benchmarks and now required on the
+# cache hit hot path.
+futures = "0.3"
+
+# Unix-only: raw `sigaction` for the short-circuit SIGBUS diagnostic handler
+# (SHORT_CIRCUIT_DESIGN §3.2 / §8.1). Already in the dependency graph
+# transitively; declared directly so the handler can be registered.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Linux-only: io_uring page-cache backend (CLIENT_PAGE_CACHE_DESIGN.md).
+# The io-uring crate provides the raw syscall wrappers; `libc` is already
+# declared for unix targets above. Only pulled in on Linux so the crate
+# continues to build on macOS / Windows.
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7"
+
+[build-dependencies]
+# Optional: only required when regenerating protobuf code in-tree.
+# See build.rs and the `regen-proto` feature.
+tonic-prost-build = { version = "0.14", optional = true }
+
+[dev-dependencies]
+# Tests/examples may rely on the broader tokio feature set.
+tokio = { version = "1.23", features = ["full", "test-util"] }
+# Statistical micro-benchmarks for the GetFileStatus optimization
+# (see benchmarks/master_hotpath.rs and
+# docs/RUST_PYTHON_SDK_OPTIMIZATION.md Part II §1/§3/§4).
+# `default-features = false` drops the optional `rayon`/`html_reports` chain;
+# `cargo_bench_support` enables `cargo bench` integration without the rest.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+# Custom benchmark target. `harness = false` is required so that criterion's
+# own `main()` is used instead of the libtest harness. Lives under
+# `benchmarks/` (alongside the runnable end-to-end benchmarks) rather than the
+# default `benches/`, so its path is declared explicitly.
+[[bench]]
+name = "master_hotpath"
+path = "benchmarks/master_hotpath.rs"
+harness = false
+
+# Runnable end-to-end benchmarks / repro cases live under `benchmarks/`.
+# They are kept as `example` targets (not `[[bench]]`) so they build & run with
+# the familiar `cargo run --release --example <name>` UX and can use
+# dev-dependencies. Cargo only auto-discovers examples under `examples/`, so the
+# relocated ones must be declared explicitly with their path.
+[[example]]
+name = "partv_perf_verify"
+path = "benchmarks/partv_perf_verify.rs"
+
+[[example]]
+name = "repro_concurrent_write"
+path = "benchmarks/repro_concurrent_write.rs"
+
+# Cache evictor A/B benchmark: Moka vs LRU vs LFU under concurrent cache-hit
+# workloads. Exercises the full LocalCacheManager::get() path (metadata lookup
+# + evictor on_access + PageStore IO). See
+# docs/perf/2026-07-09-oncpu6-concurrent-uring-analysis/MOKA_LRU_OPTIMIZATION.md.
+[[example]]
+name = "cache_evictor_bench"
+path = "benchmarks/cache_evictor_bench.rs"
+
+# P3 benchmark: io_uring vs tokio::fs page-cache backend comparison.
+# Local-only (no GooseFS cluster needed). Runs on any platform; io_uring path
+# is #[cfg(target_os = "linux")]-gated. See
+# docs/CLIENT_PAGE_CACHE_DESIGN.md §10.3.
+[[example]]
+name = "cache_uring_bench"
+path = "benchmarks/cache_uring_bench.rs"
+
+# Release profile tuning for the SDK hot paths.
+#
+# Rationale (see docs/RUST_PYTHON_SDK_OPTIMIZATION.md Part II §6):
+# - `lto = "fat"` enables cross-crate inlining, which is essential for the
+#   tonic + prost generated client stubs (heavily generic, so without LTO most
+#   hot calls remain out-of-line).
+# - `codegen-units = 1` lets LLVM see the entire crate at once, allowing
+#   better inlining decisions across modules. Compile time is longer but
+#   release-build runtime perf improves measurably.
+# - We deliberately do NOT enable `panic = "abort"`: that would change panic
+#   semantics (no unwinding), affecting any consumer that relies on
+#   `catch_unwind` / Drop ordering on panic. Keeping the default `unwind`
+#   behaviour preserves backward-compatible panic handling.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+# strip = true removes debug symbols (DWARF / PDB / Mach-O debug) from the
+# final binary. For the Python abi3 wheel this is free size reduction; for the
+# SDK crate it strips the library, so downstream consumers that want backtraces
+# should build with `debug=1` or use their own profile.
+# debug = false is the default for release, made explicit here for clarity.
+strip = true
+debug = false

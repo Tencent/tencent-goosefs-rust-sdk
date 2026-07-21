@@ -1,0 +1,37 @@
+syntax = "proto2";
+
+option java_multiple_files = true;
+option java_package = "com.qcloud.cos.goosefs.grpc";
+option java_outer_classname = "AuthenticationServerProto";
+
+package com.qcloud.cos.goosefs.grpc.sasl;
+
+enum SaslMessageType {
+  CHALLENGE = 0;
+  SUCCESS = 1;
+}
+
+enum ChannelAuthenticationScheme {
+  NOSASL = 0;
+  SIMPLE = 1;
+  CUSTOM = 2;
+  KERBEROS = 3;
+  DELEGATION_TOKEN = 4;
+  CAPABILITY_TOKEN = 5;
+}
+
+message SaslMessage {
+  optional SaslMessageType messageType = 1;
+  optional bytes message = 2;
+  optional string clientId = 3;
+  optional ChannelAuthenticationScheme authenticationScheme = 4;
+  optional string channelRef = 5;
+}
+
+service SaslAuthenticationService {
+
+  /**
+   * Used to drive Sasl negotiation with clients.
+   */
+  rpc authenticate(stream SaslMessage) returns (stream SaslMessage);
+}

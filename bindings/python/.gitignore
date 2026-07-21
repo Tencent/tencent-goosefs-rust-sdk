@@ -1,0 +1,29 @@
+# Rust build artifacts
+target/
+
+# Python virtual environment (managed by uv)
+.venv/
+
+# Compiled native extension produced by `maturin develop`
+python/goosefs/_goosefs*.so
+python/goosefs/_goosefs*.pyd
+python/goosefs/_goosefs*.dylib
+
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Type-checker / linter caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Distribution / packaging
+build/
+dist/
+wheels/
+*.egg-info/
+
+# OS / editor cruft
+.DS_Store

@@ -1,0 +1,25 @@
+syntax="proto2";
+
+package com.qcloud.cos.goosefs.proto.security;
+
+message DelegationTokenIdentifier {
+  optional string owner = 1;
+  optional string renewer = 2;
+  optional string real_user = 3;
+  optional int64 issue_date = 4;
+  optional int64 max_date = 5;
+  optional int64 sequence_number = 6;
+  optional int64 master_key_id = 7;
+}
+
+message DelegationToken {
+  required DelegationTokenIdentifier identifier = 1;
+  required bytes password = 2;
+  optional int64 renew_date = 3;
+}
+
+message MasterKey {
+  required int64 key_id = 1;
+  required int64 expiration_time = 2;
+  required bytes encoded_key = 3;
+}
