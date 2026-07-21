@@ -8,8 +8,9 @@
 powered by a native Rust implementation (the [`goosefs-sdk`](https://crates.io/crates/goosefs-sdk) crate)
 exposed through [PyO3](https://pyo3.rs/).
 
-> **Status:** alpha — the API is shaping up. See the
-> [development roadmap](https://github.com/Tencent/tencent-goosefs-rust-sdk/blob/main/docs/PYTHON_BINDING_PROGRESS.md).
+> **Status:** alpha — the API is shaping up. See
+> [`CHANGELOG.md`](https://github.com/Tencent/tencent-goosefs-rust-sdk/blob/main/bindings/python/CHANGELOG.md)
+> and [`DEVELOPMENT.md`](https://github.com/Tencent/tencent-goosefs-rust-sdk/blob/main/bindings/python/DEVELOPMENT.md).
 
 ## Install
 
@@ -33,7 +34,7 @@ an unreleased change or a platform without a pre-built wheel.
 
 ```bash
 git clone https://github.com/Tencent/tencent-goosefs-rust-sdk.git
-cd goosefs-client-rust/bindings/python
+cd tencent-goosefs-rust-sdk/bindings/python
 ```
 
 Install [maturin](https://www.maturin.rs/):

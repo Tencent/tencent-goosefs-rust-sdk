@@ -150,13 +150,17 @@ uv run --with ziglang maturin build --release \
 uv run maturin publish
 ```
 
-For the complete release process — manylinux tag selection, ARM (aarch64) wheels,
-building on a Tencent Cloud Linux host, and uploading to the official / Tencent
-internal PyPI mirror — see [`../../docs/PYTHON_RELEASE.md`](../../docs/release/PYTHON_RELEASE.md).
+Preferred release path (version check, manylinux zig build, optional upload):
 
-> **CI automation (P8) still pending:** a fully automated cross-platform wheel
-> matrix (manylinux x86_64/aarch64, macOS x86_64/arm64, Windows x86_64), PyPI
-> Trusted Publisher (OIDC) release, and internal mirror sync are awaiting the
-> unified CI platform decision. Until then, release manually via the steps above
-> and confirm version alignment between `goosefs-sdk` and `goosefs-python`
-> `Cargo.toml`s before publishing.
+```bash
+# from repo root
+bash scripts/release/python.sh
+bash scripts/release/python.sh --publish
+```
+
+See [`../../docs/release/PYTHON_RELEASE.md`](../../docs/release/PYTHON_RELEASE.md).
+
+> **Release automation:** GitHub Actions already builds wheels in CI. Tag-triggered
+> PyPI Trusted Publisher (OIDC) publish may be added later; until then, release
+> manually via the scripts above and confirm version alignment between `goosefs-sdk`
+> and the Python binding `Cargo.toml` before publishing.

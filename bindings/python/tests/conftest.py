@@ -1,3 +1,17 @@
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Shared pytest fixtures for the GooseFS Python integration tests.
 
 The tests in this directory require a running GooseFS cluster reachable at
@@ -7,16 +21,13 @@ environments without a deployed cluster.
 
 To run them locally::
 
-    # In one terminal: bring up master + worker (per AGENTS.md / project memo)
-    cd /opt/sourcecode/cos/goosefs
-    ./bin/goosefs formatMaster
-    ./bin/goosefs-start.sh master
-    ./bin/goosefs formatWorker
-    ./bin/goosefs-start.sh worker
+    # Terminal 1: start the Docker fixture from the repo root
+    bash scripts/ci/goosefs-up.sh
 
-    # In another terminal:
-    cd /opt/sourcecode/cos/goosefs-client-rust/bindings/python
+    # Terminal 2:
+    cd bindings/python
     export GOOSEFS_MASTER_ADDR=127.0.0.1:9200
+    export GOOSEFS_AUTH_TYPE=simple
     uv run pytest -v
 """
 

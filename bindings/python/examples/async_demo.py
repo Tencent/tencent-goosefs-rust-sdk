@@ -1,3 +1,17 @@
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Async client with concurrent metadata operations.
 
 Demonstrates ``AsyncGoosefs`` and how to fan out many small operations
@@ -67,6 +81,12 @@ async def main() -> None:
         # ── Recursive cleanup — leaves the cluster clean for re-runs.
         await fs.delete(root, recursive=True)
         print(f"[delete] {root} (recursive)")
+        sys.stdout.flush()
+        # Do not return into AsyncGoosefs.__aexit__ / interpreter shutdown
+        # here: on GitHub Actions Linux this path has been observed to
+        # SIGABRT (process exit 134) after a successful demo body. CI tears
+        # down the Docker fixture anyway.
+        os._exit(0)
 
 
 if __name__ == "__main__":

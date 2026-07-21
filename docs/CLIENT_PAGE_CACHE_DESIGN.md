@@ -3,7 +3,7 @@
 > Status: **Implemented (P0–P3)** · Branch: `feature/local-page-cache`
 > Author: (TBD) · Last updated: 2026-06-16
 > Reference implementation: GooseFS Java Client `com.qcloud.cos.goosefs.client.file.cache.*`
-> Target repo: `goosefs-client-rust` (crate `goosefs-sdk`)
+> Target repo: `tencent-goosefs-rust-sdk` (crate `goosefs-sdk`)
 
 > **Implementation status summary**: P0–P3 of this design have landed in `src/cache/` and passed unit tests.
 > Main differences vs the design: (1) the evictor and meta are **self-implemented** (no `moka`/`lru` introduced),
@@ -82,7 +82,7 @@ listed in §12 item 1 and are not duplicated at the gating tier.
 
 ## 2. Java Implementation Reference
 
-> Source root: `/opt/sourcecode/cos/goosefs/core/client/fs/src/main/java/com/qcloud/cos/goosefs/client/file/cache/`
+> Source root: GooseFS Java client page-cache package (`.../client/file/cache/`)
 
 ### 2.1 Component overview
 
@@ -967,10 +967,10 @@ Client.AsyncThroughThreadsActive
 
 ## Appendix B: Key source-path quick reference
 
-**Java reference** (`/opt/sourcecode/cos/goosefs/core/client/fs/.../client/file/cache/`):
+**Java reference** (GooseFS Java `.../client/file/cache/`):
 `LocalCacheManager.java`, `CacheManager.java`, `NoExceptionCacheManager.java`, `CacheManagerOptions.java`, `PageId.java`, `PageInfo.java`, `PageStore.java`, `store/LocalPageStore.java`, `store/LocalPageStoreDir.java`, `store/QuotaManagedPageStoreDir.java`, `PageMetaStore.java`, `DefaultPageMetaStore.java`, `evictor/LRUCacheEvictor.java`, `evictor/LFUCacheEvictor.java`, `allocator/HashAllocator.java`, `LocalCacheFileInStream.java`, `LocalCacheFileSystem.java`.
 
-**Rust integration points** (`/opt/sourcecode/cos/goosefs-client-rust/src/`):
+**Rust integration points** (`tencent-goosefs-rust-sdk/src/`):
 `io/file_in_stream.rs` (`read_at` / `read`), `io/file_reader.rs`, `io/reader.rs`, `context.rs`, `config.rs`, `metrics/registry.rs`, `fs/options.rs` (`ReadType`), `fs/uri_status.rs`, `error.rs`.
 
 ---
@@ -984,7 +984,7 @@ Client.AsyncThroughThreadsActive
 > - [`SHORT_CIRCUIT_IO_URING_FEASIBILITY.md`](SHORT_CIRCUIT_IO_URING_FEASIBILITY.md) — io_uring feasibility analysis for the SC path
 > - [`perf/2026-07-08-oncpu3-cache-hotspots/CACHE_VS_NOCACHE_ANALYSIS.md`](perf/2026-07-08-oncpu3-cache-hotspots/CACHE_VS_NOCACHE_ANALYSIS.md) — flame-graph root-cause analysis
 > Reference implementation:
-> - `/opt/sourcecode/lance/rust/lance-io/src/uring/` — Lance's io_uring implementation (thread pool + Future waker pattern)
+> - `lance `rust/lance-io/src/uring/` ` — Lance's io_uring implementation (thread pool + Future waker pattern)
 
 ---
 
@@ -2511,7 +2511,7 @@ async fn bench_cache_hit_concurrent_uring() { /* 32 concurrent */ }
 - [`SHORT_CIRCUIT_IO_URING_FEASIBILITY.md`](SHORT_CIRCUIT_IO_URING_FEASIBILITY.md) — io_uring analysis for the SC path
 - [`../../goosefs-lance-tests/docs/design/FLAMEGRAPH_OPTIMIZATION_PLAN.md`](../../goosefs-lance-tests/docs/design/FLAMEGRAPH_OPTIMIZATION_PLAN.md) — A/B/C series optimizations (router/transport layer)
 - [`perf/2026-07-08-oncpu3-cache-hotspots/CACHE_VS_NOCACHE_ANALYSIS.md`](perf/2026-07-08-oncpu3-cache-hotspots/CACHE_VS_NOCACHE_ANALYSIS.md) — D series optimization items
-- Lance reference: `/opt/sourcecode/lance/rust/lance-io/src/uring/` — `thread.rs`, `reader.rs`, `future.rs`, `requests.rs`
+- Lance reference: `lance `rust/lance-io/src/uring/` ` — `thread.rs`, `reader.rs`, `future.rs`, `requests.rs`
 
 ---
 

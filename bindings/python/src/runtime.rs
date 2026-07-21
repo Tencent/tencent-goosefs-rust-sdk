@@ -1,3 +1,17 @@
+// Copyright (C) 2026 Tencent. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Shared Tokio runtime for the GooseFS Python binding.
 //!
 //! Async PyO3 methods use [`pyo3_async_runtimes::tokio::future_into_py`]
@@ -13,14 +27,14 @@
 //! lazily initialised behind a `OnceCell`, never panics, and is what the
 //! async side already uses. Adding a second runtime would silently break
 //! the invariant "everything Python touches runs on the same Tokio
-//! reactor". See PYTHON_BINDING_PROGRESS.md §17.2.
+//! reactor".
 //!
 //! ## Sync ↔ async safety
 //!
 //! [`block_on`] **must not** be called from inside a Tokio worker thread
 //! (e.g. from the body of a future already running on this runtime), or
 //! from a Python `asyncio` event loop. The sync `Goosefs` class is
-//! responsible for guarding against the latter case (see P3 §17.1).
+//! responsible for guarding against the latter case.
 
 use tokio::runtime::Runtime;
 

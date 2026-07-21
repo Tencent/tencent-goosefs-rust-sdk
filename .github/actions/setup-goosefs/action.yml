@@ -1,0 +1,71 @@
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Setup GooseFS
+description: Start GooseFS Docker fixture and export SDK env vars
+
+runs:
+  using: composite
+  steps:
+    - name: Start GooseFS (docker compose)
+      shell: bash
+      working-directory: fixtures/goosefs
+      run: |
+        set -euo pipefail
+        IMAGE="${GOOSEFS_IMAGE:-goosefs.tencentcloudcr.com/goosefs/repo:v2.1.0.1}"
+        echo "GOOSEFS_IMAGE=${IMAGE}"
+        docker compose -f docker-compose-goosefs.yml up -d --wait
+        docker compose -f docker-compose-goosefs.yml ps
+
+    - name: Export GooseFS env
+      shell: bash
+      run: |
+        cat << EOF >> "$GITHUB_ENV"
+        GOOSEFS_MASTER_ADDR=127.0.0.1:9200
+        GOOSEFS_AUTH_TYPE=simple
+        GOOSEFS_AUTH_USERNAME=${USER:-runner}
+        GFS_ADDR=127.0.0.1:9200
+        EOF
+
+    - name: Dump GooseFS diagnostics (on failure)
+      if: failure()
+      shell: bash
+      working-directory: fixtures/goosefs
+      run: |
+        echo "=== docker compose ps ==="
+        docker compose -f docker-compose-goosefs.yml ps -a || true
+        echo "=== docker inspect ==="
+        docker inspect goosefs-sdk-goosefs --format '{{json .State}}' 2>&1 || true
+        echo "=== docker logs (tail 500) ==="
+        docker logs --tail=500 goosefs-sdk-goosefs 2>&1 || true
+        echo "=== host port probe ==="
+        python3 - <<'PY' || true
+        import socket
+        for port in (9200, 9201, 9203, 9204):
+            try:
+                socket.create_connection(("127.0.0.1", port), 3).close()
+                print(f"127.0.0.1:{port} connect OK")
+            except OSError as e:
+                print(f"127.0.0.1:{port} connect FAILED ({e})")
+        PY
+        echo "=== fsadmin report ==="
+        docker exec goosefs-sdk-goosefs /opt/goosefs/bin/goosefs fsadmin report 2>&1 || true
+        echo "=== master.log (tail 300) ==="
+        docker exec goosefs-sdk-goosefs sh -c \
+          'tail -n 300 /opt/goosefs/logs/master.log 2>/dev/null || true' 2>&1 || true
+        echo "=== worker.log (tail 300) ==="
+        docker exec goosefs-sdk-goosefs sh -c \
+          'tail -n 300 /opt/goosefs/logs/worker.log 2>/dev/null || true' 2>&1 || true
+        echo "=== /dev/shm ==="
+        docker exec goosefs-sdk-goosefs df -h /dev/shm 2>&1 || true

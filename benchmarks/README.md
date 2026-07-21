@@ -56,7 +56,7 @@ This is exactly the scenario for verifying whether adding worker channels in a s
 Approach: **fix the file fully cached, fix concurrency, only sweep `GFS_WPOOL = 1/2/4/8`**, and compare PR random-read throughput.
 
 ```bash
-cd /opt/sourcecode/cos/goosefs-client-rust
+cd /path/to/tencent-goosefs-rust-sdk
 
 for W in 1 2 4 8; do
   ( GFS_TAG=w$W \

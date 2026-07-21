@@ -1,6 +1,6 @@
 # Goosefs Rust Client — Configuration Parameter Reference
 
-> **Version**: 0.2.0 | **Date**: 2026-07-08
+> **Version**: 0.1.7 | **Date**: 2026-07-08
 
 This document provides a comprehensive reference for all configuration parameters
 supported by the Goosefs Rust Client (`goosefs-sdk`).

@@ -1,0 +1,69 @@
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# GooseFS fixture for GooseFS Rust/Python SDK CI and local integration tests.
+#
+# Adapted from Apache OpenDAL's fixtures/goosefs (Apache-2.0).
+#
+# Usage:
+#   docker compose -f fixtures/goosefs/docker-compose-goosefs.yml up -d --wait
+#
+# SDK env:
+#   GOOSEFS_MASTER_ADDR=127.0.0.1:9200
+#   GOOSEFS_AUTH_TYPE=simple
+#
+# Default image: goosefs.tencentcloudcr.com/goosefs/repo:v2.1.0.1
+# Multi-arch (linux/amd64 + linux/arm64), public, no auth required.
+# Override with GOOSEFS_IMAGE when mirroring to GHCR / Docker Hub / a private registry
+# (GitHub-hosted runners may time out reaching TCR).
+
+services:
+  goosefs:
+    image: ${GOOSEFS_IMAGE:-goosefs.tencentcloudcr.com/goosefs/repo:v2.1.0.1}
+    container_name: goosefs-sdk-goosefs
+    profiles: ["", "local"]
+    entrypoint: ["/bin/bash", "/opt/opendal/bin/start-default.sh"]
+    environment:
+      # Bind master/worker to IPv4 loopback literals so host-side SDK
+      # clients (and in-container healthchecks) never hit ::1 vs 127.0.0.1
+      # ambiguity. See OpenDAL fixtures/goosefs comments for details.
+      GOOSEFS_MASTER_HOSTNAME: 127.0.0.1
+      GOOSEFS_WORKER_HOSTNAME: 127.0.0.1
+    ports:
+      - "127.0.0.1:9200:9200"   # Master RPC
+      - "127.0.0.1:9201:9201"   # Master Web UI
+      - "127.0.0.1:9203:9203"   # Worker RPC
+      - "127.0.0.1:9204:9204"   # Worker Web UI
+    networks:
+      - goosefs_network
+    shm_size: 1gb
+    volumes:
+      - goosefs_worker_data:/mnt/datadisk0/goosefs-worker
+      - goosefs_ufs_data:/usr/local/service/goosesfs/underFSStorage
+      - ./bin:/opt/opendal/bin:ro
+    healthcheck:
+      # End-to-end data-plane probe (master metadata + worker block I/O).
+      test: ["CMD-SHELL", "/opt/goosefs/bin/goosefs fs rm -R /.__goosefs_sdk_healthcheck >/dev/null 2>&1 || true; rm -f /tmp/.__goosefs_sdk_healthcheck.src /tmp/.__goosefs_sdk_healthcheck.dst 2>/dev/null || true; trap 'rm -f /tmp/.__goosefs_sdk_healthcheck.src /tmp/.__goosefs_sdk_healthcheck.dst 2>/dev/null; /opt/goosefs/bin/goosefs fs rm -R /.__goosefs_sdk_healthcheck >/dev/null 2>&1 || true' EXIT; set -e; printf 'ok' > /tmp/.__goosefs_sdk_healthcheck.src; /opt/goosefs/bin/goosefs fs copyFromLocal /tmp/.__goosefs_sdk_healthcheck.src /.__goosefs_sdk_healthcheck >/dev/null 2>&1; /opt/goosefs/bin/goosefs fs copyToLocal /.__goosefs_sdk_healthcheck /tmp/.__goosefs_sdk_healthcheck.dst >/dev/null 2>&1; [ \"$(cat /tmp/.__goosefs_sdk_healthcheck.dst)\" = 'ok' ]"]
+      interval: 5s
+      timeout: 15s
+      retries: 60
+      start_period: 60s
+
+networks:
+  goosefs_network:
+    driver: bridge
+
+volumes:
+  goosefs_worker_data:
+  goosefs_ufs_data:
