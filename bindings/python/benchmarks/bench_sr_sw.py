@@ -41,6 +41,21 @@ Usage::
 
 from __future__ import annotations
 
+# ── crash diagnostics ────────────────────────────────────────────────────────
+# Enable the fault handler as early as possible so that a native crash dumps a
+# Python + C-level traceback to stderr instead of dying silently:
+#   * SIGSEGV (illegal memory access) → exit code 139
+#   * SIGTERM (CI timeout / cancel)   → exit code 143  (also dump the live stack)
+# No output is produced during normal runs, so this adds zero overhead to CI.
+# SIGKILL (137, OOM) cannot be caught in-process — see kernel/cgroup OOM logs.
+import faulthandler
+import signal
+import sys
+
+faulthandler.enable()
+faulthandler.register(signal.SIGTERM, file=sys.stderr, exit=True)
+# ─────────────────────────────────────────────────────────────────────────────
+
 import os
 import time
 
