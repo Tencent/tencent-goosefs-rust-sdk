@@ -70,8 +70,29 @@ Usage
 
 from __future__ import annotations
 
-import asyncio
+# ── crash diagnostics ────────────────────────────────────────────────────────
+# Enable the fault handler as early as possible so that a native crash dumps a
+# Python + C-level traceback to stderr instead of dying silently:
+#   * SIGSEGV (illegal memory access) → exit code 139  ← the historical CI hang
+#   * SIGTERM (CI timeout / cancel)   → exit code 143  (also dump the live stack)
+# SIGKILL (137, OOM) cannot be caught in-process — see kernel/cgroup OOM logs.
+import faulthandler
 import os
+import signal
+import sys
+
+faulthandler.enable()
+
+# Register SIGTERM with faulthandler's *native* handler. A Python-level
+# signal.signal handler only runs once the main thread returns to executing
+# Python bytecode; if it is blocked inside a native/Rust call (exactly the
+# hang we want to diagnose), the handler never fires before the CI runner
+# escalates the timeout. chain=True keeps the default termination behavior so
+# the job still fails fast with the conventional SIGTERM status (128 + 15 = 143).
+faulthandler.register(signal.SIGTERM, file=sys.stderr, all_threads=True, chain=True)
+# ─────────────────────────────────────────────────────────────────────────────
+
+import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor
 
