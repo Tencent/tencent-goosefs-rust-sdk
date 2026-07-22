@@ -274,7 +274,7 @@ impl PyURIStatus {
 /// **Performance**: for a directory with N entries, the eager `list_status`
 /// creates N Python objects in the GIL window (~33.4µs for N=100), while this
 /// lazy wrapper creates 1 Python object (~0.3µs), reducing GIL occupancy by
-/// ~99%. See `docs/perf/ListDir懒加载优化方案.md` §3.
+/// ~99%.
 ///
 /// Accessing `len(lst)` is O(1) and creates zero objects. Accessing `lst[i]`
 /// clones one `URIStatus` (deep clone; cost is data-dependent) and creates one
