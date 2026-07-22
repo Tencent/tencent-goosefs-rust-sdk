@@ -83,9 +83,15 @@ Health.Status:  {{if .State.Health}}{{.State.Health.Status}} (failing streak: {{
   echo
 }
 
-if ! docker compose -f "$COMPOSE_FILE" up -d --wait; then
+# `docker compose up --wait` has a `--wait-timeout` that defaults to 0
+# (wait forever). Without it, an unhealthy fixture (e.g. the master never
+# listening on 9200) hangs the job indefinitely and the diagnostics branch
+# below never runs. Bound it so we fail fast and dump diagnostics instead.
+GOOSEFS_WAIT_TIMEOUT="${GOOSEFS_WAIT_TIMEOUT:-300}"
+echo "Waiting up to ${GOOSEFS_WAIT_TIMEOUT}s for the GooseFS fixture to become healthy..."
+if ! docker compose -f "$COMPOSE_FILE" up -d --wait --wait-timeout "$GOOSEFS_WAIT_TIMEOUT"; then
   diagnose
-  echo "ERROR: GooseFS fixture did not become healthy in time."
+  echo "ERROR: GooseFS fixture did not become healthy within ${GOOSEFS_WAIT_TIMEOUT}s."
   exit 1
 fi
 
