@@ -596,7 +596,7 @@ class AsyncGoosefs:
     # ── Metadata
     def get_status(self, path: str) -> Awaitable[URIStatus]: ...
     def list_status(self, path: str, *, recursive: bool = ...) -> Awaitable[list[URIStatus]]: ...
-    def list_status_lazy(self, path: str, *, recursive: bool = ...) -> Awaitable[URIStatusList]:
+    def list_status_grouped(self, path: str, *, recursive: bool = ...) -> Awaitable[URIStatusList]:
         """Lazy variant of ``list_status`` — returns a single ``URIStatusList``
         that materialises ``URIStatus`` entries on-demand via ``__getitem__``
         / ``__iter__``, reducing GIL occupancy by ~99% for N=100 entries."""
@@ -813,8 +813,8 @@ class Goosefs:
     # ── Metadata
     def get_status(self, path: str) -> URIStatus: ...
     def list_status(self, path: str, *, recursive: bool = ...) -> list[URIStatus]: ...
-    def list_status_lazy(self, path: str, *, recursive: bool = ...) -> URIStatusList:
-        """Lazy variant of ``list_status`` — see ``AsyncGoosefs.list_status_lazy``."""
+    def list_status_grouped(self, path: str, *, recursive: bool = ...) -> URIStatusList:
+        """Lazy variant of ``list_status`` — see ``AsyncGoosefs.list_status_grouped``."""
         ...
     def exists(self, path: str) -> bool: ...
     def batch_get_status(self, paths: list[str]) -> list[URIStatus]:

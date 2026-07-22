@@ -282,7 +282,7 @@ impl PyURIStatus {
 ///
 /// **What is lazy**: only the Rust-struct → Python-object materialisation is
 /// deferred. The gRPC RPC, prost deserialisation, and `URIStatus::from_proto`
-/// all complete during `await list_status_lazy(...)` — the data is fully
+/// all complete during `await list_status_grouped(...)` — the data is fully
 /// loaded into `Arc<Vec<URIStatus>>` before the Python object is returned.
 #[pyclass(module = "goosefs._goosefs", name = "URIStatusList", frozen)]
 pub struct PyURIStatusList {

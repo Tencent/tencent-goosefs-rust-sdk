@@ -241,7 +241,7 @@ impl PyAsyncGoosefs {
         })
     }
 
-    /// `await fs.list_status_lazy(path, recursive=False)` → `URIStatusList`.
+    /// `await fs.list_status_grouped(path, recursive=False)` → `URIStatusList`.
     ///
     /// Like `list_status` but returns a lazy `URIStatusList` instead of
     /// `list[URIStatus]`. The Rust-side `Vec<URIStatus>` is held in a single
@@ -259,7 +259,7 @@ impl PyAsyncGoosefs {
     /// high-concurrency GIL-contended scenarios. Use `list_status` (eager) if
     /// you need a plain `list[URIStatus]` for slicing or library interop.
     #[pyo3(signature = (path, *, recursive=false))]
-    fn list_status_lazy<'py>(
+    fn list_status_grouped<'py>(
         &self,
         py: Python<'py>,
         path: String,

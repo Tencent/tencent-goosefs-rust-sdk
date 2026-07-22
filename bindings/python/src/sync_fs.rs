@@ -192,12 +192,12 @@ impl PyGoosefs {
         })
     }
 
-    /// `fs.list_status_lazy(path, recursive=False)` → `URIStatusList`.
+    /// `fs.list_status_grouped(path, recursive=False)` → `URIStatusList`.
     ///
     /// Synchronous lazy counterpart to `list_status`. See
-    /// `AsyncGoosefs.list_status_lazy` for performance rationale.
+    /// `AsyncGoosefs.list_status_grouped` for performance rationale.
     #[pyo3(signature = (path, *, recursive=false))]
-    fn list_status_lazy(
+    fn list_status_grouped(
         &self,
         py: Python<'_>,
         path: String,

@@ -43,7 +43,7 @@
 //! - `AsyncGoosefs` -- async metadata API (open, list, status, create,
 //!   delete, rename; free-threaded GIL via `gil_used = false`).
 //! - `Goosefs` -- synchronous wrapper around `AsyncGoosefs`.
-//! - `list_status_lazy` and `batch_list_status_grouped` -- deferred
+//! - `list_status_grouped` and `batch_list_status_grouped` -- deferred
 //!   Python-object materialisation for `list_status`, reducing GIL
 //!   occupancy by roughly 99 percent for N=100 entries.
 //! - `FileReader` and `FileWriter` -- streaming reads and writes with
