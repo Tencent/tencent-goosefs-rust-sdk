@@ -57,8 +57,8 @@ use crate::cache::{CacheManager, LocalCacheManager};
 use crate::client::metrics_master::MetricsClient;
 use crate::client::metrics_master::MetricsMasterClient;
 use crate::client::{
-    create_master_inquire_client, MasterClientPool, MasterInquireClient,
-    PooledClient, WorkerClientPool, WorkerManagerClient,
+    create_master_inquire_client, MasterClientPool, MasterInquireClient, PooledClient,
+    WorkerClientPool, WorkerManagerClient,
 };
 use crate::config::{ConfigRefresher, GoosefsConfig, TransparentAccelerationSwitch};
 use crate::error::Result;
