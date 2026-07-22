@@ -558,6 +558,7 @@ dependencies = [
  "bytes",
  "criterion",
  "dashmap",
+ "fastrand",
  "futures",
  "hostname",
  "io-uring",

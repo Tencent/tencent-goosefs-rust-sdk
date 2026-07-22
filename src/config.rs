@@ -626,9 +626,10 @@ const DEFAULT_ACK_INTERVAL_BYTES: i64 = 0;
 const DEFAULT_ACK_INTERVAL_CHUNKS: u32 = 1;
 
 // ── Master connection pool (Part V R3) ───────────────────────
-/// Default master connection-pool size (1 = backward compatible, single
-/// HTTP/2 channel). Set to 4 or 8 in high-concurrency remote scenarios to
-/// spread requests across multiple channels and avoid HTTP/2
+/// Default master connection-pool size (8 = P2C adaptive pool over multiple
+/// HTTP/2 channels). Lower to 1 for backward-compatible single-channel
+/// behaviour; raise to 16+ in very high concurrency remote scenarios to
+/// spread requests across more channels and avoid HTTP/2
 /// `SETTINGS_MAX_CONCURRENT_STREAMS` queueing.
 const DEFAULT_MASTER_CONNECTION_POOL_SIZE: usize = 8;
 
@@ -1331,13 +1332,14 @@ pub struct GoosefsConfig {
     pub ack_interval_chunks: u32,
 
     // ── Master connection pool (Part V R3) ───────────────────
-    /// Number of independent Master gRPC channels to pool (default: 1).
+    /// Number of independent Master gRPC channels to pool (default: 8).
     ///
-    /// `1` keeps the legacy single-channel behaviour. Raising it (e.g. 4
-    /// or 8) spreads concurrent metadata RPCs across multiple HTTP/2
+    /// `1` keeps the legacy single-channel behaviour. Raising it (e.g. 16
+    /// or 32) spreads concurrent metadata RPCs across more HTTP/2
     /// connections, avoiding `SETTINGS_MAX_CONCURRENT_STREAMS` queueing
     /// under high concurrency over remote RTT. All pooled clients share a
-    /// single inquire client so HA failover stays consistent.
+    /// single inquire client so HA failover stays consistent. Picking a
+    /// channel uses P2C (Power of Two Choices) adaptive scheduling.
     #[serde(default = "default_master_connection_pool_size")]
     pub master_connection_pool_size: usize,
 

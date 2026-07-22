@@ -109,8 +109,8 @@ pub struct FileSystemContext {
 
     /// Persistent Master gRPC connection pool (metadata RPCs).
     ///
-    /// Round-robin pool of `config.master_connection_pool_size` channels
-    /// (default 1 = single channel, backward compatible). See Part V R3.
+    /// P2C adaptive pool of `config.master_connection_pool_size` channels
+    /// (default 8). See Part V R3.
     master_pool: Arc<MasterClientPool>,
 
     /// Persistent WorkerManager gRPC connection (`GetWorkerInfoList`).
@@ -341,14 +341,17 @@ impl FileSystemContext {
     /// Return a shared `MasterClient` from the pool via P2C (Power of Two Choices)
     /// adaptive scheduling.
     ///
-    /// Returns a [`PooledClient`] RAII guard that auto-decrements the per-connection
-    /// in-flight RPC counter on drop.  With `master_connection_pool_size > 1` this
-    /// picks the least-loaded connection out of two random candidates, spreading
-    /// concurrent metadata RPCs across multiple HTTP/2 connections (Part V R3).
+    /// Returns a [`PooledClient`] handle that derefs to `MasterClient`. With
+    /// `master_connection_pool_size > 1` this picks the least-loaded connection
+    /// out of two random candidates, spreading concurrent metadata RPCs across
+    /// multiple HTTP/2 connections (Part V R3). Per-channel in-flight counts
+    /// are tracked inside `MasterClient::with_retry`, so the load signal stays
+    /// accurate even for clients cloned out of the pool (e.g. by
+    /// `GoosefsFileWriter`).
     ///
     /// Callers interact with the returned value exactly as they would with
     /// `Arc<MasterClient>` — it implements [`Deref`](std::ops::Deref) to
-    /// `MasterClient`.
+    /// `MasterClient` and [`Clone`] (cheap `Arc` clone).
     pub fn acquire_master(&self) -> PooledClient {
         self.master_pool.pick()
     }

@@ -135,6 +135,12 @@ moka = { version = "0.12", features = ["future", "sync"] }
 # spawning per-page tasks; already used by benchmarks and now required on the
 # cache hit hot path.
 futures = "0.3"
+# Fast, dependency-free PRNG used by the MasterClientPool P2C scheduler
+# (Power of Two Choices). `fastrand` is ~10x faster than `rand` and its
+# statistical quality is more than sufficient for load-balancing candidate
+# selection — the theoretical P2C bound only requires uniform sampling,
+# not cryptographic strength.
+fastrand = "2"
 
 # Unix-only: raw `sigaction` for the short-circuit SIGBUS diagnostic handler
 # (SHORT_CIRCUIT_DESIGN §3.2 / §8.1). Already in the dependency graph
