@@ -426,12 +426,12 @@ impl PyGoosefs {
         })
     }
 
-    /// `fs.batch_list_status_lazy(dirs, *, recursive=False)` → `list[URIStatusList]`.
+    /// `fs.batch_list_status_grouped(dirs, *, recursive=False)` → `list[URIStatusList]`.
     ///
     /// Synchronous lazy counterpart to `batch_list_status`. See
-    /// `AsyncGoosefs.batch_list_status_lazy` for performance rationale.
+    /// `AsyncGoosefs.batch_list_status_grouped` for performance rationale.
     #[pyo3(signature = (dirs, *, recursive=false))]
-    fn batch_list_status_lazy(
+    fn batch_list_status_grouped(
         &self,
         py: Python<'_>,
         dirs: Vec<String>,

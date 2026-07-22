@@ -601,7 +601,7 @@ impl PyAsyncGoosefs {
         })
     }
 
-    /// `await fs.batch_list_status_lazy(dirs, recursive=False)` → `list[URIStatusList]`.
+    /// `await fs.batch_list_status_grouped(dirs, recursive=False)` → `list[URIStatusList]`.
     ///
     /// Lazy counterpart to `batch_list_status`. Each directory's entries are
     /// returned as a `URIStatusList` (1 Python object per directory) instead
@@ -610,7 +610,7 @@ impl PyAsyncGoosefs {
     /// For `batch_size=32` with 100 entries each, this creates 32 Python
     /// objects in the completion phase instead of 3200.
     #[pyo3(signature = (dirs, *, recursive=false))]
-    fn batch_list_status_lazy<'py>(
+    fn batch_list_status_grouped<'py>(
         &self,
         py: Python<'py>,
         dirs: Vec<String>,
