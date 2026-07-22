@@ -25,9 +25,15 @@ on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
   workflow_dispatch:
+    inputs:
+      pr_title:
+        description: "PR title to validate (used for manual runs only)"
+        required: true
+        type: string
 
 permissions:
   pull-requests: read
+  contents: read
 
 jobs:
   pr-title:
@@ -39,5 +45,5 @@ jobs:
 
       - name: Check PR title convention
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_TITLE: ${{ github.event.pull_request.title || inputs.pr_title }}
         run: python3 scripts/ci/pr_title_check.py "$PR_TITLE"

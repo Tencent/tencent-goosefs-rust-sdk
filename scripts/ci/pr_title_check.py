@@ -52,9 +52,12 @@ import sys
 
 # One or more "[area]" tags followed by a non-empty summary.
 # Area tag: starts with lowercase letter/digit, may contain lowercase
-# letters, digits and the separators "/", "-", "_", and single spaces.
+# letters, digits and the separators "/", "-", "_", and single spaces -- but
+# each separator must occur *between* non-empty alphanumeric segments
+# (e.g. "sdk", "sdk/py", "sdk-py"), so malformed tags like "[sdk ]",
+# "[sdk py ]" or "[sdk//py]" are rejected.
 _AREA_TITLE_RE = re.compile(
-    r"^(?:\[[a-z0-9][a-z0-9 /_-]*\])+\s+\S.*$"
+    r"^(?:\[[a-z0-9][a-z0-9]+(?:[ /_-][a-z0-9]+)*\])+\s+\S.*$"
 )
 
 # Titles that are allowed without an [area] tag.

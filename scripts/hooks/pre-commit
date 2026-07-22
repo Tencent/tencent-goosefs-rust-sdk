@@ -22,25 +22,6 @@
 # title. This hook never blocks a commit.
 
 root="$(git rev-parse --show-toplevel)"
-branch="$(git symbolic-ref --short HEAD 2>/dev/null || echo "")"
-
-hint_if_suspicious() {
-  case "$branch" in
-    main|master|HEAD) return 0 ;;
-  esac
-  # Heuristic: a branch like feat/foo or fix/bar with no area tag in the
-  # conventional "[area] ..." prefix is fine; we only warn when the branch
-  # name itself looks like it already carries a title-style prefix, which
-  # usually means the author is conflating branch name and PR title.
-  case "$branch" in
-    *\]*) ;; # contains a '[' -> likely already title-style, nothing to do
-    *) return 0 ;;
-  esac
-}
-
-if [ -n "$branch" ]; then
-  hint_if_suspicious
-fi
 
 # Detect staged commit-message-style prefixes inside the diff is out of scope
 # for a pre-commit hook (it does not know the final title yet). We simply

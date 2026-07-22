@@ -25,7 +25,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HOOKS_SRC="$ROOT/scripts/hooks"
-HOOKS_DST="$ROOT/.git/hooks"
+# Ask Git for the real hooks path: in a linked worktree .git is a file, not a
+# directory, so hardcoding "$ROOT/.git/hooks" would make mkdir fail.
+HOOKS_DST="$(git -C "$ROOT" rev-parse --path-format=absolute --git-path hooks)"
 
 mkdir -p "$HOOKS_DST"
 

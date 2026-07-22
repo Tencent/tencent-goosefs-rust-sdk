@@ -83,16 +83,13 @@ import sys
 
 faulthandler.enable()
 
-
-def _dump_traceback_on_sigterm(signum, frame):
-    # Dump every thread's stack so a CI timeout shows exactly where we hung,
-    # then exit with the conventional SIGTERM status (128 + 15 = 143) so the
-    # job still fails fast instead of being left to a hard kill.
-    faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
-    os._exit(143)
-
-
-signal.signal(signal.SIGTERM, _dump_traceback_on_sigterm)
+# Register SIGTERM with faulthandler's *native* handler. A Python-level
+# signal.signal handler only runs once the main thread returns to executing
+# Python bytecode; if it is blocked inside a native/Rust call (exactly the
+# hang we want to diagnose), the handler never fires before the CI runner
+# escalates the timeout. chain=True keeps the default termination behavior so
+# the job still fails fast with the conventional SIGTERM status (128 + 15 = 143).
+faulthandler.register(signal.SIGTERM, file=sys.stderr, all_threads=True, chain=True)
 # ─────────────────────────────────────────────────────────────────────────────
 
 import asyncio

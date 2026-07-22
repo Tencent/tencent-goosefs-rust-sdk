@@ -106,8 +106,9 @@ that links back to the PR — the same behavior as Apache Fluss:
                                                  ^^^^^^^^ GitHub adds this
 ```
 
-So following the `[area] Summary` title convention is all that is required for
-merged commits to carry a clickable `(#NNNN)` PR link. A CI workflow
+The `[area] Summary` convention standardizes squash-merged commit titles.
+GitHub's squash-merge behavior — not the area prefix — appends the clickable
+`(#NNNN)` PR link on merge. A CI workflow
 (`.github/workflows/pr_title.yml`) validates the title on every PR; an advisory
 local hook can be installed with `bash scripts/hooks/install-hooks.sh`.
 
