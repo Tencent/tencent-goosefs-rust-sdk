@@ -42,9 +42,7 @@ env:
   GOOSEFS_AUTH_TYPE: simple
   GFS_ADDR: 127.0.0.1:9200
 
-# Default Docker GooseFS IT: Linux amd64 rust only for now.
-# Python Docker IT is temporarily disabled until the GooseFS fixture image
-# is reliably available via GHCR (and page-cache IT is re-verified).
+# Default Docker GooseFS IT: Linux amd64 rust + python.
 # Apple Silicon unit coverage remains in ci.yml (macos-14). Optional macOS
 # Docker IT: workflow_dispatch with run_macos_docker=true on a self-hosted Mac.
 #
@@ -52,8 +50,6 @@ env:
 # GooseFS image.
 
 jobs:
-  # Temporary: rust IT only on ubuntu-latest. Re-add python (and arm64) after
-  # GHCR mirror + page-cache IT are stable.
   goosefs-integration:
     name: ${{ matrix.kind }}-it (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -65,9 +61,9 @@ jobs:
         include:
           - os: ubuntu-latest
             kind: rust
-          # - os: ubuntu-latest
-          #   kind: python
-          #   python-version: "3.11"
+          - os: ubuntu-latest
+            kind: python
+            python-version: "3.11"
     steps:
       - uses: actions/checkout@v4
 
