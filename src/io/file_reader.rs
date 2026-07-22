@@ -1,17 +1,3 @@
-// Copyright (C) 2026 Tencent. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 //! High-level file reader that orchestrates the complete read pipeline.
 //!
 //! `GoosefsFileReader` ties together all low-level components into a single
@@ -151,7 +137,7 @@ pub struct GoosefsFileReader {
     // ── Short-circuit (local mmap) read path ─────────────────────────────────
     /// Shared short-circuit factory when SC is enabled and the reader was built
     /// in context mode. `None` disables SC (legacy path / kill switch off).
-    /// When `Some`, the per-block read entry point (`read_segment`) first attempts a
+    /// When `Some`, the per-block read convergence (`read_segment`) first attempts a
     /// local mmap read and transparently falls back to gRPC on any recoverable
     /// failure.
     short_circuit: Option<Arc<ShortCircuitFactory>>,

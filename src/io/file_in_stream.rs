@@ -1,17 +1,3 @@
-// Copyright (C) 2026 Tencent. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 //! Dual-path seekable file input stream.
 //!
 //! [`GoosefsFileInStream`] provides both sequential reads and random reads
@@ -740,7 +726,7 @@ impl GoosefsFileInStream {
     /// **single-task tight loop** of sequential `read_at(...).await` calls
     /// leaves only one op in flight and is bottlenecked by the per-op
     /// round-trip (measured ~2x slower than the steady-state floor; see
-    /// `docs/RUST_PYTHON_SDK_OPTIMIZATION.md` Part V §V.5 "B1 verification result").
+    /// `docs/RUST_PYTHON_SDK_OPTIMIZATION.md` Part V §V.5 "B1 verification results").
     ///
     /// For throughput-oriented random reads, issue reads **concurrently**
     /// (one future per `read_at`, e.g. `stream::iter(..).buffer_unordered(8..16)`)
