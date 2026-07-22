@@ -29,7 +29,7 @@ Thread / process safety
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Iterator, Mapping
 from typing import Any, final
 
 from typing_extensions import Self
@@ -249,6 +249,21 @@ class URIStatus:
         ...
     def __eq__(self, other: object, /) -> bool: ...
     def __hash__(self) -> int: ...
+
+
+class URIStatusList:
+    """Lazy list view of ``list_status`` results.
+
+    Holds the Rust-side ``Vec<URIStatus>`` in a single Python object
+    without creating N ``URIStatus`` Python objects upfront. Individual
+    entries are materialised on-demand via ``__getitem__`` / ``__iter__``.
+    """
+
+    def __len__(self) -> int: ...
+    def __getitem__(self, index: int) -> URIStatus: ...
+    def __iter__(self) -> Iterator[URIStatus]: ...
+    def __bool__(self) -> bool: ...
+    def __repr__(self) -> str: ...
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config
@@ -581,6 +596,11 @@ class AsyncGoosefs:
     # ── Metadata
     def get_status(self, path: str) -> Awaitable[URIStatus]: ...
     def list_status(self, path: str, *, recursive: bool = ...) -> Awaitable[list[URIStatus]]: ...
+    def list_status_lazy(self, path: str, *, recursive: bool = ...) -> Awaitable[URIStatusList]:
+        """Lazy variant of ``list_status`` — returns a single ``URIStatusList``
+        that materialises ``URIStatus`` entries on-demand via ``__getitem__``
+        / ``__iter__``, reducing GIL occupancy by ~99% for N=100 entries."""
+        ...
     def exists(self, path: str) -> Awaitable[bool]:
         ...
         # Maximum number of RPCs allowed in flight for batch operations.
@@ -668,6 +688,15 @@ class AsyncGoosefs:
 
         Returns entries for each directory in input order as a list-of-lists.
         The whole batch fails on the first error."""
+        ...
+    def batch_list_status_grouped(
+        self,
+        dirs: list[str],
+        *,
+        recursive: bool = ...,
+    ) -> Awaitable[list[URIStatusList]]:
+        """Lazy batch variant — returns one ``URIStatusList`` per directory,
+        deferring ``URIStatus`` materialisation to on-demand access."""
         ...
     def mkdir(self, path: str, *, recursive: bool = ...) -> Awaitable[None]: ...
     def delete(
@@ -784,6 +813,9 @@ class Goosefs:
     # ── Metadata
     def get_status(self, path: str) -> URIStatus: ...
     def list_status(self, path: str, *, recursive: bool = ...) -> list[URIStatus]: ...
+    def list_status_lazy(self, path: str, *, recursive: bool = ...) -> URIStatusList:
+        """Lazy variant of ``list_status`` — see ``AsyncGoosefs.list_status_lazy``."""
+        ...
     def exists(self, path: str) -> bool: ...
     def batch_get_status(self, paths: list[str]) -> list[URIStatus]:
         """Concurrent ``get_status`` for every path (single GIL release).
@@ -847,6 +879,14 @@ class Goosefs:
 
         Returns entries for each directory in input order as a list-of-lists.
         The whole batch fails on the first error."""
+        ...
+    def batch_list_status_grouped(
+        self,
+        dirs: list[str],
+        *,
+        recursive: bool = ...,
+    ) -> list[URIStatusList]:
+        """Lazy batch variant — see ``AsyncGoosefs.batch_list_status_grouped``."""
         ...
     def mkdir(self, path: str, *, recursive: bool = ...) -> None: ...
     def delete(
