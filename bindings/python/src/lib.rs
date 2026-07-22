@@ -34,14 +34,21 @@
 //! goosefs-sdk (Rust SDK at ../..)
 //! ```
 //!
-//! ## Binding layers
+//! ## Module contents
 //!
-//! - Config + exceptions: `Config`, `goosefs.exceptions.*`, shared Tokio runtime.
-//! - Async metadata API (`AsyncGoosefs`).
-//! - Sync wrapper (`Goosefs`).
-//! - High-level `read_file` / `write_file` / `read_range`.
-//! - Streaming `FileReader` / `FileWriter`.
-
+//! Registers the Python-facing surface for GooseFS:
+//!
+//! - `Config` and `goosefs.exceptions.*` -- full `map_err` coverage of
+//!   the SDK error enum, plus the shared Tokio runtime.
+//! - `AsyncGoosefs` -- async metadata API (open, list, status, create,
+//!   delete, rename; free-threaded GIL via `gil_used = false`).
+//! - `Goosefs` -- synchronous wrapper around `AsyncGoosefs`.
+//! - `list_status_grouped` and `batch_list_status_grouped` -- deferred
+//!   Python-object materialisation for `list_status`, reducing GIL
+//!   occupancy by roughly 99 percent for N=100 entries.
+//! - `FileReader` and `FileWriter` -- streaming reads and writes with
+//!   chunked progress callbacks.
+//!
 mod config;
 mod context;
 mod errors;
@@ -61,8 +68,8 @@ use pyo3::prelude::*;
 /// `_goosefs` Python extension module.
 ///
 /// `gil_used = false` opts into PyO3 0.27's free-threaded GIL semantics so
-/// long-running Rust IO will not hold the GIL. P5 streaming code will further
-/// wrap blocking operations in `py.allow_threads(...)`.
+/// long-running Rust IO will not hold the GIL. Streaming code further wraps
+/// blocking operations in `py.allow_threads(...)`.
 #[pymodule(gil_used = false)]
 fn _goosefs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Phase 2.2 — install the custom Tokio runtime builder *first*, before any
@@ -72,35 +79,37 @@ fn _goosefs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     runtime::init_custom_runtime();
 
     // Crate version — keep in sync with `bindings/python/Cargo.toml` and the
-    // root `goosefs-sdk` crate. CI will enforce this in P8.
+    // root `goosefs-sdk` crate.
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
-    // P1 ── exceptions submodule (`goosefs.exceptions`).
+    // exceptions submodule (`goosefs.exceptions`).
     errors::register_exceptions(py, m)?;
 
-    // P1 ── public Config class.
+    // public Config class.
     m.add_class::<config::PyConfig>()?;
 
-    // P2 ── metadata API surface.
+    // metadata API surface.
     m.add_class::<types::PyWriteType>()?;
     m.add_class::<types::PyReadType>()?;
     m.add_class::<status::PyURIStatus>()?;
+    m.add_class::<status::PyURIStatusList>()?;
+    m.add_class::<status::PyURIStatusListIter>()?;
     m.add_class::<options::PyOpenFileOptions>()?;
     m.add_class::<options::PyCreateFileOptions>()?;
     m.add_class::<options::PyDeleteOptions>()?;
     m.add_class::<filesystem::PyAsyncGoosefs>()?;
 
-    // P3 ── sync wrapper.
+    // sync wrapper.
     m.add_class::<sync_fs::PyGoosefs>()?;
 
-    // P5 ── streaming reader / writer (async + sync).
+    // streaming reader / writer (async + sync).
     m.add_class::<streaming::PyAsyncFileReader>()?;
     m.add_class::<streaming::PyAsyncFileWriter>()?;
     m.add_class::<streaming::PyFileReader>()?;
     m.add_class::<streaming::PyFileWriter>()?;
 
     // P6 ── low-level Worker block client (stage A of the
-    // "Worker block direct connection" feature; see
+    // "Worker block direct" feature; see
     // `docs/GooseFS_Python_SDK_PROBLEMS_AND_SOLUTIONS.md` §3.1).
     m.add_class::<worker::PyAsyncWorkerClient>()?;
     // Sync escape hatch — mirrors `AsyncWorkerClient` for callers that

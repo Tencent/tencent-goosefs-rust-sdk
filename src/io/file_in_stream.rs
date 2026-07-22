@@ -740,7 +740,7 @@ impl GoosefsFileInStream {
     /// **single-task tight loop** of sequential `read_at(...).await` calls
     /// leaves only one op in flight and is bottlenecked by the per-op
     /// round-trip (measured ~2x slower than the steady-state floor; see
-    /// `docs/RUST_PYTHON_SDK_OPTIMIZATION.md` Part V §V.5 "B1 verification result").
+    /// `docs/RUST_PYTHON_SDK_OPTIMIZATION.md` Part V §V.5 "B1 verification results").
     ///
     /// For throughput-oriented random reads, issue reads **concurrently**
     /// (one future per `read_at`, e.g. `stream::iter(..).buffer_unordered(8..16)`)
