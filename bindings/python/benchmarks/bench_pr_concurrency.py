@@ -77,15 +77,25 @@ from __future__ import annotations
 #   * SIGTERM (CI timeout / cancel)   → exit code 143  (also dump the live stack)
 # SIGKILL (137, OOM) cannot be caught in-process — see kernel/cgroup OOM logs.
 import faulthandler
+import os
 import signal
 import sys
 
 faulthandler.enable()
-faulthandler.register(signal.SIGTERM, file=sys.stderr, exit=True)
+
+
+def _dump_traceback_on_sigterm(signum, frame):
+    # Dump every thread's stack so a CI timeout shows exactly where we hung,
+    # then exit with the conventional SIGTERM status (128 + 15 = 143) so the
+    # job still fails fast instead of being left to a hard kill.
+    faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+    os._exit(143)
+
+
+signal.signal(signal.SIGTERM, _dump_traceback_on_sigterm)
 # ─────────────────────────────────────────────────────────────────────────────
 
 import asyncio
-import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
