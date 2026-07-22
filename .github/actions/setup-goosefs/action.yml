@@ -25,7 +25,10 @@ runs:
         set -euo pipefail
         IMAGE="${GOOSEFS_IMAGE:-goosefs.tencentcloudcr.com/goosefs/repo:v2.1.0.1}"
         echo "GOOSEFS_IMAGE=${IMAGE}"
-        docker compose -f docker-compose-goosefs.yml up -d --wait
+        # Bound the wait so an unhealthy fixture (e.g. master never listening on
+        # 9200) fails fast instead of hanging the job indefinitely. Matches the
+        # 5-minute default used by scripts/ci/goosefs-up.sh.
+        docker compose -f docker-compose-goosefs.yml up -d --wait --wait-timeout "${GOOSEFS_WAIT_TIMEOUT:-300}"
         docker compose -f docker-compose-goosefs.yml ps
 
     - name: Export GooseFS env
