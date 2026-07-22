@@ -14,7 +14,7 @@ one extra PyO3 hop, so at *matched* concurrency Python can only be
 
   (a) upper-layer concurrency mismatch — the Python harness issued more
       concurrent independent ``read_at`` calls than the Rust one, or
-  (b) methodology差异 — different file size / endpoint / buffer.
+  (b) methodology difference — different file size / endpoint / buffer.
 
 This script settles (a) vs (b) on a **local cluster**: it sweeps a matched
 concurrency level for both the sync (ThreadPool) and async (gather) models

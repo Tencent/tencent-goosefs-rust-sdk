@@ -90,8 +90,8 @@ fn _goosefs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<streaming::PyFileWriter>()?;
 
     // P6 ── low-level Worker block client (stage A of the
-    // "Worker block 直连" feature; see
-    // `docs/GooseFS_Python_SDK问题与解决方案.md` §3.1).
+    // "Worker block direct" feature; see
+    // `docs/GooseFS_Python_SDK_PROBLEMS_AND_SOLUTIONS.md` §3.1).
     m.add_class::<worker::PyAsyncWorkerClient>()?;
     // Sync escape hatch — mirrors `AsyncWorkerClient` for callers that
     // already know the worker address and want a one-shot blocking

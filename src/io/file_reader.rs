@@ -137,7 +137,7 @@ pub struct GoosefsFileReader {
     // ── Short-circuit (local mmap) read path ─────────────────────────────────
     /// Shared short-circuit factory when SC is enabled and the reader was built
     /// in context mode. `None` disables SC (legacy path / kill switch off).
-    /// When `Some`, the per-block read收口 (`read_segment`) first attempts a
+    /// When `Some`, the per-block read convergence (`read_segment`) first attempts a
     /// local mmap read and transparently falls back to gRPC on any recoverable
     /// failure.
     short_circuit: Option<Arc<ShortCircuitFactory>>,

@@ -23,7 +23,7 @@
 //! - Streaming over the PyO3 boundary requires wrapping the response
 //!   stream as a Python `__aiter__`, which is non-trivial and re-introduces
 //!   exactly the per-chunk PyO3-edge cost we are trying to avoid in the
-//!   first place (see `docs/GooseFS_Python_SDK问题与解决方案.md` §3.1).
+//!   first place (see `docs/GooseFS_Python_SDK_PROBLEMS_AND_SOLUTIONS.md` §3.1).
 //! - The SDK already provides a high-level wrapper —
 //!   [`goosefs_sdk::io::GrpcBlockReader::positioned_read`] — which opens
 //!   the stream, drains all chunks with proper `offset_received` ACK
