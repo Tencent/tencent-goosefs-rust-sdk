@@ -277,8 +277,8 @@ impl PyURIStatus {
 /// ~99%. See `docs/perf/ListDir懒加载优化方案.md` §3.
 ///
 /// Accessing `len(lst)` is O(1) and creates zero objects. Accessing `lst[i]`
-/// clones one `URIStatus` (Rust struct, ~300-500ns) and creates one Python
-/// object. Iterating creates one object per `__next__`.
+/// clones one `URIStatus` (deep clone; cost is data-dependent) and creates one
+/// Python object. Iterating creates one object (and one `URIStatus` clone) per `__next__`.
 ///
 /// **What is lazy**: only the Rust-struct → Python-object materialisation is
 /// deferred. The gRPC RPC, prost deserialisation, and `URIStatus::from_proto`
@@ -307,8 +307,12 @@ impl PyURIStatusList {
     /// Get the i-th entry as a `URIStatus`. Creates one Python object.
     /// Supports negative indexing (e.g. `lst[-1]`).
     fn __getitem__(&self, index: isize) -> PyResult<PyURIStatus> {
-        let len = self.inner.len() as isize;
-        let idx = if index < 0 { index + len } else { index };
+        let len: isize = self.inner.len().try_into().unwrap_or(isize::MAX);
+        let idx = if index < 0 {
+            index.checked_add(len).unwrap_or(isize::MIN)
+        } else {
+            index
+        };
         if idx < 0 || idx >= len {
             return Err(pyo3::exceptions::PyIndexError::new_err(format!(
                 "index {index} out of range for length {len}"
