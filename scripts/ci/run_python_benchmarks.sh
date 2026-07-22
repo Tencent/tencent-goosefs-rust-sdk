@@ -31,6 +31,15 @@ export GFS_WPOOL="${GFS_WPOOL:-1}"
 export GFS_MODE="${GFS_MODE:-both}"
 export GFS_TAG="${GFS_TAG:-ci}"
 
+# ── crash diagnostics ────────────────────────────────────────────────────────
+# PYTHONFAULTHANDLER=1: on a native crash (e.g. SIGSEGV → exit 139) each Python
+#   benchmark prints a Python + C-level traceback to stderr instead of dying
+#   silently. RUST_BACKTRACE=1: on a Rust panic, print the Rust backtrace.
+# Neither catches SIGKILL (137, OOM) — check kernel/cgroup OOM logs for that.
+export PYTHONFAULTHANDLER=1
+export RUST_BACKTRACE=1
+# ─────────────────────────────────────────────────────────────────────────────
+
 echo "==> python bench: bench_perf_opt.py"
 uv run python benchmarks/bench_perf_opt.py --paths 50 --iters 2 --threads 4
 

@@ -26,7 +26,7 @@ export GOOSEFS_MASTER_ADDR="${GOOSEFS_MASTER_ADDR:-127.0.0.1:9200}"
 export GOOSEFS_AUTH_TYPE="${GOOSEFS_AUTH_TYPE:-simple}"
 
 echo "==> integration: page_cache_e2e"
-cargo test --test page_cache_e2e -- --ignored --nocapture
+cargo test --test page_cache_e2e -- --ignored --nocapture --test-threads=1
 
 echo "==> integration: page_cache_consistency"
 cargo test --test page_cache_consistency -- --ignored --nocapture --test-threads=1

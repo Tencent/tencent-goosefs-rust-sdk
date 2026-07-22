@@ -43,11 +43,32 @@ All scratch state is created under ``/bench-pysdk/<uuid>`` and removed on exit.
 
 from __future__ import annotations
 
+# ── crash diagnostics ────────────────────────────────────────────────────────
+# Enable the fault handler as early as possible so that a native crash dumps a
+# Python + C-level traceback to stderr instead of dying silently:
+#   * SIGSEGV (illegal memory access) → exit code 139
+#   * SIGTERM (CI timeout / cancel)   → exit code 143  (also dump the live stack)
+# No output is produced during normal runs, so this adds zero overhead to CI.
+# SIGKILL (137, OOM) cannot be caught in-process — see kernel/cgroup OOM logs.
+import faulthandler
+import os
+import signal
+import sys
+
+faulthandler.enable()
+
+# Register SIGTERM with faulthandler's *native* handler. A Python-level
+# signal.signal handler only runs once the main thread returns to executing
+# Python bytecode; if it is blocked inside a native/Rust call (exactly the
+# hang we want to diagnose), the handler never fires before the CI runner
+# escalates the timeout. chain=True keeps the default termination behavior so
+# the job still fails fast with the conventional SIGTERM status (128 + 15 = 143).
+faulthandler.register(signal.SIGTERM, file=sys.stderr, all_threads=True, chain=True)
+# ─────────────────────────────────────────────────────────────────────────────
+
 import argparse
 import asyncio
-import os
 import statistics
-import sys
 import time
 import uuid
 from collections.abc import Callable, Sequence
