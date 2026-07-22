@@ -77,6 +77,43 @@ See [`bindings/python/DEVELOPMENT.md`](bindings/python/DEVELOPMENT.md).
 - Update docs or examples when user-facing behavior changes.
 - Do not commit secrets, credentials, or machine-local absolute paths.
 
+### PR title convention (this is what makes commits link to their PR)
+
+Give every pull request a title of the form:
+
+```
+[area] Short summary
+```
+
+for example:
+
+```
+[sdk] Reduce log verbosity in SplitGenerator
+[sdk][py] Add retry to Python upload
+```
+
+The `area` tag is a lowercase identifier (letters, digits, and `/`, `-`, `_`
+separators), e.g. `sdk`, `py`, `ci`, `docs`, `rust`. Multiple areas may be
+combined: `[sdk][py]`. Titles starting with `Revert`, `Release`, `Bump`,
+`Merge`, `Initial`, or `chore(release):` are exempt from the `[area]` prefix.
+
+**Why this matters:** PRs are squash-merged. On squash-merge, GitHub
+automatically appends the PR number to the commit title, producing a commit
+that links back to the PR — the same behavior as Apache Fluss:
+
+```
+[sdk] Reduce log verbosity in SplitGenerator (#3700)
+                                                 ^^^^^^^^ GitHub adds this
+```
+
+So following the `[area] Summary` title convention is all that is required for
+merged commits to carry a clickable `(#NNNN)` PR link. A CI workflow
+(`.github/workflows/pr_title.yml`) validates the title on every PR; an advisory
+local hook can be installed with `bash scripts/hooks/install-hooks.sh`.
+
+> Note: squash-merge must stay enabled for the repository (the default for
+> GitHub). If a PR is instead merge-committed, no `(#NNNN)` is appended.
+
 ## Security
 
 Report vulnerabilities privately via [`SECURITY.md`](SECURITY.md). Do not file
