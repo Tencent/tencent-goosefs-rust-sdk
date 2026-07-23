@@ -443,6 +443,20 @@ impl PropertiesMap {
         if let Some(n) = self.get_parsed::<usize>("goosefs.user.worker.connection.pool.size") {
             cfg.worker_connection_pool_size = n.max(1);
         }
+        // Master gRPC channel pool size:
+        // goosefs.user.master.connection.pool.size
+        // Same clamp contract as the worker pool above. Default `1`.
+        if let Some(n) = self.get_parsed::<usize>("goosefs.user.master.connection.pool.size") {
+            cfg.master_connection_pool_size = n.max(1);
+        }
+        // Master pool scheduling strategy:
+        // goosefs.user.master.pool.schedule
+        // Accepts the same value forms as the env var (`MasterPoolSchedule::from_str`).
+        if let Some(s) = self.get("goosefs.user.master.pool.schedule") {
+            if let Ok(sched) = s.parse::<MasterPoolSchedule>() {
+                cfg.master_connection_pool_schedule = sched;
+            }
+        }
         // Client-side FileInfo cache TTL (milliseconds):
         // goosefs.user.file.info.cache.ttl.ms
         // `0` disables the cache (default). Chosen milliseconds rather than
@@ -650,6 +664,23 @@ pub enum MasterPoolSchedule {
 impl Default for MasterPoolSchedule {
     fn default() -> Self {
         Self::RoundRobin
+    }
+}
+
+impl std::str::FromStr for MasterPoolSchedule {
+    type Err = String;
+
+    /// Parse a schedule name from env vars, properties files, or storage
+    /// options. Accepts the canonical serde form (`roundrobin`, `p2c`) plus
+    /// the common variants `round_robin`, `round-robin`, `RoundRobin`, `P2C`.
+    /// Unknown values yield an error so callers (env / properties loader)
+    /// can ignore typos instead of silently downgrading to a wrong schedule.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().replace(['-', '_'], "").as_str() {
+            "roundrobin" => Ok(Self::RoundRobin),
+            "p2c" => Ok(Self::P2C),
+            other => Err(format!("unknown master pool schedule: {other}")),
+        }
     }
 }
 
@@ -956,6 +987,25 @@ pub const ENV_CLIENT_CACHE_URING_THREAD_COUNT: &str =
 /// Example: `export GOOSEFS_WORKER_CONNECTION_POOL_SIZE=4`.
 pub const ENV_WORKER_CONNECTION_POOL_SIZE: &str = "GOOSEFS_WORKER_CONNECTION_POOL_SIZE";
 
+/// Environment variable: number of independent Master gRPC channels to pool.
+///
+/// Mirrors [`GoosefsConfig::master_connection_pool_size`]. Values `< 1` are
+/// clamped to `1`. Non-numeric values are ignored. Default is `1` (single
+/// channel, backward-compatible).
+///
+/// Example: `export GOOSEFS_MASTER_CONNECTION_POOL_SIZE=8`.
+pub const ENV_MASTER_CONNECTION_POOL_SIZE: &str = "GOOSEFS_MASTER_CONNECTION_POOL_SIZE";
+
+/// Environment variable: master connection-pool scheduling strategy.
+///
+/// Mirrors [`GoosefsConfig::master_pool_schedule`]. Accepts `roundrobin`
+/// (default) or `p2c` (Power of Two Choices). Also accepts `round_robin`,
+/// `round-robin`, `RoundRobin`, `P2C` (case-insensitive, separators ignored).
+/// Malformed values are ignored (default kept).
+///
+/// Example: `export GOOSEFS_MASTER_POOL_SCHEDULE=p2c`.
+pub const ENV_MASTER_POOL_SCHEDULE: &str = "GOOSEFS_MASTER_POOL_SCHEDULE";
+
 /// Environment variable: client-side `FileInfo` cache TTL in **milliseconds**.
 ///
 /// Mirrors [`GoosefsConfig::file_info_cache_ttl`]. Default is `30000` (30 s),
@@ -1021,6 +1071,23 @@ pub const STORAGE_OPT_CLIENT_CACHE_URING_THREAD_COUNT: &str =
 /// `opendal_service_goosefs` should map `storage_options[goosefs_worker_connection_pool_size]`
 /// to [`GoosefsConfig::with_worker_connection_pool_size`].
 pub const STORAGE_OPT_WORKER_CONNECTION_POOL_SIZE: &str = "goosefs_worker_connection_pool_size";
+
+/// Storage option key for the Master gRPC channel pool size.
+///
+/// Companion to [`ENV_MASTER_CONNECTION_POOL_SIZE`]. Consumers such as
+/// `opendal_service_goosefs` should map
+/// `storage_options[goosefs_master_connection_pool_size]` to
+/// [`GoosefsConfig::with_master_connection_pool_size`].
+pub const STORAGE_OPT_MASTER_CONNECTION_POOL_SIZE: &str = "goosefs_master_connection_pool_size";
+
+/// Storage option key for the Master connection-pool scheduling strategy.
+///
+/// Companion to [`ENV_MASTER_POOL_SCHEDULE`]. Consumers such as
+/// `opendal_service_goosefs` should map
+/// `storage_options[goosefs_master_pool_schedule]` to
+/// [`GoosefsConfig::with_master_pool_schedule`]. Accepts the same value
+/// forms as the env var (`roundrobin`, `p2c`, `round_robin`, `P2C`, ...).
+pub const STORAGE_OPT_MASTER_POOL_SCHEDULE: &str = "goosefs_master_pool_schedule";
 
 /// Storage option key for the client-side `FileInfo` cache TTL in **milliseconds**.
 ///
@@ -2841,6 +2908,22 @@ impl GoosefsConfig {
                 self.worker_connection_pool_size = n.max(1);
             }
         }
+        // Master gRPC channel pool size. Same clamp + ignore-malformed contract
+        // as the worker pool above. Default is `1` (single channel).
+        if let Ok(val) = env::var(ENV_MASTER_CONNECTION_POOL_SIZE) {
+            if let Ok(n) = val.parse::<usize>() {
+                self.master_connection_pool_size = n.max(1);
+            }
+        }
+        // Master pool scheduling strategy. Accepts the canonical serde form
+        // plus `round_robin` / `RoundRobin` / `P2C` (see `FromStr` impl).
+        // Malformed values are ignored (default kept) — a typo cannot flip
+        // scheduling silently.
+        if let Ok(val) = env::var(ENV_MASTER_POOL_SCHEDULE) {
+            if let Ok(s) = val.parse::<MasterPoolSchedule>() {
+                self.master_connection_pool_schedule = s;
+            }
+        }
         // Client-side FileInfo cache TTL (milliseconds). `0` = disabled
         // (default). This is the only knob that actually turns the cache on,
         // so parse errors are ignored to keep default behaviour (off).
@@ -4077,6 +4160,11 @@ goosefs.user.network.data.transfer.chunk.size=1MB
             ENV_WORKER_CONNECTION_POOL_SIZE,
             "GOOSEFS_WORKER_CONNECTION_POOL_SIZE"
         );
+        assert_eq!(
+            ENV_MASTER_CONNECTION_POOL_SIZE,
+            "GOOSEFS_MASTER_CONNECTION_POOL_SIZE"
+        );
+        assert_eq!(ENV_MASTER_POOL_SCHEDULE, "GOOSEFS_MASTER_POOL_SCHEDULE");
         assert_eq!(ENV_FILE_INFO_CACHE_TTL_MS, "GOOSEFS_FILE_INFO_CACHE_TTL_MS");
         assert_eq!(
             ENV_FILE_INFO_CACHE_CAPACITY,
@@ -4085,6 +4173,14 @@ goosefs.user.network.data.transfer.chunk.size=1MB
         assert_eq!(
             STORAGE_OPT_WORKER_CONNECTION_POOL_SIZE,
             "goosefs_worker_connection_pool_size"
+        );
+        assert_eq!(
+            STORAGE_OPT_MASTER_CONNECTION_POOL_SIZE,
+            "goosefs_master_connection_pool_size"
+        );
+        assert_eq!(
+            STORAGE_OPT_MASTER_POOL_SCHEDULE,
+            "goosefs_master_pool_schedule"
         );
         assert_eq!(
             STORAGE_OPT_FILE_INFO_CACHE_TTL_MS,
@@ -4128,6 +4224,74 @@ goosefs.user.network.data.transfer.chunk.size=1MB
         assert_eq!(cfg.worker_connection_pool_size, default_size);
     }
 
+    // ── Master connection pool env vars ─────────────────────────
+    #[test]
+    fn test_apply_env_master_connection_pool_size() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GOOSEFS_MASTER_CONNECTION_POOL_SIZE", "8");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var("GOOSEFS_MASTER_CONNECTION_POOL_SIZE");
+        assert_eq!(cfg.master_connection_pool_size, 8);
+    }
+
+    #[test]
+    fn test_apply_env_master_connection_pool_size_clamp() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GOOSEFS_MASTER_CONNECTION_POOL_SIZE", "0");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var("GOOSEFS_MASTER_CONNECTION_POOL_SIZE");
+        assert_eq!(cfg.master_connection_pool_size, 1);
+    }
+
+    #[test]
+    fn test_apply_env_master_connection_pool_size_invalid_keeps_default() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GOOSEFS_MASTER_CONNECTION_POOL_SIZE", "not-a-number");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var("GOOSEFS_MASTER_CONNECTION_POOL_SIZE");
+        assert_eq!(
+            cfg.master_connection_pool_size,
+            default_master_connection_pool_size()
+        );
+    }
+
+    #[test]
+    fn test_apply_env_master_pool_schedule_p2c() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GOOSEFS_MASTER_POOL_SCHEDULE", "p2c");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var("GOOSEFS_MASTER_POOL_SCHEDULE");
+        assert_eq!(cfg.master_connection_pool_schedule, MasterPoolSchedule::P2C);
+    }
+
+    #[test]
+    fn test_apply_env_master_pool_schedule_case_and_separator_insensitive() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Accept `round_robin`, `round-robin`, `RoundRobin`, `ROUNDROBIN`.
+        for val in ["round_robin", "round-robin", "RoundRobin", "ROUNDROBIN"] {
+            std::env::set_var("GOOSEFS_MASTER_POOL_SCHEDULE", val);
+            let cfg = GoosefsConfig::default().apply_env();
+            assert_eq!(
+                cfg.master_connection_pool_schedule,
+                MasterPoolSchedule::RoundRobin,
+                "failed for value {val:?}"
+            );
+        }
+        std::env::remove_var("GOOSEFS_MASTER_POOL_SCHEDULE");
+    }
+
+    #[test]
+    fn test_apply_env_master_pool_schedule_invalid_keeps_default() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GOOSEFS_MASTER_POOL_SCHEDULE", "totally-bogus");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var("GOOSEFS_MASTER_POOL_SCHEDULE");
+        assert_eq!(
+            cfg.master_connection_pool_schedule,
+            MasterPoolSchedule::default()
+        );
+    }
+
     #[test]
     fn test_apply_env_file_info_cache_ttl_ms() {
         let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -4161,11 +4325,15 @@ goosefs.user.network.data.transfer.chunk.size=1MB
     fn test_from_properties_str_perf_tuning_knobs() {
         let props = "\
 goosefs.user.worker.connection.pool.size=6
+goosefs.user.master.connection.pool.size=8
+goosefs.user.master.pool.schedule=p2c
 goosefs.user.file.info.cache.ttl.ms=1500
 goosefs.user.file.info.cache.capacity=2048
 ";
         let cfg = GoosefsConfig::from_properties_str(props);
         assert_eq!(cfg.worker_connection_pool_size, 6);
+        assert_eq!(cfg.master_connection_pool_size, 8);
+        assert_eq!(cfg.master_connection_pool_schedule, MasterPoolSchedule::P2C);
         assert_eq!(cfg.file_info_cache_ttl, Duration::from_millis(1500));
         assert_eq!(cfg.file_info_cache_capacity, 2048);
     }
@@ -4177,6 +4345,45 @@ goosefs.user.file.info.cache.capacity=2048
         let props = "goosefs.user.worker.connection.pool.size=0\n";
         let cfg = GoosefsConfig::from_properties_str(props);
         assert_eq!(cfg.worker_connection_pool_size, 1);
+    }
+
+    /// Master pool size in properties file follows the same clamp contract.
+    #[test]
+    fn test_from_properties_str_master_pool_zero_clamped() {
+        let props = "goosefs.user.master.connection.pool.size=0\n";
+        let cfg = GoosefsConfig::from_properties_str(props);
+        assert_eq!(cfg.master_connection_pool_size, 1);
+    }
+
+    /// `master.pool.schedule` accepts the same value forms as the env var.
+    #[test]
+    fn test_from_properties_str_master_pool_schedule_variants() {
+        for (val, expected) in [
+            ("roundrobin", MasterPoolSchedule::RoundRobin),
+            ("round_robin", MasterPoolSchedule::RoundRobin),
+            ("round-robin", MasterPoolSchedule::RoundRobin),
+            ("RoundRobin", MasterPoolSchedule::RoundRobin),
+            ("P2C", MasterPoolSchedule::P2C),
+            ("p2c", MasterPoolSchedule::P2C),
+        ] {
+            let props = format!("goosefs.user.master.pool.schedule={val}\n");
+            let cfg = GoosefsConfig::from_properties_str(&props);
+            assert_eq!(
+                cfg.master_connection_pool_schedule, expected,
+                "failed for value {val:?}"
+            );
+        }
+    }
+
+    /// Unknown schedule value in properties is ignored (default kept).
+    #[test]
+    fn test_from_properties_str_master_pool_schedule_invalid_keeps_default() {
+        let props = "goosefs.user.master.pool.schedule=definitely-not-real\n";
+        let cfg = GoosefsConfig::from_properties_str(props);
+        assert_eq!(
+            cfg.master_connection_pool_schedule,
+            MasterPoolSchedule::default()
+        );
     }
 
     // ── Client local page cache knob parsing ─────────────────
