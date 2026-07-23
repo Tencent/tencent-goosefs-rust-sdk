@@ -272,7 +272,7 @@ async def test_batch_open_file_single_path(async_fs: AsyncGoosefs, tmp_dir: str)
 
     readers = await async_fs.batch_open_file([path])
     assert len(readers) == 1
-    data = await readers[0].read_to_end()
+    data = await readers[0].read()
     assert data == b"solo"
 
 

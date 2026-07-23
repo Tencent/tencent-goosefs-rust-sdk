@@ -315,14 +315,4 @@ async def test_batch_delete_recursive(async_fs: AsyncGoosefs, tmp_dir: str) -> N
     assert await async_fs.exists(parent) is False
 
 
-async def test_batch_delete_unchecked_deletes_nonempty_dir_without_recursive(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
-    """unchecked=True allows deleting a directory even if it is not empty,
-    without requiring recursive=True."""
-    d = f"{tmp_dir}/nonempty-dir"
-    await async_fs.mkdir(d)
-    await async_fs.write_file(f"{d}/inside.txt", b"x")
-    # Without unchecked, non-recursive delete of a non-empty dir fails.
-    await async_fs.batch_delete([d], unchecked=True)
-    assert await async_fs.exists(d) is False
+

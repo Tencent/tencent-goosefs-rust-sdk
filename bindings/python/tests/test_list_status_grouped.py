@@ -155,8 +155,8 @@ async def test_batch_list_status_grouped_recursive(
 
     groups = await async_fs.batch_list_status_grouped([parent], recursive=True)
     assert len(groups) == 1
-    # parent + sub/ + root.txt + sub/child.txt = at least 4.
-    assert len(groups[0]) >= 4
+    # parent's descendants: sub/ + root.txt + sub/child.txt = 3 entries.
+    assert len(groups[0]) >= 3
 
 
 # ---------------------------------------------------------------------------
