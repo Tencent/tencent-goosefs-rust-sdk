@@ -73,11 +73,8 @@ async def main() -> None:
 
     async with await AsyncGoosefs.connect(cfg) as fs:
         scratch = "/batch-status-example"
-        await fs.delete_with_options(
-            scratch,
-            recursive=True,
-            unchecked=True,
-        )
+        if await fs.exists(scratch):
+            await fs.delete(scratch, recursive=True)
         await fs.mkdir(scratch)
         print(f"Created scratch dir: {scratch}")
 

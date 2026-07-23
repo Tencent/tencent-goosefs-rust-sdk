@@ -72,11 +72,8 @@ async def main() -> None:
 
     async with await AsyncGoosefs.connect(cfg) as fs:
         scratch = "/batch-files-example"
-        await fs.delete_with_options(
-            scratch,
-            recursive=True,
-            unchecked=True,
-        )
+        if await fs.exists(scratch):
+            await fs.delete(scratch, recursive=True)
         await fs.mkdir(scratch)
         print(f"Created scratch dir: {scratch}")
 
@@ -146,10 +143,14 @@ async def main() -> None:
         # 6. batch_delete — N deletes in parallel.
         #    recursive=True lets us wipe the whole scratch tree in one call.
         # ----------------------------------------------------------------
-        to_delete = dirs + renamed
-        await fs.batch_delete(to_delete, recursive=True)
-        after = await fs.batch_exists(to_delete)
-        print(f"\nbatch_delete({len(to_delete)} paths):")
+        # Only delete the parent directories (recursive=True wipes their
+        # children too). Including the child files in the batch would race:
+        # if a parent dir finishes first, the child delete sees a missing
+        # path and the whole batch fails.
+        # ----------------------------------------------------------------
+        await fs.batch_delete(dirs, recursive=True)
+        after = await fs.batch_exists(dirs + renamed)
+        print(f"\nbatch_delete({len(dirs)} dirs, recursive=True):")
         print(f"  all gone = {not any(after)}")
         assert not any(after), "all paths should be gone after delete"
 

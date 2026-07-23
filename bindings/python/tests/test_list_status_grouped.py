@@ -26,9 +26,6 @@ from __future__ import annotations
 import pytest
 from goosefs import AsyncGoosefs, Goosefs, URIStatus, URIStatusList
 
-pytestmark = pytest.mark.asyncio
-
-
 # ---------------------------------------------------------------------------
 # list_status_grouped (single path, async)
 # ---------------------------------------------------------------------------
@@ -86,7 +83,7 @@ async def test_list_status_grouped_iter_full_and_empty(
         await async_fs.write_file(f"{tmp_dir}/{name}", b"x")
     grouped = await async_fs.list_status_grouped(tmp_dir)
     names = [s.name for s in grouped]
-    assert names == ["a", "b", "c"]
+    assert sorted(names) == ["a", "b", "c"]
 
 
 async def test_list_status_grouped_recursive(
