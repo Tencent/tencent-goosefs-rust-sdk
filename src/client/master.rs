@@ -916,6 +916,15 @@ impl MasterClientPool {
                 let lb = self.clients[b].inflight.load(Ordering::Relaxed);
                 let idx = if la <= lb { a } else { b };
 
+                // TOCTOU note: the counter is only incremented inside
+                // with_retry (not at pick time). This leaves a sub-
+                // microsecond window between pick() and the first RPC
+                // increment, during which another pick() could observe
+                // the same stale value. In practice this is negligible —
+                // callers immediately .await on the returned client —
+                // and a fetch_add here would leak one increment per
+                // pick() (unbalanced against with_retry's +1/-1 per RPC).
+
                 debug!(
                     a_idx = a,
                     b_idx = b,
