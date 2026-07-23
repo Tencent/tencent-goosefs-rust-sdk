@@ -109,8 +109,9 @@ pub struct FileSystemContext {
 
     /// Persistent Master gRPC connection pool (metadata RPCs).
     ///
-    /// Round-robin pool of `config.master_connection_pool_size` channels
-    /// (default 1 = single channel, backward compatible). See Part V R3.
+    /// Pool of `config.master_connection_pool_size` channels (default 1).
+    /// Scheduling strategy is controlled by `master_connection_pool_schedule`
+    /// (default `RoundRobin`; set to `P2C` for adaptive load balancing).
     master_pool: Arc<MasterClientPool>,
 
     /// Persistent WorkerManager gRPC connection (`GetWorkerInfoList`).
@@ -132,7 +133,7 @@ pub struct FileSystemContext {
     /// this context share one hot-block reader LRU + negative cache: a hot
     /// local block is `OpenLocalBlock`+mmap'd once and reused across every
     /// concurrent stream/task, instead of once per stream. `None` when the SC
-    /// kill switch is off. See `docs/SHORT_CIRCUIT_DESIGN.md` §3.5 / §10 P8.
+    /// kill switch is off. See `docs/SHORT_CIRCUIT_DESIGN.md`  /  P8.
     short_circuit: Option<Arc<ShortCircuitFactory>>,
 
     /// Client-side local page cache, when `config.client_cache_enabled`.
@@ -143,7 +144,7 @@ pub struct FileSystemContext {
     cache_manager: Option<Arc<dyn CacheManager>>,
 
     /// Opt-in short-TTL `FileInfo` metadata cache
-    /// (FLAMEGRAPH_OPTIMIZATION_PLAN §A3).
+    ///
     ///
     /// `None` only when `config.file_info_cache_ttl == 0`. By default the
     /// TTL is 30 s, so this is a live cache. When enabled,
@@ -289,7 +290,7 @@ impl FileSystemContext {
             None
         };
 
-        // Build the opt-in FileInfo (metadata) cache — §A3. `maybe_new`
+        // Build the opt-in FileInfo (metadata) cache — . `maybe_new`
         // returns `None` when the TTL is zero (default), so this is a
         // no-op unless the caller explicitly opted in via
         // `with_file_info_cache_ttl`.
@@ -299,7 +300,7 @@ impl FileSystemContext {
             debug!(
                 ttl_ms = config.file_info_cache_ttl.as_millis(),
                 capacity = config.file_info_cache_capacity,
-                "FileInfo metadata cache enabled (opt-in, §A3), ttl={:?}",
+                "FileInfo metadata cache enabled (opt-in), ttl={:?}",
                 c.ttl(),
             );
         }
@@ -338,11 +339,14 @@ impl FileSystemContext {
 
     // ── Acquisition API ──────────────────────────────────────────────────────
 
-    /// Return a shared `MasterClient` from the pool (zero-cost Arc clone).
+    /// Return a shared `MasterClient` from the pool.
     ///
-    /// With `master_connection_pool_size > 1` this round-robins across the
-    /// pooled channels to spread concurrent metadata RPCs over multiple
-    /// HTTP/2 connections (Part V R3).
+    /// With `master_connection_pool_schedule = RoundRobin` (default) this
+    /// cycles through pooled channels in order. With `P2C` it picks the
+    /// least-loaded connection out of two random candidates. Per-channel
+    /// in-flight counts are tracked inside `MasterClient::with_retry`, so
+    /// the load signal stays accurate even for clients cloned out of the
+    /// pool (e.g. by `GoosefsFileWriter`).
     pub fn acquire_master(&self) -> Arc<MasterClient> {
         self.master_pool.pick()
     }
@@ -385,7 +389,7 @@ impl FileSystemContext {
     }
 
     /// Return the shared opt-in `FileInfo` metadata cache
-    /// (FLAMEGRAPH_OPTIMIZATION_PLAN §A3).
+    ///
     ///
     /// `None` only when `config.file_info_cache_ttl == 0` (opt-out).
     /// By default the TTL is 30 s, so this returns the live cache.
@@ -400,7 +404,7 @@ impl FileSystemContext {
     /// **Contract**: every write path (create, delete, rename, setAttr...)
     /// that mutates `path` on the master through this client MUST call this
     /// after the mutation is acknowledged, so subsequent reads observe the
-    /// fresh metadata (§A3).
+    /// fresh metadata().
     pub fn invalidate_file_info(&self, path: &str) {
         if let Some(cache) = &self.file_info_cache {
             cache.invalidate(path);
@@ -816,7 +820,7 @@ mod tests {
     /// without attempting any network connection when `metrics_enabled = false`.
     ///
     /// This is the core contract for the `disabled_no_task_spawn` requirement
-    /// from the design spec §8.1:
+    /// from the design spec :
     ///   - `metrics_enabled=false` → no HeartbeatTask spawned, no MetricsMasterClient created.
     ///
     /// We test the gate condition directly (the config flag check) rather than
@@ -854,7 +858,7 @@ mod tests {
     }
 
     /// Verify the `metrics_enabled` default value (true = opt-in enabled by default,
-    /// matching the design spec §2).
+    /// matching the design spec ).
     #[test]
     fn metrics_disabled_by_default() {
         let config = GoosefsConfig::new("127.0.0.1:9200");
@@ -875,7 +879,7 @@ mod tests {
 
     // ── A3: FileInfo cache opt-in semantics ─────────────────────────────
 
-    /// FLAMEGRAPH_OPTIMIZATION_PLAN §A3: the cache is **enabled** by default
+    /// The cache is **enabled** by default
     /// with a 30 s TTL, so `FileSystemContext::acquire_file_info_cache()`
     /// must return a live cache on a plain `GoosefsConfig::default()`.
     #[test]
@@ -887,7 +891,7 @@ mod tests {
         assert_eq!(
             cfg.file_info_cache_ttl,
             Duration::from_secs(30),
-            "default TTL must be 30 s (enabled by default per §A3)"
+            "default TTL must be 30 s (enabled by default)"
         );
         assert!(
             crate::file_info_cache::FileInfoCache::maybe_new(

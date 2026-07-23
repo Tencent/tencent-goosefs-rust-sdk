@@ -27,7 +27,7 @@
 //! ```
 //!
 //! Every variant of `goosefs_sdk::error::Error` is mapped explicitly by
-//! [`map_err`] — no variant falls through silently. See Review §17.1.
+//! [`map_err`] — no variant falls through silently. See Review .
 
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
@@ -54,7 +54,7 @@ create_exception!(goosefs.exceptions, AuthenticationFailed, GoosefsError);
 create_exception!(goosefs.exceptions, NoWorkerAvailable, GoosefsError);
 create_exception!(goosefs.exceptions, MasterUnavailable, GoosefsError);
 create_exception!(goosefs.exceptions, RpcError, GoosefsError);
-// `IoError` covers SDK `BlockIoError` — Review §17.8 made this its own class
+// `IoError` covers SDK `BlockIoError` — Review  made this its own class
 // so callers can distinguish transient block I/O failures from generic ones.
 create_exception!(goosefs.exceptions, IoError, GoosefsError);
 create_exception!(goosefs.exceptions, ConfigError, GoosefsError);
@@ -93,7 +93,7 @@ pub fn register_exceptions(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyRe
 /// Every variant of the upstream enum is matched explicitly. If a new variant
 /// is added to `goosefs-sdk` and we forget to update this function, the Rust
 /// compiler will fail the build (no `_` arm) — this is intentional, see
-/// Review §17.1.
+/// Review .
 //
 // Allowed because the first call site lands in P2 (`AsyncGoosefs::*` methods).
 #[allow(dead_code)]
@@ -113,7 +113,7 @@ pub fn map_err(e: goosefs_sdk::error::Error) -> PyErr {
         E::MasterUnavailable { .. } => MasterUnavailable::new_err(msg),
         E::ConfigError { .. } => ConfigError::new_err(msg),
         E::GrpcError { .. } | E::TransportError { .. } => RpcError::new_err(msg),
-        // Review §17.1 — three variants that the original draft let fall
+        // Review  — three variants that the original draft let fall
         // through to the catch-all. Handle them explicitly so the Python
         // exception type carries the correct semantics.
         E::MissingField { field } => {

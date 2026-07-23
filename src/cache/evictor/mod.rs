@@ -23,7 +23,7 @@
 //! `moka::sync::Cache` with per-segment write locks (~64 segments), replacing
 //! the previous global `Mutex` implementations that caused 38x contention
 //! under 32 concurrent reads. See
-//! `docs/perf/2026-07-09-oncpu6-concurrent-uring-analysis/MOKA_LRU_OPTIMIZATION.md`.
+//! the Moka LRU optimisation analysis.
 
 mod moka_evictor;
 

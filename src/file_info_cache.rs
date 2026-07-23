@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Opt-in short-TTL cache for `FileInfo` metadata
-//! (FLAMEGRAPH_OPTIMIZATION_PLAN §A3).
+//!
 //!
 //! # Rationale
 //!
@@ -62,7 +62,7 @@ struct CachedFileInfo {
     /// The `FileInfo` snapshot returned by `MasterClient::get_status`
     /// at capture time.
     ///
-    /// **S3** (`docs/perf/2026-07-07-hotspot-optimizations/README.md`):
+    ///:
     /// wrapped in `Arc<FileInfo>` so `get` returns an `Arc` clone (one
     /// atomic inc) instead of a deep `FileInfo::clone` (which copies
     /// `block_ids: Vec<i64>`, `file_block_infos: Vec<FileBlockInfo>`,
@@ -131,7 +131,7 @@ impl FileInfoCache {
     /// when the cached entry is older than `ttl` (in which case it is
     /// evicted lazily — no separate sweep task).
     ///
-    /// **S3**: returns `Arc<FileInfo>` instead of `FileInfo` — the clone
+    ///: returns `Arc<FileInfo>` instead of `FileInfo` — the clone
     /// is a single atomic increment rather than a deep copy of the
     /// `block_ids` / `file_block_infos` / `ufs_path` fields.
     pub fn get(&self, path: &str) -> Option<Arc<FileInfo>> {
@@ -164,7 +164,7 @@ impl FileInfoCache {
 
     /// Insert or refresh the cached entry for `path`.
     ///
-    /// **S3**: wraps `info` in `Arc<FileInfo>` on insert so `get` can
+    ///: wraps `info` in `Arc<FileInfo>` on insert so `get` can
     /// return an `Arc` clone (one atomic inc) instead of a deep copy.
     pub fn insert(&self, path: &str, info: FileInfo) {
         self.insert_arc(path, Arc::new(info));
@@ -175,7 +175,7 @@ impl FileInfoCache {
     /// both the `FileInfo::clone` for the cache and the `Arc::new` on
     /// the return path.
     ///
-    /// **S3**: added so `init_with_context` can do `cache.insert_arc(path,
+    ///: added so `init_with_context` can do `cache.insert_arc(path,
     /// arc.clone())` on a miss — the cache gets an `Arc` clone (atomic
     /// inc) and the caller keeps the original `Arc` (no deep copy at
     /// all on the miss path either).

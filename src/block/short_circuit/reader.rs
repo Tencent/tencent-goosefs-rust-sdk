@@ -16,11 +16,11 @@
 //!
 //! A `LocalBlockReader` maps a single Goosefs block file **once** into the
 //! process address space (whole-block read-only mmap) and serves all reads as
-//! pure slice operations with zero further syscalls (design §3.2). The
+//! pure slice operations with zero further syscalls (design ). The
 //! Worker-side block lock is held for the reader's lifetime by an
 //! [`OpenLocalBlockGuard`].
 //!
-//! See `docs/SHORT_CIRCUIT_DESIGN.md` §4.1 / §8 for the full contract and the
+//! See `docs/SHORT_CIRCUIT_DESIGN.md`  /  for the full contract and the
 //! consistency invariants (INV-D1..D4, INV-S2, INV-S5) this implements.
 
 use std::sync::Arc;
@@ -42,7 +42,7 @@ use super::{AccessHint, ShortCircuitError};
 /// `as_ref` exposes exactly the **logical** block (`[..file_size]`), not the
 /// whole physical mapping: if the on-disk block file is preallocated / sparse
 /// to a length greater than the logical block size, the trailing bytes must
-/// not be observable (INV-D2, design §4.1 `file_size` note).
+/// not be observable (INV-D2, design  `file_size` note).
 struct MmapChunk {
     mmap: Arc<Mmap>,
     /// Logical block length — the only region callers may observe.
@@ -62,7 +62,7 @@ impl AsRef<[u8]> for MmapChunk {
 /// that on Drop the mapping is released (munmap) first, then the guard closes
 /// the bidi stream (Worker unlock). Correctness does not depend on this order
 /// (the kernel keeps the inode alive via the VMA), but it makes the
-/// "release resource before releasing the permit" intent explicit (design §8.2).
+/// "release resource before releasing the permit" intent explicit (design ).
 pub struct LocalBlockReader {
     /// Block this reader serves.
     block_id: i64,
@@ -83,19 +83,19 @@ pub struct LocalBlockReader {
 }
 
 impl LocalBlockReader {
-    /// Open a short-circuit reader for `block_id` (design §4.1).
+    /// Open a short-circuit reader for `block_id` (design ).
     ///
     /// 1. Drives `OpenLocalBlock` to obtain the local `path` + logical
     ///    `block_size` and a lock-holding [`OpenLocalBlockGuard`].
     /// 2. Maps the whole block file read-only (one `mmap`), then drops the
     ///    `File` so no fd is retained (the VMA keeps the inode alive).
     /// 3. Applies the `madvise` hint derived from `hint` (L1 kernel readahead),
-    ///    and optionally `MADV_HUGEPAGE` when `thp` is set (Linux only, §11.1).
+    ///    and optionally `MADV_HUGEPAGE` when `thp` is set (Linux only, ).
     ///
     /// `block_size` is the caller's expected size used in the request; the
     /// **response** `block_size` is authoritative and becomes `file_size`.
     ///
-    /// ⚠️ `capability` source is a P3 item (design §3.1): on capability-enabled
+    /// ⚠️ `capability` source is a P3 item (design ): on capability-enabled
     /// clusters this must carry a valid capability or the Worker rejects the
     /// request. `None` = no capability (NOSASL / disabled clusters).
     pub async fn open(
@@ -123,7 +123,7 @@ impl LocalBlockReader {
         let file_size = resp.block_size.unwrap_or(block_size).max(0) as usize;
 
         // `File::open` + `Mmap::map` are short, metadata-only syscalls (no data
-        // IO); per design §3.4 they run directly on the calling task (no
+        // IO); per design  they run directly on the calling task (no
         // spawn_blocking). The fd is dropped immediately after mapping.
         let file = std::fs::File::open(&path).map_err(|e| {
             metrics::counter(name::CLIENT_SC_FILE_OPEN_FAIL).inc(1);
@@ -131,7 +131,7 @@ impl LocalBlockReader {
         })?;
 
         // SAFETY: We map the block file read-only for the reader's lifetime.
-        // The safety precondition is INV-D1 (design §8.1): the Worker holds the
+        // The safety precondition is INV-D1 (design ): the Worker holds the
         // block lock (via `guard`) for as long as this mapping lives and a
         // committed block file is immutable, so the bytes under the mapping do
         // not change / truncate. If that protocol guarantee were violated a
@@ -226,7 +226,7 @@ impl LocalBlockReader {
         }
     }
 
-    /// Zero-copy borrow of `[offset, offset+len)` (design §3.3).
+    /// Zero-copy borrow of `[offset, offset+len)` (design ).
     ///
     /// Pure pointer arithmetic — no syscall. The slice borrows `self`, so it
     /// cannot outlive the reader. For an owned, `'static`, cross-await handle
@@ -240,7 +240,7 @@ impl LocalBlockReader {
     }
 
     /// Zero-copy, ref-counted [`Bytes`] view of `[offset, offset+len)`
-    /// (design §3.3).
+    /// (design ).
     ///
     /// Uses [`Bytes::from_owner`] so the returned `Bytes` (and any clone /
     /// sub-slice) keeps the underlying `Arc<Mmap>` alive until the last
@@ -259,7 +259,7 @@ impl LocalBlockReader {
         Ok(full.slice(offset..offset + len))
     }
 
-    /// Copy `dst.len()` bytes starting at `offset` into `dst` (design §3.3).
+    /// Copy `dst.len()` bytes starting at `offset` into `dst` (design ).
     ///
     /// For callers that must own the buffer. Returns the number of bytes
     /// copied (`dst.len()`).
@@ -272,7 +272,7 @@ impl LocalBlockReader {
         Ok(len)
     }
 
-    /// L2 application-level prefetch (design §3.2.1): asynchronously ask the
+    /// L2 application-level prefetch (design ): asynchronously ask the
     /// kernel to read `[offset, offset+len)` into the page cache via
     /// `madvise(MADV_WILLNEED)`.
     ///
@@ -291,7 +291,7 @@ impl LocalBlockReader {
         Ok(())
     }
 
-    /// L2 batch prefetch (design §4.1 / §3.2.1): coalesce + sort the requested
+    /// L2 batch prefetch (design  / ): coalesce + sort the requested
     /// ranges (merging gaps ≤ `coalesce_gap`) and issue one `madvise` per
     /// merged span to minimise syscalls.
     ///
@@ -395,7 +395,7 @@ fn coalesce_ranges(ranges: &[(usize, usize)], gap: usize) -> Vec<(usize, usize)>
     merged
 }
 
-/// Apply the L1 kernel-readahead hint (design §3.2.1 "L1 decision matrix").
+/// Apply the L1 kernel-readahead hint (design  "L1 decision matrix").
 ///
 /// `madvise` is unix-only in `memmap2`; on other targets this is a no-op and
 /// `AccessHint::Default` is the safe cross-platform default.
@@ -416,7 +416,7 @@ fn apply_advice(mmap: &Mmap, hint: AccessHint) {
 fn apply_advice(_mmap: &Mmap, _hint: AccessHint) {}
 
 /// Request Transparent Huge Pages for the mapping via `madvise(MADV_HUGEPAGE)`
-/// (design §11.1). Linux only — file-backed THP support is kernel/FS
+/// (design ). Linux only — file-backed THP support is kernel/FS
 /// dependent, so this is best-effort and failures are logged and ignored.
 /// A no-op on every non-Linux target (no `MADV_HUGEPAGE` there).
 #[cfg(target_os = "linux")]

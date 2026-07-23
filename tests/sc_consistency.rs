@@ -14,10 +14,10 @@
 
 //! Gating-grade short-circuit **consistency** regression suite.
 //!
-//! This is the test file referenced by `docs/SHORT_CIRCUIT_DESIGN.md` §5.3
+//! This is the test file referenced by `docs/SHORT_CIRCUIT_DESIGN.md`
 //! item 5 (`cargo test --test sc_consistency`). Unlike the perf-oriented
 //! `short_circuit_e2e.rs`, every case here is a hard byte-level invariant
-//! check derived from §1.3:
+//! check derived from :
 //!
 //! | Case                                | Invariant              |
 //! |-------------------------------------|------------------------|

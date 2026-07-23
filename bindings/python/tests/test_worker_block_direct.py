@@ -39,7 +39,7 @@ Layer 2 deliberately does **not** depend on ``URIStatus.block_ids`` —
 on a dev cluster running in "UFS-only / no-tier-cache" mode the master
 may not have received any block report yet, so ``status.block_ids`` can
 legitimately be empty (see the GooseFS Rust/Python/Java client stress
-comparison docs, §3.4 Python section, for the discussion). Even in that
+comparison docs for the discussion). Even in that
 state, ``AsyncWorkerClient.connect(...) + read_block_positioned(fake_id)``
 is enough end-to-end evidence that the binding hits the worker directly:
 the worker rejects the request with a ``"Failed to read block ID=...

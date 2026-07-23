@@ -64,8 +64,8 @@ mod e2e {
         config.auth_type = auth_type();
         // These tests specifically exercise the short-circuit read path. The
         // SDK default for `short_circuit_enabled` was flipped to `false` in
-        // the 2026-07-07 hotspot pass (see docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md
-        // §C6), so opt back in explicitly here — otherwise all SC counters
+        // the hotspot pass optimisation
+        // ), so opt back in explicitly here — otherwise all SC counters
         // stay at zero and every assertion below trips.
         // The one gRPC-baseline callsite (`short_circuit_matches_grpc`) still
         // overrides this to `false` locally, so byte-parity is preserved.
@@ -338,7 +338,7 @@ mod e2e {
 //
 // The suite above validates short-circuit on `GoosefsFileInStream`. The one
 // below validates that short-circuit is also wired into `GoosefsFileReader`'s
-// per-block collection point `read_segment` (design §8.2), the path OpenDAL /
+// per-block collection point `read_segment` (design ), the path OpenDAL /
 // Lance drive. The page cache is disabled here so every read flows straight
 // through `read_file_range → read_segment → try_short_circuit_read`, isolating
 // the SC path. Same local-worker requirement + `#[ignore]` policy as above.
@@ -427,7 +427,7 @@ mod reader_sc {
         counter(name::CLIENT_SC_READ_BYTES).get()
     }
 
-    /// §8.2 — short-circuit engages on a local worker **through the
+    ///  — short-circuit engages on a local worker **through the
     /// GoosefsFileReader read path** and returns the exact written bytes.
     ///
     /// Proves the reader's per-block collection point (`read_segment`) attempts
@@ -447,11 +447,7 @@ mod reader_sc {
         // read_file_range → read_segment → short-circuit).
         let whole = GoosefsFileReader::read_file_with_context(ctx.clone(), &path).await?;
         assert_eq!(whole.len(), payload.len(), "whole read length");
-        assert_eq!(
-            whole.as_ref(),
-            payload.as_slice(),
-            "whole read bytes (§8.2)"
-        );
+        assert_eq!(whole.as_ref(), payload.as_slice(), "whole read bytes");
 
         // A few range reads too, including a page-crossing and a tail read.
         let cases: &[(u64, u64)] = &[

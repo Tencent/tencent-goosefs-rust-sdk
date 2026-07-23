@@ -15,7 +15,7 @@
 //! `goosefs.enable_tracing()` — opt-in bridge from the SDK's `tracing`
 //! events to a stderr subscriber.
 //!
-//! Review §17.7. We deliberately keep this minimal:
+//! Review . We deliberately keep this minimal:
 //!
 //! 1. **Off by default.** Importing `goosefs` does *not* install any
 //!    subscriber, so library users that already configured their own

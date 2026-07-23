@@ -137,12 +137,12 @@ async fn main() -> Result<()> {
         println!("  - {}", entry.path.as_deref().unwrap_or("unknown"));
     }
 
-    // // Delete the file
+    // Delete the file
     // println!("\n8. Deleting the file...");
     // master.delete("/test-demo/world.txt", false).await?;
     // println!("File deleted successfully");
     //
-    // // Delete the directory
+    // Delete the directory
     // println!("\n9. Deleting the directory...");
     // master.delete("/test-demo", true).await?;
     // println!("Directory deleted successfully");

@@ -115,7 +115,7 @@ __all__ = [
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# atexit safety-net (Review §17.4)
+# atexit safety-net (Review )
 # ─────────────────────────────────────────────────────────────────────────────
 # Users *should* close every ``Goosefs`` / ``AsyncGoosefs`` they open, either
 # via ``close()`` or by using the (async) context-manager protocol. In real

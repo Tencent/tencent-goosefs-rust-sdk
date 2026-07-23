@@ -276,7 +276,7 @@ impl Drop for WriteBlockHandle {
 /// guard drops the sender, which closes the client half of the stream → the
 /// Worker observes `onCompleted` → unlocks the block.
 ///
-/// # Drop / unlock semantics (design §8.2.1)
+/// # Drop / unlock semantics (design )
 ///
 /// `Drop` is synchronous and cannot `await`, so unlock is **eventually
 /// released**: dropping the sender signals the close, and the actual
@@ -442,7 +442,7 @@ impl WorkerClient {
     ) -> Result<(mpsc::Sender<ReadRequest>, Streaming<ReadResponse>)> {
         let (tx, rx) = mpsc::channel::<ReadRequest>(32);
 
-        // Send the initial read request. `prefetch_window` (Part V R1-B-a)
+        // Send the initial read request. `prefetch_window`()
         // tells the worker how many extra chunks it may keep in flight,
         // raising the sequential-stream pipeline depth above the default
         // 4 MiB fallback.
@@ -515,7 +515,7 @@ impl WorkerClient {
 
     /// Open a **short-circuit** local block session.
     ///
-    /// Drives the `OpenLocalBlock` bidirectional streaming RPC (design §3.1):
+    /// Drives the `OpenLocalBlock` bidirectional streaming RPC (design ):
     /// sends a single [`OpenLocalBlockRequest`] `{ block_id, capability,
     /// block_size }`, waits for the first [`OpenLocalBlockResponse`] (carrying
     /// the on-disk `path` and the logical `block_size`), and returns it
@@ -539,7 +539,7 @@ impl WorkerClient {
     /// - [`Error`] from the underlying transport / gRPC status (e.g.
     ///   `NotFound` when the block is not local, `PermissionDenied` /
     ///   `AuthenticationFailed` for capability rejection). The short-circuit
-    ///   factory classifies these into fallback-vs-propagate (design §3.6).
+    ///   factory classifies these into fallback-vs-propagate (design ).
     #[instrument(skip(self, capability), fields(block_id = %block_id, block_size = %block_size))]
     pub async fn open_local_block(
         &self,
@@ -757,7 +757,7 @@ pub struct WorkerClientPool {
     /// clients-map write lock. Acquiring this mutex for one channel does not
     /// block other channels' reconnects.
     ///
-    /// **H2** (`docs/perf/2026-07-07-hotspot-optimizations/README.md`):
+    ///:
     /// changed from `tokio::sync::RwLock<HashMap<…>>` to `DashMap<…>` so the
     /// `reconnect_lock_for` read path is lock-free (shard-level striped lock
     /// inside DashMap, no async `.read().await` round-trip) — the old pattern
@@ -766,7 +766,7 @@ pub struct WorkerClientPool {
     /// Per-address round-robin counter used to pick the next channel slot when
     /// `pool_size > 1`. Lazily created on first `acquire` for an address.
     ///
-    /// **H2**: same `RwLock<HashMap> → DashMap` swap as `reconnect_locks`
+    ///: same `RwLock<HashMap> → DashMap` swap as `reconnect_locks`
     /// above; `next_slot`'s hot path no longer takes an async read lock.
     addr_rr: DashMap<String, Arc<AtomicU64>>,
     /// Number of channels to pool per worker address (≥ 1).
@@ -804,7 +804,7 @@ impl WorkerClientPool {
     /// Channel-map key for `(addr, slot)`. For a single-channel pool this is
     /// just `addr` (byte-identical to the legacy behaviour).
     ///
-    /// **H1** (`docs/perf/2026-07-07-hotspot-optimizations/README.md`):
+    ///:
     /// replaced `format!("{addr}#{slot}")` with a pre-sized `String` +
     /// `itoa::Buffer` to avoid the `core::fmt` machinery on every `acquire`
     /// when `pool_size > 1`.
@@ -823,7 +823,7 @@ impl WorkerClientPool {
 
     /// Pick the next round-robin slot for `addr` (always `0` when `pool_size == 1`).
     ///
-    /// **H2**: the `DashMap` read path is lock-free (shard-level striped
+    ///: the `DashMap` read path is lock-free (shard-level striped
     /// lock inside DashMap, no async `.read().await` round-trip). The old
     /// `tokio::sync::RwLock<HashMap>` pattern took an async read lock on
     /// every `acquire`, which contended under 32+ concurrent readers.
@@ -955,7 +955,7 @@ impl WorkerClientPool {
 
     /// Get (or lazily create) the per-address reconnect mutex.
     ///
-    /// **H2**: `DashMap::entry` is atomic (shard-level striped lock), so the
+    ///: `DashMap::entry` is atomic (shard-level striped lock), so the
     /// double-checked-locking pattern is no longer needed — a single
     /// `entry().or_insert_with()` call replaces the read-then-write pattern.
     async fn reconnect_lock_for(&self, addr: &str) -> Arc<AsyncMutex<()>> {
@@ -1161,7 +1161,7 @@ mod tests {
     }
 
     /// Worker-side multi-channel pool: `next_slot` round-robins per address
-    /// and `slot_key` composes the channel key (Part V worker-side pool).
+    /// and `slot_key` composes the channel key ( worker-side pool).
     #[tokio::test]
     async fn worker_pool_round_robins_slots() {
         let config = GoosefsConfig::new("127.0.0.1:9200").with_worker_connection_pool_size(4);

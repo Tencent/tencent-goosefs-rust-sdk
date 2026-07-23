@@ -52,20 +52,20 @@ use crate::metrics::name;
 use crate::proto::grpc::block::{ReadRequest, ReadResponse};
 use crate::proto::proto::dataserver::OpenUfsBlockOptions;
 
-/// Per-stream tuning knobs for the sequential read path (Part V R1-B).
+/// Per-stream tuning knobs for the sequential read path().
 ///
 /// Carries the prefetch window, receive-buffer depth, and flow-control ACK
 /// coalescing thresholds resolved from [`GoosefsConfig`].
 #[derive(Debug, Clone, Copy)]
 pub struct ReadTuning {
-    /// Prefetch window in chunks sent on the initial `ReadRequest` (R1-B-a).
+    /// Prefetch window in chunks sent on the initial `ReadRequest`().
     pub prefetch_window: i32,
     /// Receive-buffer depth between the background drain task and the
-    /// consumer, in messages (R1-B-b).
+    /// consumer, in messages().
     pub buffer_messages: usize,
-    /// ACK coalescing threshold in bytes (R1-B-c).
+    /// ACK coalescing threshold in bytes().
     pub ack_interval_bytes: i64,
-    /// ACK coalescing threshold in chunks (R1-B-c).
+    /// ACK coalescing threshold in chunks().
     pub ack_interval_chunks: u32,
 }
 
@@ -101,7 +101,7 @@ enum ChunkSource {
     /// Direct streaming — used by positioned (random) reads. ACKs are sent
     /// per chunk; no background task is spawned (one-shot, low overhead).
     Direct(Streaming<ReadResponse>),
-    /// Buffered drain — used by the sequential read path (Part V R1-B-b). A
+    /// Buffered drain — used by the sequential read path(). A
     /// background task drains the tonic stream into a bounded channel so the
     /// network pull is decoupled from application consumption.
     Buffered {
@@ -191,7 +191,7 @@ fn check_positioned_read_complete(block_id: i64, bytes_received: i64, length: i6
 }
 
 /// Decide whether a coalesced flow-control ACK should be emitted now
-/// (Part V R1-B-c). Pure function so the policy is unit-testable without a
+///(). Pure function so the policy is unit-testable without a
 /// live stream.
 ///
 /// An ACK fires when *either* coalescing threshold is reached, *or* the full
@@ -266,17 +266,17 @@ impl GrpcBlockReader {
     }
 
     /// Open a sequential block reader with prefetch + buffered drain + ACK
-    /// coalescing (Part V R1-B).
+    /// coalescing().
     ///
     /// Unlike [`Self::open`], this:
     /// - sends `prefetch_window` on the initial request so the worker keeps
-    ///   `(1 + prefetch_window)` chunks in flight (R1-B-a);
+    ///   `(1 + prefetch_window)` chunks in flight();
     /// - spawns a background task that drains the tonic stream into a bounded
     ///   channel (`buffer_messages` deep), decoupling network pull from
-    ///   application consumption (R1-B-b);
+    ///   application consumption();
     /// - coalesces flow-control ACKs to one per `ack_interval_bytes` /
     ///   `ack_interval_chunks` (plus a forced ACK at EOF), cutting round-trips
-    ///   (R1-B-c). **Default is one ACK per chunk** (`ack_interval_*` ⇒ every
+    ///. **Default is one ACK per chunk** (`ack_interval_*` ⇒ every
     ///   chunk) which is deadlock-safe regardless of the worker's flow-control
     ///   window; the `try_send` path still removes the blocking ACK cost.
     ///   Coalescing (>1 chunk) is opt-in via `GoosefsConfig` for workers
@@ -453,7 +453,7 @@ impl GrpcBlockReader {
     /// - `Full` ⇒ **keep the counters** and retry on the next chunk. Dropping
     ///   an ACK here is a *liveness* concern only, never a correctness one:
     ///   `offset_received` is always `offset + bytes_received`, which is
-    ///   monotonic regardless of how many ACKs are skipped (B4-2).
+    ///   monotonic regardless of how many ACKs are skipped().
     /// - `Closed` ⇒ the stream is finishing; log and move on.
     fn maybe_send_ack(&mut self, delta: i64) {
         self.bytes_since_last_ack += delta;
@@ -608,7 +608,7 @@ impl GrpcBlockReader {
 impl Drop for GrpcBlockReader {
     fn drop(&mut self) {
         // Abort the background drain task (if any) so it does not keep
-        // draining the stream after the consumer goes away (Part V R1-B-b).
+        // draining the stream after the consumer goes away().
         if let ChunkSource::Buffered { task, .. } = &self.source {
             task.abort();
         }
@@ -732,7 +732,7 @@ mod tests {
         assert!(check_positioned_read_complete(1, 5000, 4096).is_ok());
     }
 
-    /// R1-B-c: Direct positioned-read mode (`ack_interval_bytes == 0`,
+    /// : Direct positioned-read mode (`ack_interval_bytes == 0`,
     /// `ack_interval_chunks == 1`) ACKs on every chunk.
     #[test]
     fn should_send_ack_direct_mode_acks_every_chunk() {
@@ -740,7 +740,7 @@ mod tests {
         assert!(should_send_ack(64, 1, 0, 1, 64, 1_000_000));
     }
 
-    /// R1-B-c: in coalescing mode the ACK is suppressed until a threshold or
+    /// : in coalescing mode the ACK is suppressed until a threshold or
     /// completion is hit.
     #[test]
     fn should_send_ack_coalesces_until_threshold() {
@@ -775,7 +775,7 @@ mod tests {
         ));
     }
 
-    /// R1-B-c: the final chunk that completes the range always forces an ACK,
+    /// : the final chunk that completes the range always forces an ACK,
     /// even if neither coalescing threshold is met.
     #[test]
     fn should_send_ack_forces_final_ack_at_completion() {
@@ -789,7 +789,7 @@ mod tests {
         ));
     }
 
-    /// R1-B: `ReadTuning::from_config` reflects config defaults and clamps.
+    /// : `ReadTuning::from_config` reflects config defaults and clamps.
     #[test]
     fn read_tuning_from_config_defaults_and_clamps() {
         let mut cfg = crate::config::GoosefsConfig::new("127.0.0.1:9200");

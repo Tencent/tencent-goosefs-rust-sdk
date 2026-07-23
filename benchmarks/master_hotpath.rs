@@ -15,8 +15,8 @@
 //! Micro-benchmarks for the `MasterClient` hot-path optimisations introduced
 //! by the GetFileStatus performance work.
 //!
-//! See `docs/RUST_PYTHON_SDK_OPTIMIZATION.md` Part II (§1 / §3 /
-//! §4) for the full analysis. This file contains three benchmark
+//! See the SDK optimisation analysis for the full context.
+//! ) for the full analysis. This file contains three benchmark
 //! groups, each comparing the *old* implementation strategy against the
 //! *new* one, using identical inputs so the only variable is the strategy:
 //!

@@ -20,7 +20,7 @@ Mirrors the **PR section** of the Rust example
 and — crucially — the *same number of concurrent in-flight ``read_at``
 calls*.
 
-Why this exists (docs/RUST_PYTHON_SDK_OPTIMIZATION.md, Part V, hypothesis
+Why this exists (optimisation analysis, hypothesis
 B1): the remote stress reported "PR-1M Python beats Rust +47%". But the
 Python ``read_at`` binding calls the **same** SDK ``read_at`` as Rust plus
 one extra PyO3 hop, so at *matched* concurrency Python can only be

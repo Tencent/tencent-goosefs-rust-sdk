@@ -133,7 +133,7 @@ impl BaseFileSystem {
 
     // ── Internal helpers ─────────────────────────────────────────────────────
 
-    /// Obtain a `MasterClient` — O(1) Arc clone from the shared context.
+    /// Obtain a `MasterClient` from the shared pool.
     fn master(&self) -> Arc<MasterClient> {
         self.ctx.acquire_master()
     }

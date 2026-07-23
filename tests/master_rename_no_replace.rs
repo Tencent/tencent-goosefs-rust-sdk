@@ -14,7 +14,7 @@
 
 //! T0' — Master no-replace rename regression via pure SDK `MasterClient::rename`.
 //!
-//! Documents Lance/OpenDAL GooseFS safe Create (§8.8 T0'): when `dst` already
+//! Documents Lance/OpenDAL GooseFS safe Create ( T0'): when `dst` already
 //! exists, client RPC rename must return [`Error::AlreadyExists`] and **must
 //! not** overwrite `dst` contents. This path does **not** go through OpenDAL
 //! `GoosefsCore::rename` (which used to delete-then-rename).

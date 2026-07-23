@@ -26,7 +26,7 @@
 //!   + the [`should_use_short_circuit`] decision (P2).
 //! - [`AccessHint`] / [`ShortCircuitError`] — the public hint + error types.
 //!
-//! Consistency is the hard constraint (design §1.1 / §1.3): any error that is
+//! Consistency is the hard constraint (design  / ): any error that is
 //! *recoverable* falls back transparently to the gRPC path (INV-S1), whereas
 //! *semantic* errors (`OutOfRange`) are propagated unchanged (INV-S4).
 
@@ -40,7 +40,7 @@ pub use factory::{
 };
 pub use reader::LocalBlockReader;
 
-/// L1 kernel-readahead hint applied via `madvise` after mapping (design §3.2.1).
+/// L1 kernel-readahead hint applied via `madvise` after mapping (design ).
 ///
 /// On non-unix targets `madvise` is unavailable and all variants behave like
 /// [`AccessHint::Default`] (no hint), which is the safe cross-platform default.
@@ -70,7 +70,7 @@ impl AccessHint {
     }
 }
 
-/// Errors specific to the short-circuit path (design §7.1).
+/// Errors specific to the short-circuit path (design ).
 ///
 /// All variants are *recoverable* (transparently fall back to gRPC, INV-S1)
 /// **except** [`ShortCircuitError::OutOfRange`], which is a caller/semantic
@@ -110,7 +110,7 @@ pub enum ShortCircuitError {
     SizeMismatch { logical: usize, mapped: usize },
 
     /// `madvise` failed (currently unused on the error path — advise failures
-    /// are non-fatal and logged; kept for completeness with design §7.1).
+    /// are non-fatal and logged; kept for completeness with design ).
     #[error("short-circuit: madvise failed: {0}")]
     Madvise(#[source] std::io::Error),
 

@@ -199,8 +199,8 @@ pub struct GoosefsFileWriter {
     /// Worker router for block → worker mapping (with failed-worker exclusion).
     /// Worker router view for block → worker mapping.
     ///
-    /// P0-D Step 2 (`docs/perf/2026-07-07-hotspot-optimizations/README.md`
-    /// §3.4): migrated from `WorkerRouter` (per-writer `ArcSwap`×3) to
+    ///  Step 2
+    /// migrated from `WorkerRouter` (per-writer `ArcSwap`×3) to
     /// `WorkerRouterView` (per-writer `Arc`×2 + `Option<i64>` value).
     /// `create_with_context` stores a `WorkerRouterView::empty()` placeholder
     /// so zero-byte writes never touch the hash ring; the first `write()`
@@ -376,7 +376,7 @@ impl GoosefsFileWriter {
     ///
     /// Safe to call multiple times — once initialized, this immediately returns.
     ///
-    /// **A1** (`docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md`): the local router is
+    ///: the local router is
     /// **replaced** by a snapshot of the shared context router, so no hash
     /// ring is rebuilt on the first `write()`. Failure isolation is preserved
     /// via the snapshot's own `failed_workers` DashMap.
@@ -398,9 +398,9 @@ impl GoosefsFileWriter {
             }
             // Wait-free view: clones two `Arc`s (workers + hash_ring) plus a
             // value copy of `local_worker_id`. Does NOT rebuild the ring and
-            // does NOT allocate any `ArcSwap` — the whole point of P0-D
-            // Step 2 (`docs/perf/2026-07-07-hotspot-optimizations/README.md`
-            // §3.4).
+            // does NOT allocate any `ArcSwap` — the whole point of
+            // Step 2
+            // ).
             self.router = WorkerRouterView::from_shared(&shared);
             self._router_needs_init.store(false, Ordering::Release);
         }
@@ -492,8 +492,7 @@ impl GoosefsFileWriter {
     /// Append data to the per-block cache stream, slicing at block boundaries.
     ///
     /// To avoid the server-side concurrent-writer race in
-    /// `LocalFileBlockWriter.appendComposite` (see
-    /// `docs/BUG_concurrent_writer_file_length_inconsistent.md`), every chunk
+    /// `LocalFileBlockWriter.appendComposite`, every chunk
     /// pushed onto the gRPC stream is **exactly `chunk_size` bytes**, except
     /// at safe boundaries (block end / explicit flush / block close), where a
     /// trailing partial chunk is allowed because no further chunks follow on
@@ -1042,7 +1041,7 @@ impl GoosefsFileWriter {
             // TODO (Wave 2): call list_status(ALWAYS) to force the Master to reload
             // UFS metadata so a subsequent open() of this path returns the UFS file.
             // This requires adding a new list_status_with_load_metadata() variant to
-            // MasterClient (see T2-C in FINAL_DESIGN.md).
+            // MasterClient.
         }
         err
     }
@@ -1297,7 +1296,7 @@ fn compute_block_id(file_id: i64, block_index: u64) -> i64 {
 /// `LocalFileBlockWriter.appendComposite(CompositeByteBuf)` (which uses a
 /// position-relative gathering write on a shared `FileChannel` and is unsafe
 /// under concurrent stream pressure when chunks are not `chunk_size`-aligned;
-/// see `docs/BUG_concurrent_writer_file_length_inconsistent.md`), this struct
+/// this struct
 /// keeps a `pending_chunk` buffer. Bytes are accumulated until exactly one
 /// `chunk_size`-aligned chunk can be sent; any trailing remainder is held
 /// back and merged with subsequent writes. The buffer is force-flushed only

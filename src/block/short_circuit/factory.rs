@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! [`ShortCircuitFactory`] — per-task hot-block reader cache + the
-//! [`should_use_short_circuit`] decision (design §3.5 / §3.7 / §4.2).
+//! [`should_use_short_circuit`] decision (design  /  / ).
 //!
 //! The factory owns:
 //! - a **bounded** LRU of live [`LocalBlockReader`]s keyed by `block_id`, so a
@@ -21,11 +21,11 @@
 //! - a **bounded** negative cache of recently-failed `block_id`s so the SC path
 //!   is not retried for them until the entry expires (avoids repeated RTT),
 //! - a sticky process-level "SC disabled" flag set on a permanent failure
-//!   (e.g. `File::open` EACCES — uid mismatch, design §3.6).
+//!   (e.g. `File::open` EACCES — uid mismatch, design ).
 //!
 //! Both caches are bounded `LruCache`s (never a naked `HashMap`) so a workload
 //! touching many distinct block ids cannot grow them without bound (design
-//! §4.2). TTLs are enforced lazily on lookup.
+//! ). TTLs are enforced lazily on lookup.
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,7 +46,7 @@ use crate::proto::proto::security::Capability;
 use super::{AccessHint, LocalBlockReader, ShortCircuitError};
 
 /// Supplies the `Capability` to attach to an `OpenLocalBlock` request for a
-/// given block (design §3.1 / INV-S3).
+/// given block (design  / INV-S3).
 ///
 /// On capability-enabled clusters the Worker rejects `OpenLocalBlock` requests
 /// without a valid capability; an implementation of this trait is how the SC
@@ -61,7 +61,7 @@ pub trait CapabilityProvider: Send + Sync {
     fn capability_for(&self, block_id: i64) -> Option<Capability>;
 }
 
-/// Resolved short-circuit tuning, derived from [`GoosefsConfig`] (design §6).
+/// Resolved short-circuit tuning, derived from [`GoosefsConfig`] (design ).
 #[derive(Debug, Clone)]
 pub struct ShortCircuitConfig {
     /// Master kill switch (`goosefs.user.short.circuit.enabled`).
@@ -107,7 +107,7 @@ impl ShortCircuitConfig {
     }
 }
 
-/// Inputs to the [`should_use_short_circuit`] decision (design §3.7).
+/// Inputs to the [`should_use_short_circuit`] decision (design ).
 ///
 /// Kept as a plain data struct so the decision is a pure, unit-testable
 /// function independent of any live cluster state.
@@ -123,7 +123,7 @@ pub struct ScDecisionCtx {
     pub block_size: i64,
 }
 
-/// Pure SC gating decision (design §3.7 decision matrix).
+/// Pure SC gating decision (design  decision matrix).
 ///
 /// ```text
 /// should_use_short_circuit(cfg, ctx):
@@ -156,18 +156,18 @@ pub struct ShortCircuitFactory {
     /// Shared router (local-worker detection + addressing).
     router: Arc<WorkerRouter>,
     /// Hot-block reader LRU (bounded + idle TTL). Lazily initialised in
-    /// [`Self::cache`] / [`Self::neg_cache`] (P0-F.4): a `FileSystemContext`
+    /// [`Self::cache`] / [`Self::neg_cache`](): a `FileSystemContext`
     /// created with SC enabled but used purely for non-local reads (or
     /// never read from at all) never pays for the `Mutex<LruCache>` pair.
     /// Mirrors the `OnceLock<DashMap>` pattern used for `WorkerRouter`'s
-    /// `failed_workers` (P0-F.1).
+    /// `failed_workers`().
     cache: OnceLock<Mutex<LruCache<i64, CachedReader>>>,
     /// Bounded negative cache: `block_id -> last failure time`. See
     /// [`Self::cache`] for the lazy-init rationale.
     neg_cache: OnceLock<Mutex<LruCache<i64, Instant>>>,
     /// Sticky process-level disable (set on a permanent failure like EACCES).
     process_sc_disabled: AtomicBool,
-    /// Optional capability provider for `OpenLocalBlock` (design §3.1). `None`
+    /// Optional capability provider for `OpenLocalBlock` (design ). `None`
     /// → send no capability (works on capability-disabled / NOSASL clusters).
     capability_provider: Option<Arc<dyn CapabilityProvider>>,
     cfg: ShortCircuitConfig,
@@ -176,7 +176,7 @@ pub struct ShortCircuitFactory {
 impl ShortCircuitFactory {
     /// Create a factory from the shared pool + router and resolved SC config.
     ///
-    /// **Lazy construction (P0-F.4 / table row #4)**: the LRU caches are NOT
+    /// **Lazy construction ( / table row #4)**: the LRU caches are NOT
     /// allocated here — they are wrapped in `OnceLock<Mutex<LruCache<…>>>`
     /// and only created on the first [`Self::get_or_open`] / [`Self::should_use`]
     /// call that actually needs them. A factory created but never used (e.g.
@@ -202,7 +202,7 @@ impl ShortCircuitFactory {
 
     /// Construct the hot-block reader LRU on first use.
     ///
-    /// P0-F.4: `OnceLock::get_or_init` is the standard once-initialised
+    /// `OnceLock::get_or_init` is the standard once-initialised
     /// pattern; the first caller pays the `Mutex::new` + `LruCache::new`
     /// cost, every subsequent caller gets a `&Mutex<LruCache>` with no
     /// extra atomic. The closure is `FnOnce` so we move the capacity in.
@@ -238,7 +238,7 @@ impl ShortCircuitFactory {
     }
 
     /// Attach a [`CapabilityProvider`] used to populate `OpenLocalBlock`
-    /// requests (design §3.1). Builder style; defaults to no provider.
+    /// requests (design ). Builder style; defaults to no provider.
     pub fn with_capability_provider(mut self, provider: Arc<dyn CapabilityProvider>) -> Self {
         self.capability_provider = Some(provider);
         self
@@ -296,7 +296,7 @@ impl ShortCircuitFactory {
             .map_err(|e| ShortCircuitError::OpenLocalBlock(Box::new(e)))?;
 
         // 3) Open the local block. capability comes from the provider when one
-        //    is configured (design §3.1); otherwise `None` (no capability),
+        //    is configured (design ); otherwise `None` (no capability),
         //    which on a capability-enabled cluster triggers a transparent gRPC
         //    fallback (INV-S1/S3).
         let capability = self
@@ -321,7 +321,7 @@ impl ShortCircuitFactory {
             }
             Err(e) => {
                 // Permanent failures (EACCES) sticky-disable SC for the whole
-                // process (design §3.6); transient ones only negative-cache the
+                // process (design ); transient ones only negative-cache the
                 // block.
                 if let ShortCircuitError::FileOpen(io) = &e {
                     if io.kind() == std::io::ErrorKind::PermissionDenied {
@@ -508,9 +508,9 @@ mod tests {
 
     #[test]
     fn config_from_goosefs_config_defaults() {
-        // P2-B (2026-07-07): `GoosefsConfig::default()` now emits
+        // `GoosefsConfig::default()` now emits
         // `short_circuit_enabled: false` (see
-        // `docs/perf/2026-07-07-hotspot-optimizations/README.md` §5.2 and
+        //
         // `config::tests::test_short_circuit_enabled_default_is_false`).
         // `ShortCircuitConfig::from_config` faithfully mirrors that, so
         // the default `enabled` is `false`, not `true`. Flip it on
@@ -532,12 +532,12 @@ mod tests {
         assert!(sc_on.prefetch_enabled);
     }
 
-    /// P0-F.4: `ShortCircuitFactory::new` must NOT allocate either
+    /// `ShortCircuitFactory::new` must NOT allocate either
     /// `Mutex<LruCache>`. A factory created but never used (e.g. a
     /// `FileSystemContext` that only does non-local reads) should keep
     /// both `OnceLock`s uninitialised until the first `should_use` /
     /// `get_or_open` / `invalidate` / `mark_failure` / `is_process_disabled`
-    /// call. Mirrors the `WorkerRouter::failed_workers` P0-F.1
+    /// call. Mirrors the `WorkerRouter::failed_workers`
     /// lazy-init test.
     #[tokio::test]
     async fn test_factory_caches_are_lazy_initialised() {
@@ -546,8 +546,8 @@ mod tests {
 
         let pool = WorkerClientPool::new_shared(GoosefsConfig::new("127.0.0.1:9200"));
         let router = Arc::new(WorkerRouter::new());
-        // P0-F.4 needs SC actually enabled — otherwise `should_use` would
-        // short-circuit on `!self.cfg.enabled` (P2-B default) and never
+        //  needs SC actually enabled — otherwise `should_use` would
+        // short-circuit on `!self.cfg.enabled` (default) and never
         // touch the negative cache, masking the lazy-init we want to test.
         let cfg = GoosefsConfig::new("127.0.0.1:9200").with_short_circuit_enabled(true);
         let sc_cfg = ShortCircuitConfig::from_config(&cfg);

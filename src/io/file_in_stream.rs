@@ -157,8 +157,8 @@ pub struct GoosefsFileInStream {
     /// Worker router for block → worker selection.
     /// Worker router view for block → worker mapping.
     ///
-    /// P0-D Step 2 (`docs/perf/2026-07-07-hotspot-optimizations/README.md`
-    /// §3.4): migrated from `WorkerRouter` (per-stream `ArcSwap`×3) to
+    ///  Step 2
+    /// migrated from `WorkerRouter` (per-stream `ArcSwap`×3) to
     /// `WorkerRouterView` (per-stream `Arc`×2 + `Option<i64>` value).
     /// The legacy `open()` path builds the view via
     /// [`WorkerRouterView::from_workers`] (in-line ring build,
@@ -201,7 +201,7 @@ pub struct GoosefsFileInStream {
     /// off). When `Some`, both the positioned-read path (`read_external_range`)
     /// and the sequential `read()` path first attempt a local mmap read and
     /// transparently fall back to gRPC on any recoverable failure (INV-S1).
-    /// See `docs/SHORT_CIRCUIT_DESIGN.md` §4.3.
+    /// See `docs/SHORT_CIRCUIT_DESIGN.md` .
     short_circuit: Option<Arc<ShortCircuitFactory>>,
 
     /// Block id currently being served sequentially via the short-circuit
@@ -332,13 +332,13 @@ impl GoosefsFileInStream {
 
         // Reuse persistent Master connection — no network I/O.
         //
-        // **A3** (`docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md`): consult the opt-in
+        //: consult the opt-in
         // FileInfo metadata cache first. On hit, skip the RPC entirely; on
         // miss, populate the cache after a successful `get_status`. Cache is
         // `None` unless the caller has opted in via `with_file_info_cache_ttl`.
         let file_info_cache = ctx.acquire_file_info_cache();
         let file_info = if let Some(cached) = file_info_cache.as_ref().and_then(|c| c.get(path)) {
-            debug!(path = %path, "FileInfo cache hit (§A3 + S3)");
+            debug!(path = %path, "FileInfo cache hit");
             // S3: `cached` is `Arc<FileInfo>`; `from_proto` needs owned
             // `FileInfo`, so one clone is unavoidable here (it moves
             // the fields into URIStatus). The win is that the cache
@@ -374,7 +374,7 @@ impl GoosefsFileInStream {
         }
 
         // Reuse shared router — already populated and TTL-refreshed.
-        // A1 (`docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md`): clone the workers +
+        // A1: clone the workers +
         // hash_ring `Arc`s wait-free instead of rebuilding the ring. Failure
         // isolation is preserved via the new router's own `failed_workers`
         // DashMap.
@@ -392,7 +392,7 @@ impl GoosefsFileInStream {
 
         // Inject the shared page cache (best-effort; `None` when disabled).
         //
-        // HR-1 (design §9.2): see [`page_cache_eligible`]. This guard MUST run
+        // HR-1 (design ): see [`page_cache_eligible`]. This guard MUST run
         // before `on_file_open` below, otherwise a "0"-keyed open would pollute
         // the version table for the next id-less file.
         let cache = if page_cache_eligible(status.file_id) {
@@ -740,13 +740,13 @@ impl GoosefsFileInStream {
     /// **single-task tight loop** of sequential `read_at(...).await` calls
     /// leaves only one op in flight and is bottlenecked by the per-op
     /// round-trip (measured ~2x slower than the steady-state floor; see
-    /// `docs/RUST_PYTHON_SDK_OPTIMIZATION.md` Part V §V.5 "B1 verification results").
+    ///
     ///
     /// For throughput-oriented random reads, issue reads **concurrently**
     /// (one future per `read_at`, e.g. `stream::iter(..).buffer_unordered(8..16)`)
     /// so multiple ops overlap and hide each round-trip. Raising
     /// [`GoosefsConfig::worker_connection_pool_size`](crate::config::GoosefsConfig)
-    /// further lifts the single-connection ceiling. See Part IV of that doc
+    /// further lifts the single-connection ceiling. See  of that doc
     /// for caller-side concurrency patterns.
     ///
     /// # Authentication failure recovery
@@ -992,7 +992,7 @@ impl GoosefsFileInStream {
     /// - `None`           — SC was not used, or hit a recoverable failure;
     ///   the caller transparently falls back to the gRPC path (INV-S1).
     ///
-    /// capability is `None` here (design §3.1 P3 item — the read path has no
+    /// capability is `None` here — the read path has no
     /// capability fetcher yet). On capability-enabled clusters the
     /// `OpenLocalBlock` RPC is rejected and this returns `None`, so the read
     /// still completes over gRPC with identical bytes.
@@ -1003,7 +1003,7 @@ impl GoosefsFileInStream {
         offset_in_block: i64,
         length: i64,
     ) -> Option<Result<Bytes>> {
-        // §B1: SC decision histogram — count SKIPPED when the factory itself
+        // : SC decision histogram — count SKIPPED when the factory itself
         // is absent so hit_rate = HIT / (HIT + SKIPPED + FALLBACK_*) has a
         // stable denominator across `short_circuit_enabled` toggles.
         let factory = match self.short_circuit.as_ref() {

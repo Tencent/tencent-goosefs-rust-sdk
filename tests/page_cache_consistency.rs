@@ -15,9 +15,9 @@
 //! Gating-grade client page-cache **consistency** regression suite.
 //!
 //! This is the test file referenced by `docs/CLIENT_PAGE_CACHE_DESIGN.md`
-//! §12.5. Unlike `tests/page_cache_e2e.rs` (which is mostly about metric
+//! . Unlike `tests/page_cache_e2e.rs` (which is mostly about metric
 //! counter movement), every case here is a hard byte-level invariant
-//! check derived from §1.4:
+//! check derived from :
 //!
 //! | Case                                            | Invariant   |
 //! |-------------------------------------------------|-------------|
@@ -566,8 +566,8 @@ mod consistency {
 //
 // The suite above validates `GoosefsFileInStream`. The one below validates the
 // same page-cache invariants on `GoosefsFileReader`, whose streaming
-// `read_next_block` loop is the path OpenDAL / Lance actually drive (design §7).
-// Merge gate from the upgrade design §9.4 (HR-3) / §9.5 (HR-4):
+// `read_next_block` loop is the path OpenDAL / Lance actually drive (design ).
+// Merge gate from the upgrade design  (HR-3) /  (HR-4):
 //
 // | Case                                       | Invariant                  |
 // |--------------------------------------------|----------------------------|
@@ -666,7 +666,7 @@ mod reader_consistency {
 
     /// Read `[offset, offset+len)` through the **streaming** reader path
     /// (`open_range_with_context` → `read_next_block` loop) — exactly the path
-    /// OpenDAL / Lance drive. This is what the §7 change routes through the
+    /// OpenDAL / Lance drive. This is what the  change routes through the
     /// page cache.
     async fn read_range_via_reader(
         ctx: &Arc<FileSystemContext>,
@@ -912,7 +912,7 @@ mod reader_consistency {
 
     // ── HR-3 matrix edges: empty file + exact page-multiple length ───────────
 
-    /// Closes the remaining §9.4 boundary dimensions for the reader: an
+    /// Closes the remaining  boundary dimensions for the reader: an
     /// **empty file** (0 bytes) and a file whose length is an exact multiple of
     /// the cache page size (final page full, no EOF remainder). Both must be
     /// byte-identical across cache-off, cold, and warm.

@@ -2,7 +2,7 @@
 
 Every variant of ``goosefs_sdk::error::Error`` is mapped to one of the
 classes below by the Rust binding's ``map_err`` (no fall-through to a
-generic catch-all; see Review §17.1 in the design plan). All classes
+generic catch-all; see the design plan). All classes
 inherit from :class:`GoosefsError`, which itself inherits from
 ``Exception`` — so ``except GoosefsError`` is a safe, exhaustive
 fallback.

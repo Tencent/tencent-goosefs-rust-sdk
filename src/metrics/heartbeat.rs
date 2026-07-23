@@ -735,7 +735,7 @@ mod tests {
         );
 
         // Run the future and the time advance concurrently. We expect `fut`
-        // to finish (return ()) once 1s of paused time has elapsed.
+        // to finish (return()) once 1s of paused time has elapsed.
         tokio::select! {
             _ = fut => {}
             _ = async {

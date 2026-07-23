@@ -19,7 +19,7 @@
 //! batched submit, short-read/short-write retry) but extended to handle write,
 //! open, close, and unlink opcodes in addition to read.
 //!
-//! See `docs/CLIENT_PAGE_CACHE_DESIGN.md` §3.2.
+//! See `docs/CLIENT_PAGE_CACHE_DESIGN.md` .
 
 use super::requests::{IoRequest, UringOpType};
 use io_uring::{opcode, types, IoUring};
@@ -301,10 +301,9 @@ fn run_uring_thread(request_rx: Receiver<Arc<IoRequest>>, queue_depth: u32, thre
         // at all. The spin ensures CQEs are reaped with minimum latency
         // (~100ns vs ~10µs for submit_and_wait). The periodic yield
         // prevents the 8 uring threads from starving tokio workers
-        // (which caused P99 to balloon 5x in the B1 pure-spin attempt).
+        // (which caused P99 to balloon 5x in the pure-spin attempt).
         //
-        // See `docs/perf/2026-07-10-oncpu-concurrent-uring-analysis/README.md`
-        // §8.1.4 for the detailed analysis and rationale.
+        // See the concurrent uring analysis for the detailed rationale.
         if !pending.is_empty() && batch_count == 0 {
             let should_yield = SPIN_COUNT.with(|c| {
                 let n = c.get().saturating_add(1);

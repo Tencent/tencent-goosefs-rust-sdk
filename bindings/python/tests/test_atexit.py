@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the atexit safety-net (Review §17.4).
+"""Tests for the atexit safety-net.
 
 These tests verify that:
 

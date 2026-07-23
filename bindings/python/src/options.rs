@@ -20,7 +20,7 @@
 //!
 //! ## Why `__repr__` everywhere?
 //!
-//! Review §17.3 — option objects are frequently logged in user code; an
+//! Review  — option objects are frequently logged in user code; an
 //! empty `<OpenFileOptions object at 0x...>` repr is unhelpful. We build a
 //! deterministic, kwargs-style repr so logs are diff-friendly.
 

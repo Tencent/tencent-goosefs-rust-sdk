@@ -15,7 +15,7 @@
 //! `GoosefsFileReader` + client **page cache** end-to-end demo.
 //!
 //! This is the reader-side counterpart of `examples/page_cache_demo.rs` (which
-//! uses `GoosefsFileInStream`). It demonstrates the §7 integration: the
+//! uses `GoosefsFileInStream`). It demonstrates the  integration: the
 //! streaming `GoosefsFileReader::read_next_block` path — the exact path that
 //! OpenDAL / Lance drive — is now routed through the local page cache.
 //!

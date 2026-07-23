@@ -108,16 +108,15 @@ fn _goosefs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<streaming::PyFileReader>()?;
     m.add_class::<streaming::PyFileWriter>()?;
 
-    // P6 ── low-level Worker block client (stage A of the
-    // "Worker block direct" feature; see
-    // `docs/GooseFS_Python_SDK_PROBLEMS_AND_SOLUTIONS.md` §3.1).
+    // low-level Worker block client (stage A of the
+    // "Worker block direct" feature).
     m.add_class::<worker::PyAsyncWorkerClient>()?;
     // Sync escape hatch — mirrors `AsyncWorkerClient` for callers that
     // already know the worker address and want a one-shot blocking
     // positioned read without going through `Goosefs.positioned_read`.
     m.add_class::<worker::PyWorkerClient>()?;
 
-    // P7 ── opt-in tracing bridge (Review §17.7).
+    // opt-in tracing bridge (Review ).
     m.add_function(wrap_pyfunction!(tracing::enable_tracing, m)?)?;
 
     // Subsequent stages will register additional classes here.

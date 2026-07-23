@@ -20,7 +20,7 @@
 //! reuse the same async cores via [`crate::sync_fs::PyGoosefs::guarded_block_on`]-equivalent
 //! helpers, so the same deadlock and fork-safety guards from P3 apply.
 //!
-//! ## Concurrency model — Review §17.1
+//! ## Concurrency model — Review
 //!
 //! The SDK's reader/writer methods take `&mut self`, which means concurrent
 //! `await`s on the same Python object would race in Rust. We model this by
@@ -132,7 +132,7 @@ async fn pull_all(stream: &mut GoosefsFileInStream) -> PyResult<bytes::Bytes> {
 
 /// Prefetch hint: when the reader's prefetch buffer is empty, pull at least
 /// this many bytes from the SDK in one shot so subsequent small `read(n)`
-/// calls are served from the buffer (Part V P1).
+/// calls are served from the buffer().
 const PREFETCH_HINT_BYTES: usize = 1 << 20; // 1 MiB
 
 /// Pull `max(want, PREFETCH_HINT_BYTES)` bytes (or until EOF) from `stream`,
@@ -222,7 +222,7 @@ pub struct PyAsyncFileReader {
     /// Cached file length so `__len__` / `tell` do not need to acquire
     /// the mutex (and hence cannot deadlock with an in-flight read).
     file_length: i64,
-    /// Sequential-read prefetch buffer (Part V P1).
+    /// Sequential-read prefetch buffer().
     ///
     /// Holds bytes already pulled from the SDK but not yet delivered to the
     /// caller. Anchored on the logical (user-visible) position: `tell()` is
@@ -373,7 +373,7 @@ impl PyAsyncFileReader {
     /// `reader.tell()` → current byte position (sync, no I/O).
     ///
     /// Returns the **logical** position: the SDK stream position minus any
-    /// bytes still parked in the prefetch buffer (Part V P1 / A4).
+    /// bytes still parked in the prefetch buffer ( / A4).
     /// Implemented by acquiring the mutex with `try_lock()` so we don't
     /// block the caller — if a concurrent read is in flight we surface
     /// `RuntimeError` rather than silently waiting.
@@ -412,7 +412,7 @@ impl PyAsyncFileReader {
             // closing a reader is best-effort.
             let mut guard = inner.lock().await;
             let _ = guard.take();
-            // Drop any parked prefetch bytes (Part V P1 / A4).
+            // Drop any parked prefetch bytes ( / A4).
             *prefetch.lock().unwrap() = bytes::Bytes::new();
             Ok(())
         })
@@ -553,7 +553,7 @@ pub struct PyFileReader {
     // serialised by the GIL since sync methods never yield.
     inner: Arc<AsyncMutex<Option<GoosefsFileInStream>>>,
     file_length: i64,
-    /// Sequential-read prefetch buffer (Part V P1). Because sync methods are
+    /// Sequential-read prefetch buffer(). Because sync methods are
     /// serialised by the GIL, buffered slices are served **without** entering
     /// the Tokio runtime (`guarded_block_on`), eliminating the per-`read`
     /// runtime-scheduling cost that dominates SR-64K. See A4 for the
@@ -576,7 +576,7 @@ impl PyFileReader {
 impl PyFileReader {
     #[pyo3(signature = (size=-1))]
     fn read<'py>(&self, py: Python<'py>, size: i64) -> PyResult<Bound<'py, PyBytes>> {
-        // Fast path (Part V P1): serve a buffered slice WITHOUT entering the
+        // Fast path(): serve a buffered slice WITHOUT entering the
         // Tokio runtime. Sync methods are GIL-serialised, so the prefetch
         // buffer is safe to touch directly here. This is the path that fires
         // ~15 out of every 16 small `read(64k)` calls on a sequential scan,
@@ -663,7 +663,7 @@ impl PyFileReader {
             )));
         }
         // Clear the prefetch buffer and convert a relative seek to an
-        // absolute logical target (Part V P1 / A4).
+        // absolute logical target ( / A4).
         let parked_len = {
             let mut pf = self.prefetch.lock().unwrap();
             let len = pf.len() as i64;
@@ -717,7 +717,7 @@ impl PyFileReader {
     }
 
     fn close(&self, py: Python<'_>) -> PyResult<()> {
-        // Drop any parked prefetch bytes (Part V P1 / A4).
+        // Drop any parked prefetch bytes ( / A4).
         *self.prefetch.lock().unwrap() = bytes::Bytes::new();
         let inner = Arc::clone(&self.inner);
         guarded_block_on(py, async move {

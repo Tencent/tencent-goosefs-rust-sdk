@@ -81,7 +81,7 @@ pub(crate) fn format_worker_addr(addr: &goosefs_sdk::proto::grpc::WorkerNetAddre
 /// bytes, which is almost never what the caller meant. We forbid it so a
 /// silent-but-wrong write is converted into a clear `TypeError`.
 ///
-/// # Zero-copy fast path (Part V P2, `abi3-py311` only)
+/// # Zero-copy fast path (, `abi3-py311` only)
 ///
 /// When built with the `abi3-py311` feature the `pyo3::buffer` module is
 /// available, so a C-contiguous read-only buffer is wrapped — **without
@@ -121,7 +121,7 @@ pub(crate) fn extract_bytes_like(data: &Bound<'_, PyAny>) -> PyResult<bytes::Byt
 }
 
 /// Owner adaptor that lets `bytes::Bytes` borrow a `PyBuffer`'s memory with
-/// zero copy (Part V P2). `AsRef<[u8]>` exposes the contiguous bytes; the
+/// zero copy(). `AsRef<[u8]>` exposes the contiguous bytes; the
 /// `PyBuffer` is released on drop (pyo3 re-acquires the GIL internally).
 #[cfg(feature = "abi3-py311")]
 struct PyBufferOwner(pyo3::buffer::PyBuffer<u8>);
@@ -289,7 +289,7 @@ impl PyAsyncGoosefs {
     // in-flight at the same time instead of being serialised one-by-one at
     // the GIL. This is the lever for "application queries many paths at once":
     // it bypasses the per-op GIL-contention ceiling that single-op calls hit
-    // under high thread concurrency (see analysis §3.1 / scheme 1).
+    // under high thread concurrency (see analysis  / scheme 1).
     //
     // The concurrency cap (`BATCH_CONCURRENCY_LIMIT`, see `crate::context`)
     // bounds how many RPCs can be in flight per batch; this protects the

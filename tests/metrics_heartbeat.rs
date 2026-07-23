@@ -28,7 +28,7 @@
 //! `Arc<dyn MetricsClient>`) to avoid requiring a real Goosefs cluster.
 //! Tests that need a real cluster are marked `#[ignore]`.
 //!
-//! ## Design spec reference: §8.2
+//! ## Design spec reference:
 //!
 //! The primary verification is:
 //!   switch enabled → `counter.inc(N)` → after ≥ interval, server receives
@@ -85,7 +85,7 @@ impl goosefs_sdk::client::MetricsClient for MockMetricsClient {
 /// Build a `HeartbeatTask` wired to a `MockMetricsClient`.
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-/// **§8.2 core scenario**: counter.inc(N) → HeartbeatTask → MockMetricsClient
+/// ** core scenario**: counter.inc(N) → HeartbeatTask → MockMetricsClient
 /// receives `ClientMetrics` with `source = app_id` and the correct counter value.
 ///
 /// Uses `shutdown()` to trigger an immediate final flush rather than timer
@@ -122,7 +122,7 @@ async fn pipeline_counter_inc_reaches_heartbeat_payload() {
         .try_recv()
         .expect("heartbeat payload must have been sent on shutdown");
 
-    // §8.2: verify `source = app_id`
+    // : verify `source = app_id`
     assert!(!received.is_empty(), "ClientMetrics list must not be empty");
     let cm = &received[0];
     assert_eq!(
@@ -131,7 +131,7 @@ async fn pipeline_counter_inc_reaches_heartbeat_payload() {
         "ClientMetrics.source must equal the app_id passed to HeartbeatTask::spawn"
     );
 
-    // §8.2: verify the counter appears with the correct value.
+    // : verify the counter appears with the correct value.
     let metric = cm
         .metrics
         .iter()
@@ -151,7 +151,7 @@ async fn pipeline_counter_inc_reaches_heartbeat_payload() {
 /// Verify that a second heartbeat beat only carries the **incremental delta**,
 /// not the full cumulative value.
 ///
-/// This tests the diff semantics described in §4 (reporter) across the full
+/// This tests the diff semantics described in  (reporter) across the full
 /// pipeline.
 #[tokio::test]
 async fn pipeline_second_beat_carries_only_delta() {
@@ -246,7 +246,7 @@ fn disabled_no_task_spawn_config_flag() {
     );
 }
 
-/// Verify the well-known metric name constants are correct strings (§3 spec).
+/// Verify the well-known metric name constants are correct strings ( spec).
 ///
 /// These constants are embedded in the heartbeat payload `Metric.name` field
 /// and must match the Java SDK's metric names exactly to be aggregated

@@ -16,10 +16,10 @@ Thread / process safety
 - Instances are **NOT safe across ``os.fork()``** — a forked child must
   build a fresh instance. ``Goosefs`` records its creator PID in
   ``__new__`` and refuses any subsequent call from a different PID with
-  ``RuntimeError`` (see Review §17.4).
+  ``RuntimeError``.
 - ``Goosefs`` synchronous methods refuse to run from inside a Tokio
   worker thread or an asyncio event loop and raise ``RuntimeError``
-  (Review §17.1). Use the matching ``AsyncGoosefs`` coroutine instead.
+  (see the design review). Use the matching ``AsyncGoosefs`` coroutine instead.
 - ``FileReader`` / ``FileWriter`` (and their async siblings) are **NOT
   safe to share across threads / tasks**. Each handle wraps a single
   in-flight stream that is serialised by an internal mutex; concurrent
@@ -397,7 +397,7 @@ class FileReader:
 
     Each blocking call releases the GIL via ``Python::detach`` and is
     guarded against deadlock when invoked from a Tokio worker / asyncio
-    loop (Review §17.1).
+    loop (see the design review).
     """
 
     def read(self, size: int = ...) -> bytes: ...
@@ -795,7 +795,7 @@ class Goosefs:
 
     All blocking calls release the GIL and are guarded against being
     invoked from a Tokio worker or an asyncio event loop (raises
-    ``RuntimeError`` instead of deadlocking, Review §17.1).
+    ``RuntimeError`` instead of deadlocking).
 
     Not safe across ``os.fork()`` — a child process must reconnect.
     """
@@ -805,7 +805,7 @@ class Goosefs:
     # The ``__init__`` slot is ordinarily ``object.__init__`` for a PyO3
     # class (construction happens in ``__new__``), but ``goosefs/__init__.py``
     # replaces it with a thin wrapper that registers ``self`` into the
-    # atexit safety-net (Review §17.4). The wrapper accepts the same
+    # atexit safety-net (Review ). The wrapper accepts the same
     # ``config`` argument as ``__new__`` to keep the signature consistent
     # with what ``Goosefs(config)`` produces.
     def __init__(self, config: Config) -> None: ...

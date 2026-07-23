@@ -18,7 +18,7 @@
 //! Mirrors Lance `requests.rs` but extends the request type to cover write,
 //! open, close, and unlink operations (Lance only implements read).
 //!
-//! See `docs/CLIENT_PAGE_CACHE_DESIGN.md` §3.1.
+//! See `docs/CLIENT_PAGE_CACHE_DESIGN.md` .
 
 use bytes::BytesMut;
 use std::io;
