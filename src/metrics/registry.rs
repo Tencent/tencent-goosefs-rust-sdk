@@ -268,7 +268,7 @@ pub mod name {
     /// Actual `madvise(WILLNEED)` syscalls issued (after coalescing).
     pub const CLIENT_SC_PREFETCH_MADVISE: &str = "Client.ShortCircuitPrefetchMadvise";
 
-    // ── SC top-level decision histogram (FLAMEGRAPH_OPTIMIZATION_PLAN §B1) ──
+    // ── SC top-level decision histogram ──
     //
     // Enum-tagged counters that expose the **caller-visible** outcome of each
     // `try_short_circuit_read` invocation on the **positioned / random** read
@@ -479,7 +479,7 @@ mod tests {
 
     // ── B1: SC decision histogram constants ───────────────────────
 
-    /// FLAMEGRAPH_OPTIMIZATION_PLAN §B1: five enum-tagged decision
+    /// Five enum-tagged decision
     /// counters exposing the caller-visible SC outcome. Names follow
     /// the `Client.ShortCircuitDecision*` convention so operators can
     /// easily wildcard them in Prometheus / dashboards.

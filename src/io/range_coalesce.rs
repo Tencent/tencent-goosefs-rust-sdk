@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Range coalescing planner
-//! (FLAMEGRAPH_OPTIMIZATION_PLAN §B2).
+//!
 //!
 //! # Rationale
 //!
@@ -52,7 +52,7 @@
 //!   `max_bytes` is served as one fetch of that size (splitting a
 //!   single caller request would violate the byte-equivalence
 //!   contract). This mirrors the "avoid pathological blow-ups" wording
-//!   in FLAMEGRAPH_OPTIMIZATION_PLAN §B2.
+//!
 //! - Overlapping inputs are handled correctly: the merged fetch spans
 //!   the union of all overlapping ranges, and per-input slice indices
 //!   still recover exactly the original bytes.
@@ -190,7 +190,7 @@ pub fn plan(ranges: &[(u64, u64)], gap: u64, max_bytes: u64) -> CoalescePlan {
         // still served (splitting a single caller request is not our
         // job) — the cap only prevents *merging* from ballooning the
         // request. This matches the "avoid pathological blow-ups"
-        // wording in FLAMEGRAPH_OPTIMIZATION_PLAN §B2.
+        //
         let within_gap = off <= cur_end.saturating_add(gap);
         let effective_cap = max(max_bytes, cur_len);
         let within_cap = candidate_len <= effective_cap;

@@ -68,7 +68,7 @@ pub const RUNTIME_MAX_BLOCKING_THREADS: usize = 64;
 /// - `max_blocking_threads`: bumped to 64 so blocking SDK hops (DNS, filesystem
 ///   fallbacks) do not queue behind one another under load.
 ///
-/// # Environment overrides (FLAMEGRAPH_OPTIMIZATION_PLAN §B4 opt-in)
+/// # Environment overrides (analysis
 ///
 /// - `GOOSEFS_TOKIO_WORKER_THREADS` — override `worker_threads`. Values are
 ///   clamped to `>=1`. When unset, the default (`cpus.max(16)`) is used.
@@ -112,7 +112,7 @@ pub fn init_custom_runtime() {
 
 /// Parse an environment variable as `usize`, returning `None` on missing /
 /// empty / unparsable values. Used by [`init_custom_runtime`] to expose the
-/// runtime knobs called out in FLAMEGRAPH_OPTIMIZATION_PLAN §B4.
+/// runtime knobs called out in analysis.
 fn env_usize(key: &str) -> Option<usize> {
     match std::env::var(key) {
         Ok(v) => {
@@ -158,7 +158,7 @@ pub fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 mod tests {
     use super::*;
 
-    /// FLAMEGRAPH_OPTIMIZATION_PLAN §B4: the env-var override plumbing must
+    /// the env-var override plumbing must
     /// return `None` for missing / empty / unparsable values (falling back
     /// to the built-in default), and the parsed value otherwise. Uses a
     /// process-unique key so parallel test threads do not stomp on each

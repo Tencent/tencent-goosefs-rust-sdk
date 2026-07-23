@@ -450,7 +450,7 @@ impl MasterClient {
         //
         // Net effect on the success path (the common case): one `String`
         // allocation per `get_status` call instead of two. See
-                let mut path_owned: Option<String> = Some(path.to_string());
+        let mut path_owned: Option<String> = Some(path.to_string());
         let result = self
             .with_retry("get_status", |mut client| {
                 let req_path = path_owned.take().unwrap_or_else(|| path.to_string());

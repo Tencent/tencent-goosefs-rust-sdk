@@ -144,7 +144,7 @@ pub struct FileSystemContext {
     cache_manager: Option<Arc<dyn CacheManager>>,
 
     /// Opt-in short-TTL `FileInfo` metadata cache
-    /// (FLAMEGRAPH_OPTIMIZATION_PLAN §A3).
+    ///
     ///
     /// `None` only when `config.file_info_cache_ttl == 0`. By default the
     /// TTL is 30 s, so this is a live cache. When enabled,
@@ -389,7 +389,7 @@ impl FileSystemContext {
     }
 
     /// Return the shared opt-in `FileInfo` metadata cache
-    /// (FLAMEGRAPH_OPTIMIZATION_PLAN §A3).
+    ///
     ///
     /// `None` only when `config.file_info_cache_ttl == 0` (opt-out).
     /// By default the TTL is 30 s, so this returns the live cache.
@@ -879,7 +879,7 @@ mod tests {
 
     // ── A3: FileInfo cache opt-in semantics ─────────────────────────────
 
-    /// FLAMEGRAPH_OPTIMIZATION_PLAN §A3: the cache is **enabled** by default
+    /// The cache is **enabled** by default
     /// with a 30 s TTL, so `FileSystemContext::acquire_file_info_cache()`
     /// must return a live cache on a plain `GoosefsConfig::default()`.
     #[test]

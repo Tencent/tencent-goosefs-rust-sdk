@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Opt-in short-TTL cache for `FileInfo` metadata
-//! (FLAMEGRAPH_OPTIMIZATION_PLAN §A3).
+//!
 //!
 //! # Rationale
 //!

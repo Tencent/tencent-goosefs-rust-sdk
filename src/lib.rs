@@ -103,7 +103,7 @@ pub use crate::config::{
     ENV_CHUNK_SIZE,
     ENV_CONFIG_MANAGER_RPC_ADDRESSES,
     ENV_CONFIG_RPC_PORT,
-    // Performance tuning knobs (FLAMEGRAPH_OPTIMIZATION_PLAN §A3 / §B3).
+    // Performance tuning knobs.
     ENV_FILE_INFO_CACHE_CAPACITY,
     ENV_FILE_INFO_CACHE_TTL_MS,
     ENV_LOGIN_IMPERSONATION_USERNAME,

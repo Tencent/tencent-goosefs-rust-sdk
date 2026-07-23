@@ -201,7 +201,7 @@ impl WorkerRouter {
     /// `GoosefsFileReader::init_with_context` /
     /// `GoosefsFileInStream::open_with_context` /
     /// `GoosefsFileWriter::ensure_router_init` (see optimisation A1 in
-    /// 
+    ///
     ///
     /// Semantics guaranteed:
     /// - `select_worker` observes the **exact** ring the shared router had at

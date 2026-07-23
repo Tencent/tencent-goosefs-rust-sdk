@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -86,10 +86,10 @@ impl std::error::Error for UriParseError {}
 /// - `addrs` is split on `,`, whitespace-trimmed, empties dropped.
 /// - `root_path` is the URI path verbatim (leading `/` preserved) or `""`.
 /// - `?` / `#` are **not** recognised as query/fragment delimiters: this
-///   parser only splits authority vs path on the first `/`. Any `?` or `#`
-///   appearing before that `/` will be embedded verbatim into an address
-///   entry. Callers who need query-string driven config should use
-///   properties/env instead.
+/// parser only splits authority vs path on the first `/`. Any `?` or `#`
+/// appearing before that `/` will be embedded verbatim into an address
+/// entry. Callers who need query-string driven config should use
+/// properties/env instead.
 fn parse_gfs_uri(uri: &str) -> Result<(Vec<String>, String), UriParseError> {
     const SCHEME: &str = "gfs://";
     let rest = uri
@@ -436,15 +436,15 @@ impl PropertiesMap {
             }
         }
 
-        // ── Performance tuning knobs (FLAMEGRAPH_OPTIMIZATION_PLAN §A3 / §B3) ─
+        // ── Performance tuning knobs ─
         // Per-worker gRPC channel pool size:
-        //   goosefs.user.worker.connection.pool.size
+        // goosefs.user.worker.connection.pool.size
         // `0` is clamped to `1` to mirror the builder contract.
         if let Some(n) = self.get_parsed::<usize>("goosefs.user.worker.connection.pool.size") {
             cfg.worker_connection_pool_size = n.max(1);
         }
         // Client-side FileInfo cache TTL (milliseconds):
-        //   goosefs.user.file.info.cache.ttl.ms
+        // goosefs.user.file.info.cache.ttl.ms
         // `0` disables the cache (default). Chosen milliseconds rather than
         // seconds because the intended tuning range (100 ms – a few s) is
         // sub-second-sensitive on Lance / DuckDB open-heavy queries.
@@ -452,69 +452,69 @@ impl PropertiesMap {
             cfg.file_info_cache_ttl = Duration::from_millis(ms);
         }
         // FileInfo LRU cache capacity:
-        //   goosefs.user.file.info.cache.capacity
+        // goosefs.user.file.info.cache.capacity
         if let Some(n) = self.get_parsed::<usize>("goosefs.user.file.info.cache.capacity") {
             cfg.file_info_cache_capacity = n.max(1);
         }
 
         // ── Short-circuit (local mmap) read path ─────────────────
         // Master kill switch:
-        //   goosefs.user.short.circuit.enabled
+        // goosefs.user.short.circuit.enabled
         if let Some(enabled) = self.get_bool("goosefs.user.short.circuit.enabled") {
             cfg.short_circuit_enabled = enabled;
         }
         // Per-task hot-block LRU capacity:
-        //   goosefs.client.short.circuit.cache.capacity
+        // goosefs.client.short.circuit.cache.capacity
         if let Some(n) = self.get_parsed::<usize>("goosefs.client.short.circuit.cache.capacity") {
             cfg.short_circuit_cache_capacity = n;
         }
         // Cached SC reader idle TTL (milliseconds):
-        //   goosefs.client.short.circuit.cache.ttl.ms
+        // goosefs.client.short.circuit.cache.ttl.ms
         if let Some(ms) = self.get_parsed::<u64>("goosefs.client.short.circuit.cache.ttl.ms") {
             cfg.short_circuit_cache_ttl = Duration::from_millis(ms);
         }
         // Negative-cache TTL for blocks that failed SC (milliseconds):
-        //   goosefs.client.short.circuit.neg.cache.ttl.ms
+        // goosefs.client.short.circuit.neg.cache.ttl.ms
         if let Some(ms) = self.get_parsed::<u64>("goosefs.client.short.circuit.neg.cache.ttl.ms") {
             cfg.short_circuit_neg_cache_ttl = Duration::from_millis(ms);
         }
         // L1 kernel readahead hint (`sequential`/`random`/`normal`/`none`):
-        //   goosefs.client.short.circuit.advise
+        // goosefs.client.short.circuit.advise
         if let Some(hint) = self.get("goosefs.client.short.circuit.advise") {
             if !hint.is_empty() {
                 cfg.short_circuit_advise = hint.to_string();
             }
         }
         // L2 application-level prefetch master switch:
-        //   goosefs.client.short.circuit.prefetch.enabled
+        // goosefs.client.short.circuit.prefetch.enabled
         if let Some(enabled) = self.get_bool("goosefs.client.short.circuit.prefetch.enabled") {
             cfg.short_circuit_prefetch_enabled = enabled;
         }
         // Max gap between adjacent ranges merged by `prefetch_many` (bytes):
-        //   goosefs.client.short.circuit.prefetch.coalesce.gap
+        // goosefs.client.short.circuit.prefetch.coalesce.gap
         if let Some(n) =
             self.get_parsed::<usize>("goosefs.client.short.circuit.prefetch.coalesce.gap")
         {
             cfg.short_circuit_prefetch_coalesce_gap = n;
         }
         // Max `madvise` calls per `prefetch_many`:
-        //   goosefs.client.short.circuit.prefetch.max.batch
+        // goosefs.client.short.circuit.prefetch.max.batch
         if let Some(n) = self.get_parsed::<usize>("goosefs.client.short.circuit.prefetch.max.batch")
         {
             cfg.short_circuit_prefetch_max_batch = n;
         }
         // Minimum block size (bytes) required to attempt SC (`0` = no minimum):
-        //   goosefs.client.short.circuit.min.block.size
+        // goosefs.client.short.circuit.min.block.size
         if let Some(n) = self.get_parsed::<i64>("goosefs.client.short.circuit.min.block.size") {
             cfg.short_circuit_min_block_size = n;
         }
         // Install a process-global SIGBUS diagnostic handler (Linux/macOS):
-        //   goosefs.client.short.circuit.sigbus.handler
+        // goosefs.client.short.circuit.sigbus.handler
         if let Some(enabled) = self.get_bool("goosefs.client.short.circuit.sigbus.handler") {
             cfg.short_circuit_sigbus_handler = enabled;
         }
         // Request Transparent Huge Pages via `madvise(MADV_HUGEPAGE)` (Linux):
-        //   goosefs.client.short.circuit.thp
+        // goosefs.client.short.circuit.thp
         if let Some(enabled) = self.get_bool("goosefs.client.short.circuit.thp") {
             cfg.short_circuit_thp = enabled;
         }
@@ -529,14 +529,14 @@ const PROPERTIES_FILENAME: &str = "goosefs-site.properties";
 /// Discover a config file from the standard search paths.
 ///
 /// The search order mirrors the Java `SITE_CONF_DIR` property:
-///   `${goosefs.conf.dir}/, ${user.home}/.goosefs/, /etc/goosefs/`
+/// `${goosefs.conf.dir}/, ${user.home}/.goosefs/, /etc/goosefs/`
 ///
 /// Search order:
 /// 1. `$GOOSEFS_CONFIG_FILE` env var — explicit file path (Rust-only convenience)
 /// 2. `$GOOSEFS_CONF_DIR/goosefs-site.properties` — mirrors Java `goosefs.conf.dir`
 /// 3. `$GOOSEFS_HOME/conf/goosefs-site.properties` — fallback when `GOOSEFS_CONF_DIR` is unset
-/// 4. `~/.goosefs/goosefs-site.properties`          — user home
-/// 5. `/etc/goosefs/goosefs-site.properties`        — system-wide
+/// 4. `~/.goosefs/goosefs-site.properties` — user home
+/// 5. `/etc/goosefs/goosefs-site.properties` — system-wide
 pub fn discover_config_file() -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
 
@@ -548,7 +548,7 @@ pub fn discover_config_file() -> Option<std::path::PathBuf> {
         }
     }
 
-    // 2. $GOOSEFS_CONF_DIR/goosefs-site.properties  (≈ Java `goosefs.conf.dir`)
+    // 2. $GOOSEFS_CONF_DIR/goosefs-site.properties (≈ Java `goosefs.conf.dir`)
     if let Ok(conf_dir) = std::env::var(CONF_DIR) {
         let p = PathBuf::from(&conf_dir).join(PROPERTIES_FILENAME);
         if p.exists() {
@@ -556,7 +556,7 @@ pub fn discover_config_file() -> Option<std::path::PathBuf> {
         }
     }
 
-    // 3. $GOOSEFS_HOME/conf/goosefs-site.properties  (fallback for CONF_DIR)
+    // 3. $GOOSEFS_HOME/conf/goosefs-site.properties (fallback for CONF_DIR)
     if let Ok(home) = std::env::var(ENV_HOME) {
         let p = PathBuf::from(&home).join("conf").join(PROPERTIES_FILENAME);
         if p.exists() {
@@ -636,10 +636,10 @@ const DEFAULT_MASTER_CONNECTION_POOL_SIZE: usize = 1;
 /// Scheduling strategy for the master connection pool.
 ///
 /// - `RoundRobin` (default): cycle through pooled channels in order.
-///   Zero overhead, no in-flight tracking required.
+/// Zero overhead, no in-flight tracking required.
 /// - `P2C`: Power of Two Choices — sample two channels uniformly at
-///   random and pick the one with fewer in-flight RPCs. Requires
-///   `master_connection_pool_size > 1` to have any effect.
+/// random and pick the one with fewer in-flight RPCs. Requires
+/// `master_connection_pool_size > 1` to have any effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MasterPoolSchedule {
@@ -662,7 +662,7 @@ impl Default for MasterPoolSchedule {
 /// old value of `1` is kept as a floor / clamp target and as the single-shot
 /// value returned when the platform cannot report the CPU count.
 ///
-/// 
+///
 const DEFAULT_WORKER_CONNECTION_POOL_MIN: usize = 1;
 
 /// Upper cap for the worker connection pool default.
@@ -673,7 +673,7 @@ const DEFAULT_WORKER_CONNECTION_POOL_MIN: usize = 1;
 /// still opt in explicitly via
 /// [`GoosefsConfig::with_worker_connection_pool_size`].
 ///
-/// 
+///
 const DEFAULT_WORKER_CONNECTION_POOL_MAX: usize = 4;
 /// Default connect timeout: 30 seconds.
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 30_000;
@@ -946,7 +946,7 @@ pub const ENV_CLIENT_CACHE_URING_QUEUE_DEPTH: &str = "GOOSEFS_USER_CLIENT_CACHE_
 pub const ENV_CLIENT_CACHE_URING_THREAD_COUNT: &str =
     "GOOSEFS_USER_CLIENT_CACHE_URING_THREAD_COUNT";
 
-// ── Performance tuning env vars (FLAMEGRAPH_OPTIMIZATION_PLAN §A3 / §B3) ─
+// ── Performance tuning env vars ─
 /// Environment variable: per-worker gRPC channel pool size.
 ///
 /// Mirrors [`GoosefsConfig::worker_connection_pool_size`]. Values `< 1` are
@@ -961,7 +961,7 @@ pub const ENV_WORKER_CONNECTION_POOL_SIZE: &str = "GOOSEFS_WORKER_CONNECTION_POO
 /// Mirrors [`GoosefsConfig::file_info_cache_ttl`]. Default is `30000` (30 s),
 /// which enables the cache. Set to `0` to disable the cache. Any positive
 /// value controls staleness bound for out-of-band mutations. See
-/// FLAMEGRAPH_OPTIMIZATION_PLAN §A3.
+///
 ///
 /// Example: `export GOOSEFS_FILE_INFO_CACHE_TTL_MS=2000` (2 s TTL).
 pub const ENV_FILE_INFO_CACHE_TTL_MS: &str = "GOOSEFS_FILE_INFO_CACHE_TTL_MS";
@@ -1014,7 +1014,7 @@ pub const STORAGE_OPT_CLIENT_CACHE_URING_QUEUE_DEPTH: &str =
 pub const STORAGE_OPT_CLIENT_CACHE_URING_THREAD_COUNT: &str =
     "goosefs_client_cache_uring_thread_count";
 
-// ── Performance tuning storage-option keys (FLAMEGRAPH_OPTIMIZATION_PLAN §A3 / §B3) ─
+// ── Performance tuning storage-option keys ─
 /// Storage option key for the per-worker gRPC channel pool size.
 ///
 /// Companion to [`ENV_WORKER_CONNECTION_POOL_SIZE`]. Consumers such as
@@ -1125,13 +1125,13 @@ pub const STORAGE_OPT_SHORT_CIRCUIT_THP: &str = "goosefs_short_circuit_thp";
 ///
 /// # String representation (case-insensitive)
 ///
-/// | Variant       | Strings                              |
+/// | Variant | Strings |
 /// |---------------|--------------------------------------|
-/// | `MustCache`   | `must_cache`, `MUST_CACHE`            |
-/// | `TryCache`    | `try_cache`, `TRY_CACHE`              |
-/// | `CacheThrough`| `cache_through`, `CACHE_THROUGH`      |
-/// | `Through`     | `through`, `THROUGH`                  |
-/// | `AsyncThrough`| `async_through`, `ASYNC_THROUGH`      |
+/// | `MustCache` | `must_cache`, `MUST_CACHE` |
+/// | `TryCache` | `try_cache`, `TRY_CACHE` |
+/// | `CacheThrough`| `cache_through`, `CACHE_THROUGH` |
+/// | `Through` | `through`, `THROUGH` |
+/// | `AsyncThrough`| `async_through`, `ASYNC_THROUGH` |
 ///
 /// # Examples
 /// ```
@@ -1373,7 +1373,7 @@ pub struct GoosefsConfig {
 
     /// Number of independent gRPC channels to pool **per worker**.
     ///
-    /// **Default (since FLAMEGRAPH_OPTIMIZATION_PLAN §B3)**:
+    /// **Default**:
     /// `min(available_cores, 4)`. `1` restores the legacy
     /// single-channel-per-worker behaviour. Raising it (e.g. 4)
     /// round-robins concurrent block reads across multiple HTTP/2
@@ -1663,11 +1663,11 @@ pub struct GoosefsConfig {
     #[serde(default)]
     pub client_cache_sequential_read_enabled: bool,
 
-    // ── FileInfo metadata cache (FLAMEGRAPH_OPTIMIZATION_PLAN §A3) ──
+    // ── FileInfo metadata cache ──
     /// TTL for the client-side `FileInfo` (`get_status`) cache.
     ///
     /// **Default**: `Duration::ZERO` — cache is **disabled**. This is a
-    /// deliberate opt-in per FLAMEGRAPH_OPTIMIZATION_PLAN §A3: caching
+    /// deliberate opt-in: caching
     /// metadata trades away the "always live" guarantee (up to `ttl`
     /// staleness on `length` / `block_ids` if the file is mutated
     /// out-of-band). Enabling it amortises the ~2.8 % on-CPU cost of
@@ -1691,13 +1691,13 @@ pub struct GoosefsConfig {
     #[serde(default = "default_file_info_cache_capacity")]
     pub file_info_cache_capacity: usize,
 
-    // ── Range coalesce (FLAMEGRAPH_OPTIMIZATION_PLAN §B2) ──
+    // ── Range coalesce ──
     /// Whether the multi-range read API
     /// ([`GoosefsFileReader::read_ranges_with_context`]) coalesces
     /// adjacent input ranges into fewer, larger `read_range` calls
     /// (default: `false`).
     ///
-    /// **Off by default per FLAMEGRAPH_OPTIMIZATION_PLAN §B2.** Merging
+    /// **Off by default.** Merging
     /// trades a small amount of over-read (the gap bytes between
     /// adjacent sub-ranges) for a large reduction in H2 stream count on
     /// workloads that issue many small `get_range` calls (e.g. Lance /
@@ -1724,7 +1724,7 @@ pub struct GoosefsConfig {
     /// Master kill switch for the short-circuit local read path (default:
     /// `false`, **disabled**). Mirrors Java
     /// `goosefs.user.short.circuit.enabled`. See
-    /// 
+    ///
     /// the default. Set to `true` (via env var, storage option, property,
     /// or the `.with_short_circuit_enabled(true)` builder) to opt back into
     /// the local mmap fast path on deployments that genuinely benefit
@@ -1871,9 +1871,9 @@ fn default_false_bool() -> bool {
     false
 }
 
-// ── FileInfo metadata cache defaults (FLAMEGRAPH_OPTIMIZATION_PLAN §A3) ─
+// ── FileInfo metadata cache defaults ─
 fn default_file_info_cache_ttl() -> Duration {
-    // 30 s by default (FLAMEGRAPH_OPTIMIZATION_PLAN §A3): a non-zero TTL
+    // 30 s by default: a non-zero TTL
     // enables the client-side FileInfo metadata cache out of the box and
     // bounds staleness for out-of-band mutations. Set the TTL to `0` to
     // disable the cache (opt-out).
@@ -1883,7 +1883,7 @@ fn default_file_info_cache_capacity() -> usize {
     16384
 }
 
-// ── Range coalesce defaults (FLAMEGRAPH_OPTIMIZATION_PLAN §B2) ─────────
+// ── Range coalesce defaults ─────────
 fn default_range_coalesce_gap_bytes() -> u64 {
     64 * 1024 // 64 KiB
 }
@@ -1932,10 +1932,10 @@ fn default_worker_connection_pool_size() -> usize {
     //
     // - `available_parallelism` respects cgroup CPU limits on Linux (containers).
     // - `min` with the DEFAULT_WORKER_CONNECTION_POOL_MAX cap so we don't
-    //   fan out to dozens of channels per worker on big-core hosts, which
-    //   would trade H2 flow-control wins for RAM + FD overhead.
+    // fan out to dozens of channels per worker on big-core hosts, which
+    // would trade H2 flow-control wins for RAM + FD overhead.
     // - Fall back to the single-channel legacy behaviour when the platform
-    //   cannot report CPU count (extremely rare — same fall-back Tokio uses).
+    // cannot report CPU count (extremely rare — same fall-back Tokio uses).
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(DEFAULT_WORKER_CONNECTION_POOL_MIN);
@@ -2059,7 +2059,7 @@ impl GoosefsConfig {
     /// Create a config from one or more master addresses.
     ///
     /// Automatically selects the right mode:
-    /// - 1 address  → single-master (same as [`new`](Self::new)).
+    /// - 1 address → single-master (same as [`new`](Self::new)).
     /// - 2+ addresses → multi-master (same as [`new_ha`](Self::new_ha)).
     ///
     /// # Panics
@@ -2099,7 +2099,7 @@ impl GoosefsConfig {
     ///
     /// // Three masters (HA), no root
     /// let cfg = GoosefsConfig::from_uri(
-    ///     "gfs://10.0.0.1:9200,10.0.0.2:9200,10.0.0.3:9200",
+    /// "gfs://10.0.0.1:9200,10.0.0.2:9200,10.0.0.3:9200",
     /// ).unwrap();
     /// assert!(cfg.is_multi_master());
     /// assert_eq!(cfg.root, "");
@@ -2168,7 +2168,7 @@ impl GoosefsConfig {
     /// use goosefs_sdk::auth::AuthType;
     ///
     /// let config = GoosefsConfig::new("127.0.0.1:9200")
-    ///     .with_auth_type(AuthType::NoSasl);
+    /// .with_auth_type(AuthType::NoSasl);
     /// ```
     pub fn with_auth_type(mut self, auth_type: AuthType) -> Self {
         self.auth_type = auth_type;
@@ -2197,7 +2197,7 @@ impl GoosefsConfig {
     /// use goosefs_sdk::WritePType;
     ///
     /// let config = GoosefsConfig::new("127.0.0.1:9200")
-    ///     .with_write_type(WritePType::CacheThrough);
+    /// .with_write_type(WritePType::CacheThrough);
     /// ```
     pub fn with_write_type(mut self, wt: WritePType) -> Self {
         self.write_type = Some(wt as i32);
@@ -2211,7 +2211,7 @@ impl GoosefsConfig {
     /// use goosefs_sdk::config::{GoosefsConfig, WriteType};
     ///
     /// let config = GoosefsConfig::new("127.0.0.1:9200")
-    ///     .with_write_type_enum(WriteType::CacheThrough);
+    /// .with_write_type_enum(WriteType::CacheThrough);
     /// ```
     pub fn with_write_type_enum(mut self, wt: WriteType) -> Self {
         self.write_type = Some(wt.as_i32());
@@ -2228,8 +2228,8 @@ impl GoosefsConfig {
     /// use goosefs_sdk::config::GoosefsConfig;
     ///
     /// let config = GoosefsConfig::new("127.0.0.1:9200")
-    ///     .with_write_type_str("cache_through")
-    ///     .unwrap();
+    /// .with_write_type_str("cache_through")
+    /// .unwrap();
     /// ```
     pub fn with_write_type_str(self, wt: &str) -> Result<Self, String> {
         let write_type: WriteType = wt.parse()?;
@@ -2277,7 +2277,7 @@ impl GoosefsConfig {
     }
 
     /// Enable the client-side `FileInfo` (metadata) cache with the given TTL
-    /// (FLAMEGRAPH_OPTIMIZATION_PLAN §A3).
+    ///
     ///
     /// Passing `Duration::ZERO` disables the cache (matches the default).
     /// The cache is consulted on the read path (`get_status` / `open`) and
@@ -2377,7 +2377,7 @@ impl GoosefsConfig {
 
     /// Enable adjacent-range coalescing in
     /// [`GoosefsFileReader::read_ranges_with_context`]
-    /// (FLAMEGRAPH_OPTIMIZATION_PLAN §B2).
+    ///
     ///
     /// Off by default. When enabled, the `read_ranges` API sorts and
     /// merges input ranges whose gap is `≤ range_coalesce_gap_bytes`,
@@ -2519,13 +2519,13 @@ impl GoosefsConfig {
     ///
     /// Reads the following variables (all optional):
     ///
-    /// | Variable              | Field           |
+    /// | Variable | Field |
     /// |-----------------------|-----------------|
     /// | `GOOSEFS_MASTER_ADDR` | `master_addr` / `master_addrs` |
-    /// | `GOOSEFS_WRITE_TYPE`  | `write_type`    |
-    /// | `GOOSEFS_BLOCK_SIZE`  | `block_size`    |
-    /// | `GOOSEFS_CHUNK_SIZE`  | `chunk_size`    |
-    /// | `GOOSEFS_AUTH_TYPE`   | `auth_type`     |
+    /// | `GOOSEFS_WRITE_TYPE` | `write_type` |
+    /// | `GOOSEFS_BLOCK_SIZE` | `block_size` |
+    /// | `GOOSEFS_CHUNK_SIZE` | `chunk_size` |
+    /// | `GOOSEFS_AUTH_TYPE` | `auth_type` |
     /// | `GOOSEFS_AUTH_USERNAME` | `auth_username` |
     ///
     /// Returns a config reflecting any variables that are set, falling back to
@@ -2534,7 +2534,7 @@ impl GoosefsConfig {
     /// # Priority
     ///
     /// This is intended to be called as part of the auto-load chain:
-    /// `from_properties_auto()` then `apply_env()`.  Call `apply_env()` on an
+    /// `from_properties_auto()` then `apply_env()`. Call `apply_env()` on an
     /// existing config to overlay env-var values on top of properties values.
     pub fn from_env() -> Self {
         Self::default().apply_env()
@@ -2553,8 +2553,8 @@ impl GoosefsConfig {
         // scheme prefix, so the plain comma-list path is 100 % backward
         // compatible:
         //
-        //   * `gfs://h1:9200,h2:9200,h3:9200/root` — full URI (masters + root)
-        //   * `h1:9200,h2:9200,h3:9200`            — bare comma list (legacy)
+        // * `gfs://h1:9200,h2:9200,h3:9200/root` — full URI (masters + root)
+        // * `h1:9200,h2:9200,h3:9200` — bare comma list (legacy)
         if let Ok(addr) = env::var(ENV_MASTER_ADDR) {
             if addr.trim_start().starts_with("gfs://") {
                 match parse_gfs_uri(addr.trim()) {
@@ -2574,7 +2574,7 @@ impl GoosefsConfig {
                         // very confusing connection failures.
                         tracing::warn!(
                             "ignoring malformed GOOSEFS_MASTER_ADDR URI {:?}: {}; \
-                             existing master address configuration is retained",
+ existing master address configuration is retained",
                             addr,
                             e
                         );
@@ -2832,7 +2832,7 @@ impl GoosefsConfig {
             }
         }
 
-        // ── Performance tuning knobs (FLAMEGRAPH_OPTIMIZATION_PLAN §A3 / §B3) ─
+        // ── Performance tuning knobs ─
         // Per-worker gRPC channel pool size. `0` is clamped to `1` (mirrors
         // the `with_worker_connection_pool_size` builder contract); non-numeric
         // values are ignored so a typo cannot silently degrade performance.
@@ -2959,7 +2959,7 @@ impl GoosefsConfig {
     /// # Config file search paths
     ///
     /// Mirrors the Java `SITE_CONF_DIR` property:
-    ///   `${goosefs.conf.dir}/, ${user.home}/.goosefs/, /etc/goosefs/`
+    /// `${goosefs.conf.dir}/, ${user.home}/.goosefs/, /etc/goosefs/`
     ///
     /// 1. `$GOOSEFS_CONFIG_FILE` environment variable (if set and file exists)
     /// 2. `$GOOSEFS_CONF_DIR/goosefs-site.properties` (mirrors Java `goosefs.conf.dir`)
@@ -3015,12 +3015,12 @@ impl GoosefsConfig {
             ));
         }
         // The heartbeat RPC timeout must be:
-        //   1. >= 1 s, to tolerate ordinary GC / network jitter without
-        //      generating false timeouts that retry and double-count.
-        //   2. <  metrics_heartbeat_interval, otherwise periodic ticks
-        //      can fire while the previous RPC is still in flight,
-        //      letting requests pile up against a slow / dead Master
-        //      (the very situation the timeout is meant to prevent).
+        // 1. >= 1 s, to tolerate ordinary GC / network jitter without
+        // generating false timeouts that retry and double-count.
+        // 2. < metrics_heartbeat_interval, otherwise periodic ticks
+        // can fire while the previous RPC is still in flight,
+        // letting requests pile up against a slow / dead Master
+        // (the very situation the timeout is meant to prevent).
         if self.metrics_heartbeat_timeout < Duration::from_secs(1) {
             return Err(format!(
                 "metrics_heartbeat_timeout must be >= 1000ms (got {}ms)",
@@ -3030,7 +3030,7 @@ impl GoosefsConfig {
         if self.metrics_heartbeat_timeout >= self.metrics_heartbeat_interval {
             return Err(format!(
                 "metrics_heartbeat_timeout ({}ms) must be < metrics_heartbeat_interval ({}ms) \
-                 to prevent in-flight RPCs from piling up across ticks",
+ to prevent in-flight RPCs from piling up across ticks",
                 self.metrics_heartbeat_timeout.as_millis(),
                 self.metrics_heartbeat_interval.as_millis()
             ));
@@ -3060,7 +3060,7 @@ pub struct TransparentAccelerationSwitch {
 ///
 /// Mirrors the Java pattern:
 /// ```text
-/// ConfigurationUtils.loadIfExpire();          // reload if stale
+/// ConfigurationUtils.loadIfExpire(); // reload if stale
 /// GoosefsProperties props = ConfigurationUtils.defaults();
 /// InstancedConfiguration cfg = new InstancedConfiguration(props);
 /// boolean enable = cfg.getBoolean(TRANSPARENT_ACCELERATION_ENABLED);
@@ -3150,15 +3150,15 @@ impl ConfigRefresher {
     /// This mirrors Java's:
     /// ```java
     /// boolean refreshTransparentAccelerationSwitch() {
-    ///     ConfigurationUtils.loadIfExpire();
-    ///     GoosefsProperties props = ConfigurationUtils.defaults();
-    ///     InstancedConfiguration cfg = new InstancedConfiguration(props);
-    ///     cfg.validate();
-    ///     boolean enable = cfg.getBoolean(TRANSPARENT_ACCELERATION_ENABLED);
-    ///     boolean cosRangerEnable = cfg.getBoolean(COSRANGER_ENABLED);
-    ///     transparentAccelerationEnabled.set(enable);
-    ///     cosRangerEnabled.set(cosRangerEnable);
-    ///     return transparentAccelerationEnabled.get();
+    /// ConfigurationUtils.loadIfExpire();
+    /// GoosefsProperties props = ConfigurationUtils.defaults();
+    /// InstancedConfiguration cfg = new InstancedConfiguration(props);
+    /// cfg.validate();
+    /// boolean enable = cfg.getBoolean(TRANSPARENT_ACCELERATION_ENABLED);
+    /// boolean cosRangerEnable = cfg.getBoolean(COSRANGER_ENABLED);
+    /// transparentAccelerationEnabled.set(enable);
+    /// cosRangerEnabled.set(cosRangerEnable);
+    /// return transparentAccelerationEnabled.get();
     /// }
     /// ```
     pub fn refresh_transparent_acceleration_switch(&self) -> TransparentAccelerationSwitch {
@@ -3258,7 +3258,7 @@ mod tests {
 
     // ── B3: worker connection pool size default ─────────────────────────────
 
-    /// FLAMEGRAPH_OPTIMIZATION_PLAN §B3: default is `min(cores, 4)`, never
+    /// Default is `min(cores, 4)`, never
     /// exceeds the cap, never drops below the legacy `1`. This holds on any
     /// core count without hard-coding a specific number (CI runners vary).
     #[test]
@@ -4069,7 +4069,7 @@ goosefs.user.network.data.transfer.chunk.size=1MB
     }
 
     // ── Performance tuning knob env / properties tests
-    //    (FLAMEGRAPH_OPTIMIZATION_PLAN §A3 / §B3) ─────────────
+    // ─────────────
 
     #[test]
     fn test_perf_tuning_constant_names() {
@@ -4388,7 +4388,7 @@ goosefs.client.short.circuit.thp=true
     /// **disabled** by default across every construction path
     /// (`Default::default`, `serde` with a missing field, and
     /// `apply_env` with no env vars set). Rationale documented in
-    /// 
+    ///
     #[test]
     fn test_short_circuit_enabled_default_is_false() {
         // 1. Direct Default impl.
@@ -4398,10 +4398,10 @@ goosefs.client.short.circuit.thp=true
         );
 
         // 2. Serde/properties default when the SC field is absent.
-        //    `from_properties_str` runs the full serde deserialize path
-        //    and any custom `#[serde(default = ...)]` fallbacks; a
-        //    properties string without `goosefs.user.short.circuit.enabled`
-        //    must therefore still land on `false`.
+        // `from_properties_str` runs the full serde deserialize path
+        // and any custom `#[serde(default = ...)]` fallbacks; a
+        // properties string without `goosefs.user.short.circuit.enabled`
+        // must therefore still land on `false`.
         let cfg = GoosefsConfig::from_properties_str("goosefs.master.hostname=127.0.0.1");
         assert!(
             !cfg.short_circuit_enabled,
@@ -4524,14 +4524,14 @@ goosefs.client.short.circuit.thp=true
         let refresher = ConfigRefresher::from_config(&user_config);
 
         // 3. Trigger a refresh (this calls from_properties_auto() internally
-        //    if the config has expired, but the refresher only updates the
-        //    two switch AtomicBool fields).
+        // if the config has expired, but the refresher only updates the
+        // two switch AtomicBool fields).
         let switch = refresher.refresh_transparent_acceleration_switch();
 
         // 4. The switch values may have changed (depending on what's in the
-        //    properties file), but the user's other config fields are NOT
-        //    stored in the refresher and thus cannot be overwritten.
-        //    The refresher only tracks: enabled + cosranger_enabled.
+        // properties file), but the user's other config fields are NOT
+        // stored in the refresher and thus cannot be overwritten.
+        // The refresher only tracks: enabled + cosranger_enabled.
         assert!(
             switch
                 == TransparentAccelerationSwitch {
@@ -4547,8 +4547,8 @@ goosefs.client.short.circuit.thp=true
         );
 
         // 5. Verify the user's original config is completely unaffected.
-        //    The ConfigRefresher does NOT hold a mutable reference to GoosefsConfig,
-        //    so user-set fields like master_addr, block_size, etc. are never touched.
+        // The ConfigRefresher does NOT hold a mutable reference to GoosefsConfig,
+        // so user-set fields like master_addr, block_size, etc. are never touched.
         assert_eq!(user_config.master_addr, "10.0.0.99:9999");
         assert_eq!(user_config.block_size, 128 * 1024 * 1024);
         assert_eq!(user_config.chunk_size, 2 * 1024 * 1024);
@@ -4565,7 +4565,7 @@ goosefs.client.short.circuit.thp=true
         use std::io::Write;
 
         // 1. Create a temporary properties file with specific switch values
-        //    AND different master/block settings.
+        // AND different master/block settings.
         let dir = std::env::temp_dir().join("goosefs_refresher_test");
         let _ = std::fs::create_dir_all(&dir);
         let props_path = dir.join(PROPERTIES_FILENAME);
@@ -4624,7 +4624,7 @@ goosefs.client.short.circuit.thp=true
         let switch = refresher_immediate.refresh_transparent_acceleration_switch();
 
         // 6. The switch values should now reflect the FILE config, NOT the user config.
-        //    File says: enabled=false, cosranger=true
+        // File says: enabled=false, cosranger=true
         assert!(
             !switch.enabled,
             "switch.enabled should be overridden to false by file config"
@@ -4635,8 +4635,8 @@ goosefs.client.short.circuit.thp=true
         );
 
         // 7. But the user's GoosefsConfig object is completely untouched.
-        //    The refresher never modifies the original config — it only updates
-        //    its own internal AtomicBool fields.
+        // The refresher never modifies the original config — it only updates
+        // its own internal AtomicBool fields.
         assert_eq!(
             user_config.master_addr, "user-master:9200",
             "user's master_addr must NOT be affected by config refresh"
@@ -4672,7 +4672,7 @@ goosefs.client.short.circuit.thp=true
         );
 
         // 8. Meanwhile, the non-refreshed refresher (seeded from user config)
-        //    should still have the user's original switch values.
+        // should still have the user's original switch values.
         let sw_original = refresher.current_switch();
         assert!(
             sw_original.enabled,

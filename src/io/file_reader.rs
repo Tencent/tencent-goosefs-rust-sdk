@@ -971,7 +971,7 @@ impl GoosefsFileReader {
     }
 
     /// Read multiple `(offset, length)` ranges from `path` in one call
-    /// (FLAMEGRAPH_OPTIMIZATION_PLAN §B2).
+    ///
     ///
     /// # Behaviour
     ///
