@@ -510,7 +510,7 @@ mod tests {
     fn config_from_goosefs_config_defaults() {
         // P2-B (2026-07-07): `GoosefsConfig::default()` now emits
         // `short_circuit_enabled: false` (see
-        // `docs/perf/2026-07-07-hotspot-optimizations/README.md` §5.2 and
+        // 
         // `config::tests::test_short_circuit_enabled_default_is_false`).
         // `ShortCircuitConfig::from_config` faithfully mirrors that, so
         // the default `enabled` is `false`, not `true`. Flip it on

@@ -23,7 +23,7 @@
 //! Under 32 concurrent reads, the global `Mutex` in the old evictors caused
 //! 38x latency degradation (20µs → 772µs) and extreme tail latency
 //! (P95/P50 = 204x). See
-//! `docs/perf/2026-07-09-oncpu6-concurrent-uring-analysis/MOKA_LRU_OPTIMIZATION.md`.
+//! the Moka LRU optimisation analysis.
 //!
 //! ## Design
 //!

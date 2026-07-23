@@ -157,7 +157,7 @@ pub struct GoosefsFileInStream {
     /// Worker router for block → worker selection.
     /// Worker router view for block → worker mapping.
     ///
-    /// P0-D Step 2 (`docs/perf/2026-07-07-hotspot-optimizations/README.md`
+    /// P0-D Step 2
     /// §3.4): migrated from `WorkerRouter` (per-stream `ArcSwap`×3) to
     /// `WorkerRouterView` (per-stream `Arc`×2 + `Option<i64>` value).
     /// The legacy `open()` path builds the view via
@@ -332,7 +332,7 @@ impl GoosefsFileInStream {
 
         // Reuse persistent Master connection — no network I/O.
         //
-        // **A3** (`docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md`): consult the opt-in
+        // **A3**: consult the opt-in
         // FileInfo metadata cache first. On hit, skip the RPC entirely; on
         // miss, populate the cache after a successful `get_status`. Cache is
         // `None` unless the caller has opted in via `with_file_info_cache_ttl`.
@@ -374,7 +374,7 @@ impl GoosefsFileInStream {
         }
 
         // Reuse shared router — already populated and TTL-refreshed.
-        // A1 (`docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md`): clone the workers +
+        // A1: clone the workers +
         // hash_ring `Arc`s wait-free instead of rebuilding the ring. Failure
         // isolation is preserved via the new router's own `failed_workers`
         // DashMap.
@@ -740,7 +740,7 @@ impl GoosefsFileInStream {
     /// **single-task tight loop** of sequential `read_at(...).await` calls
     /// leaves only one op in flight and is bottlenecked by the per-op
     /// round-trip (measured ~2x slower than the steady-state floor; see
-    /// `docs/RUST_PYTHON_SDK_OPTIMIZATION.md` Part V §V.5 "B1 verification results").
+    ///
     ///
     /// For throughput-oriented random reads, issue reads **concurrently**
     /// (one future per `read_at`, e.g. `stream::iter(..).buffer_unordered(8..16)`)

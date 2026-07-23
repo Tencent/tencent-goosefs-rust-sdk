@@ -83,7 +83,7 @@ type AuthenticatedFsClient =
 /// releases it, so the old SASL stream cannot be closed while anyone is still
 /// using the old channel.
 ///
-/// See `docs/RUST_PYTHON_SDK_OPTIMIZATION.md` Part II §1 + §II.3 for the
+///
 /// full consistency rationale.
 struct AuthedState {
     client: AuthenticatedFsClient,
@@ -138,7 +138,7 @@ pub fn default_file_mode() -> PMode {
 /// **outside** of `AuthedState` on purpose: they are process-level metric
 /// handles that must outlive any `reconnect` and must not be re-resolved
 /// from the global `DashMap` on every RPC. See
-/// `docs/RUST_PYTHON_SDK_OPTIMIZATION.md` Part II §II.3 for the placement
+///
 /// rule.
 #[derive(Clone)]
 pub struct MasterClient {
@@ -357,7 +357,7 @@ impl MasterClient {
         // `FnMut` (rather than `Fn`) lets callers move owned state (e.g. the
         // request `path: String`) into the closure on the *first* attempt and
         // only `clone()` it inside the closure when a retry is actually
-        // needed. See docs/RUST_PYTHON_SDK_OPTIMIZATION.md Part II §3.
+        // needed.
         F: FnMut(AuthenticatedFsClient) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
@@ -450,8 +450,7 @@ impl MasterClient {
         //
         // Net effect on the success path (the common case): one `String`
         // allocation per `get_status` call instead of two. See
-        // docs/RUST_PYTHON_SDK_OPTIMIZATION.md Part II §3.
-        let mut path_owned: Option<String> = Some(path.to_string());
+                let mut path_owned: Option<String> = Some(path.to_string());
         let result = self
             .with_retry("get_status", |mut client| {
                 let req_path = path_owned.take().unwrap_or_else(|| path.to_string());
@@ -942,7 +941,7 @@ mod tests {
     //! Concurrency-correctness tests for the `ArcSwap<AuthedState>`-based
     //! state model introduced as part of the GetFileStatus performance
     //! optimisation work.  See
-    //! `docs/RUST_PYTHON_SDK_OPTIMIZATION.md` Part II §1 / §II.3 / §II.4 for
+    //!
     //! the rationale and the gating-test requirement.
     //!
     //! These tests intentionally do **not** spin up a real Master server.

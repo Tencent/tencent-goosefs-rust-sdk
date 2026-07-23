@@ -656,24 +656,24 @@ impl Default for MasterPoolSchedule {
 // ── Worker connection pool (Part V worker-side multi-channel) ─
 /// Legacy per-worker connection-pool size (single HTTP/2 channel per worker).
 ///
-/// **Deprecated as the default** since [FLAMEGRAPH_OPTIMIZATION_PLAN.md §B3]:
+/// **Deprecated as the default**:
 /// the current default is now [`default_worker_connection_pool_size`] which
 /// returns `min(available_cores, DEFAULT_WORKER_CONNECTION_POOL_MAX)`. The
 /// old value of `1` is kept as a floor / clamp target and as the single-shot
 /// value returned when the platform cannot report the CPU count.
 ///
-/// [FLAMEGRAPH_OPTIMIZATION_PLAN.md §B3]: ../../docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md
+/// 
 const DEFAULT_WORKER_CONNECTION_POOL_MIN: usize = 1;
 
 /// Upper cap for the worker connection pool default.
 ///
-/// Chosen per [FLAMEGRAPH_OPTIMIZATION_PLAN.md §B3]: `min(cores, 4)`. Beyond
+/// Chosen: `min(cores, 4)`. Beyond
 /// 4, the H2 flow-control benefit plateaus while socket / buffer overhead
 /// grows linearly. Callers that want a larger pool for exotic hardware can
 /// still opt in explicitly via
 /// [`GoosefsConfig::with_worker_connection_pool_size`].
 ///
-/// [FLAMEGRAPH_OPTIMIZATION_PLAN.md §B3]: ../../docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md
+/// 
 const DEFAULT_WORKER_CONNECTION_POOL_MAX: usize = 4;
 /// Default connect timeout: 30 seconds.
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 30_000;
@@ -1724,7 +1724,7 @@ pub struct GoosefsConfig {
     /// Master kill switch for the short-circuit local read path (default:
     /// `false`, **disabled**). Mirrors Java
     /// `goosefs.user.short.circuit.enabled`. See
-    /// `docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md` §C6 for the rationale behind
+    /// 
     /// the default. Set to `true` (via env var, storage option, property,
     /// or the `.with_short_circuit_enabled(true)` builder) to opt back into
     /// the local mmap fast path on deployments that genuinely benefit
@@ -1928,7 +1928,7 @@ fn default_master_connection_pool_size() -> usize {
     DEFAULT_MASTER_CONNECTION_POOL_SIZE
 }
 fn default_worker_connection_pool_size() -> usize {
-    // B3 (`docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md`): default = min(cores, 4).
+    // B3: default = min(cores, 4).
     //
     // - `available_parallelism` respects cgroup CPU limits on Linux (containers).
     // - `min` with the DEFAULT_WORKER_CONNECTION_POOL_MAX cap so we don't
@@ -2005,9 +2005,7 @@ impl Default for GoosefsConfig {
             range_coalesce_gap_bytes: default_range_coalesce_gap_bytes(),
             range_coalesce_max_bytes: default_range_coalesce_max_bytes(),
             // Short-circuit local-mmap read path is **disabled by default**.
-            // Rationale (2026-07-07 hotspot analysis, see
-            // docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md §C6 and
-            // docs/perf/2026-07-07-hotspot-optimizations/README.md §5.2):
+            // Rationale (2026-07-07 hotspot analysis):
             // the demo binary reference flame graph (oncpu_4, ~1200 QPS)
             // contains no short-circuit frames, and flipping this switch
             // to `false` on the previously-default-`true` build empirically
@@ -4390,7 +4388,7 @@ goosefs.client.short.circuit.thp=true
     /// **disabled** by default across every construction path
     /// (`Default::default`, `serde` with a missing field, and
     /// `apply_env` with no env vars set). Rationale documented in
-    /// `docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md` §C6.
+    /// 
     #[test]
     fn test_short_circuit_enabled_default_is_false() {
         // 1. Direct Default impl.

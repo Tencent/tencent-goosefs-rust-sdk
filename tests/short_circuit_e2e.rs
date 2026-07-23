@@ -64,7 +64,7 @@ mod e2e {
         config.auth_type = auth_type();
         // These tests specifically exercise the short-circuit read path. The
         // SDK default for `short_circuit_enabled` was flipped to `false` in
-        // the 2026-07-07 hotspot pass (see docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md
+        // the hotspot pass optimisation
         // §C6), so opt back in explicitly here — otherwise all SC counters
         // stay at zero and every assertion below trips.
         // The one gRPC-baseline callsite (`short_circuit_matches_grpc`) still

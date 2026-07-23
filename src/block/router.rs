@@ -48,7 +48,7 @@ const DEFAULT_WORKER_REFRESH_TTL: Duration = Duration::from_secs(30);
 /// Number of virtual nodes per worker in the hash ring.
 const VIRTUAL_NODES_PER_WORKER: u32 = 100;
 
-/// P0-F.1 (`docs/perf/2026-07-07-hotspot-optimizations/README.md` §3.6.1):
+/// P0-F.1:
 /// allocate the `failed_workers` `DashMap` with **2 shards** instead of the
 /// default 4. The failure map is written only by `mark_failed` (rare,
 /// error-only path) and read by `is_failed` / `cleanup_expired_failures`
@@ -74,8 +74,7 @@ pub struct WorkerRouter {
     workers: ArcSwap<Vec<WorkerInfo>>,
     /// Tracks recently failed worker addresses with the failure timestamp.
     ///
-    /// **P0-F.1** (`docs/perf/2026-07-07-hotspot-optimizations/README.md`
-    /// §3.6.1): wrapped in `OnceLock` so the `DashMap` is only allocated on
+    /// **P0-F.1**    /// §3.6.1): wrapped in `OnceLock` so the `DashMap` is only allocated on
     /// the first `mark_failed` call. On the happy path (healthy cluster,
     /// no failures) — which is the overwhelming majority of readers —
     /// **zero** heap allocation occurs for failure tracking. `OnceLock::get()`
@@ -85,8 +84,7 @@ pub struct WorkerRouter {
     /// 4) to further reduce the allocation cost on the rare error path.
     failed_workers: OnceLock<DashMap<String, Instant>>,
     /// Approximate size of `failed_workers`, used as a wait-free fast-path
-    /// gate in `cleanup_expired_failures` (P0-E in
-    /// `docs/perf/2026-07-07-hotspot-optimizations/README.md` §3.5).
+    /// gate in `cleanup_expired_failures` (P0-E).
     ///
     /// `DashMap::is_empty()` walks every shard and takes a `try_read` on
     /// each, which showed up as ~0.98 % CPU self time on `oncpu_7.svg`
@@ -115,7 +113,7 @@ pub struct WorkerRouter {
     // ── Worker list TTL ─────────────────────────────────────────────────────────
     /// Timestamp of the last worker-list update.
     ///
-    /// **H3** (`docs/perf/2026-07-07-hotspot-optimizations/README.md`):
+    /// **H3**):
     /// changed from `tokio::sync::RwLock<Instant>` to `std::sync::Mutex<Instant>`
     /// — the critical section is a single `*ptr = Instant::now()` /
     /// `instant.elapsed()` (nanoseconds), so a synchronous `std::sync::Mutex`
@@ -203,7 +201,7 @@ impl WorkerRouter {
     /// `GoosefsFileReader::init_with_context` /
     /// `GoosefsFileInStream::open_with_context` /
     /// `GoosefsFileWriter::ensure_router_init` (see optimisation A1 in
-    /// `docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md`).
+    /// 
     ///
     /// Semantics guaranteed:
     /// - `select_worker` observes the **exact** ring the shared router had at
@@ -233,7 +231,7 @@ impl WorkerRouter {
             failure_ttl: shared.failure_ttl,
             last_refresh: Mutex::new(Instant::now()),
             worker_refresh_ttl: shared.worker_refresh_ttl,
-            // C2 (`docs/perf/2026-07-07-hotspot-optimizations/README.md` §3.2):
+            // C2 §3.2):
             // inherit the parent's already-probed `local_worker_id` instead
             // of resetting it to `None`. `local_worker_id` describes the
             // host ("which registered worker, if any, is co-located with
@@ -265,7 +263,7 @@ impl WorkerRouter {
     ///
     /// The rebuild is **skipped** when the new sorted `(id, host, port)`
     /// fingerprint matches the currently published ring (defensive add-on
-    /// A1.3 in `FLAMEGRAPH_OPTIMIZATION_PLAN.md`): repeated background
+    ///  repeated background
     /// refreshes that observe the same worker set no longer pay the
     /// N·V·xxh3 + O(N·V·log(N·V)) sort cost.
     pub async fn update_workers(&self, workers: Vec<WorkerInfo>) {
@@ -301,8 +299,7 @@ impl WorkerRouter {
             .lock()
             .expect("last_refresh mutex poisoned") = Instant::now();
 
-        // D-Step0 (`docs/perf/2026-07-07-hotspot-optimizations/README.md`
-        // §3.4.3.1 Caveat 2): re-run the local-worker probe **synchronously
+        // D-Step0        // §3.4.3.1 Caveat 2): re-run the local-worker probe **synchronously
         // right here** instead of leaving `local_worker_id` in the
         // "unprobed" state (`Arc::new(None)`) for the next `select_worker`
         // to lazily populate.
@@ -336,7 +333,7 @@ impl WorkerRouter {
 
     /// Whether the worker list is currently empty.
     ///
-    /// **H4** (`docs/perf/2026-07-07-hotspot-optimizations/README.md`):
+    /// **H4**):
     /// the old `init_with_context` called `get_workers().await.len()` just to
     /// check non-empty — that does a full `Arc::clone` (inc + dec on the
     /// `Arc<Vec<WorkerInfo>>`) for no reason. This method borrows the
@@ -481,7 +478,7 @@ impl WorkerRouter {
     /// `LocalFirstPolicy`.  The local worker is only bypassed if it is in the
     /// failed set.
     pub async fn select_worker(&self, block_id: i64) -> Result<WorkerInfo> {
-        // C1 (`docs/perf/2026-07-07-hotspot-optimizations/README.md` §3.1):
+        // C1 §3.1):
         // snapshot every shared `ArcSwap` field **exactly once** per call.
         //
         // Before this refactor `select_worker` performed 3–4 independent
@@ -671,7 +668,7 @@ impl WorkerRouter {
 
     /// Remove expired failure entries.
     fn cleanup_expired_failures(&self) {
-        // P0-E (`docs/perf/2026-07-07-hotspot-optimizations/README.md` §3.5):
+        // P0-E §3.5):
         // wait-free fast-path gate via an external counter.
         //
         // The previous C3 fix used `DashMap::is_empty()` as the fast path,
@@ -760,7 +757,7 @@ impl WorkerRouter {
 /// [`WorkerRouterView`].
 ///
 /// Extracted from `WorkerRouter::consistent_hash_select_with_ring` in P0-D
-/// Step 1 (`docs/perf/2026-07-07-hotspot-optimizations/README.md` §3.4):
+/// Step 1 §3.4):
 /// the algorithm is identical for the shared router and every per-reader
 /// snapshot / view, and the only piece of per-router state involved is
 /// the failed-worker predicate. Passing that in as a closure lets both
@@ -817,8 +814,7 @@ where
 /// Wait-free, immutable snapshot of the routing state for a single
 /// reader/writer's lifetime.
 ///
-/// **Motivation** (P0-D, `docs/perf/2026-07-07-hotspot-optimizations/README.md`
-/// §3.4): every per-range `WorkerRouter::snapshot_from` today allocates
+/// **Motivation**/// §3.4): every per-range `WorkerRouter::snapshot_from` today allocates
 /// **three fresh `ArcSwap` fields**, each of which triggers
 /// `Box<[T]>::from_iter → posix_memalign` on construction (~2.81 % CPU on
 /// `oncpu_7.svg`) and `arc_swap::debt::list::LocalNode::with` on Drop
@@ -1597,8 +1593,7 @@ mod tests {
         assert_eq!(selected.id, Some(2), "new local worker should be preferred");
     }
 
-    /// D-Step0 (`docs/perf/2026-07-07-hotspot-optimizations/README.md`
-    /// §3.4.3.1 Caveat 2): after **every** slow-path `update_workers`
+    /// D-Step0    /// §3.4.3.1 Caveat 2): after **every** slow-path `update_workers`
     /// the shared router must be in the "probed" state
     /// (`Some(_)`), never the "unprobed" state (`None`). This is the
     /// invariant that lets a future `WorkerRouterView::from_shared`
@@ -1739,7 +1734,7 @@ mod tests {
     /// This is a semantic (not micro-benchmark) test: after the call the
     /// map must still be empty *and* still be reusable by a subsequent
     /// `mark_failed`. The perf win itself is measured by the router
-    /// select bench (see `docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md` §6).
+    /// select bench
     #[tokio::test]
     async fn test_cleanup_expired_failures_empty_is_noop() {
         let router = WorkerRouter::new();

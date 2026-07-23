@@ -604,7 +604,7 @@ impl PageStore for UringPageStore {
     /// worker blocking. The cold path (cache miss → `entry()`) takes a brief
     /// write guard but only on the first access to each file.
     ///
-    /// See `docs/perf/2026-07-09-oncpu6-concurrent-uring-analysis/README.md`
+    /// See the concurrent uring analysis for design context.
     /// for the concurrency analysis that motivated this design.
     /// Read a page via **page fd cache** (Method E) → dir fd cache fallback.
     ///
@@ -625,7 +625,7 @@ impl PageStore for UringPageStore {
     /// **Concurrency**: same lock-free `DashMap` read guard pattern as
     /// `get_dir_fd`. `last_access` updated via `AtomicU64` — no write lock.
     ///
-    /// See `docs/perf/2026-07-09-oncpu6-concurrent-uring-analysis/README.md`
+    /// See the concurrent uring analysis for design context.
     /// §8.5 and Method E for the analysis that motivated this design.
     async fn get(&self, page_id: &PageId, offset: usize, dst: &mut [u8]) -> Result<usize> {
         let bytes = self.get_bytes(page_id, offset, dst.len()).await?;

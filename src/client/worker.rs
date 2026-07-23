@@ -757,7 +757,7 @@ pub struct WorkerClientPool {
     /// clients-map write lock. Acquiring this mutex for one channel does not
     /// block other channels' reconnects.
     ///
-    /// **H2** (`docs/perf/2026-07-07-hotspot-optimizations/README.md`):
+    /// **H2**:
     /// changed from `tokio::sync::RwLock<HashMap<…>>` to `DashMap<…>` so the
     /// `reconnect_lock_for` read path is lock-free (shard-level striped lock
     /// inside DashMap, no async `.read().await` round-trip) — the old pattern
@@ -804,7 +804,7 @@ impl WorkerClientPool {
     /// Channel-map key for `(addr, slot)`. For a single-channel pool this is
     /// just `addr` (byte-identical to the legacy behaviour).
     ///
-    /// **H1** (`docs/perf/2026-07-07-hotspot-optimizations/README.md`):
+    /// **H1**:
     /// replaced `format!("{addr}#{slot}")` with a pre-sized `String` +
     /// `itoa::Buffer` to avoid the `core::fmt` machinery on every `acquire`
     /// when `pool_size > 1`.

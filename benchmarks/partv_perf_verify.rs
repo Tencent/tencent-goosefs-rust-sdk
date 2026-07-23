@@ -15,7 +15,7 @@
 //! Part V optimisation verification & micro-benchmark.
 //!
 //! Exercises and measures the optimisations landed for
-//! `docs/RUST_PYTHON_SDK_OPTIMIZATION.md` Part V on a **live local cluster**:
+//! Part V optimisation verification on a **live local cluster**:
 //!
 //! - **R2** — `read_at` single-block fast path (random read / PR large IO).
 //! - **R1-B** — sequential-read prefetch window + buffered drain + ACK merge

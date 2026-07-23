@@ -19,7 +19,7 @@
 //! evictor `on_access` + PageStore IO) to measure the evictor's impact on
 //! concurrent cache-hit latency. This is the benchmark that validates the
 //! moka replacement documented in
-//! `docs/perf/2026-07-09-oncpu6-concurrent-uring-analysis/MOKA_LRU_OPTIMIZATION.md`.
+//! the Moka LRU optimisation analysis.
 //!
 //! ## Usage
 //! ```bash

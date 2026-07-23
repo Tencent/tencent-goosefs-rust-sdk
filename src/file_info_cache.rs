@@ -62,7 +62,7 @@ struct CachedFileInfo {
     /// The `FileInfo` snapshot returned by `MasterClient::get_status`
     /// at capture time.
     ///
-    /// **S3** (`docs/perf/2026-07-07-hotspot-optimizations/README.md`):
+    /// **S3**:
     /// wrapped in `Arc<FileInfo>` so `get` returns an `Arc` clone (one
     /// atomic inc) instead of a deep `FileInfo::clone` (which copies
     /// `block_ids: Vec<i64>`, `file_block_infos: Vec<FileBlockInfo>`,

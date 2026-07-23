@@ -93,7 +93,7 @@ pub struct GoosefsFileReader {
     path: String,
     /// File info from Master (contains block IDs, block size, length).
     ///
-    /// **S3** (`docs/perf/2026-07-07-hotspot-optimizations/README.md`):
+    /// **S3**:
     /// wrapped in `Arc<FileInfo>` so a `FileInfoCache` hit on a
     /// repeated `open_with_context` / `open_range_with_context` call
     /// returns an `Arc` clone (one atomic inc) instead of a deep
@@ -104,7 +104,7 @@ pub struct GoosefsFileReader {
     /// Worker router for block → worker mapping.
     /// Worker router view for block → worker mapping.
     ///
-    /// P0-D Step 2 (`docs/perf/2026-07-07-hotspot-optimizations/README.md`
+    /// P0-D Step 2
     /// §3.4): migrated from `WorkerRouter` (per-reader `ArcSwap`×3) to
     /// `WorkerRouterView` (per-reader `Arc`×2 + `Option<i64>` value).
     /// Byte-exact routing behaviour is guaranteed by
@@ -256,7 +256,7 @@ impl GoosefsFileReader {
     /// snapshot, so per-read failure marking stays local and does not pollute
     /// the long-lived context-level routing state.
     ///
-    /// **A1** (`docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md`): the local view is
+    /// **A1**: the local view is
     /// built via [`WorkerRouterView::from_shared`], which clones the shared
     /// router's `workers` + `hash_ring` `Arc`s wait-free (two `Arc::clone`s
     /// plus a value copy of `local_worker_id`) with **no `ArcSwap`
@@ -273,7 +273,7 @@ impl GoosefsFileReader {
     ) -> Result<(Arc<FileInfo>, WorkerRouterView)> {
         // 1. Reuse the shared Master client (zero handshake).
         //
-        // **A3** (`docs/FLAMEGRAPH_OPTIMIZATION_PLAN.md`): consult the opt-in
+        // **A3**: consult the opt-in
         // FileInfo metadata cache first. On hit, skip the RPC entirely; on
         // miss, populate the cache after a successful `get_status`. The
         // cache is `None` only when the caller has explicitly opted out
@@ -916,7 +916,7 @@ impl GoosefsFileReader {
     ///
     /// Returns `None` if the file has no UFS path (i.e. data is cache-only).
     ///
-    /// **S4** (`docs/perf/2026-07-07-hotspot-optimizations/README.md`):
+    /// **S4**):
     /// clones the pre-built `self.ufs_read_options` template and updates only
     /// `offset_in_file`. The old path re-cloned `ufs_path: String` +
     /// re-derived `mount_id` / `no_cache` / `block_size` on every
