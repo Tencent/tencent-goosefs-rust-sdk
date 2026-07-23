@@ -45,6 +45,7 @@ import asyncio
 
 import pytest
 from goosefs import AsyncGoosefs, Goosefs, WriteType
+from goosefs.exceptions import GoosefsError
 
 # ---------------------------------------------------------------------------
 # Parametrisation
@@ -284,5 +285,5 @@ async def test_batch_open_file_missing_path_fails_whole_batch(
     missing = f"{tmp_dir}/missing.bin"
     await async_fs.write_file(good, b"x", write_type=WriteType.MustCache)
 
-    with pytest.raises(Exception):
+    with pytest.raises(GoosefsError):
         await async_fs.batch_open_file([good, missing])
