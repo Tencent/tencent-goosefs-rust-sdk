@@ -111,7 +111,7 @@ pub struct FileSystemContext {
     ///
     /// Pool of `config.master_connection_pool_size` channels (default 1).
     /// Scheduling strategy is controlled by `master_connection_pool_schedule`
-    /// (default `RoundRobin`; set to `P2c` for adaptive load balancing).
+    /// (default `RoundRobin`; set to `P2C` for adaptive load balancing).
     master_pool: Arc<MasterClientPool>,
 
     /// Persistent WorkerManager gRPC connection (`GetWorkerInfoList`).
@@ -342,7 +342,7 @@ impl FileSystemContext {
     /// Return a shared `MasterClient` from the pool.
     ///
     /// With `master_connection_pool_schedule = RoundRobin` (default) this
-    /// cycles through pooled channels in order. With `P2c` it picks the
+    /// cycles through pooled channels in order. With `P2C` it picks the
     /// least-loaded connection out of two random candidates. Per-channel
     /// in-flight counts are tracked inside `MasterClient::with_retry`, so
     /// the load signal stays accurate even for clients cloned out of the

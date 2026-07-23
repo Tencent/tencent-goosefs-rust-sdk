@@ -628,7 +628,7 @@ const DEFAULT_ACK_INTERVAL_CHUNKS: u32 = 1;
 // ── Master connection pool ───────────────────────────────────
 /// Default master connection-pool size (1 = single channel, backward
 /// compatible). Raise to 4-8 and set `master_connection_pool_schedule` to
-/// `P2c` for high-concurrency remote scenarios to spread requests across
+/// `P2C` for high-concurrency remote scenarios to spread requests across
 /// multiple channels and avoid HTTP/2 `SETTINGS_MAX_CONCURRENT_STREAMS`
 /// queueing.
 const DEFAULT_MASTER_CONNECTION_POOL_SIZE: usize = 1;
@@ -637,14 +637,14 @@ const DEFAULT_MASTER_CONNECTION_POOL_SIZE: usize = 1;
 ///
 /// - `RoundRobin` (default): cycle through pooled channels in order.
 ///   Zero overhead, no in-flight tracking required.
-/// - `P2c`: Power of Two Choices — sample two channels uniformly at
+/// - `P2C`: Power of Two Choices — sample two channels uniformly at
 ///   random and pick the one with fewer in-flight RPCs. Requires
 ///   `master_connection_pool_size > 1` to have any effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MasterPoolSchedule {
     RoundRobin,
-    P2c,
+    P2C,
 }
 
 impl Default for MasterPoolSchedule {
@@ -1359,13 +1359,13 @@ pub struct GoosefsConfig {
     /// connections, avoiding `SETTINGS_MAX_CONCURRENT_STREAMS` queueing
     /// under high concurrency over remote RTT. All pooled clients share a
     /// single inquire client so HA failover stays consistent. When
-    /// `master_connection_pool_schedule` is `P2c`, the pool uses Power of
+    /// `master_connection_pool_schedule` is `P2C`, the pool uses Power of
     /// Two Choices adaptive scheduling; otherwise it round-robins.
     #[serde(default = "default_master_connection_pool_size")]
     pub master_connection_pool_size: usize,
 
     /// Scheduling strategy for the master connection pool (default:
-    /// `RoundRobin`). Set to `P2c` to enable Power of Two Choices
+    /// `RoundRobin`). Set to `P2C` to enable Power of Two Choices
     /// adaptive load balancing — requires `master_connection_pool_size`
     /// greater than 1 to have any effect.
     #[serde(default)]
@@ -2260,7 +2260,7 @@ impl GoosefsConfig {
 
     /// Set the master connection pool scheduling strategy.
     ///
-    /// Use `MasterPoolSchedule::P2c` for Power of Two Choices adaptive
+    /// Use `MasterPoolSchedule::P2C` for Power of Two Choices adaptive
     /// load balancing (requires `master_connection_pool_size > 1`).
     pub fn with_master_pool_schedule(mut self, schedule: MasterPoolSchedule) -> Self {
         self.master_connection_pool_schedule = schedule;

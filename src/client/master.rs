@@ -819,7 +819,7 @@ impl Drop for InflightGuard<'_> {
 ///
 /// - **RoundRobin** (default): cycles through channels in order. Wait-free,
 ///   zero overhead, no in-flight tracking required.
-/// - **P2c**: Power of Two Choices — uniformly samples two distinct channels
+/// - **P2C**: Power of Two Choices — uniformly samples two distinct channels
 ///   with a fast PRNG (`fastrand`) and picks the one with fewer in-flight
 ///   RPCs. Per-channel in-flight counts are tracked inside each
 ///   [`MasterClient`] (incremented in `with_retry`, decremented on RPC
@@ -877,7 +877,7 @@ impl MasterClientPool {
     ///
     /// - `RoundRobin` (default): cycle through channels in order. Wait-free,
     ///   zero overhead, no in-flight tracking required.
-    /// - `P2c`: Power of Two Choices — uniformly sample two distinct channels
+    /// - `P2C`: Power of Two Choices — uniformly sample two distinct channels
     ///   at random and select the one with fewer in-flight RPCs. The
     ///   per-channel in-flight count is maintained inside
     ///   [`MasterClient::with_retry`] (not by this method), so it stays
@@ -899,7 +899,7 @@ impl MasterClientPool {
                 let idx = self.rr.fetch_add(1, Ordering::Relaxed) % n;
                 self.clients[idx].clone()
             }
-            crate::config::MasterPoolSchedule::P2c => {
+            crate::config::MasterPoolSchedule::P2C => {
                 // Uniformly sample two distinct indices with a fast PRNG.
                 let a = fastrand::usize(0..n);
                 let b = loop {
@@ -1178,14 +1178,14 @@ mod tests {
         MasterClient::from_channel(endpoint, GoosefsConfig::new("localhost:0"))
     }
 
-    /// Build a pool of `n` test clients with P2c scheduling (no network I/O).
+    /// Build a pool of `n` test clients with P2C scheduling (no network I/O).
     fn make_test_pool(n: usize) -> MasterClientPool {
         let clients: Vec<Arc<MasterClient>> = (0..n)
             .map(|_| Arc::new(make_test_master_client()))
             .collect();
         MasterClientPool {
             clients,
-            schedule: crate::config::MasterPoolSchedule::P2c,
+            schedule: crate::config::MasterPoolSchedule::P2C,
             rr: AtomicUsize::new(0),
         }
     }
