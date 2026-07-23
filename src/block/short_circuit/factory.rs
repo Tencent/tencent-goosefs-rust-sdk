@@ -508,7 +508,7 @@ mod tests {
 
     #[test]
     fn config_from_goosefs_config_defaults() {
-        // P2-B (2026-07-07): `GoosefsConfig::default()` now emits
+        // `GoosefsConfig::default()` now emits
         // `short_circuit_enabled: false` (see
         //
         // `config::tests::test_short_circuit_enabled_default_is_false`).
@@ -547,7 +547,7 @@ mod tests {
         let pool = WorkerClientPool::new_shared(GoosefsConfig::new("127.0.0.1:9200"));
         let router = Arc::new(WorkerRouter::new());
         //  needs SC actually enabled — otherwise `should_use` would
-        // short-circuit on `!self.cfg.enabled` (P2-B default) and never
+        // short-circuit on `!self.cfg.enabled` (default) and never
         // touch the negative cache, masking the lazy-init we want to test.
         let cfg = GoosefsConfig::new("127.0.0.1:9200").with_short_circuit_enabled(true);
         let sc_cfg = ShortCircuitConfig::from_config(&cfg);
