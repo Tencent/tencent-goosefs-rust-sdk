@@ -625,7 +625,7 @@ const DEFAULT_ACK_INTERVAL_BYTES: i64 = 0;
 /// Default flow-control ACK coalescing threshold in chunks (`1` = every chunk).
 const DEFAULT_ACK_INTERVAL_CHUNKS: u32 = 1;
 
-// ── Master connection pool (Part V R3) ───────────────────────
+// ── Master connection pool ───────────────────────────────────
 /// Default master connection-pool size (1 = single channel, backward
 /// compatible). Raise to 4-8 and set `master_connection_pool_schedule` to
 /// `P2c` for high-concurrency remote scenarios to spread requests across

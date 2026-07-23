@@ -801,11 +801,11 @@ impl Drop for InflightGuard<'_> {
     }
 }
 
-// ── Master connection pool (Part V R3) ───────────────────────────────────────
+// ── Master connection pool ────────────────────────────────────────────────
 
-/// A P2C adaptive pool of [`MasterClient`]s over independent HTTP/2 channels.
+/// A pool of [`MasterClient`]s over independent HTTP/2 channels.
 ///
-/// # Why (Part V R3)
+/// # Why
 ///
 /// A single tonic [`Channel`] multiplexes all RPCs over one HTTP/2 connection,
 /// which caps concurrency at `SETTINGS_MAX_CONCURRENT_STREAMS` (default 100).
@@ -814,6 +814,19 @@ impl Drop for InflightGuard<'_> {
 /// / OpenFile regression vs Java (Java defaults to a channel pool). Spreading
 /// requests across `master_connection_pool_size` channels removes the queue.
 ///
+/// # Scheduling
+///
+/// Two strategies are available via `GoosefsConfig::master_connection_pool_schedule`:
+///
+/// - **RoundRobin** (default): cycles through channels in order. Wait-free,
+///   zero overhead, no in-flight tracking required.
+/// - **P2c**: Power of Two Choices — uniformly samples two distinct channels
+///   with a fast PRNG (`fastrand`) and picks the one with fewer in-flight
+///   RPCs. Per-channel in-flight counts are tracked inside each
+///   [`MasterClient`] (incremented in `with_retry`, decremented on RPC
+///   completion), so the count is accurate even for `MasterClient`s cloned
+///   out of the pool (e.g. by `GoosefsFileWriter`).
+///
 /// # HA consistency
 ///
 /// Every pooled client is constructed with the **same** `inquire_client`, so a
@@ -821,13 +834,6 @@ impl Drop for InflightGuard<'_> {
 /// new Primary, eliminating split-brain. Each channel performs its own SASL
 /// handshake and carries a unique `channel-id`, fully compatible with the
 /// `ArcSwap<AuthedState>` model.
-///
-/// `pick()` uses P2C (Power of Two Choices) with a fast PRNG (`fastrand`):
-/// two distinct channels are sampled uniformly at random, and the one with
-/// fewer in-flight RPCs is selected. Per-channel in-flight counts are tracked
-/// inside each [`MasterClient`] (incremented in `with_retry`, decremented on
-/// RPC completion), so the count is accurate even for `MasterClient`s cloned
-/// out of the pool (e.g. by `GoosefsFileWriter`).
 pub struct MasterClientPool {
     clients: Vec<Arc<MasterClient>>,
     schedule: crate::config::MasterPoolSchedule,
