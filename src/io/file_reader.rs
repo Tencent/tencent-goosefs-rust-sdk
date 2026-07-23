@@ -916,7 +916,7 @@ impl GoosefsFileReader {
     ///
     /// Returns `None` if the file has no UFS path (i.e. data is cache-only).
     ///
-    ////// clones the pre-built `self.ufs_read_options` template and updates only
+    /// clones the pre-built `self.ufs_read_options` template and updates only
     /// `offset_in_file`. The old path re-cloned `ufs_path: String` +
     /// re-derived `mount_id` / `no_cache` / `block_size` on every
     /// `read_segment` call. Now the per-segment cost is one `OpenUfsBlockOptions::clone`

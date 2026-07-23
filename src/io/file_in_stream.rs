@@ -992,7 +992,7 @@ impl GoosefsFileInStream {
     /// - `None`           — SC was not used, or hit a recoverable failure;
     ///   the caller transparently falls back to the gRPC path (INV-S1).
     ///
-    /// capability is `None` here (design  P3 item — the read path has no
+    /// capability is `None` here — the read path has no
     /// capability fetcher yet). On capability-enabled clusters the
     /// `OpenLocalBlock` RPC is rejected and this returns `None`, so the read
     /// still completes over gRPC with identical bytes.

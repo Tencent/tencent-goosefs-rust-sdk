@@ -112,7 +112,7 @@ pub struct WorkerRouter {
     // ── Worker list TTL ─────────────────────────────────────────────────────────
     /// Timestamp of the last worker-list update.
     ///
-    ////// changed from `tokio::sync::RwLock<Instant>` to `std::sync::Mutex<Instant>`
+    /// changed from `tokio::sync::RwLock<Instant>` to `std::sync::Mutex<Instant>`
     /// — the critical section is a single `*ptr = Instant::now()` /
     /// `instant.elapsed()` (nanoseconds), so a synchronous `std::sync::Mutex`
     /// is strictly cheaper than an async `RwLock` (no tokio task scheduling,
@@ -198,9 +198,7 @@ impl WorkerRouter {
     /// This is the hot-path constructor used by
     /// `GoosefsFileReader::init_with_context` /
     /// `GoosefsFileInStream::open_with_context` /
-    /// `GoosefsFileWriter::ensure_router_init` (see optimisation A1 in
-    ///
-    ///
+    /// `GoosefsFileWriter::ensure_router_init`.
     /// Semantics guaranteed:
     /// - `select_worker` observes the **exact** ring the shared router had at
     ///   snapshot time (both `workers` and `hash_ring` `Arc`s are cloned via
@@ -331,7 +329,7 @@ impl WorkerRouter {
 
     /// Whether the worker list is currently empty.
     ///
-    ////// the old `init_with_context` called `get_workers().await.len()` just to
+    /// the old `init_with_context` called `get_workers().await.len()` just to
     /// check non-empty — that does a full `Arc::clone` (inc + dec on the
     /// `Arc<Vec<WorkerInfo>>`) for no reason. This method borrows the
     /// `Guard` and checks `is_empty()` directly, saving one atomic
@@ -665,8 +663,7 @@ impl WorkerRouter {
 
     /// Remove expired failure entries.
     fn cleanup_expired_failures(&self) {
-        //  ):
-        // wait-free fast-path gate via an external counter.
+        // fast-path gate via an external counter.
         //
         // The previous C3 fix used `DashMap::is_empty()` as the fast path,
         // which still walks every shard and takes a `try_read` on each —
