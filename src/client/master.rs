@@ -830,6 +830,9 @@ impl Drop for InflightGuard<'_> {
 /// out of the pool (e.g. by `GoosefsFileWriter`).
 pub struct MasterClientPool {
     clients: Vec<Arc<MasterClient>>,
+    schedule: crate::config::MasterPoolSchedule,
+    /// Round-robin cursor for `RoundRobin` schedule (Relaxed, wait-free).
+    rr: AtomicUsize,
 }
 
 impl MasterClientPool {
@@ -858,106 +861,73 @@ impl MasterClientPool {
         }))
         .await?;
         debug!(pool_size = size, "MasterClientPool connected");
-        Ok(Self { clients })
+        Ok(Self {
+            clients,
+            schedule: config.master_connection_pool_schedule,
+            rr: AtomicUsize::new(0),
+        })
     }
 
-    /// P2C (Power of Two Choices) scheduling: uniformly sample two distinct
-    /// connections at random and select the one with fewer in-flight RPCs.
+    /// Pick the next client according to the configured scheduling strategy.
     ///
-    /// Returns a [`PooledClient`] handle that derefs to the chosen
-    /// [`MasterClient`]. The per-channel in-flight count is maintained
-    /// inside `MasterClient::with_retry` (not by this guard), so it stays
-    /// accurate even for clients cloned out of the pool. This is wait-free,
-    /// O(1), and avoids the thundering-herd problem of a full-scan min-pick.
+    /// - `RoundRobin` (default): cycle through channels in order. Wait-free,
+    ///   zero overhead, no in-flight tracking required.
+    /// - `P2c`: Power of Two Choices — uniformly sample two distinct channels
+    ///   at random and select the one with fewer in-flight RPCs. The
+    ///   per-channel in-flight count is maintained inside
+    ///   [`MasterClient::with_retry`] (not by this method), so it stays
+    ///   accurate even for clients cloned out of the pool.
     ///
-    /// # Why P2C with a PRNG?
-    ///
-    /// Naïve "scan all, pick min → fetch_add" is a two-step non-atomic
-    /// operation under high concurrency: multiple threads simultaneously
-    /// select the same "current minimum" connection, creating a thundering
-    /// herd that *increases* lock contention on that connection.  P2C
-    /// (Power of Two Choices) samples two candidates uniformly at random
-    /// and picks the lighter, which is wait-free and O(1). The classical
-    /// O(log log n) load bound assumes independent uniform sampling; we
-    /// achieve that here with `fastrand`, a fast non-cryptographic PRNG
-    /// whose statistical quality is sufficient for load balancing (it does
-    /// not need to be cryptographically secure, only uniform).
-    pub fn pick(&self) -> PooledClient {
+    /// Returns `Arc<MasterClient>` — callers interact with it exactly as
+    /// before. The in-flight counter lives inside `MasterClient` itself
+    /// (shared via `Arc<AtomicUsize>` across clones), so P2C load awareness
+    /// works regardless of whether the caller holds the `Arc` directly or
+    /// clones the inner `MasterClient`.
+    pub fn pick(&self) -> Arc<MasterClient> {
         let n = self.clients.len();
         if n == 1 {
-            return PooledClient {
-                client: self.clients[0].clone(),
-            };
+            return self.clients[0].clone();
         }
-        // Uniformly sample two distinct indices with a fast PRNG. Unlike the
-        // previous deterministic `base % n` scheme (where one index was
-        // constant for long runs), this gives independent samples per call,
-        // which is what the P2C load bound requires.
-        let a = fastrand::usize(0..n);
-        let b = loop {
-            let b = fastrand::usize(0..n);
-            if b != a {
-                break b;
+
+        match self.schedule {
+            crate::config::MasterPoolSchedule::RoundRobin => {
+                let idx = self.rr.fetch_add(1, Ordering::Relaxed) % n;
+                self.clients[idx].clone()
             }
-        };
+            crate::config::MasterPoolSchedule::P2c => {
+                // Uniformly sample two distinct indices with a fast PRNG.
+                let a = fastrand::usize(0..n);
+                let b = loop {
+                    let b = fastrand::usize(0..n);
+                    if b != a {
+                        break b;
+                    }
+                };
 
-        // Read per-client in-flight counts (tracked inside each MasterClient
-        // via with_retry, so clone-out-of-pool RPCs are counted too).
-        let la = self.clients[a].inflight.load(Ordering::Relaxed);
-        let lb = self.clients[b].inflight.load(Ordering::Relaxed);
-        let idx = if la <= lb { a } else { b };
+                // Read per-client in-flight counts (tracked inside each
+                // MasterClient via with_retry, so clone-out-of-pool RPCs
+                // are counted too).
+                let la = self.clients[a].inflight.load(Ordering::Relaxed);
+                let lb = self.clients[b].inflight.load(Ordering::Relaxed);
+                let idx = if la <= lb { a } else { b };
 
-        debug!(
-            a_idx = a,
-            b_idx = b,
-            a_inflight = la,
-            b_inflight = lb,
-            picked = idx,
-            "P2C pick"
-        );
+                debug!(
+                    a_idx = a,
+                    b_idx = b,
+                    a_inflight = la,
+                    b_inflight = lb,
+                    picked = idx,
+                    "P2C pick"
+                );
 
-        PooledClient {
-            client: self.clients[idx].clone(),
+                self.clients[idx].clone()
+            }
         }
     }
 
     /// Number of pooled channels.
     pub fn size(&self) -> usize {
         self.clients.len()
-    }
-}
-
-/// Handle returned by [`MasterClientPool::pick`].
-///
-/// Wraps an `Arc<MasterClient>` and implements [`Deref`](std::ops::Deref) to
-/// `MasterClient` so callers can invoke methods directly:
-///
-/// ```ignore
-/// let pooled = pool.pick();
-/// let info = pooled.get_status("/path").await?;
-/// // pooled is dropped here (no counter to decrement — in-flight tracking
-/// // lives inside MasterClient::with_retry)
-/// ```
-///
-/// The per-channel in-flight RPC counter is maintained by
-/// [`MasterClient::with_retry`] (incremented on RPC entry, decremented on
-/// exit via an RAII guard), **not** by this handle's `Drop`. This means the
-/// count is accurate even when a `MasterClient` is cloned out of the pool
-/// (e.g. by `GoosefsFileWriter`) and used long after the `PooledClient` is
-/// dropped — the previous pool-level counter could not track those RPCs.
-///
-/// `Clone` is a cheap `Arc` clone; cloning is safe because the in-flight
-/// counter is shared via `Arc<AtomicUsize>` inside the `MasterClient`.
-#[derive(Clone)]
-pub struct PooledClient {
-    pub client: Arc<MasterClient>,
-}
-
-impl std::ops::Deref for PooledClient {
-    type Target = MasterClient;
-
-    fn deref(&self) -> &Self::Target {
-        &self.client
     }
 }
 
@@ -1203,12 +1173,16 @@ mod tests {
         MasterClient::from_channel(endpoint, GoosefsConfig::new("localhost:0"))
     }
 
-    /// Build a pool of `n` test clients (no network I/O).
+    /// Build a pool of `n` test clients with P2c scheduling (no network I/O).
     fn make_test_pool(n: usize) -> MasterClientPool {
         let clients: Vec<Arc<MasterClient>> = (0..n)
             .map(|_| Arc::new(make_test_master_client()))
             .collect();
-        MasterClientPool { clients }
+        MasterClientPool {
+            clients,
+            schedule: crate::config::MasterPoolSchedule::P2c,
+            rr: AtomicUsize::new(0),
+        }
     }
 
     /// Under unequal load, `pick()` must always select the lighter channel.
@@ -1222,7 +1196,7 @@ mod tests {
         for _ in 0..200 {
             let picked = pool.pick();
             assert!(
-                Arc::ptr_eq(&picked.client, &pool.clients[1]),
+                Arc::ptr_eq(&picked, &pool.clients[1]),
                 "pick() selected the heavier channel"
             );
         }
@@ -1242,9 +1216,9 @@ mod tests {
         // tie-break (la <= lb → a), not by load asymmetry.
         for _ in 0..1000 {
             let picked = pool.pick();
-            if Arc::ptr_eq(&picked.client, &pool.clients[0]) {
+            if Arc::ptr_eq(&picked, &pool.clients[0]) {
                 saw_0 = true;
-            } else if Arc::ptr_eq(&picked.client, &pool.clients[1]) {
+            } else if Arc::ptr_eq(&picked, &pool.clients[1]) {
                 saw_1 = true;
             } else {
                 panic!("pick() returned a client not in the pool");
@@ -1266,7 +1240,7 @@ mod tests {
         for _ in 0..4000 {
             let picked = pool.pick();
             for (i, c) in pool.clients.iter().enumerate() {
-                if Arc::ptr_eq(&picked.client, c) {
+                if Arc::ptr_eq(&picked, c) {
                     hits[i] += 1;
                     break;
                 }
@@ -1364,17 +1338,16 @@ mod tests {
         );
     }
 
-    /// `PooledClient` implements `Clone` (cheap `Arc` clone) and the clone
-    /// shares the same underlying `MasterClient` (and thus the same
-    /// in-flight counter).
+    /// `pick()` returns `Arc<MasterClient>` — cloning the Arc shares the
+    /// same underlying `MasterClient` (and thus the same in-flight counter).
     #[tokio::test]
-    async fn pooled_client_clone_shares_master_client() {
+    async fn pick_returns_arc_sharing_inflight() {
         let pool = make_test_pool(2);
         let picked = pool.pick();
-        let cloned = picked.clone();
+        let cloned = Arc::clone(&picked);
         assert!(
-            Arc::ptr_eq(&picked.client, &cloned.client),
-            "PooledClient::clone must share the same Arc<MasterClient>"
+            Arc::ptr_eq(&picked, &cloned),
+            "Arc::clone must share the same MasterClient"
         );
     }
 }

@@ -626,12 +626,32 @@ const DEFAULT_ACK_INTERVAL_BYTES: i64 = 0;
 const DEFAULT_ACK_INTERVAL_CHUNKS: u32 = 1;
 
 // ── Master connection pool (Part V R3) ───────────────────────
-/// Default master connection-pool size (8 = P2C adaptive pool over multiple
-/// HTTP/2 channels). Lower to 1 for backward-compatible single-channel
-/// behaviour; raise to 16+ in very high concurrency remote scenarios to
-/// spread requests across more channels and avoid HTTP/2
-/// `SETTINGS_MAX_CONCURRENT_STREAMS` queueing.
-const DEFAULT_MASTER_CONNECTION_POOL_SIZE: usize = 8;
+/// Default master connection-pool size (1 = single channel, backward
+/// compatible). Raise to 4-8 and set `master_connection_pool_schedule` to
+/// `P2c` for high-concurrency remote scenarios to spread requests across
+/// multiple channels and avoid HTTP/2 `SETTINGS_MAX_CONCURRENT_STREAMS`
+/// queueing.
+const DEFAULT_MASTER_CONNECTION_POOL_SIZE: usize = 1;
+
+/// Scheduling strategy for the master connection pool.
+///
+/// - `RoundRobin` (default): cycle through pooled channels in order.
+///   Zero overhead, no in-flight tracking required.
+/// - `P2c`: Power of Two Choices — sample two channels uniformly at
+///   random and pick the one with fewer in-flight RPCs. Requires
+///   `master_connection_pool_size > 1` to have any effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MasterPoolSchedule {
+    RoundRobin,
+    P2c,
+}
+
+impl Default for MasterPoolSchedule {
+    fn default() -> Self {
+        Self::RoundRobin
+    }
+}
 
 // ── Worker connection pool (Part V worker-side multi-channel) ─
 /// Legacy per-worker connection-pool size (single HTTP/2 channel per worker).
@@ -1332,16 +1352,24 @@ pub struct GoosefsConfig {
     pub ack_interval_chunks: u32,
 
     // ── Master connection pool (Part V R3) ───────────────────
-    /// Number of independent Master gRPC channels to pool (default: 8).
+    /// Number of independent Master gRPC channels to pool (default: 1).
     ///
-    /// `1` keeps the legacy single-channel behaviour. Raising it (e.g. 16
-    /// or 32) spreads concurrent metadata RPCs across more HTTP/2
+    /// `1` keeps the legacy single-channel behaviour. Raising it (e.g. 4
+    /// or 8) spreads concurrent metadata RPCs across multiple HTTP/2
     /// connections, avoiding `SETTINGS_MAX_CONCURRENT_STREAMS` queueing
     /// under high concurrency over remote RTT. All pooled clients share a
-    /// single inquire client so HA failover stays consistent. Picking a
-    /// channel uses P2C (Power of Two Choices) adaptive scheduling.
+    /// single inquire client so HA failover stays consistent. When
+    /// `master_connection_pool_schedule` is `P2c`, the pool uses Power of
+    /// Two Choices adaptive scheduling; otherwise it round-robins.
     #[serde(default = "default_master_connection_pool_size")]
     pub master_connection_pool_size: usize,
+
+    /// Scheduling strategy for the master connection pool (default:
+    /// `RoundRobin`). Set to `P2c` to enable Power of Two Choices
+    /// adaptive load balancing — requires `master_connection_pool_size`
+    /// greater than 1 to have any effect.
+    #[serde(default)]
+    pub master_connection_pool_schedule: MasterPoolSchedule,
 
     /// Number of independent gRPC channels to pool **per worker**.
     ///
@@ -1933,6 +1961,7 @@ impl Default for GoosefsConfig {
             ack_interval_bytes: default_ack_interval_bytes(),
             ack_interval_chunks: default_ack_interval_chunks(),
             master_connection_pool_size: default_master_connection_pool_size(),
+            master_connection_pool_schedule: MasterPoolSchedule::default(),
             worker_connection_pool_size: default_worker_connection_pool_size(),
             master_inquire_retry_max_duration: default_master_inquire_max_duration(),
             master_inquire_initial_sleep: default_master_inquire_initial_sleep(),
@@ -2228,6 +2257,15 @@ impl GoosefsConfig {
     /// at least `1`.
     pub fn with_master_connection_pool_size(mut self, size: usize) -> Self {
         self.master_connection_pool_size = size.max(1);
+        self
+    }
+
+    /// Set the master connection pool scheduling strategy.
+    ///
+    /// Use `MasterPoolSchedule::P2c` for Power of Two Choices adaptive
+    /// load balancing (requires `master_connection_pool_size > 1`).
+    pub fn with_master_pool_schedule(mut self, schedule: MasterPoolSchedule) -> Self {
+        self.master_connection_pool_schedule = schedule;
         self
     }
 
@@ -3434,7 +3472,11 @@ mod tests {
         assert_eq!(config.read_buffer_messages, 16);
         assert_eq!(config.ack_interval_bytes, 0); // ACK every chunk (deadlock-safe)
         assert_eq!(config.ack_interval_chunks, 1);
-        assert_eq!(config.master_connection_pool_size, 8);
+        assert_eq!(config.master_connection_pool_size, 1);
+        assert_eq!(
+            config.master_connection_pool_schedule,
+            MasterPoolSchedule::RoundRobin
+        );
 
         let tuned = GoosefsConfig::new("127.0.0.1:9200")
             .with_prefetch_window(16)

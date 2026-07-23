@@ -71,7 +71,7 @@ use crate::cache::{CacheManager, LocalCacheManager};
 use crate::client::metrics_master::MetricsClient;
 use crate::client::metrics_master::MetricsMasterClient;
 use crate::client::{
-    create_master_inquire_client, MasterClientPool, MasterInquireClient, PooledClient,
+    create_master_inquire_client, MasterClient, MasterClientPool, MasterInquireClient,
     WorkerClientPool, WorkerManagerClient,
 };
 use crate::config::{ConfigRefresher, GoosefsConfig, TransparentAccelerationSwitch};
@@ -109,8 +109,9 @@ pub struct FileSystemContext {
 
     /// Persistent Master gRPC connection pool (metadata RPCs).
     ///
-    /// P2C adaptive pool of `config.master_connection_pool_size` channels
-    /// (default 8). See Part V R3.
+    /// Pool of `config.master_connection_pool_size` channels (default 1).
+    /// Scheduling strategy is controlled by `master_connection_pool_schedule`
+    /// (default `RoundRobin`; set to `P2c` for adaptive load balancing).
     master_pool: Arc<MasterClientPool>,
 
     /// Persistent WorkerManager gRPC connection (`GetWorkerInfoList`).
@@ -338,21 +339,15 @@ impl FileSystemContext {
 
     // ── Acquisition API ──────────────────────────────────────────────────────
 
-    /// Return a shared `MasterClient` from the pool via P2C (Power of Two Choices)
-    /// adaptive scheduling.
+    /// Return a shared `MasterClient` from the pool.
     ///
-    /// Returns a [`PooledClient`] handle that derefs to `MasterClient`. With
-    /// `master_connection_pool_size > 1` this picks the least-loaded connection
-    /// out of two random candidates, spreading concurrent metadata RPCs across
-    /// multiple HTTP/2 connections (Part V R3). Per-channel in-flight counts
-    /// are tracked inside `MasterClient::with_retry`, so the load signal stays
-    /// accurate even for clients cloned out of the pool (e.g. by
-    /// `GoosefsFileWriter`).
-    ///
-    /// Callers interact with the returned value exactly as they would with
-    /// `Arc<MasterClient>` — it implements [`Deref`](std::ops::Deref) to
-    /// `MasterClient` and [`Clone`] (cheap `Arc` clone).
-    pub fn acquire_master(&self) -> PooledClient {
+    /// With `master_connection_pool_schedule = RoundRobin` (default) this
+    /// cycles through pooled channels in order. With `P2c` it picks the
+    /// least-loaded connection out of two random candidates. Per-channel
+    /// in-flight counts are tracked inside `MasterClient::with_retry`, so
+    /// the load signal stays accurate even for clients cloned out of the
+    /// pool (e.g. by `GoosefsFileWriter`).
+    pub fn acquire_master(&self) -> Arc<MasterClient> {
         self.master_pool.pick()
     }
 
