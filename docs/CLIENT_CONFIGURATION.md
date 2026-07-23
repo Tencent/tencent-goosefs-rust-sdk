@@ -35,6 +35,7 @@ supported by the Goosefs Rust Client (`goosefs-sdk`).
    - [AuthType](#73-authtype)
    - [WriteTypeXAttr](#74-writetypexattr)
    - [CacheEvictorType](#75-cacheevictortype)
+   - [MasterPoolSchedule](#76-masterpoolschedule)
 8. [Configuration File Format](#8-configuration-file-format)
 9. [Configuration Examples](#9-configuration-examples)
 
@@ -111,12 +112,14 @@ When auto-discovering the properties file, the client searches in this order
 > documentation drifting from the code.
 >
 > **Rust-only fields.** A handful of knobs — the Part V streaming-read tuning
-> (`master_connection_pool_size`, `prefetch_window`, `read_buffer_messages`,
-> `ack_interval_bytes`, `ack_interval_chunks`) and the range-coalesce trio
-> (`range_coalesce_*`) — are exposed **only through the `GoosefsConfig`
-> builder / struct** and are deliberately absent from §3, §4, §5. Setting the
-> corresponding Java-style key in `goosefs-site.properties` or as `GOOSEFS_*`
-> env vars is silently ignored by the current SDK.
+> (`prefetch_window`, `read_buffer_messages`, `ack_interval_bytes`,
+> `ack_interval_chunks`) and the range-coalesce trio (`range_coalesce_*`) — are
+> exposed **only through the `GoosefsConfig` builder / struct** and are
+> deliberately absent from §3, §4, §5. Setting the corresponding Java-style key
+> in `goosefs-site.properties` or as `GOOSEFS_*` env vars is silently ignored
+> by the current SDK. (`master_connection_pool_size` and
+> `master_connection_pool_schedule` used to be in this group but have been
+> promoted to full env / properties / storage-option support.)
 
 ### 2.1 Connection Settings
 
@@ -128,7 +131,8 @@ When auto-discovering the properties file, the client searches in this order
 | `request_timeout` | `Duration` | `5min` (300s) | Request timeout for individual RPCs. |
 | `use_vpc_mapping` | `bool` | `false` | Whether to use VPC mapping addresses from `WorkerNetAddress`. |
 | `root` | `String` | `""` (empty) | Root path prefix for all operations (e.g. `/goosefs-data`). All paths are prepended with this prefix. |
-| `master_connection_pool_size` | `usize` | `1` | Number of independent Master gRPC channels to pool. `1` = legacy single-channel. Raising it (e.g. `4`/`8`) spreads concurrent metadata RPCs across multiple HTTP/2 connections, avoiding `SETTINGS_MAX_CONCURRENT_STREAMS` queueing under high concurrency / remote RTT. All pooled clients share one inquire client so HA failover stays consistent. **Set programmatically** via `with_master_connection_pool_size()`. (Optimization doc Part V R3.) |
+| `master_connection_pool_size` | `usize` | `1` | Number of independent Master gRPC channels to pool. `1` = legacy single-channel. Raising it (e.g. `4`/`8`) spreads concurrent metadata RPCs across multiple HTTP/2 connections, avoiding `SETTINGS_MAX_CONCURRENT_STREAMS` queueing under high concurrency / remote RTT. All pooled clients share one inquire client so HA failover stays consistent. Also configurable via the `GOOSEFS_MASTER_CONNECTION_POOL_SIZE` env var, the `goosefs.user.master.connection.pool.size` properties key, or the `goosefs_master_connection_pool_size` storage option (see §3, §4, §5). |
+| `master_connection_pool_schedule` | `MasterPoolSchedule` | `RoundRobin` | Scheduling strategy for the master connection pool (see §7.6). `RoundRobin` = cycle through pooled channels in order (zero overhead). `P2C` = Power of Two Choices — sample two channels at random and pick the one with fewer in-flight RPCs; only effective when `master_connection_pool_size > 1`. Also configurable via the `GOOSEFS_MASTER_POOL_SCHEDULE` env var, the `goosefs.user.master.pool.schedule` properties key, or the `goosefs_master_pool_schedule` storage option. All three accept `roundrobin` / `round_robin` / `round-robin` / `RoundRobin` (case-insensitive, separators ignored) and `p2c` / `P2C`. |
 | `worker_connection_pool_size` | `usize` | `min(cores, 4)` (since B3) | Number of independent gRPC channels to pool **per worker**. `1` restores the legacy single-channel-per-worker behaviour. The default now spreads concurrent block reads across multiple HTTP/2 connections to the same worker, lifting the per-connection throughput cap; each channel does its own SASL handshake. **Set programmatically** via `with_worker_connection_pool_size()`. **Operational note (since B3):** because each pooled channel performs an independent SASL handshake and holds its own FDs, raising the pool trades first-open latency and steady-state FD / RAM per worker for concurrency. `available_parallelism` is used so cgroup CPU limits are respected (containers see the container's core count) and the value is capped at `DEFAULT_WORKER_CONNECTION_POOL_MAX` so big-core hosts do not fan out to dozens of channels per worker. Operators rolling out this default on many-worker deployments should observe worker-side FD counts and master-side auth request rate; set `1` explicitly to opt out. (Optimization doc Part V R4 + FLAMEGRAPH_OPTIMIZATION_PLAN §B3.) |
 
 #### 2.1.1 URI form (`gfs://…`)
@@ -420,6 +424,8 @@ properties file values and built-in defaults.
 | `GOOSEFS_USER_CLIENT_CACHE_URING_QUEUE_DEPTH` | `client_cache_uring_queue_depth` | `32768` | io_uring SQ/CQ depth (plain integer). `0` is ignored. |
 | `GOOSEFS_USER_CLIENT_CACHE_URING_THREAD_COUNT` | `client_cache_uring_thread_count` | `2` | io_uring background thread count (plain integer). `0` is ignored. |
 | `GOOSEFS_WORKER_CONNECTION_POOL_SIZE` | `worker_connection_pool_size` | `min(cores, 4)` | Per-worker gRPC channel pool size (plain integer). `0` is clamped to `1`; non-numeric values are ignored (default kept). See FLAMEGRAPH_OPTIMIZATION_PLAN §B3. |
+| `GOOSEFS_MASTER_CONNECTION_POOL_SIZE` | `master_connection_pool_size` | `1` | Master gRPC channel pool size (plain integer). `0` is clamped to `1`; non-numeric values are ignored (default kept). Raise to `4`/`8` in high-concurrency remote scenarios to spread metadata RPCs across multiple HTTP/2 connections. |
+| `GOOSEFS_MASTER_POOL_SCHEDULE` | `master_connection_pool_schedule` | `RoundRobin` | Master pool scheduling strategy. Accepted: `roundrobin`, `round_robin`, `round-robin`, `RoundRobin` (case-insensitive, separators ignored) or `p2c`, `P2C`. Unknown values are ignored (default kept). Only effective when `master_connection_pool_size > 1`. |
 | `GOOSEFS_FILE_INFO_CACHE_TTL_MS` | `file_info_cache_ttl` | `30000` (30 s) | Client-side `FileInfo` cache TTL in **milliseconds**. Default is 30 s (cache enabled). `0` disables the cache; any positive value controls staleness bound for out-of-band mutations. See FLAMEGRAPH_OPTIMIZATION_PLAN §A3. |
 | `GOOSEFS_FILE_INFO_CACHE_CAPACITY` | `file_info_cache_capacity` | `16384` | Maximum `(path, FileInfo)` LRU entries when the FileInfo cache is enabled (plain integer). `0` is clamped to `1`. |
 | `GOOSEFS_SHORT_CIRCUIT_ENABLED` | `short_circuit_enabled` | `false` | Master kill switch for the short-circuit local-mmap read path (`true`/`false`). **Disabled by default** since 0.1.6 (see §2.9 and `../../goosefs-lance-tests/docs/design/FLAMEGRAPH_OPTIMIZATION_PLAN.md` §C6). |
@@ -464,6 +470,8 @@ These constants are used in `storage_options` maps (e.g. Lance's
 | `STORAGE_OPT_CLIENT_CACHE_URING_QUEUE_DEPTH` | `goosefs_client_cache_uring_queue_depth` | `32768` | io_uring SQ/CQ depth (integer as string). |
 | `STORAGE_OPT_CLIENT_CACHE_URING_THREAD_COUNT` | `goosefs_client_cache_uring_thread_count` | `2` | io_uring background thread count (integer as string). |
 | `STORAGE_OPT_WORKER_CONNECTION_POOL_SIZE` | `goosefs_worker_connection_pool_size` | `min(cores, 4)` | Per-worker gRPC channel pool size (integer as string). `0` is clamped to `1`. |
+| `STORAGE_OPT_MASTER_CONNECTION_POOL_SIZE` | `goosefs_master_connection_pool_size` | `1` | Master gRPC channel pool size (integer as string). `0` is clamped to `1`. Raise to `4`/`8` in high-concurrency remote scenarios. |
+| `STORAGE_OPT_MASTER_POOL_SCHEDULE` | `goosefs_master_pool_schedule` | `RoundRobin` | Master pool scheduling strategy. Accepts `roundrobin` / `round_robin` / `round-robin` / `RoundRobin` / `p2c` / `P2C` (case-insensitive, separators ignored). |
 | `STORAGE_OPT_FILE_INFO_CACHE_TTL_MS` | `goosefs_file_info_cache_ttl_ms` | `30000` (30 s) | Client-side `FileInfo` cache TTL in **milliseconds** (integer as string). Default is 30 s (cache enabled). `0` disables the cache; any positive value controls staleness bound for out-of-band mutations. |
 | `STORAGE_OPT_FILE_INFO_CACHE_CAPACITY` | `goosefs_file_info_cache_capacity` | `16384` | `FileInfo` LRU capacity when the cache is enabled (integer as string). `0` is clamped to `1`. |
 | `STORAGE_OPT_SHORT_CIRCUIT_ENABLED` | `goosefs_short_circuit_enabled` | `false` | Master kill switch for the short-circuit local-mmap read path. **Disabled by default** since 0.1.6. |
@@ -526,6 +534,8 @@ These keys are used in `goosefs-site.properties` files (Java-style `key=value` f
 | `goosefs.user.client.cache.uring.queue.depth` | `client_cache_uring_queue_depth` | integer | `32768` | io_uring SQ/CQ depth. `0` falls back to default. |
 | `goosefs.user.client.cache.uring.thread.count` | `client_cache_uring_thread_count` | integer | `2` | io_uring background thread count. `0` falls back to default. |
 | `goosefs.user.worker.connection.pool.size` | `worker_connection_pool_size` | integer | `min(cores, 4)` | Per-worker gRPC channel pool size. `0` is clamped to `1`. See FLAMEGRAPH_OPTIMIZATION_PLAN §B3. |
+| `goosefs.user.master.connection.pool.size` | `master_connection_pool_size` | integer | `1` | Master gRPC channel pool size. `0` is clamped to `1`. Raise to `4`/`8` in high-concurrency remote scenarios to spread metadata RPCs across multiple HTTP/2 connections. |
+| `goosefs.user.master.pool.schedule` | `master_connection_pool_schedule` | `roundrobin` / `round_robin` / `round-robin` / `RoundRobin` / `p2c` / `P2C` | `RoundRobin` | Master pool scheduling strategy (case-insensitive, separators ignored). Unknown values are ignored (default kept). Only effective when `master_connection_pool_size > 1`. |
 | `goosefs.user.file.info.cache.ttl.ms` | `file_info_cache_ttl` | integer (milliseconds) | `30000` (30 s) | Client-side `FileInfo` cache TTL. Default is 30 s (cache enabled). `0` disables the cache; any positive value controls staleness bound for out-of-band mutations. See FLAMEGRAPH_OPTIMIZATION_PLAN §A3. |
 | `goosefs.user.file.info.cache.capacity` | `file_info_cache_capacity` | integer | `16384` | `FileInfo` LRU capacity when the cache is enabled. `0` is clamped to `1`. |
 | `goosefs.user.short.circuit.enabled` | `short_circuit_enabled` | `true` / `false` | `false` | Master kill switch for the short-circuit local-mmap read path. **Disabled by default** since 0.1.6 (see §2.9). |
@@ -700,6 +710,37 @@ Eviction policy for the client local page cache (`client_cache_evictor`).
 
 **String parsing** is case-insensitive. Mirrors Java's
 `goosefs.user.client.cache.eviction.policy`.
+
+### 7.6 MasterPoolSchedule
+
+Scheduling strategy for the master connection pool (`master_connection_pool_schedule`).
+
+| Variant | String Representation | Description |
+|---------|----------------------|-------------|
+| `RoundRobin` (default) | `roundrobin` / `round_robin` / `round-robin` / `RoundRobin` | Cycle through pooled channels in order. Zero overhead, no in-flight tracking required. |
+| `P2C` | `p2c` / `P2C` | Power of Two Choices — sample two channels uniformly at random and pick the one with fewer in-flight RPCs. Wait-free, O(1). Only effective when `master_connection_pool_size > 1`. |
+
+**String parsing** is case-insensitive and ignores `-` / `_` separators (so
+`round_robin`, `round-robin`, `RoundRobin`, and `ROUNDROBIN` are all accepted;
+likewise `p2c` and `P2C`). Malformed values are ignored so a typo cannot
+silently flip scheduling — the previous value (default `RoundRobin`) is kept.
+
+**Conversions:**
+
+```rust
+use goosefs_sdk::config::MasterPoolSchedule;
+
+// String → MasterPoolSchedule (used by env var / properties / storage option loaders)
+let s: MasterPoolSchedule = "p2c".parse().unwrap();
+let s2: MasterPoolSchedule = "round-robin".parse().unwrap();
+
+// MasterPoolSchedule → serde form (lowercase, no separators)
+let json = serde_json::to_string(&MasterPoolSchedule::P2C).unwrap(); // "p2c"
+```
+
+See §3 (`GOOSEFS_MASTER_POOL_SCHEDULE`), §4 (`goosefs_master_pool_schedule`),
+and §5 (`goosefs.user.master.pool.schedule`) for the three configuration
+entry points that use this parser.
 
 ---
 
@@ -1004,6 +1045,8 @@ env vars (picked up by `GoosefsConfig::from_env()` /
 `GoosefsConfig::from_properties_auto()`):
 
 ```bash
+export GOOSEFS_MASTER_CONNECTION_POOL_SIZE=8
+export GOOSEFS_MASTER_POOL_SCHEDULE=p2c
 export GOOSEFS_WORKER_CONNECTION_POOL_SIZE=8
 export GOOSEFS_FILE_INFO_CACHE_TTL_MS=2000
 export GOOSEFS_FILE_INFO_CACHE_CAPACITY=8192
@@ -1014,6 +1057,8 @@ export GOOSEFS_FILE_INFO_CACHE_CAPACITY=8192
 Or the equivalent lines in `goosefs-site.properties`:
 
 ```properties
+goosefs.user.master.connection.pool.size=8
+goosefs.user.master.pool.schedule=p2c
 goosefs.user.worker.connection.pool.size=8
 goosefs.user.file.info.cache.ttl.ms=2000
 goosefs.user.file.info.cache.capacity=8192
@@ -1029,6 +1074,8 @@ methods:
 ds = lance.dataset(
     "gfs://…",
     storage_options={
+        "goosefs_master_connection_pool_size": "8",
+        "goosefs_master_pool_schedule": "p2c",
         "goosefs_worker_connection_pool_size": "8",
         "goosefs_file_info_cache_ttl_ms": "2000",
         "goosefs_file_info_cache_capacity": "8192",
@@ -1040,7 +1087,8 @@ ds = lance.dataset(
 
 | Knob | Raise for | Default | Typical value | Env var | Properties key | Storage option |
 |------|-----------|---------|---------------|---------|----------------|----------------|
-| `master_connection_pool_size` | High-concurrency metadata RPCs over remote RTT | `1` | `4`–`8` | *(programmatic only)* | *(programmatic only)* | *(programmatic only)* |
+| `master_connection_pool_size` | High-concurrency metadata RPCs over remote RTT | `1` | `4`–`8` | `GOOSEFS_MASTER_CONNECTION_POOL_SIZE` | `goosefs.user.master.connection.pool.size` | `goosefs_master_connection_pool_size` |
+| `master_connection_pool_schedule` | Adaptive load balancing across pooled master channels | `RoundRobin` | `RoundRobin` (default) / `P2C` (opt-in for high concurrency) | `GOOSEFS_MASTER_POOL_SCHEDULE` | `goosefs.user.master.pool.schedule` | `goosefs_master_pool_schedule` |
 | `worker_connection_pool_size` | Single-process high-throughput block reads | `min(cores, 4)` | `4`–`8` | `GOOSEFS_WORKER_CONNECTION_POOL_SIZE` | `goosefs.user.worker.connection.pool.size` | `goosefs_worker_connection_pool_size` |
 | `file_info_cache_ttl` | Repeated opens of the same file inside one query | `30000` (30 s) | `1s`–`5s` | `GOOSEFS_FILE_INFO_CACHE_TTL_MS` | `goosefs.user.file.info.cache.ttl.ms` | `goosefs_file_info_cache_ttl_ms` |
 | `file_info_cache_capacity` | Wide fan-out workloads (many distinct paths) | `16384` | `16384`–`32768` | `GOOSEFS_FILE_INFO_CACHE_CAPACITY` | `goosefs.user.file.info.cache.capacity` | `goosefs_file_info_cache_capacity` |
