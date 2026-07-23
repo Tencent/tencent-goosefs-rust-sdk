@@ -118,7 +118,7 @@ async def main() -> None:
         print(f"  opened = {len(readers)} streams")
         contents = []
         for r, expected in zip(readers, payloads):
-            data = await r.read_to_end()
+            data = await r.read()
             contents.append(data)
             assert data == expected, f"read mismatch: {data!r} != {expected!r}"
         print(f"  all contents verified = {contents == payloads}")

@@ -260,7 +260,7 @@ async def test_batch_open_file_reads_all_in_order(
 
     contents = []
     for r in readers:
-        data = await r.read_to_end()
+        data = await r.read()
         contents.append(data)
     assert contents == payloads
 

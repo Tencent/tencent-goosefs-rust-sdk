@@ -95,8 +95,9 @@ async def test_list_status_grouped_recursive(
     await async_fs.mkdir(f"{tmp_dir}/sub")
     await async_fs.write_file(f"{tmp_dir}/sub/child", b"x")
     grouped = await async_fs.list_status_grouped(tmp_dir, recursive=True)
-    # tmp_dir itself + sub/ + sub/child = at least 3 entries.
-    assert len(grouped) >= 3
+    # listStatus recursive returns descendants (sub/ + sub/child), not the
+    # directory itself, so we expect at least 2 entries.
+    assert len(grouped) >= 2
 
 
 async def test_list_status_grouped_bool(
@@ -147,6 +148,7 @@ async def test_batch_list_status_grouped_recursive(
     async_fs: AsyncGoosefs, tmp_dir: str
 ) -> None:
     parent = f"{tmp_dir}/parent"
+    await async_fs.mkdir(parent)
     await async_fs.mkdir(f"{parent}/sub")
     await async_fs.write_file(f"{parent}/root.txt", b"x")
     await async_fs.write_file(f"{parent}/sub/child.txt", b"x")
