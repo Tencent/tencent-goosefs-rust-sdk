@@ -97,9 +97,7 @@ async def main() -> None:
         # never report blocks back to master (worker registers with
         # ``usedBytes=0``, no block report).  Detect that up front and
         # bail out gracefully instead of letting every API below blow up
-        # with the same root cause.  See
-        # docs/GooseFS_Rust_Python_Java_CLIENT_STRESS_COMPARISON.md  (Python
-        # binding).
+        # with the same root cause.
         status = await fs.get_status(path_file)
         if not status.block_ids:
             # Flush stdout first so the [skip] hint below appears *after*

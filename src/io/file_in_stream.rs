@@ -338,7 +338,7 @@ impl GoosefsFileInStream {
         // `None` unless the caller has opted in via `with_file_info_cache_ttl`.
         let file_info_cache = ctx.acquire_file_info_cache();
         let file_info = if let Some(cached) = file_info_cache.as_ref().and_then(|c| c.get(path)) {
-            debug!(path = %path, "FileInfo cache hit (§A3 + S3)");
+            debug!(path = %path, "FileInfo cache hit");
             // S3: `cached` is `Arc<FileInfo>`; `from_proto` needs owned
             // `FileInfo`, so one clone is unavoidable here (it moves
             // the fields into URIStatus). The win is that the cache

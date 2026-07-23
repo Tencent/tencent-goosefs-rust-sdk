@@ -125,7 +125,7 @@ async fn main() -> Result<()> {
     let file_size = size_mb * 1024 * 1024;
     let io_size = io_kb * 1024;
 
-    println!("Part V optimisation verification / benchmark");
+    println!("Optimisation verification / benchmark");
     println!("============================================");
     println!("  master      = {addr}");
     println!("  file size   = {size_mb} MiB");
@@ -313,9 +313,9 @@ async fn main() -> Result<()> {
 
     println!("\n============================================");
     if pr_mism == 0 {
-        println!("✅ Part V verification complete — random/sequential reads correct.");
+        println!("✅ verification complete — random/sequential reads correct.");
     } else {
-        println!("❌ Part V verification FAILED — see mismatch count above.");
+        println!("❌ verification FAILED — see mismatch count above.");
     }
     Ok(())
 }

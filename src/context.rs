@@ -300,7 +300,7 @@ impl FileSystemContext {
             debug!(
                 ttl_ms = config.file_info_cache_ttl.as_millis(),
                 capacity = config.file_info_cache_capacity,
-                "FileInfo metadata cache enabled (opt-in, §A3), ttl={:?}",
+                "FileInfo metadata cache enabled (opt-in), ttl={:?}",
                 c.ttl(),
             );
         }
@@ -891,7 +891,7 @@ mod tests {
         assert_eq!(
             cfg.file_info_cache_ttl,
             Duration::from_secs(30),
-            "default TTL must be 30 s (enabled by default per §A3)"
+            "default TTL must be 30 s (enabled by default)"
         );
         assert!(
             crate::file_info_cache::FileInfoCache::maybe_new(

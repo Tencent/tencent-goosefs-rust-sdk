@@ -447,11 +447,7 @@ mod reader_sc {
         // read_file_range → read_segment → short-circuit).
         let whole = GoosefsFileReader::read_file_with_context(ctx.clone(), &path).await?;
         assert_eq!(whole.len(), payload.len(), "whole read length");
-        assert_eq!(
-            whole.as_ref(),
-            payload.as_slice(),
-            "whole read bytes (§8.2)"
-        );
+        assert_eq!(whole.as_ref(), payload.as_slice(), "whole read bytes");
 
         // A few range reads too, including a page-crossing and a tail read.
         let cases: &[(u64, u64)] = &[

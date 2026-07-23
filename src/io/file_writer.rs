@@ -1041,7 +1041,7 @@ impl GoosefsFileWriter {
             // TODO (Wave 2): call list_status(ALWAYS) to force the Master to reload
             // UFS metadata so a subsequent open() of this path returns the UFS file.
             // This requires adding a new list_status_with_load_metadata() variant to
-            // MasterClient (see T2-C in FINAL_DESIGN.md).
+            // MasterClient.
         }
         err
     }

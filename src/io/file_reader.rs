@@ -288,7 +288,7 @@ impl GoosefsFileReader {
         // `fetched.clone()` for the cache + moved `fetched` out).
         let file_info_cache = ctx.acquire_file_info_cache();
         let file_info = if let Some(cached) = file_info_cache.as_ref().and_then(|c| c.get(path)) {
-            debug!(path = %path, "FileInfo cache hit (§A3 + S3 — Arc clone, zero deep copy)");
+            debug!(path = %path, "FileInfo cache hit — Arc clone, zero deep copy");
             cached
         } else {
             let master = ctx.acquire_master();
@@ -1037,7 +1037,7 @@ impl GoosefsFileReader {
             input_bytes = plan.total_input_bytes,
             fetch_bytes = plan.total_fetch_bytes,
             wasted_bytes = plan.wasted_bytes(),
-            "range coalesce plan (§B2)"
+            "range coalesce plan"
         );
 
         // Issue one `read_range` per merged fetch. We do them sequentially
@@ -1365,7 +1365,7 @@ mod tests {
         let cfg = GoosefsConfig::default();
         assert!(
             !cfg.range_coalesce_enabled,
-            "range_coalesce_enabled must default to false (opt-in per §B2)"
+            "range_coalesce_enabled must default to false"
         );
         assert_eq!(cfg.range_coalesce_gap_bytes, 64 * 1024);
         assert_eq!(cfg.range_coalesce_max_bytes, 4 * 1024 * 1024);
