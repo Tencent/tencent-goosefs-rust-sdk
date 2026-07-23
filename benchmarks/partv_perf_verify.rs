@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Part V optimisation verification & micro-benchmark.
+//!  optimisation verification & micro-benchmark.
 //!
 //! Exercises and measures the optimisations landed for
-//! Part V optimisation verification on a **live local cluster**:
+//!  optimisation verification on a **live local cluster**:
 //!
-//! - **R2** — `read_at` single-block fast path (random read / PR large IO).
-//! - **R1-B** — sequential-read prefetch window + buffered drain + ACK merge
+//! - — `read_at` single-block fast path (random read / PR large IO).
+//! - **** — sequential-read prefetch window + buffered drain + ACK merge
 //!   (sequential read / SR throughput).
-//! - **R3** — Master multi-channel connection pool (metadata `get_status`
+//! - — Master multi-channel connection pool (metadata `get_status`
 //!   throughput, pool=1 vs pool=N).
 //!
 //! Every random read is also **verified byte-for-byte** against a
@@ -228,7 +228,7 @@ async fn main() -> Result<()> {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 2) Sequential read (SR) — R1-B prefetch + buffered drain + ACK merge.
+    // 2) Sequential read (SR) —  prefetch + buffered drain + ACK merge.
     //    Two flavours: small-buffer loop (64 KiB) and full read_all.
     // ─────────────────────────────────────────────────────────────────────────
     println!("\n[2] Sequential read (SR) — R1-B (prefetch/buffer/ACK-merge)");

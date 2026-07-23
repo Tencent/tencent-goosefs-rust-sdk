@@ -16,7 +16,7 @@
 //!
 //! A SIGBUS while touching a block mapping means the underlying file was
 //! truncated / replaced **while the Worker was supposed to be holding the block
-//! lock** — i.e. INV-D1 (the immutability protocol, design §1.3 / §8.1) was
+//! lock** — i.e. INV-D1 (the immutability protocol, design  / ) was
 //! violated. There is no safe way to *recover* inside a signal handler: SIGBUS
 //! fires at an arbitrary faulting instruction (e.g. deep in `memcpy`), and
 //! unwinding from a signal handler through libc frames is UB. `catch_unwind`
@@ -25,10 +25,10 @@
 //! Therefore the only correct response is to **fail loudly**: emit an
 //! async-signal-safe diagnostic line to stderr and `abort()`. This turns a
 //! protocol violation into an immediate, observable crash rather than silently
-//! returning torn / stale bytes (which would break data consistency, §0a).
+//! returning torn / stale bytes (which would break data consistency, a).
 //!
 //! Deployments that need to tolerate untrusted/mutable backing files should use
-//! the `pread` data plane instead of mmap (design §11.4) rather than relying on
+//! the `pread` data plane instead of mmap (design ) rather than relying on
 //! signal recovery.
 //!
 //! The handler is installed once per process (idempotent) and only on unix.

@@ -21,7 +21,7 @@
 //! References: Lance `reader.rs:97-292` `UringReader` (extended from read-only
 //! to full get/put/delete).
 //!
-//! See `docs/CLIENT_PAGE_CACHE_DESIGN.md` §3.4.
+//! See `docs/CLIENT_PAGE_CACHE_DESIGN.md` .
 
 use super::driver::{submit_request, try_submit_request};
 use super::future::UringOpFuture;
@@ -626,7 +626,7 @@ impl PageStore for UringPageStore {
     /// `get_dir_fd`. `last_access` updated via `AtomicU64` — no write lock.
     ///
     /// See the concurrent uring analysis for design context.
-    /// §8.5 and Method E for the analysis that motivated this design.
+    ///  and Method E for the analysis that motivated this design.
     async fn get(&self, page_id: &PageId, offset: usize, dst: &mut [u8]) -> Result<usize> {
         let bytes = self.get_bytes(page_id, offset, dst.len()).await?;
         let n = bytes.len().min(dst.len());
@@ -705,7 +705,7 @@ impl PageStore for UringPageStore {
     /// `rename` uses `std::fs::rename` (sync) because it is NOT on the cache
     /// hit hot path — it only runs on cache miss fill.
     ///
-    /// See design §3.4.
+    /// See design .
     async fn put(&self, page_id: &PageId, page: &[u8]) -> Result<()> {
         let final_path = self.page_path(page_id);
         let parent = final_path

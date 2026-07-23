@@ -240,7 +240,7 @@ pub mod name {
     /// Total blocks successfully written (counter).
     pub const CLIENT_BLOCKS_WRITTEN_TOTAL: &str = "Client.BlocksWrittenTotal";
 
-    // ── Short-circuit (local mmap) read path (SHORT_CIRCUIT_DESIGN §7.3) ──
+    // ── Short-circuit (local mmap) read path (SHORT_CIRCUIT_DESIGN ) ──
     /// Successful `OpenLocalBlock` + mmap sessions.
     pub const CLIENT_SC_OPEN_SUCCESS: &str = "Client.ShortCircuitOpenSuccess";
     /// `OpenLocalBlock` RPC failures (block not local / IO error).
@@ -274,7 +274,7 @@ pub mod name {
     // `try_short_circuit_read` invocation on the **positioned / random** read
     // path (`GoosefsFileReader::next_read_bytes` /
     // `GoosefsFileInStream::read_at`), which is the workload the flame graph
-    // in §2 is dominated by. Operators can compute the hit rate directly:
+    // in  is dominated by. Operators can compute the hit rate directly:
     //
     //     hit_rate = HIT / (HIT + SKIPPED + FALLBACK_OPEN + FALLBACK_READ)
     //
@@ -287,7 +287,7 @@ pub mod name {
     //
     // Fine-grained fallback *reasons* remain observable via the pre-existing
     // `Client.ShortCircuitOpenLocalFail` / `FileOpenFail` / `MmapFail`
-    // counters (they act as the "fallback reason histogram" §B1.2 asks for).
+    // counters (they act as the "fallback reason histogram"  asks for).
     /// SC actually served the read (zero-copy mmap slice). Hit-rate numerator.
     pub const CLIENT_SC_DECISION_HIT: &str = "Client.ShortCircuitDecisionHit";
     /// SC not attempted at all — pre-filter (`should_use`) rejected the block.

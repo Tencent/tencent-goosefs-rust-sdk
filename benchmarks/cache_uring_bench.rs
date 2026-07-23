@@ -32,7 +32,7 @@
 //! - `BENCH_CONCURRENT_ITERATIONS` — iterations per concurrent task (default 10_000)
 //! - `BENCH_PAGE_SIZE` — page size in bytes (default 1024)
 //!
-//! See `docs/CLIENT_PAGE_CACHE_DESIGN.md` §10.3 for expected results.
+//! See `docs/CLIENT_PAGE_CACHE_DESIGN.md`  for expected results.
 
 use std::sync::Arc;
 use std::time::Instant;

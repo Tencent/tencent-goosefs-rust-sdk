@@ -615,7 +615,7 @@ const DEFAULT_BLOCK_SIZE: u64 = 64 * 1024 * 1024;
 /// Default chunk size for streaming reads: 1 MiB.
 const DEFAULT_CHUNK_SIZE: u64 = 1024 * 1024;
 
-// ── Streaming-read tuning (Part V R1-B) ──────────────────────
+// ── Streaming-read tuning() ──────────────────────
 /// Default sequential-read prefetch window (in chunks).
 ///
 /// Mirrors Java `USER_STREAMING_READER_MAX_PREFETCH_WINDOW = 8`.
@@ -684,7 +684,7 @@ impl std::str::FromStr for MasterPoolSchedule {
     }
 }
 
-// ── Worker connection pool (Part V worker-side multi-channel) ─
+// ── Worker connection pool ( worker-side multi-channel) ─
 /// Legacy per-worker connection-pool size (single HTTP/2 channel per worker).
 ///
 /// **Deprecated as the default**:
@@ -1101,7 +1101,7 @@ pub const STORAGE_OPT_FILE_INFO_CACHE_TTL_MS: &str = "goosefs_file_info_cache_tt
 /// [`STORAGE_OPT_FILE_INFO_CACHE_TTL_MS`] resolves to a value `> 0`.
 pub const STORAGE_OPT_FILE_INFO_CACHE_CAPACITY: &str = "goosefs_file_info_cache_capacity";
 
-// ── Short-circuit (local mmap) read env vars (SHORT_CIRCUIT_DESIGN §6) ─
+// ── Short-circuit (local mmap) read env vars (SHORT_CIRCUIT_DESIGN ) ─
 /// Environment variable: master kill switch for the short-circuit local read path.
 ///
 /// Mirrors [`GoosefsConfig::short_circuit_enabled`]. Accepts `true`/`false`
@@ -1392,7 +1392,7 @@ pub struct GoosefsConfig {
     /// Use [`GoosefsConfig::with_write_type`] for a type-safe builder.
     pub write_type: Option<i32>,
 
-    // ── Streaming-read tuning (Part V R1-B) ──────────────────
+    // ── Streaming-read tuning() ──────────────────
     /// Sequential-read prefetch window in chunks (default: 8).
     ///
     /// Sent in the first `ReadRequest`; lets the worker keep up to
@@ -1418,7 +1418,7 @@ pub struct GoosefsConfig {
     #[serde(default = "default_ack_interval_chunks")]
     pub ack_interval_chunks: u32,
 
-    // ── Master connection pool (Part V R3) ───────────────────
+    // ── Master connection pool() ───────────────────
     /// Number of independent Master gRPC channels to pool (default: 1).
     ///
     /// `1` keeps the legacy single-channel behaviour. Raising it (e.g. 4
@@ -1787,7 +1787,7 @@ pub struct GoosefsConfig {
     #[serde(default = "default_range_coalesce_max_bytes")]
     pub range_coalesce_max_bytes: u64,
 
-    // ── Short-circuit (local mmap) read path (SHORT_CIRCUIT_DESIGN §6) ──
+    // ── Short-circuit (local mmap) read path (SHORT_CIRCUIT_DESIGN ) ──
     /// Master kill switch for the short-circuit local read path (default:
     /// `false`, **disabled**). Mirrors Java
     /// `goosefs.user.short.circuit.enabled`. See
@@ -1844,7 +1844,7 @@ pub struct GoosefsConfig {
     /// Install a process-global SIGBUS handler that diagnoses + `abort`s on a
     /// mapping fault (default: `true`). A SIGBUS on a committed, locked block
     /// indicates a protocol violation (INV-D1); aborting surfaces it loudly
-    /// rather than returning torn/stale bytes (design §3.2 / §8.1). Linux/macOS
+    /// rather than returning torn/stale bytes (design  / ). Linux/macOS
     /// only; a no-op elsewhere. `goosefs.client.short.circuit.sigbus.handler`.
     #[serde(default = "default_true_bool")]
     pub short_circuit_sigbus_handler: bool,
@@ -1958,7 +1958,7 @@ fn default_range_coalesce_max_bytes() -> u64 {
     4 * 1024 * 1024 // 4 MiB
 }
 
-// ── Short-circuit (local mmap) read defaults (SHORT_CIRCUIT_DESIGN §6) ─
+// ── Short-circuit (local mmap) read defaults (SHORT_CIRCUIT_DESIGN ) ─
 fn default_short_circuit_cache_capacity() -> usize {
     64
 }
@@ -1978,7 +1978,7 @@ fn default_short_circuit_prefetch_max_batch() -> usize {
     1024
 }
 
-// ── Streaming-read tuning / master pool defaults (Part V) ─────
+// ── Streaming-read tuning / master pool defaults() ─────
 fn default_prefetch_window() -> i32 {
     DEFAULT_PREFETCH_WINDOW
 }
@@ -2304,19 +2304,19 @@ impl GoosefsConfig {
     }
 
     /// Set the sequential-read prefetch window (in chunks). See
-    /// [`GoosefsConfig::prefetch_window`] (Part V R1-B-a).
+    /// [`GoosefsConfig::prefetch_window`]().
     pub fn with_prefetch_window(mut self, window: i32) -> Self {
         self.prefetch_window = window;
         self
     }
 
-    /// Set the flow-control ACK coalescing threshold in bytes (Part V R1-B-c).
+    /// Set the flow-control ACK coalescing threshold in bytes().
     pub fn with_ack_interval_bytes(mut self, bytes: i64) -> Self {
         self.ack_interval_bytes = bytes;
         self
     }
 
-    /// Set the number of pooled Master gRPC channels (Part V R3).
+    /// Set the number of pooled Master gRPC channels().
     ///
     /// `1` keeps the legacy single-channel behaviour. Values are clamped to
     /// at least `1`.
@@ -3544,7 +3544,7 @@ mod tests {
         assert!(config.validate().is_err());
     }
 
-    /// Part V R1-B / R3: new streaming-read / master-pool tuning fields have
+    ///  / R3: new streaming-read / master-pool tuning fields have
     /// the documented defaults, and the pool-size builder clamps to ≥ 1.
     #[test]
     fn test_part_v_tuning_defaults_and_builders() {

@@ -157,7 +157,7 @@ pub struct MasterClient {
     /// not track.
     inflight: Arc<AtomicUsize>,
     // ── Cached metric handles (lifetime-aligned with the MasterClient, not
-    //    with any single channel/SASL session — see §9.1). Caching avoids
+    //    with any single channel/SASL session — see ). Caching avoids
     //    `crate::metrics::counter(name)` DashMap lookups on every RPC.
     counter_get_status_ops: Arc<Counter>,
     counter_get_status_latency_us: Arc<Counter>,

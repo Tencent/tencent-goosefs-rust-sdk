@@ -133,7 +133,7 @@ pub struct FileSystemContext {
     /// this context share one hot-block reader LRU + negative cache: a hot
     /// local block is `OpenLocalBlock`+mmap'd once and reused across every
     /// concurrent stream/task, instead of once per stream. `None` when the SC
-    /// kill switch is off. See `docs/SHORT_CIRCUIT_DESIGN.md` §3.5 / §10 P8.
+    /// kill switch is off. See `docs/SHORT_CIRCUIT_DESIGN.md`  /  P8.
     short_circuit: Option<Arc<ShortCircuitFactory>>,
 
     /// Client-side local page cache, when `config.client_cache_enabled`.
@@ -290,7 +290,7 @@ impl FileSystemContext {
             None
         };
 
-        // Build the opt-in FileInfo (metadata) cache — §A3. `maybe_new`
+        // Build the opt-in FileInfo (metadata) cache — . `maybe_new`
         // returns `None` when the TTL is zero (default), so this is a
         // no-op unless the caller explicitly opted in via
         // `with_file_info_cache_ttl`.
@@ -404,7 +404,7 @@ impl FileSystemContext {
     /// **Contract**: every write path (create, delete, rename, setAttr...)
     /// that mutates `path` on the master through this client MUST call this
     /// after the mutation is acknowledged, so subsequent reads observe the
-    /// fresh metadata (§A3).
+    /// fresh metadata().
     pub fn invalidate_file_info(&self, path: &str) {
         if let Some(cache) = &self.file_info_cache {
             cache.invalidate(path);
@@ -820,7 +820,7 @@ mod tests {
     /// without attempting any network connection when `metrics_enabled = false`.
     ///
     /// This is the core contract for the `disabled_no_task_spawn` requirement
-    /// from the design spec §8.1:
+    /// from the design spec :
     ///   - `metrics_enabled=false` → no HeartbeatTask spawned, no MetricsMasterClient created.
     ///
     /// We test the gate condition directly (the config flag check) rather than
@@ -858,7 +858,7 @@ mod tests {
     }
 
     /// Verify the `metrics_enabled` default value (true = opt-in enabled by default,
-    /// matching the design spec §2).
+    /// matching the design spec ).
     #[test]
     fn metrics_disabled_by_default() {
         let config = GoosefsConfig::new("127.0.0.1:9200");

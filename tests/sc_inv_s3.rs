@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Gating-grade short-circuit **INV-S3** (capability authorization) regression
-//! suite — design `docs/SHORT_CIRCUIT_DESIGN.md` §1.3 / §3.1.
+//! suite — design `docs/SHORT_CIRCUIT_DESIGN.md`  / .
 //!
 //! ## What INV-S3 actually claims
 //!
@@ -230,7 +230,7 @@ mod inv_s3 {
     /// enforcement policy under the current cluster auth mode.
     ///
     /// `FileSystemContext` does not yet wire a `CapabilityProvider` into its
-    /// shared `ShortCircuitFactory` (design §3.1, P3 deliberately external),
+    /// shared `ShortCircuitFactory` (design , P3 deliberately external),
     /// so every `OpenLocalBlock` produced via the public SDK API today carries
     /// `capability = None` on the wire. We exploit this to probe the live
     /// Worker:

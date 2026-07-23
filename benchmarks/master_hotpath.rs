@@ -16,7 +16,7 @@
 //! by the GetFileStatus performance work.
 //!
 //! See the SDK optimisation analysis for the full context.
-//! §4) for the full analysis. This file contains three benchmark
+//! ) for the full analysis. This file contains three benchmark
 //! groups, each comparing the *old* implementation strategy against the
 //! *new* one, using identical inputs so the only variable is the strategy:
 //!

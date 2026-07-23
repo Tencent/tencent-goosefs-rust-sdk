@@ -93,7 +93,7 @@ pub struct GoosefsFileReader {
     path: String,
     /// File info from Master (contains block IDs, block size, length).
     ///
-    /// **S3**:
+    ///:
     /// wrapped in `Arc<FileInfo>` so a `FileInfoCache` hit on a
     /// repeated `open_with_context` / `open_range_with_context` call
     /// returns an `Arc` clone (one atomic inc) instead of a deep
@@ -104,8 +104,8 @@ pub struct GoosefsFileReader {
     /// Worker router for block → worker mapping.
     /// Worker router view for block → worker mapping.
     ///
-    /// P0-D Step 2
-    /// §3.4): migrated from `WorkerRouter` (per-reader `ArcSwap`×3) to
+    ///  Step 2
+    /// migrated from `WorkerRouter` (per-reader `ArcSwap`×3) to
     /// `WorkerRouterView` (per-reader `Arc`×2 + `Option<i64>` value).
     /// Byte-exact routing behaviour is guaranteed by
     /// `block::router::tests::test_view_select_worker_matches_shared_for_all_block_ids`.
@@ -256,7 +256,7 @@ impl GoosefsFileReader {
     /// snapshot, so per-read failure marking stays local and does not pollute
     /// the long-lived context-level routing state.
     ///
-    /// **A1**: the local view is
+    ///: the local view is
     /// built via [`WorkerRouterView::from_shared`], which clones the shared
     /// router's `workers` + `hash_ring` `Arc`s wait-free (two `Arc::clone`s
     /// plus a value copy of `local_worker_id`) with **no `ArcSwap`
@@ -273,14 +273,14 @@ impl GoosefsFileReader {
     ) -> Result<(Arc<FileInfo>, WorkerRouterView)> {
         // 1. Reuse the shared Master client (zero handshake).
         //
-        // **A3**: consult the opt-in
+        //: consult the opt-in
         // FileInfo metadata cache first. On hit, skip the RPC entirely; on
         // miss, populate the cache after a successful `get_status`. The
         // cache is `None` only when the caller has explicitly opted out
         // (`file_info_cache_ttl == 0`). By default the TTL is 30 s, so this
         // branch consults the live cache.
         //
-        // **S3**: `get` returns `Arc<FileInfo>` — a cache hit is now a
+        //: `get` returns `Arc<FileInfo>` — a cache hit is now a
         // single `Arc::clone` (atomic inc) instead of a deep
         // `FileInfo::clone`. On miss, the fetched `FileInfo` is wrapped
         // in `Arc` once, inserted into the cache, and returned directly
@@ -418,7 +418,7 @@ impl GoosefsFileReader {
         // worker read even when the page cache is disabled.
         self.short_circuit = ctx.acquire_short_circuit();
 
-        // HR-1 (design §9.2): `file_id <= 0` means no stable inode identity.
+        // HR-1 (design ): `file_id <= 0` means no stable inode identity.
         // See [`page_cache_eligible`]. This guard MUST run before
         // `acquire_cache_manager()` / `on_file_open()` so a "0"-keyed open never
         // pollutes the version table.
@@ -572,13 +572,13 @@ impl GoosefsFileReader {
     ///   ② auth failure during the RPC → single-flight reconnect + re-read
     ///      (same `open + read_all` verb, byte-equivalent — HR-3).
     /// It also attempts the short-circuit (local mmap) path first, falling back
-    /// transparently to gRPC on any recoverable failure (§8.2).
+    /// transparently to gRPC on any recoverable failure().
     ///
     /// Uses only `&self` — it never touches iterator state, so it is safe to be
     /// re-entered as the cache-miss source.
     async fn read_segment(&self, block_id: i64, plan: &BlockReadPlan) -> Result<Bytes> {
         // Try the short-circuit (local mmap) path first; a recoverable failure
-        // returns `None` and we fall through to the gRPC path below (§8.2).
+        // returns `None` and we fall through to the gRPC path below().
         if let Some(sc_result) = self.try_short_circuit_read(block_id, plan).await {
             return sc_result;
         }
@@ -694,7 +694,7 @@ impl GoosefsFileReader {
         block_id: i64,
         plan: &BlockReadPlan,
     ) -> Option<Result<Bytes>> {
-        // §B1: `self.short_circuit == None` means the SC factory was never
+        // : `self.short_circuit == None` means the SC factory was never
         // built (SC disabled by config, or the reader was constructed
         // without a `FileSystemContext`). Count it as SKIPPED so
         //     hit_rate = HIT / (HIT + SKIPPED + FALLBACK_OPEN + FALLBACK_READ)
@@ -709,7 +709,7 @@ impl GoosefsFileReader {
         let block_size = self.block_logical_size(plan.block_index);
 
         if !factory.should_use(block_id, block_size).await {
-            // §B1: SC disabled / pre-filter rejected the block. This is the
+            // : SC disabled / pre-filter rejected the block. This is the
             // hit-rate denominator's "skipped" bucket (see registry docs).
             crate::metrics::counter(crate::metrics::name::CLIENT_SC_DECISION_SKIPPED).inc(1);
             return None;
@@ -723,7 +723,7 @@ impl GoosefsFileReader {
                     error = %e,
                     "short-circuit open failed, falling back to gRPC"
                 );
-                // §B1: SC attempted but the open step failed. The specific
+                // : SC attempted but the open step failed. The specific
                 // cause is exposed via `ShortCircuitOpenLocalFail` /
                 // `ShortCircuitFileOpenFail` / `ShortCircuitMmapFail`.
                 crate::metrics::counter(crate::metrics::name::CLIENT_SC_DECISION_FALLBACK_OPEN)
@@ -734,7 +734,7 @@ impl GoosefsFileReader {
 
         match reader.read_bytes(plan.offset_in_block as usize, plan.length as usize) {
             Ok(bytes) => {
-                // §B1: SC actually served this read.
+                // : SC actually served this read.
                 crate::metrics::counter(crate::metrics::name::CLIENT_SC_DECISION_HIT).inc(1);
                 Some(Ok(bytes))
             }
@@ -743,7 +743,7 @@ impl GoosefsFileReader {
                 len,
                 file_size,
             }) => {
-                // §B1: semantic error — propagates rather than falls back.
+                // : semantic error — propagates rather than falls back.
                 crate::metrics::counter(crate::metrics::name::CLIENT_SC_DECISION_SEMANTIC_ERROR)
                     .inc(1);
                 Some(Err(Error::InvalidArgument {
@@ -759,7 +759,7 @@ impl GoosefsFileReader {
                     error = %e,
                     "short-circuit read failed, falling back to gRPC"
                 );
-                // §B1: SC opened OK but read failed recoverably; falling back.
+                // : SC opened OK but read failed recoverably; falling back.
                 crate::metrics::counter(crate::metrics::name::CLIENT_SC_DECISION_FALLBACK_READ)
                     .inc(1);
                 factory.invalidate(block_id).await;
@@ -789,7 +789,7 @@ impl GoosefsFileReader {
     /// address identically (inlines the old manual formatting + the
     /// `worker has no address` error branch).
     ///
-    /// P0-F.2: delegates to the shared [`rpc_endpoint`] helper (uses
+    /// delegates to the shared [`rpc_endpoint`] helper (uses
     /// `itoa::write` for the port) so every `host:port` construction in
     /// the crate goes through the same allocation-free path.
     fn worker_addr(worker_info: &WorkerInfo) -> Result<String> {
@@ -916,8 +916,7 @@ impl GoosefsFileReader {
     ///
     /// Returns `None` if the file has no UFS path (i.e. data is cache-only).
     ///
-    /// **S4**):
-    /// clones the pre-built `self.ufs_read_options` template and updates only
+    ////// clones the pre-built `self.ufs_read_options` template and updates only
     /// `offset_in_file`. The old path re-cloned `ufs_path: String` +
     /// re-derived `mount_id` / `no_cache` / `block_size` on every
     /// `read_segment` call. Now the per-segment cost is one `OpenUfsBlockOptions::clone`

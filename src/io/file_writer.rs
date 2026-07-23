@@ -199,8 +199,8 @@ pub struct GoosefsFileWriter {
     /// Worker router for block → worker mapping (with failed-worker exclusion).
     /// Worker router view for block → worker mapping.
     ///
-    /// P0-D Step 2
-    /// §3.4): migrated from `WorkerRouter` (per-writer `ArcSwap`×3) to
+    ///  Step 2
+    /// migrated from `WorkerRouter` (per-writer `ArcSwap`×3) to
     /// `WorkerRouterView` (per-writer `Arc`×2 + `Option<i64>` value).
     /// `create_with_context` stores a `WorkerRouterView::empty()` placeholder
     /// so zero-byte writes never touch the hash ring; the first `write()`
@@ -376,7 +376,7 @@ impl GoosefsFileWriter {
     ///
     /// Safe to call multiple times — once initialized, this immediately returns.
     ///
-    /// **A1**: the local router is
+    ///: the local router is
     /// **replaced** by a snapshot of the shared context router, so no hash
     /// ring is rebuilt on the first `write()`. Failure isolation is preserved
     /// via the snapshot's own `failed_workers` DashMap.
@@ -398,9 +398,9 @@ impl GoosefsFileWriter {
             }
             // Wait-free view: clones two `Arc`s (workers + hash_ring) plus a
             // value copy of `local_worker_id`. Does NOT rebuild the ring and
-            // does NOT allocate any `ArcSwap` — the whole point of P0-D
+            // does NOT allocate any `ArcSwap` — the whole point of
             // Step 2
-            // §3.4).
+            // ).
             self.router = WorkerRouterView::from_shared(&shared);
             self._router_needs_init.store(false, Ordering::Release);
         }

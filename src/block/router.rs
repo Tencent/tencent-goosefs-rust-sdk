@@ -48,7 +48,6 @@ const DEFAULT_WORKER_REFRESH_TTL: Duration = Duration::from_secs(30);
 /// Number of virtual nodes per worker in the hash ring.
 const VIRTUAL_NODES_PER_WORKER: u32 = 100;
 
-/// P0-F.1:
 /// allocate the `failed_workers` `DashMap` with **2 shards** instead of the
 /// default 4. The failure map is written only by `mark_failed` (rare,
 /// error-only path) and read by `is_failed` / `cleanup_expired_failures`
@@ -74,17 +73,17 @@ pub struct WorkerRouter {
     workers: ArcSwap<Vec<WorkerInfo>>,
     /// Tracks recently failed worker addresses with the failure timestamp.
     ///
-    /// **P0-F.1**    /// §3.6.1): wrapped in `OnceLock` so the `DashMap` is only allocated on
+    ///    wrapped in `OnceLock` so the `DashMap` is only allocated on
     /// the first `mark_failed` call. On the happy path (healthy cluster,
     /// no failures) — which is the overwhelming majority of readers —
     /// **zero** heap allocation occurs for failure tracking. `OnceLock::get()`
     /// is a single `Acquire` atomic load (~1 ns), cheaper than even the
-    /// `failed_count.load(Relaxed)` gate from P0-E. The `DashMap` itself is
+    /// `failed_count.load(Relaxed)` gate from the `DashMap` itself is
     /// constructed via [`new_failed_workers_map`] (1 shard, not the default
     /// 4) to further reduce the allocation cost on the rare error path.
     failed_workers: OnceLock<DashMap<String, Instant>>,
     /// Approximate size of `failed_workers`, used as a wait-free fast-path
-    /// gate in `cleanup_expired_failures` (P0-E).
+    /// gate in `cleanup_expired_failures`().
     ///
     /// `DashMap::is_empty()` walks every shard and takes a `try_read` on
     /// each, which showed up as ~0.98 % CPU self time on `oncpu_7.svg`
@@ -113,8 +112,7 @@ pub struct WorkerRouter {
     // ── Worker list TTL ─────────────────────────────────────────────────────────
     /// Timestamp of the last worker-list update.
     ///
-    /// **H3**):
-    /// changed from `tokio::sync::RwLock<Instant>` to `std::sync::Mutex<Instant>`
+    ////// changed from `tokio::sync::RwLock<Instant>` to `std::sync::Mutex<Instant>`
     /// — the critical section is a single `*ptr = Instant::now()` /
     /// `instant.elapsed()` (nanoseconds), so a synchronous `std::sync::Mutex`
     /// is strictly cheaper than an async `RwLock` (no tokio task scheduling,
@@ -223,7 +221,7 @@ impl WorkerRouter {
             workers: ArcSwap::new(shared.workers.load_full()),
             hash_ring: ArcSwap::new(shared.hash_ring.load_full()),
             failed_workers: OnceLock::new(),
-            // P0-E: fresh, per-snapshot counter mirrors the fresh
+            // fresh, per-snapshot counter mirrors the fresh
             // `failed_workers` map above (both start empty). Must NOT
             // inherit the parent's count — snapshot failure state is
             // isolated by design (see `test_snapshot_mark_failed_is_isolated_from_parent`).
@@ -231,7 +229,7 @@ impl WorkerRouter {
             failure_ttl: shared.failure_ttl,
             last_refresh: Mutex::new(Instant::now()),
             worker_refresh_ttl: shared.worker_refresh_ttl,
-            // C2 §3.2):
+            // C2 ):
             // inherit the parent's already-probed `local_worker_id` instead
             // of resetting it to `None`. `local_worker_id` describes the
             // host ("which registered worker, if any, is co-located with
@@ -299,12 +297,12 @@ impl WorkerRouter {
             .lock()
             .expect("last_refresh mutex poisoned") = Instant::now();
 
-        // D-Step0        // §3.4.3.1 Caveat 2): re-run the local-worker probe **synchronously
+        // D-Step0        //  Caveat 2): re-run the local-worker probe **synchronously
         // right here** instead of leaving `local_worker_id` in the
         // "unprobed" state (`Arc::new(None)`) for the next `select_worker`
         // to lazily populate.
         //
-        // Rationale: P0-D is going to replace the per-reader `ArcSwap`
+        // Rationale:  is going to replace the per-reader `ArcSwap`
         // fields with an immutable `WorkerRouterView`, which no longer has
         // a writer for `local_worker_id`. If the shared router is left
         // unprobed at any point, every view minted afterwards would
@@ -312,7 +310,7 @@ impl WorkerRouter {
         // skip local-first routing. Probing here — inside the only place
         // the cache is reset — guarantees the shared router is
         // always-probed, so every `WorkerRouterView::from_shared` (to be
-        // introduced in P0-D Step 1) inherits a resolved
+        // introduced in  Step 1) inherits a resolved
         // `Some(_)` regardless of whether short-circuit is on.
         //
         // `detect_local_worker` is off the hot path: `update_workers` is
@@ -333,8 +331,7 @@ impl WorkerRouter {
 
     /// Whether the worker list is currently empty.
     ///
-    /// **H4**):
-    /// the old `init_with_context` called `get_workers().await.len()` just to
+    ////// the old `init_with_context` called `get_workers().await.len()` just to
     /// check non-empty — that does a full `Arc::clone` (inc + dec on the
     /// `Arc<Vec<WorkerInfo>>`) for no reason. This method borrows the
     /// `Guard` and checks `is_empty()` directly, saving one atomic
@@ -347,7 +344,7 @@ impl WorkerRouter {
 
     /// Returns `true` if the worker list is older than `worker_refresh_ttl`.
     ///
-    /// **H3**: `std::sync::Mutex` lock + `elapsed()` — synchronous, no tokio
+    ///: `std::sync::Mutex` lock + `elapsed()` — synchronous, no tokio
     /// scheduling overhead. Still `async fn` for API compatibility (callers
     /// `await` it; the body is synchronous so the future resolves immediately).
     pub async fn needs_refresh(&self) -> bool {
@@ -393,7 +390,7 @@ impl WorkerRouter {
     /// name (`localhost` / loopback / this machine's hostname) **or** a local
     /// interface address. The latter is decisive in practice: Goosefs workers
     /// usually register with their LAN IP (e.g. `10.x.x.x`), not loopback or
-    /// hostname (SHORT_CIRCUIT_DESIGN §3.7).
+    /// hostname (SHORT_CIRCUIT_DESIGN ).
     ///
     /// Returns the worker ID of the local worker, or `0` if none found.
     async fn detect_local_worker(workers: &[WorkerInfo]) -> i64 {
@@ -478,7 +475,7 @@ impl WorkerRouter {
     /// `LocalFirstPolicy`.  The local worker is only bypassed if it is in the
     /// failed set.
     pub async fn select_worker(&self, block_id: i64) -> Result<WorkerInfo> {
-        // C1 §3.1):
+        // C1 ):
         // snapshot every shared `ArcSwap` field **exactly once** per call.
         //
         // Before this refactor `select_worker` performed 3–4 independent
@@ -552,7 +549,7 @@ impl WorkerRouter {
 
     /// Mark a worker as failed (e.g., after a connection error).
     ///
-    /// P0-E: increments `failed_count` iff `insert` returns `None` (a new
+    /// increments `failed_count` iff `insert` returns `None` (a new
     /// key). Re-inserting an existing key only refreshes its timestamp and
     /// must not touch the counter, otherwise repeated failures of the same
     /// worker would drift the counter upward and defeat the fast-path gate
@@ -563,7 +560,7 @@ impl WorkerRouter {
     /// observes `None` — the counter cannot double-count.
     pub fn mark_failed(&self, addr: &WorkerNetAddress) {
         let key = worker_addr_key(addr);
-        // P0-F.1: lazily initialise the DashMap on first failure.
+        // lazily initialise the DashMap on first failure.
         // On the happy path this closure never runs.
         let map = self.failed_workers.get_or_init(new_failed_workers_map);
         if map.insert(key, Instant::now()).is_none() {
@@ -572,7 +569,7 @@ impl WorkerRouter {
     }
 
     /// `source_is_local` pre-filter for short-circuit reads
-    /// (SHORT_CIRCUIT_DESIGN §3.7).
+    /// (SHORT_CIRCUIT_DESIGN ).
     ///
     /// Returns `true` iff the worker that would serve `block_id` is the
     /// detected local worker. This composes the existing local-first routing:
@@ -580,7 +577,7 @@ impl WorkerRouter {
     /// (when present & healthy) for *every* block, so a match here means the
     /// block would be served locally.
     ///
-    /// **Note (design §3.7):** "worker local" ≠ "block physically local". This
+    /// **Note (design ):** "worker local" ≠ "block physically local". This
     /// is only a pre-filter to avoid issuing a pointless `OpenLocalBlock` RPC
     /// to a remote worker; the final authority on whether the block can be
     /// mmap'd locally is the `OpenLocalBlock` RPC itself.
@@ -655,7 +652,7 @@ impl WorkerRouter {
 
     /// Check if a worker address is currently in the failed set.
     fn is_failed(&self, key: &str) -> bool {
-        // P0-F.1: if the map was never initialised, there are no failures.
+        // if the map was never initialised, there are no failures.
         let Some(map) = self.failed_workers.get() else {
             return false;
         };
@@ -668,7 +665,7 @@ impl WorkerRouter {
 
     /// Remove expired failure entries.
     fn cleanup_expired_failures(&self) {
-        // P0-E §3.5):
+        //  ):
         // wait-free fast-path gate via an external counter.
         //
         // The previous C3 fix used `DashMap::is_empty()` as the fast path,
@@ -685,7 +682,7 @@ impl WorkerRouter {
             return;
         }
 
-        // P0-F.1: the counter is non-zero, so the map must have been
+        // the counter is non-zero, so the map must have been
         // initialised by a prior `mark_failed`. Defensive `get()` in
         // case of a transient over-count.
         let Some(map) = self.failed_workers.get() else {
@@ -711,7 +708,7 @@ impl WorkerRouter {
     }
 
     /// Test-only: returns `true` if the `failed_workers` `DashMap` has not
-    /// been allocated yet (P0-F.1 lazy-init check). On the happy path this
+    /// been allocated yet ( lazy-init check). On the happy path this
     /// must remain `true` — the map is only constructed by `mark_failed`.
     #[cfg(test)]
     fn failed_workers_is_uninitialised(&self) -> bool {
@@ -719,7 +716,7 @@ impl WorkerRouter {
     }
 
     /// Test-only: returns the number of entries in the `failed_workers` map,
-    /// or `0` if the map was never initialised (P0-F.1).
+    /// or `0` if the map was never initialised().
     #[cfg(test)]
     fn failed_workers_len(&self) -> usize {
         self.failed_workers.get().map_or(0, |m| m.len())
@@ -756,8 +753,8 @@ impl WorkerRouter {
 /// Free-standing consistent-hash ring walk shared by [`WorkerRouter`] and
 /// [`WorkerRouterView`].
 ///
-/// Extracted from `WorkerRouter::consistent_hash_select_with_ring` in P0-D
-/// Step 1 §3.4):
+/// Extracted from `WorkerRouter::consistent_hash_select_with_ring` in
+/// Step 1 ):
 /// the algorithm is identical for the shared router and every per-reader
 /// snapshot / view, and the only piece of per-router state involved is
 /// the failed-worker predicate. Passing that in as a closure lets both
@@ -814,7 +811,7 @@ where
 /// Wait-free, immutable snapshot of the routing state for a single
 /// reader/writer's lifetime.
 ///
-/// **Motivation**/// §3.4): every per-range `WorkerRouter::snapshot_from` today allocates
+/// **Motivation**/// ): every per-range `WorkerRouter::snapshot_from` today allocates
 /// **three fresh `ArcSwap` fields**, each of which triggers
 /// `Box<[T]>::from_iter → posix_memalign` on construction (~2.81 % CPU on
 /// `oncpu_7.svg`) and `arc_swap::debt::list::LocalNode::with` on Drop
@@ -822,7 +819,7 @@ where
 /// justified for a per-reader snapshot: the `workers` / `hash_ring`
 /// fields are never mutated after the snapshot is minted, and the
 /// `local_worker_id` is now guaranteed to be already-probed by the
-/// shared router (P0-D Step 0 — probe follows `update_workers`).
+/// shared router ( Step 0 — probe follows `update_workers`).
 ///
 /// `WorkerRouterView` captures the routing state as plain `Arc` pointers
 /// and a value-typed `Option<i64>`, so `from_shared` is two `Arc::clone`s
@@ -838,14 +835,14 @@ where
 /// after each file to validate A/B behavioural parity before the
 /// snapshot API is retired in Step 3.
 ///
-/// # Semantic equivalence to `snapshot_from` (see §3.4.3.2)
+/// # Semantic equivalence to `snapshot_from` (see )
 ///
 /// | Field           | Shape                         | Equivalent to snapshot? |
 /// |-----------------|-------------------------------|-------------------------|
 /// | `workers`       | `Arc<Vec<WorkerInfo>>`        | ✅ same `Arc` pointer   |
 /// | `hash_ring`     | `Arc<Vec<(u64, usize)>>`      | ✅ same `Arc` pointer   |
 /// | `failed_workers`| `DashMap<String, Instant>`    | ✅ fresh, per-view      |
-/// | `failed_count`  | `AtomicUsize` (P0-E)          | ✅ fresh, per-view      |
+/// | `failed_count`  | `AtomicUsize`()          | ✅ fresh, per-view      |
 /// | `failure_ttl`   | `Duration`                    | ✅ value copy           |
 /// | `local_worker_id` | `Option<i64>` (value)       | ✅ *iff* the shared     |
 /// |                 |                               |    router is probed —   |
@@ -861,7 +858,7 @@ where
 ///   [`src/block/short_circuit/factory.rs`](../short_circuit/factory.rs))
 ///
 /// The type system therefore statically prevents a future contributor
-/// from calling shared-router-only APIs on a per-reader view (§3.4.3.3),
+/// from calling shared-router-only APIs on a per-reader view(),
 /// which the current `snapshot_from` allows at compile time but silently
 /// mishandles.
 pub struct WorkerRouterView {
@@ -874,7 +871,7 @@ pub struct WorkerRouterView {
     hash_ring: Arc<Vec<(u64, usize)>>,
     /// Local-worker id captured at construction. `None` means either
     /// "no local worker" or "shared router was not probed yet"; the
-    /// latter case is prevented in practice by P0-D Step 0 (the shared
+    /// latter case is prevented in practice by  Step 0 (the shared
     /// router always probes synchronously inside `update_workers`).
     local_worker_id: Option<i64>,
     /// Per-view failed-worker set. Failure state is intentionally
@@ -884,11 +881,11 @@ pub struct WorkerRouterView {
     /// `WorkerRouter::snapshot_from` behaviour, see
     /// `test_snapshot_mark_failed_is_isolated_from_parent`).
     ///
-    /// **P0-F.1**: wrapped in `OnceLock` — same lazy-init strategy as
+    ///: wrapped in `OnceLock` — same lazy-init strategy as
     /// `WorkerRouter::failed_workers`. See that field's doc comment
     /// for the full rationale.
     failed_workers: OnceLock<DashMap<String, Instant>>,
-    /// P0-E fast-path counter for [`Self::cleanup_expired_failures`].
+    ///  fast-path counter for [`Self::cleanup_expired_failures`].
     /// Invariants are identical to `WorkerRouter::failed_count`; see the
     /// doc comment there.
     failed_count: AtomicUsize,
@@ -906,10 +903,10 @@ impl WorkerRouterView {
     /// `GoosefsFileInStream::open_with_context`,
     /// `GoosefsFileWriter::create_with_context` after Step 2).
     ///
-    /// # Precondition (§3.4.3.1 Caveat 2)
+    /// # Precondition ( Caveat 2)
     ///
     /// `shared.local_worker_id` should be in the "probed" state
-    /// (`Some(_)`) when this is called; P0-D Step 0 guarantees this by
+    /// (`Some(_)`) when this is called;  Step 0 guarantees this by
     /// running `detect_local_worker` synchronously inside
     /// `WorkerRouter::update_workers`. If the shared router has never
     /// had `update_workers` called (fresh `WorkerRouter::new()` with an
@@ -1032,15 +1029,15 @@ impl WorkerRouterView {
             });
         }
 
-        // Fast-path cleanup gate (P0-E). Identical semantics to the
+        // Fast-path cleanup gate(). Identical semantics to the
         // shared router.
         self.cleanup_expired_failures();
 
         // Local-first routing: unlike `WorkerRouter::select_worker`,
         // the view has no `ArcSwap` writer to lazily probe into. The
         // value was captured at construction and either
-        //   (a) inherited from a probed shared router (§3.4.3.1
-        //       Caveat 2 fix, guaranteed by P0-D Step 0), or
+        //   (a) inherited from a probed shared router (
+        //       Caveat 2 fix, guaranteed by  Step 0), or
         //   (b) `None` on the legacy `from_workers` path, which
         //       intentionally skips local-first (see `from_workers`
         //       doc comment).
@@ -1125,7 +1122,7 @@ impl WorkerRouterView {
     /// or into the shared router.
     pub fn mark_failed(&self, addr: &WorkerNetAddress) {
         let key = worker_addr_key(addr);
-        // P0-F.1: lazily initialise the DashMap on first failure.
+        // lazily initialise the DashMap on first failure.
         let map = self.failed_workers.get_or_init(new_failed_workers_map);
         if map.insert(key, Instant::now()).is_none() {
             self.failed_count.fetch_add(1, Ordering::Relaxed);
@@ -1134,7 +1131,7 @@ impl WorkerRouterView {
 
     /// Check whether a worker key is currently marked failed.
     fn is_failed(&self, key: &str) -> bool {
-        // P0-F.1: if the map was never initialised, there are no failures.
+        // if the map was never initialised, there are no failures.
         let Some(map) = self.failed_workers.get() else {
             return false;
         };
@@ -1146,12 +1143,12 @@ impl WorkerRouterView {
     }
 
     /// Fast-path cleanup gate identical to
-    /// [`WorkerRouter::cleanup_expired_failures`] (P0-E).
+    /// [`WorkerRouter::cleanup_expired_failures`]().
     fn cleanup_expired_failures(&self) {
         if self.failed_count.load(Ordering::Relaxed) == 0 {
             return;
         }
-        // P0-F.1: defensive — counter non-zero implies map is initialised.
+        // defensive — counter non-zero implies map is initialised.
         let Some(map) = self.failed_workers.get() else {
             return;
         };
@@ -1184,7 +1181,7 @@ impl WorkerRouterView {
     }
 
     /// Test-only: returns `true` if the `failed_workers` `DashMap` has not
-    /// been allocated yet (P0-F.1 lazy-init check). On the happy path this
+    /// been allocated yet ( lazy-init check). On the happy path this
     /// must remain `true` — the map is only constructed by `mark_failed`.
     #[cfg(test)]
     fn failed_workers_is_uninitialised(&self) -> bool {
@@ -1192,7 +1189,7 @@ impl WorkerRouterView {
     }
 
     /// Test-only: returns the number of entries in the `failed_workers` map,
-    /// or `0` if the map was never initialised (P0-F.1).
+    /// or `0` if the map was never initialised().
     #[cfg(test)]
     fn failed_workers_len(&self) -> usize {
         self.failed_workers.get().map_or(0, |m| m.len())
@@ -1211,7 +1208,7 @@ impl WorkerRouterView {
 /// path can do an O(log N) binary search instead of rebuilding+sorting on
 /// every request.
 ///
-/// **A2**: virtual-node hashes are computed by feeding the raw `i64` /
+///: virtual-node hashes are computed by feeding the raw `i64` /
 /// `u32` bytes to xxh3 directly (no `format!` / no allocation). The ring
 /// is client-local (never exchanged across processes), so intra-process
 /// self-consistency with [`hash_block_id`] is the only requirement.
@@ -1277,7 +1274,7 @@ impl Default for WorkerRouter {
 
 /// Produce a unique key for a `WorkerNetAddress`.
 ///
-/// **A2 / P0-F.2**: hand-rolled string join (no `format!` / no fmt machinery /
+/// **A2 / **: hand-rolled string join (no `format!` / no fmt machinery /
 /// no intermediate `String` for the port) — this is called on every
 /// `mark_failed` / `is_failed` and on every gRPC worker acquisition
 /// (`file_reader.rs`, `file_in_stream.rs`, `file_writer.rs`, the SC factory's
@@ -1291,7 +1288,7 @@ pub(crate) fn worker_addr_key(addr: &WorkerNetAddress) -> String {
     // Reserve exactly `host + ':' + up-to-11-digit i32` up-front to avoid
     // the growth-and-copy chain we saw as `RawVec…::finish_grow` in the
     // flame graph. Then `itoa::Buffer` formats the port straight into a
-    // stack `&str` (P0-F.2): the integer-to-string conversion skips the
+    // stack `&str`(): the integer-to-string conversion skips the
     // `core::fmt::Formatter` machinery entirely, the only remaining
     // copy is the final `push_str` into the pre-sized `String`.
     let mut s = String::with_capacity(host.len() + 12);
@@ -1303,7 +1300,7 @@ pub(crate) fn worker_addr_key(addr: &WorkerNetAddress) -> String {
 }
 
 /// Build the gRPC endpoint (`host:port`) used by clients to actually dial a
-/// worker. P0-F.2 / table row #2 in the post-`oncpu_8` plan: every
+/// worker.  / table row #2 in the post-`oncpu_8` plan: every
 /// `file_reader.rs` / `file_in_stream.rs` / `file_writer.rs` /
 /// `short_circuit::factory::acquire_worker` call site used to roll its own
 /// `format!("{}:{}", host, port)`; share this one instead so the
@@ -1325,7 +1322,7 @@ pub(crate) fn rpc_endpoint(addr: &WorkerNetAddress) -> String {
 
 /// Hash a virtual-node identifier `(worker_id, vn)` into the ring.
 ///
-/// **A2**: feeds the raw `i64` + separator + `u32` bytes to xxh3 with no
+///: feeds the raw `i64` + separator + `u32` bytes to xxh3 with no
 /// allocation. Domain-separated from [`hash_block_id`] by construction
 /// (different byte layout: 8-byte id + 1-byte separator + 4-byte vn vs.
 /// bare 8-byte block id) so the two never collide within one ring.
@@ -1340,7 +1337,7 @@ fn hash_virtual_node(worker_id: i64, vn: u32) -> u64 {
 
 /// Hash a `block_id` for consistent-hash ring lookup.
 ///
-/// **A2**: replaces the old `hash_key(&block_id.to_string())` (fmt
+///: replaces the old `hash_key(&block_id.to_string())` (fmt
 /// machinery + `String` allocation on every `select_worker`) with a
 /// direct `to_le_bytes()` feed to the xxh3 hasher.
 #[inline]
@@ -1593,7 +1590,7 @@ mod tests {
         assert_eq!(selected.id, Some(2), "new local worker should be preferred");
     }
 
-    /// D-Step0    /// §3.4.3.1 Caveat 2): after **every** slow-path `update_workers`
+    /// D-Step0    ///  Caveat 2): after **every** slow-path `update_workers`
     /// the shared router must be in the "probed" state
     /// (`Some(_)`), never the "unprobed" state (`None`). This is the
     /// invariant that lets a future `WorkerRouterView::from_shared`
@@ -1742,7 +1739,7 @@ mod tests {
             .update_workers(vec![make_worker(1, "w1", 9203)])
             .await;
 
-        // Precondition: map starts empty (P0-F.1: not yet allocated).
+        // Precondition: map starts empty (not yet allocated).
         assert!(router.failed_workers_is_uninitialised());
 
         // Cleanup on empty map must not panic and must leave the map empty.
@@ -1855,7 +1852,7 @@ mod tests {
         );
     }
 
-    /// P0-E: `failed_count` must stay in sync with `failed_workers` across
+    /// `failed_count` must stay in sync with `failed_workers` across
     /// insert / re-insert / cleanup rounds — otherwise the fast-path gate
     /// in `cleanup_expired_failures` would either skip a needed walk (stale
     /// zero) or pay a permanent spurious walk (permanent over-count).
@@ -1916,7 +1913,7 @@ mod tests {
         assert_eq!(router.failed_count.load(Ordering::Relaxed), 0);
     }
 
-    /// P0-E: `snapshot_from` must NOT inherit the parent's `failed_count`.
+    /// `snapshot_from` must NOT inherit the parent's `failed_count`.
     /// Snapshot failure state is isolated (fresh `DashMap`), so its counter
     /// starts fresh too — otherwise it would gate `cleanup_expired_failures`
     /// on a phantom set that is not in the snapshot's own map.
@@ -1954,7 +1951,7 @@ mod tests {
         assert_ne!(hash_virtual_node(42, 0), hash_block_id(42));
     }
 
-    /// P0-F.1: `failed_workers` `DashMap` must NOT be allocated on the
+    /// `failed_workers` `DashMap` must NOT be allocated on the
     /// happy path — i.e. when `mark_failed` is never called. `select_worker`
     /// on a healthy cluster should leave the `OnceLock` uninitialised.
     #[tokio::test]
@@ -1982,7 +1979,7 @@ mod tests {
         );
     }
 
-    /// P0-F.1: the first `mark_failed` lazily initialises the `DashMap`,
+    /// the first `mark_failed` lazily initialises the `DashMap`,
     /// and subsequent `is_failed` / `cleanup_expired_failures` calls operate
     /// on the initialised map. Counter must stay in sync.
     #[tokio::test]
@@ -2013,7 +2010,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // P0-D Step 1: `WorkerRouterView` parity tests
+    //  Step 1: `WorkerRouterView` parity tests
     //
     // These live alongside the `WorkerRouter::snapshot_from` tests
     // during the coexistence phase (Steps 1–3). They assert that a
@@ -2026,7 +2023,7 @@ mod tests {
     //   - failure-isolation semantics.
     // ------------------------------------------------------------------
 
-    /// §3.4.6: `from_shared` must borrow the same `workers` and
+    /// : `from_shared` must borrow the same `workers` and
     /// `hash_ring` `Arc`s as the shared router — this is what makes
     /// construction ~2 ns (`Arc::clone`) instead of ~250 ns
     /// (`Box<[T]>::from_iter → posix_memalign`).
@@ -2055,7 +2052,7 @@ mod tests {
         );
     }
 
-    /// §3.4.6: `local_worker_id` inheritance across all four parent
+    /// : `local_worker_id` inheritance across all four parent
     /// states. Value-equality (not `Arc::ptr_eq`), because the view
     /// stores `Option<i64>` directly, not an `Arc<Option<Option<i64>>>`.
     #[tokio::test]
@@ -2063,7 +2060,7 @@ mod tests {
         // Case A: parent = None (unprobed).
         //
         // This state is only reachable on a brand-new `WorkerRouter::new()`
-        // that has never had `update_workers` called (P0-D Step 0 fills
+        // that has never had `update_workers` called ( Step 0 fills
         // the cache synchronously). Verify the collapse rule explicitly.
         let shared_a = WorkerRouter::new();
         assert!((**shared_a.local_worker_id.load()).is_none());
@@ -2126,7 +2123,7 @@ mod tests {
         );
     }
 
-    /// §3.4.6: `from_workers` must build a functional hash ring
+    /// : `from_workers` must build a functional hash ring
     /// without going through a shared `WorkerRouter`. Verifies the
     /// legacy `file_in_stream.rs::open` escape hatch.
     #[tokio::test]
@@ -2157,7 +2154,7 @@ mod tests {
         );
     }
 
-    /// §3.4.6 (the key A/B parity test): for a wide spread of block ids,
+    ///  (the key A/B parity test): for a wide spread of block ids,
     /// `WorkerRouterView::select_worker` must return the **exact same**
     /// worker as `WorkerRouter::select_worker` on the same shared
     /// router (and as `snapshot_from` — the coexistence contract).
@@ -2209,7 +2206,7 @@ mod tests {
         }
     }
 
-    /// §3.4.6: failure state on a view must be isolated from the
+    /// : failure state on a view must be isolated from the
     /// shared router (and from every other view) — identical to
     /// `snapshot_from`'s isolation contract.
     #[tokio::test]
@@ -2232,7 +2229,7 @@ mod tests {
         assert!(!view2.is_failed(&worker_addr_key(workers[0].address.as_ref().unwrap())));
     }
 
-    /// §3.4.6: `pick_any_worker` on a view must match the shared
+    /// : `pick_any_worker` on a view must match the shared
     /// router's semantics — returns Ok on non-empty pools, Err on
     /// empty ones, respects the eligible/pool fallback.
     #[tokio::test]
@@ -2260,7 +2257,7 @@ mod tests {
         assert!(matches!(picked_after_fail.id, Some(1) | Some(2)));
     }
 
-    /// §3.4.6 (documented behaviour): `from_workers` intentionally
+    ///  (documented behaviour): `from_workers` intentionally
     /// captures `local_worker_id = None`, so local-first routing is
     /// **disabled** on the legacy path even when a local worker is
     /// present in the list. This is by design (avoid the
@@ -2287,7 +2284,7 @@ mod tests {
         assert_eq!(a.id, b.id);
     }
 
-    /// P0-D Step 2.0: `WorkerRouterView::empty()` must match the
+    ///  Step 2.0: `WorkerRouterView::empty()` must match the
     /// pre-Step-2 `WorkerRouter::new()` semantics that the call-site
     /// migration relies on. Specifically:
     ///   - `select_worker` returns `NoWorkerAvailable` (empty ring).

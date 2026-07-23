@@ -83,7 +83,7 @@ bytes = "1.11.1"
 thiserror = "2"
 tracing = "0.1"
 dashmap = "6"
-# Fast integer-to-string formatting (P0-F.2): replaces the `write!` /
+# Fast integer-to-string formatting (): replaces the `write!` /
 # `format!("{}", n)` on the `host:port` keying hot path. `itoa::write` skips
 # the `core::fmt` machinery entirely, which shows up in flamegraphs as
 # `core::fmt::write` / `Formatter::write_fmt`. Pulled in as a direct dep
@@ -111,12 +111,12 @@ serde = { version = "1", features = ["derive"] }
 async-trait = "0.1"
 # Short-circuit (local) block read data plane: whole-block read-only mmap +
 # `madvise` hints (MADV_RANDOM / SEQUENTIAL / WILLNEED). See
-# docs/SHORT_CIRCUIT_DESIGN.md §3.2. `Mmap::advise` is unix-only; all advise
+# docs/SHORT_CIRCUIT_DESIGN.md . `Mmap::advise` is unix-only; all advise
 # calls are `cfg(unix)`-gated so the crate still builds on other targets.
 memmap2 = "0.9"
 # Bounded LRU used by `ShortCircuitFactory` for the per-task hot-block reader
 # cache and the (also bounded) negative cache. See SHORT_CIRCUIT_DESIGN.md
-# §3.5 / §4.2.
+#  / .
 lru = "0.12"
 rand = "0.9.1"
 uuid = { version = "1.2", features = ["v4"] }
@@ -143,7 +143,7 @@ futures = "0.3"
 fastrand = "2"
 
 # Unix-only: raw `sigaction` for the short-circuit SIGBUS diagnostic handler
-# (SHORT_CIRCUIT_DESIGN §3.2 / §8.1). Already in the dependency graph
+# (SHORT_CIRCUIT_DESIGN  / ). Already in the dependency graph
 # transitively; declared directly so the handler can be registered.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -201,7 +201,7 @@ path = "benchmarks/cache_evictor_bench.rs"
 # P3 benchmark: io_uring vs tokio::fs page-cache backend comparison.
 # Local-only (no GooseFS cluster needed). Runs on any platform; io_uring path
 # is #[cfg(target_os = "linux")]-gated. See
-# docs/CLIENT_PAGE_CACHE_DESIGN.md §10.3.
+# docs/CLIENT_PAGE_CACHE_DESIGN.md .
 [[example]]
 name = "cache_uring_bench"
 path = "benchmarks/cache_uring_bench.rs"

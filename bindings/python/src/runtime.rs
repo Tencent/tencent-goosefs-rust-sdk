@@ -61,7 +61,7 @@ pub const RUNTIME_MAX_BLOCKING_THREADS: usize = 64;
 /// `connect()` / `block_on()` ever touches the runtime — otherwise the default
 /// builder wins and `init` is a silent no-op.
 ///
-/// Tuning rationale (analysis §2.5 / scheme 4):
+/// Tuning rationale (analysis  / scheme 4):
 /// - `worker_threads`: at least 16 so that highly-concurrent Worker IO
 ///   (streaming read/write) is not starved by a worker count pinned to the
 ///   CPU core count. Capped generously to avoid pathological oversubscription.
@@ -72,9 +72,9 @@ pub const RUNTIME_MAX_BLOCKING_THREADS: usize = 64;
 ///
 /// - `GOOSEFS_TOKIO_WORKER_THREADS` — override `worker_threads`. Values are
 ///   clamped to `>=1`. When unset, the default (`cpus.max(16)`) is used.
-///   Deployments that want to **cap** the pool per §B4 (`min(cores, 8)`) can
+///   Deployments that want to **cap** the pool per  (`min(cores, 8)`) can
 ///   set this explicitly, e.g. `GOOSEFS_TOKIO_WORKER_THREADS=8`. Left as an
-///   opt-in switch (rather than a default flip) because §B4 is explicit that
+///   opt-in switch (rather than a default flip) because  is explicit that
 ///   under-sizing hurts throughput and needs per-workload benchmarking.
 /// - `GOOSEFS_TOKIO_MAX_BLOCKING_THREADS` — override `max_blocking_threads`.
 ///   Same clamp / no-default-change semantics.
@@ -89,7 +89,7 @@ pub fn init_custom_runtime() {
         .map(|n| n.get())
         .unwrap_or(16);
 
-    // Default: at least 16 workers (see rationale above). §B4 (opt-in) lets
+    // Default: at least 16 workers (see rationale above).  (opt-in) lets
     // deployments override this via env var without a default flip.
     let default_worker_threads = cpus.max(16);
     let worker_threads = env_usize("GOOSEFS_TOKIO_WORKER_THREADS")

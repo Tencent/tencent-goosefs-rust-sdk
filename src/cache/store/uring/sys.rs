@@ -21,7 +21,7 @@
 //! References: Lance `uring.rs:32-35` — "only available on Linux and requires
 //! kernel 5.1".
 //!
-//! See `docs/CLIENT_PAGE_CACHE_DESIGN.md` §3.5.
+//! See `docs/CLIENT_PAGE_CACHE_DESIGN.md` .
 
 /// Detect whether io_uring is usable for the page-store backend.
 ///

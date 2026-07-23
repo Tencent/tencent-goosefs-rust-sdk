@@ -117,7 +117,7 @@ pub use crate::config::{
     ENV_PUSHGATEWAY_INSTANCE,
     ENV_PUSHGATEWAY_JOB,
     ENV_PUSHGATEWAY_PUSH_INTERVAL_MS,
-    // Short-circuit (local mmap) read knobs (SHORT_CIRCUIT_DESIGN §6).
+    // Short-circuit (local mmap) read knobs (SHORT_CIRCUIT_DESIGN ).
     ENV_SHORT_CIRCUIT_ADVISE,
     ENV_SHORT_CIRCUIT_CACHE_CAPACITY,
     ENV_SHORT_CIRCUIT_CACHE_TTL_MS,

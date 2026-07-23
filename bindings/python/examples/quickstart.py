@@ -57,7 +57,7 @@ def main() -> None:
 
     # Use Goosefs as a context manager so the connection is always closed
     # cleanly, even if the body raises. The atexit safety-net will catch
-    # forgotten handles too — see Review §17.4 — but explicit ``with`` is
+    # forgotten handles too — see Review  — but explicit ``with`` is
     # always preferable.
     with Goosefs(cfg) as fs:
         path_dir = "/quickstart"

@@ -805,7 +805,7 @@ class Goosefs:
     # The ``__init__`` slot is ordinarily ``object.__init__`` for a PyO3
     # class (construction happens in ``__new__``), but ``goosefs/__init__.py``
     # replaces it with a thin wrapper that registers ``self`` into the
-    # atexit safety-net (Review §17.4). The wrapper accepts the same
+    # atexit safety-net (Review ). The wrapper accepts the same
     # ``config`` argument as ``__new__`` to keep the signature consistent
     # with what ``Goosefs(config)`` produces.
     def __init__(self, config: Config) -> None: ...
