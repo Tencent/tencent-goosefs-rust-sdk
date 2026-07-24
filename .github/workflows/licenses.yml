@@ -1,0 +1,54 @@
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Licenses
+
+# This check is a *required* status check on the main branch. It MUST run on
+# every pull request -- including pure documentation PRs that only touch
+# `website/**` -- so GitHub always receives a "pass" report for it.
+#
+# That is why it lives in its own workflow: the main `ci.yml` workflow uses
+# `paths-ignore: website/**` to skip the heavy build/test jobs for docs-only
+# PRs, which would otherwise leave this required check stuck as "Expected"
+# (never reported) forever, blocking merges.
+#
+# Here `pull_request` intentionally has NO `paths-ignore`, so the cheap
+# (timeout-minutes: 5) header scan runs for every PR regardless of what it
+# touches.
+on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - "website/**"
+      - ".github/workflows/docs.yml"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: licenses-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  licenses:
+    name: licenses
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Apache-2.0 license headers
+        run: python3 scripts/ci/check_license_headers.py
