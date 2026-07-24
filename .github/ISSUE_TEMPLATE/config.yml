@@ -14,6 +14,9 @@
 
 blank_issues_enabled: true
 contact_links:
+  - name: GooseFS SDK docs
+    url: https://tencent.github.io/tencent-goosefs-rust-sdk/
+    about: Rust and Python client documentation (GitHub Pages).
   - name: GooseFS product docs
     url: https://cloud.tencent.com/document/product/1424
     about: Official GooseFS documentation on Tencent Cloud.

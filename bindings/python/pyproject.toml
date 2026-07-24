@@ -44,8 +44,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage   = "https://github.com/Tencent/tencent-goosefs-rust-sdk"
-Repository = "https://github.com/Tencent/tencent-goosefs-rust-sdk"
+Homepage      = "https://tencent.github.io/tencent-goosefs-rust-sdk/"
+Documentation = "https://tencent.github.io/tencent-goosefs-rust-sdk/"
+Repository    = "https://github.com/Tencent/tencent-goosefs-rust-sdk"
+Issues        = "https://github.com/Tencent/tencent-goosefs-rust-sdk/issues"
 
 [project.optional-dependencies]
 arrow  = ["pyarrow>=10.0"]

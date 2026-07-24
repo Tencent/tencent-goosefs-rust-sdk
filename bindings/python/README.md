@@ -98,6 +98,7 @@ See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
 ## Documentation Map
 
+- **Published docs**: [https://tencent.github.io/tencent-goosefs-rust-sdk/](https://tencent.github.io/tencent-goosefs-rust-sdk/)
 - **PyPI landing page**: [`PYPI_README.md`](./PYPI_README.md) — install, quickstart, thread / fork safety, type stubs
 - **Five runnable examples**: [`examples/`](./examples/)
   - [`quickstart.py`](./examples/quickstart.py) — synchronous one-pager: connect → mkdir → write → read → delete
