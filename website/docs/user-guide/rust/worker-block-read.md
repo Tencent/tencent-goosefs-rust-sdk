@@ -55,7 +55,9 @@ use goosefs_sdk::client::WorkerClient;
 use goosefs_sdk::io::GrpcBlockReader;
 
 // WorkerInfo.address is Option<WorkerNetAddress>; unwrap and format host:port.
-let addr = worker_info.address.as_ref().unwrap();
+// In production code, propagate the missing address as Error::MissingField instead.
+let addr = worker_info.address.as_ref()
+    .ok_or_else(|| goosefs_sdk::error::Error::MissingField { field: "address".into() })?;
 let worker_addr = format!(
     "{}:{}",
     addr.host.as_deref().unwrap_or("127.0.0.1"),
@@ -63,9 +65,11 @@ let worker_addr = format!(
 );
 let worker = WorkerClient::connect(&worker_addr, &ctx.config()).await?;
 
-// One-shot: read the entire block.
+// One-shot: read the entire first block.
+let block_size = status.block_size_bytes.unwrap_or(ctx.config().block_size as i64);
+let read_len = status.length.unwrap_or(0).min(block_size);
 let mut reader = GrpcBlockReader::open(
-    &worker, block_ids[0], 0, block_size as i64, chunk_size as i64, None,
+    &worker, block_ids[0], 0, read_len, ctx.config().chunk_size as i64, None,
 ).await?;
 let data = reader.read_all().await?;
 println!("read {} bytes from block {}", data.len(), block_ids[0]);
@@ -77,7 +81,7 @@ println!("read {} bytes from block {}", data.len(), block_ids[0]);
 use goosefs_sdk::io::GrpcBlockReader;
 
 let mut reader = GrpcBlockReader::open(
-    &worker, block_ids[0], 0, block_size as i64, chunk_size as i64, None,
+    &worker, block_ids[0], 0, read_len, ctx.config().chunk_size as i64, None,
 ).await?;
 while let Some(chunk) = reader.read_chunk().await? {
     process(&chunk);
@@ -122,10 +126,11 @@ let (response, _guard) = worker.open_local_block(block_ids[0], block_size as i64
 | `open_local_block(block_id, block_size, capability)` | Short-circuit `mmap` read (returns `(OpenLocalBlockResponse, OpenLocalBlockGuard)`) |
 | `write_block(...)` | Block write (for streaming writers) |
 | `addr()` | Worker `host:port` |
-| `close()` | Close the connection (returns to pool) |
+| `generation()` | Monotonic connection-generation tag used by pooled reconnect logic |
+| `close(self)` | Close the connection (consumes the client) |
 
 :::note
-`WorkerClient` is not `Clone` — each `acquire()` from the pool returns an owned `WorkerClient`. Dropping it returns the underlying gRPC channel to the `WorkerClientPool` for reuse; no reconnection cost on the next acquire.
+`WorkerClient` is `Clone`; clones share the underlying tonic channel. `WorkerClientPool::acquire()` returns a cheap clone of a cached client, and the pool retains its cached connection until it is invalidated or dropped.
 :::
 
 ## `WorkerRouter` API
@@ -143,7 +148,7 @@ let (response, _guard) = worker.open_local_block(block_ids[0], block_size as i64
 | Scenario | Recommended API |
 |----------|----------------|
 | Read a small range from a large file | `GoosefsFileReader::read_range_with_context` |
-| Read a specific block by index | `GoosefsFileInStream::read_at` or low-level pipeline |
+| Read a byte range at a file offset | `GoosefsFileInStream::read_at` |
 | Multiple chunked reads from a block | `GrpcBlockReader::open` + `read_chunk()` |
 | Full-file sequential read | `GoosefsFileInStream::read_all` or `GoosefsFileReader::read_next_block` |
 

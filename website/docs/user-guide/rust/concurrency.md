@@ -64,7 +64,7 @@ The worker pool is per-worker-address. Default is `min(cores, 4)`. Each `WorkerC
 
 ### `ConfigRefresher`
 
-A background task (default interval 30s) reloads transparent-acceleration switches from properties/env. Started automatically by `FileSystemContext::connect()`.
+A background task reloads transparent-acceleration switches from properties/env. `ConfigRefresher` uses a 30s expiry duration, while `FileSystemContext::connect()` starts an eager load followed by refresh checks every 60s.
 
 ## Async I/O with `tokio`
 
@@ -88,7 +88,11 @@ let mut tasks = Vec::new();
 for path in paths {
     let ctx = ctx.clone();
     tasks.push(tokio::spawn(async move {
-        let mut s = GoosefsFileInStream::open_with_context(ctx, &path).await?;
+        let mut s = GoosefsFileInStream::open_with_context(
+            ctx,
+            &path,
+            goosefs_sdk::fs::options::OpenFileOptions::new(),
+        ).await?;
         s.read_all().await
     }));
 }
@@ -125,9 +129,9 @@ Two or more addresses → multi-master mode. The client polls to discover the Pr
 ## Graceful Shutdown
 
 ```rust
-// Close the context to release all pooled connections and stop background tasks.
+// Close the context to stop its background tasks and mark it as closed.
 ctx.close().await?;
 assert!(ctx.is_closed());
 ```
 
-`close()` is idempotent. After close, all methods on the context return `Error::ConfigError`.
+`close()` is idempotent. After close, `is_closed()` returns `true` and the context's background refresh and metrics tasks have stopped.

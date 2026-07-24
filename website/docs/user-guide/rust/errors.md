@@ -77,7 +77,7 @@ The SDK implements `From<tonic::Status>` for `Error`, so gRPC failures are autom
 ### Retry on transient errors
 
 ```rust
-use goosefs_sdk::error::Error;
+use goosefs_sdk::error::{Error, Result};
 use bytes::Bytes;
 use std::time::Duration;
 
@@ -85,7 +85,7 @@ async fn retry_read(ctx: &std::sync::Arc<goosefs_sdk::context::FileSystemContext
     for attempt in 0..3 {
         match goosefs_sdk::io::GoosefsFileReader::read_file_with_context(ctx.clone(), path).await {
             Ok(data) => return Ok(data),
-            Err(Error::GrpcError { .. } | Error::TransportError { .. } | Error::MasterUnavailable { .. } | Error::NoWorkerAvailable { .. }) if attempt < 2 => {
+            Err(e) if e.is_retriable() && attempt < 2 => {
                 tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
             }
             Err(e) => return Err(e),

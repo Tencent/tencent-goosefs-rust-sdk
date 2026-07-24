@@ -6,7 +6,7 @@ sidebar_position: 7
 
 The Rust SDK provides three I/O types for streaming file access:
 
-- **`GoosefsFileReader`** — block-by-block sequential reader (worker-direct, skips client cache).
+- **`GoosefsFileReader`** — block-by-block sequential reader (consults the client page cache when opened with a shared context, then reads cache misses worker-direct).
 - **`GoosefsFileInStream`** — streaming reader with `seek` / `read_at` (consults client page cache when enabled).
 - **`GoosefsFileWriter`** — streaming writer with `write` / `flush` / `close` / `cancel`.
 
@@ -72,11 +72,11 @@ stream.seek_from(SeekFrom::End(-50)).await?;
 
 ### Concurrency model
 
-`GoosefsFileInStream` holds an internal cursor state and is **not `Sync`**. Use one stream per task; for parallel reads, open multiple streams or use `read_at()` (positioned, does not conflict with the cursor, but still requires `&mut self`).
+`GoosefsFileInStream` holds an internal cursor state and is **not `Sync`**. Use one stream per task; for parallel reads, open multiple streams. Use `read_at()` for positioned reads that do not move a stream's cursor, noting that it still requires `&mut self`.
 
 ## Streaming Read: `GoosefsFileReader`
 
-`GoosefsFileReader` reads block-by-block directly from the worker, bypassing the client page cache. Use it for bulk sequential reads where cache is unnecessary.
+`GoosefsFileReader` reads block-by-block from the worker. When opened with a shared context that has a cache manager attached, it consults the client page cache on cache hits and falls back to worker-direct reads on misses. Use it for bulk sequential reads.
 
 ```rust
 use goosefs_sdk::io::GoosefsFileReader;
