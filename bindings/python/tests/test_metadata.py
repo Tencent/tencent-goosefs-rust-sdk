@@ -242,3 +242,77 @@ async def test_close_is_idempotent(config) -> None:
 
 async def test_repr_contains_master_addr(async_fs: AsyncGoosefs, master_addr: str) -> None:
     assert master_addr in repr(async_fs)
+
+
+# ---------------------------------------------------------------------------
+# batch_create_dir / batch_create_file / batch_rename / batch_delete
+# ---------------------------------------------------------------------------
+
+
+async def test_batch_create_dir_creates_all(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
+    dirs = [f"{tmp_dir}/bd{i}" for i in range(3)]
+    await async_fs.batch_create_dir(dirs)
+    exists = await async_fs.batch_exists(dirs)
+    assert exists == [True, True, True]
+    for d in dirs:
+        status = await async_fs.get_status(d)
+        assert status.is_folder()
+
+
+async def test_batch_create_dir_recursive(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
+    # recursive=True lets the parent path be created on the fly.
+    nested = [f"{tmp_dir}/parent/child1", f"{tmp_dir}/parent/child2"]
+    await async_fs.batch_create_dir(nested, recursive=True)
+    assert await async_fs.batch_exists(nested) == [True, True]
+
+
+async def test_batch_create_file_creates_empty_files(
+    async_fs: AsyncGoosefs, tmp_dir: str
+) -> None:
+    files = [f"{tmp_dir}/bf{i}" for i in range(3)]
+    written = await async_fs.batch_create_file(files)
+    # Empty files report 0 bytes written.
+    assert written == [0, 0, 0]
+    statuses = await async_fs.batch_get_status(files)
+    for s in statuses:
+        assert not s.is_folder()
+        assert s.length == 0
+
+
+async def test_batch_rename_moves_all(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
+    src = [f"{tmp_dir}/src{i}" for i in range(2)]
+    dst = [f"{tmp_dir}/dst{i}" for i in range(2)]
+    await async_fs.batch_create_file(src)
+    # pairs is a flat list: [src_0, dst_0, src_1, dst_1, ...]
+    pairs: list[str] = []
+    for s, d in zip(src, dst):
+        pairs.extend([s, d])
+    await async_fs.batch_rename(pairs)
+    assert await async_fs.batch_exists(src) == [False, False]
+    assert await async_fs.batch_exists(dst) == [True, True]
+
+
+async def test_batch_rename_odd_length_raises(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
+    with pytest.raises(ValueError):
+        await async_fs.batch_rename([f"{tmp_dir}/a", f"{tmp_dir}/b", f"{tmp_dir}/c"])
+
+
+async def test_batch_delete_removes_all(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
+    paths = [f"{tmp_dir}/del{i}" for i in range(3)]
+    await async_fs.batch_create_file(paths)
+    await async_fs.batch_delete(paths)
+    assert await async_fs.batch_exists(paths) == [False, False, False]
+
+
+async def test_batch_delete_recursive(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
+    parent = f"{tmp_dir}/tree"
+    await async_fs.mkdir(parent)
+    await async_fs.mkdir(f"{parent}/sub")
+    await async_fs.write_file(f"{parent}/root.txt", b"x")
+    await async_fs.write_file(f"{parent}/sub/child.txt", b"x")
+    # Non-recursive delete of a non-empty dir would fail.
+    await async_fs.batch_delete([parent], recursive=True)
+    assert await async_fs.exists(parent) is False
+
+
+

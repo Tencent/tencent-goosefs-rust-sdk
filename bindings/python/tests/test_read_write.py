@@ -45,6 +45,7 @@ import asyncio
 
 import pytest
 from goosefs import AsyncGoosefs, Goosefs, WriteType
+from goosefs.exceptions import GoosefsError
 
 # ---------------------------------------------------------------------------
 # Parametrisation
@@ -238,3 +239,51 @@ def test_sync_write_inside_asyncio_loop_is_refused(sync_fs: Goosefs, sync_tmp_di
             sync_fs.read_range(path, 0, 1)
 
     asyncio.run(attempt())
+
+
+# ---------------------------------------------------------------------------
+# batch_open_file — fan out N read streams with bounded concurrency.
+# ---------------------------------------------------------------------------
+
+
+async def test_batch_open_file_reads_all_in_order(
+    async_fs: AsyncGoosefs, tmp_dir: str
+) -> None:
+    """Open N files in parallel and verify contents match in input order."""
+    paths = [f"{tmp_dir}/bof-{i}.bin" for i in range(3)]
+    payloads = [f"payload-{i}".encode() for i in range(3)]
+    for p, data in zip(paths, payloads):
+        await async_fs.write_file(p, data, write_type=WriteType.MustCache)
+
+    readers = await async_fs.batch_open_file(paths)
+    assert len(readers) == len(paths)
+
+    contents = []
+    for r in readers:
+        data = await r.read()
+        contents.append(data)
+    assert contents == payloads
+
+
+async def test_batch_open_file_single_path(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
+    """A one-element batch should still return a list with one reader."""
+    path = f"{tmp_dir}/single.bin"
+    await async_fs.write_file(path, b"solo", write_type=WriteType.MustCache)
+
+    readers = await async_fs.batch_open_file([path])
+    assert len(readers) == 1
+    data = await readers[0].read()
+    assert data == b"solo"
+
+
+async def test_batch_open_file_missing_path_fails_whole_batch(
+    async_fs: AsyncGoosefs, tmp_dir: str
+) -> None:
+    """If any path is missing the whole batch fails; already-opened
+    streams are dropped to avoid worker-connection leaks."""
+    good = f"{tmp_dir}/exists.bin"
+    missing = f"{tmp_dir}/missing.bin"
+    await async_fs.write_file(good, b"x", write_type=WriteType.MustCache)
+
+    with pytest.raises(GoosefsError):
+        await async_fs.batch_open_file([good, missing])
