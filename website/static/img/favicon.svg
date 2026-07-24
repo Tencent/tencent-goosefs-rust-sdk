@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="16px" height="16px" viewBox="0 0 16 16" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <title>产品图标一16px</title>
+    <g id="产品图标一16px" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
+        <g id="编组">
+            <rect id="矩形" stroke="#979797" fill="#D8D8D8" opacity="0" x="0.5" y="0.5" width="15" height="15"></rect>
+            <polygon id="路径-28" fill="#00A4FF" fill-rule="nonzero" points="0.601960096 2.72327676 4.85922186 0.876079256 7.15605992 5.44353173 5.518 9.206 7.355 12.103 10.518 12.017 12.5865854 7.24606569 14.4215905 8.04152546 11.8462593 13.9824242 6.27388729 14.1329753 3.26179304 9.38105135 4.948 5.505 3.921 3.463 1.3980399 4.55801296"></polygon>
+            <polygon id="路径-29" fill="#00A4FF" fill-rule="nonzero" points="13.7763465 2.66311097 14.1979032 4.61817875 11.607 5.176 9.28278266 10.1352212 7.47183566 9.28641555 10.2164555 3.43070359"></polygon>
+        </g>
+    </g>
+</svg>

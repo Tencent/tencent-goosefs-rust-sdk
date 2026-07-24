@@ -1,0 +1,17 @@
+{
+  "short_name": "GooseFS SDK",
+  "name": "GooseFS SDK: Rust and Python clients",
+  "description": "Rust and Python clients for Tencent GooseFS",
+  "start_url": "/tencent-goosefs-rust-sdk/",
+  "scope": "/tencent-goosefs-rust-sdk/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#00A4FF",
+  "icons": [
+    {
+      "src": "img/logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

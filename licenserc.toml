@@ -35,6 +35,9 @@ excludes = [
 
   # Third-party OpenDAL fixture (keeps ASF header)
   "fixtures/goosefs/bin/start-default.sh",
+
+  # Docusaurus website
+  "website/**",
 ]
 
 keywords = ["copyright", "license"]
