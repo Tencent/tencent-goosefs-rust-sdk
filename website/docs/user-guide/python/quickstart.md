@@ -46,3 +46,5 @@ goosefs.enable_tracing(level="debug")
 ## Batch APIs
 
 Both sync and async clients expose batch metadata / lifecycle helpers (`batch_get_status`, `batch_exists`, `batch_create_file`, `batch_list_status`, …). Each batch uses one PyO3 boundary crossing and bounded concurrency; the first error in input order is returned.
+
+See the runnable demos under [Examples](./example/): `batch_status.py` and `batch_files.py`.
