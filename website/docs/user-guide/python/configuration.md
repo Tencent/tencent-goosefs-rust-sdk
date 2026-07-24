@@ -35,7 +35,7 @@ cfg = Config.from_uri("goosefs://127.0.0.1:9200/?auth.type=simple")
 | ------------------------------------- | --------------------------------------------- |
 | `GOOSEFS_MASTER_ADDR`                 | Master host:port (or comma-separated HA list) |
 | `GOOSEFS_AUTH_TYPE`                   | `nosasl` / `simple` / `custom`                |
-| `GOOSEFS_USER`                        | Username for SIMPLE auth                      |
+| `GOOSEFS_AUTH_USERNAME`               | Username for SIMPLE auth                      |
 | `GOOSEFS_MASTER_CONNECTION_POOL_SIZE` | Master gRPC channel pool size (default 1)     |
 | `GOOSEFS_MASTER_POOL_SCHEDULE`        | `roundrobin` / `p2c`                          |
 | `GOOSEFS_WORKER_CONNECTION_POOL_SIZE` | Per-worker gRPC channel pool size             |
@@ -81,12 +81,12 @@ The master connection pool spreads concurrent metadata RPCs across multiple HTTP
 
 Disabled by default. Enable via env or properties:
 
-| Property key                                | Env var                                | Default              |
-| ------------------------------------------- | -------------------------------------- | -------------------- |
-| `goosefs.user.client.cache.enabled`         | `GOOSEFS_CLIENT_CACHE_ENABLED`         | `false`              |
-| `goosefs.user.client.cache.page.size`       | `GOOSEFS_CLIENT_CACHE_PAGE_SIZE`       | `1MB`                |
-| `goosefs.user.client.cache.size`            | `GOOSEFS_CLIENT_CACHE_SIZE`            | `20 GiB`             |
-| `goosefs.user.client.cache.dirs`            | `GOOSEFS_CLIENT_CACHE_DIRS`            | `/tmp/goosefs_cache` |
+| Property key                                | Env var                                    | Default              |
+| ------------------------------------------- | ------------------------------------------ | -------------------- |
+| `goosefs.user.client.cache.enabled`         | `GOOSEFS_USER_CLIENT_CACHE_ENABLED`        | `false`              |
+| `goosefs.user.client.cache.page.size`       | `GOOSEFS_USER_CLIENT_CACHE_PAGE_SIZE`      | `1048576` (1 MB)     |
+| `goosefs.user.client.cache.size`            | `GOOSEFS_USER_CLIENT_CACHE_SIZE`           | `21474836480` (20 GiB) |
+| `goosefs.user.client.cache.dirs`            | `GOOSEFS_USER_CLIENT_CACHE_DIRS`           | `/tmp/goosefs_cache` |
 
 See [Page Cache](./page-cache) for a full walkthrough.
 
