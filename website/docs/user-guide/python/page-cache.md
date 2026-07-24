@@ -4,11 +4,11 @@ sidebar_position: 8
 
 # Page Cache
 
-The client-side page cache stores recently-read file blocks in local memory, avoiding repeated network round-trips for hot data. It is **disabled by default** and must be opted in per file via `OpenFileOptions`.
+The client-side page cache stores recently read file pages on **local disk**, avoiding repeated network round-trips for hot data. It is **disabled by default** and is enabled globally through configuration; streaming `open_file()` reads use the cache-enabled read type by default.
 
 ## Behavior
 
-- **Cache hit**: data served from local memory — zero RPCs.
+- **Cache hit**: file data is served from local disk without a worker data RPC; opening the file may still require master metadata lookup.
 - **Cache miss**: data fetched from the worker, back-filled into the cache.
 - **Eviction**: LRU or LFU (configurable), evicts pages when the cache reaches its size limit.
 - **Consistency**: the cache is **not** invalidated on out-of-band writes by other clients. Use `ReadType.NoCache` for fresh reads if you suspect concurrent writers.
@@ -18,11 +18,11 @@ The client-side page cache stores recently-read file blocks in local memory, avo
 ### Global configuration
 
 ```bash
-# Environment variables
-export GOOSEFS_CLIENT_CACHE_ENABLED=true
-export GOOSEFS_CLIENT_CACHE_SIZE=20GiB
-export GOOSEFS_CLIENT_CACHE_PAGE_SIZE=1MB
-export GOOSEFS_CLIENT_CACHE_DIRS=/tmp/goosefs_cache
+# Environment variables (values are integer byte counts, not human-readable)
+export GOOSEFS_USER_CLIENT_CACHE_ENABLED=true
+export GOOSEFS_USER_CLIENT_CACHE_SIZE=21474836480        # 20 GiB in bytes
+export GOOSEFS_USER_CLIENT_CACHE_PAGE_SIZE=1048576       # 1 MB in bytes
+export GOOSEFS_USER_CLIENT_CACHE_DIRS=/tmp/goosefs_cache
 ```
 
 ```properties
@@ -34,20 +34,16 @@ goosefs.user.client.cache.dirs=/tmp/goosefs_cache
 goosefs.user.client.cache.eviction.policy=LFU
 ```
 
-### Per-file read type
+### Per-file read behavior
 
 ```python
-from goosefs import AsyncGoosefs, Config, OpenFileOptions, ReadType
+from goosefs import AsyncGoosefs, Config
 
 async with await AsyncGoosefs.connect(Config("127.0.0.1:9200")) as fs:
-    # Cache-backed read (default when cache is enabled)
+    # open_file() uses the cache-enabled read type by default.
+    # When the page cache is enabled globally, streaming reads
+    # consult the cache automatically.
     reader = await fs.open_file("/data/hot.parquet")
-
-    # Explicitly skip cache for a cold read
-    reader = await fs.open_file(
-        "/data/cold.parquet",
-        # OpenFileOptions can be passed via the streaming API
-    )
 ```
 
 :::note
@@ -89,10 +85,10 @@ RUST_LOG=goosefs_sdk::cache=debug python your_script.py
 
 ## Configuration Reference
 
-| Property key                                | Env var                          | Default              |
-| ------------------------------------------- | -------------------------------- | -------------------- |
-| `goosefs.user.client.cache.enabled`         | `GOOSEFS_CLIENT_CACHE_ENABLED`   | `false`              |
-| `goosefs.user.client.cache.page.size`       | `GOOSEFS_CLIENT_CACHE_PAGE_SIZE` | `1MB`                |
-| `goosefs.user.client.cache.size`            | `GOOSEFS_CLIENT_CACHE_SIZE`      | `20 GiB`             |
-| `goosefs.user.client.cache.dirs`            | `GOOSEFS_CLIENT_CACHE_DIRS`      | `/tmp/goosefs_cache` |
-| `goosefs.user.client.cache.eviction.policy` | `GOOSEFS_CLIENT_CACHE_EVICTOR`   | `LFU`                |
+| Property key                                | Env var                                    | Default              |
+| ------------------------------------------- | ------------------------------------------ | -------------------- |
+| `goosefs.user.client.cache.enabled`         | `GOOSEFS_USER_CLIENT_CACHE_ENABLED`        | `false`              |
+| `goosefs.user.client.cache.page.size`       | `GOOSEFS_USER_CLIENT_CACHE_PAGE_SIZE`      | `1048576` (1 MB)     |
+| `goosefs.user.client.cache.size`            | `GOOSEFS_USER_CLIENT_CACHE_SIZE`           | `21474836480` (20 GiB) |
+| `goosefs.user.client.cache.dirs`            | `GOOSEFS_USER_CLIENT_CACHE_DIRS`           | `/tmp/goosefs_cache` |
+| `goosefs.user.client.cache.eviction.policy` | `GOOSEFS_USER_CLIENT_CACHE_EVICTION_POLICY`| `LFU`                |

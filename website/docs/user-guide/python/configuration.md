@@ -19,11 +19,8 @@ Priority (highest → lowest):
 ```python
 from goosefs import Config
 
-# Single master
+# Single master (GOOSEFS_* env overrides are applied automatically)
 cfg = Config("127.0.0.1:9200")
-
-# From environment variables (GOOSEFS_MASTER_ADDR, GOOSEFS_AUTH_TYPE, ...)
-cfg = Config.from_env()
 
 # From a goosefs-site.properties file
 cfg = Config.from_properties_file("/etc/goosefs/goosefs-site.properties")
@@ -39,7 +36,7 @@ cfg = Config.from_uri("goosefs://127.0.0.1:9200/?auth.type=simple")
 | `GOOSEFS_MASTER_ADDR`                 | Master host:port (or comma-separated HA list) |
 | `GOOSEFS_AUTH_TYPE`                   | `nosasl` / `simple` / `custom`                |
 | `GOOSEFS_USER`                        | Username for SIMPLE auth                      |
-| `GOOSEFS_MASTER_CONNECTION_POOL_SIZE` | Master gRPC channel pool size (default 8)     |
+| `GOOSEFS_MASTER_CONNECTION_POOL_SIZE` | Master gRPC channel pool size (default 1)     |
 | `GOOSEFS_MASTER_POOL_SCHEDULE`        | `roundrobin` / `p2c`                          |
 | `GOOSEFS_WORKER_CONNECTION_POOL_SIZE` | Per-worker gRPC channel pool size             |
 | `GOOSEFS_FILE_INFO_CACHE_TTL_MS`      | Client-side FileInfo cache TTL (0 = disabled) |
@@ -49,13 +46,14 @@ cfg = Config.from_uri("goosefs://127.0.0.1:9200/?auth.type=simple")
 
 | Enum                   | Typical use                                     |
 | ---------------------- | ----------------------------------------------- |
-| `WriteType.MustCache`  | Cache only (no UFS persist)                     |
-| `WriteType.CacheThrough` | Write cache + UFS synchronously                |
-| `WriteType.Through`    | Write UFS directly                              |
-| `WriteType.AsyncThrough` | Write cache, persist UFS asynchronously       |
+| `WriteType.MustCache`    | Cache only (no UFS persist)                     |
+| `WriteType.TryCache`     | Try cache first, fall back to Through on error  |
+| `WriteType.CacheThrough` | Write cache + UFS synchronously                 |
+| `WriteType.Through`      | Write UFS directly                              |
+| `WriteType.AsyncThrough` | Write cache, persist UFS asynchronously         |
 
 ```python
-from goosefs import Config, WriteType
+from goosefs import Config, Goosefs, WriteType
 
 cfg = Config("127.0.0.1:9200")
 fs = Goosefs(cfg)  # sync; use AsyncGoosefs for async
@@ -64,7 +62,7 @@ fs.write_file("/data/file.bin", b"payload", write_type=WriteType.CacheThrough)
 
 ## Master Connection Pool
 
-The master connection pool spreads concurrent metadata RPCs across multiple HTTP/2 channels. Default size is **8** with **P2C** (Power of Two Choices) scheduling.
+The master connection pool spreads concurrent metadata RPCs across multiple HTTP/2 channels. Default size is **1** (single channel, backward-compatible) with **round-robin** scheduling. Raise to 4-8 with P2C scheduling for high-concurrency remote scenarios.
 
 ```python
 # Via env

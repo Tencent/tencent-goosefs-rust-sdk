@@ -119,7 +119,7 @@ for r in readers:
     print(len(data))
 ```
 
-**Resource cleanup on partial failure**: if any path fails to open, all already-opened streams are dropped immediately (their `Drop` triggers worker-connection release) to avoid leaks. The whole batch raises the first error.
+**Resource cleanup on partial failure**: after all dispatched open attempts complete, if any path failed, all successfully opened streams are dropped (their `Drop` releases worker resources) and the batch raises an error.
 
 ## Sync API
 
@@ -131,14 +131,10 @@ with Goosefs(cfg) as fs:
     fs.batch_create_dir(["/data/d1", "/data/d2"])
 ```
 
+:::note
+`batch_open_file` is **async-only** — the synchronous `Goosefs` wrapper does not expose it because it returns `AsyncFileReader` objects that require an asyncio runtime. All other batch APIs are available on both `AsyncGoosefs` and `Goosefs`.
+:::
+
 ## Performance Characteristics
 
-For N=100 paths on a local cluster:
-
-| Operation              | N individual calls | 1 batch call | Speedup |
-| ---------------------- | ------------------- | ------------ | ------- |
-| `exists`               | ~33 ms              | ~0.3 ms      | ~100x   |
-| `get_status`           | ~35 ms              | ~0.4 ms      | ~90x    |
-| `list_status` (100 entries) | ~33 ms GIL      | ~0.3 ms GIL  | ~99% GIL reduction (grouped) |
-
-The speedup comes from eliminating per-call PyO3 boundary crossings (each ~30-40 µs of GIL + allocation overhead).
+Batch APIs complete in a **single PyO3 boundary crossing** instead of N. For a directory with N=100 entries, `list_status_grouped` creates 1 Python object (~0.3 µs GIL occupancy) instead of 100 `URIStatus` objects (~33.4 µs total), reducing GIL occupancy by ~99%. The speedup comes from eliminating per-call PyO3 boundary crossings (each briefly acquires the GIL and allocates Python objects).

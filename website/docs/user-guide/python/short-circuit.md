@@ -10,7 +10,7 @@ Short-circuit read allows a client co-located with a GooseFS worker to read bloc
 
 1. The client opens a file and resolves the block → worker mapping.
 2. If the client and worker are on the **same host**, the client attempts a short-circuit open.
-3. On success, data is read via `mmap` of the worker's block file — no gRPC, no protobuf encoding, no network.
+3. On success, the data payload is read via `mmap` of the worker's block file — no protobuf encoding or network transfer for the file bytes, though setup may use an `OpenLocalBlock` control RPC.
 4. On any recoverable failure (permission denied, file not found, etc.), the client **transparently falls back** to the gRPC read path.
 
 ## Enabling

@@ -57,7 +57,7 @@ See [Batch APIs](./batch-api) for concurrent multi-path operations.
 # One-shot read (entire file into memory)
 data = await fs.read_file("/data/hello.txt")
 
-# Range read (offset + length, single RPC)
+# Range read (offset + length; may span multiple block RPCs)
 chunk = await fs.read_range("/data/hello.txt", offset=100, length=500)
 
 # One-shot write (create + write + close in one call)

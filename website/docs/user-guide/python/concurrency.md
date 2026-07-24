@@ -94,7 +94,7 @@ The atexit handler is a safety net, not a replacement for explicit cleanup. In l
 The Python binding uses PyO3 to bridge Python and Rust. Key interactions:
 
 - **Rust async tasks run on Tokio** — they do not hold the GIL while waiting on I/O.
-- **PyO3 boundary crossings acquire the GIL** — each call from Python to Rust (and back) takes the GIL briefly (~30-40 µs per crossing).
+- **PyO3 boundary crossings acquire the GIL** — each call from Python to Rust (and back) briefly acquires the GIL.
 - **Batch APIs reduce GIL crossings** — one `batch_get_status(100_paths)` takes the GIL once instead of 100 times. See [Batch APIs](./batch-api).
 - **`URIStatusList` defers GIL work** — `list_status_grouped` returns a lazy container that materialises `URIStatus` objects one at a time on `__getitem__`, reducing peak GIL occupancy.
 

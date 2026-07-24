@@ -4,18 +4,20 @@ sidebar_position: 12
 
 # Metrics
 
-The GooseFS Python client can export Prometheus-compatible metrics via a background heartbeat to a Pushgateway or by exposing a scrape endpoint. Metrics are **disabled by default**.
+The GooseFS Python client exports Prometheus-compatible metrics via a background heartbeat. Metrics collection is **enabled by default** (mirrors the Java client's `USER_METRICS_COLLECTION_ENABLED`).
 
-## Enabling
+## Configuration
 
 ```bash
 # Environment variables
-export GOOSEFS_METRICS_ENABLED=true
+export GOOSEFS_USER_METRICS_COLLECTION_ENABLED=true       # default: true
+export GOOSEFS_USER_METRICS_HEARTBEAT_INTERVAL_MS=10000  # default: 10000 (10s)
 ```
 
 ```properties
 # goosefs-site.properties
-goosefs.user.metrics.enabled=true
+goosefs.user.metrics.collection.enabled=true
+goosefs.user.metrics.heartbeat.interval.ms=10000
 ```
 
 ```python
@@ -27,29 +29,19 @@ cfg = Config("127.0.0.1:9200")
 # starts automatically when the FileSystemContext is connected.
 ```
 
-## Available Metrics
-
-| Metric                              | Type      | Description                              |
-| ----------------------------------- | --------- | ---------------------------------------- |
-| `goosefs_master_rpc_count`          | counter   | Total Master RPCs sent                   |
-| `goosefs_master_rpc_latency_ms`     | histogram | Per-RPC latency (Master)                 |
-| `goosefs_worker_rpc_count`          | counter   | Total Worker RPCs sent                   |
-| `goosefs_worker_rpc_latency_ms`     | histogram | Per-RPC latency (Worker)                 |
-| `goosefs_short_circuit_count`       | counter   | Short-circuit reads attempted            |
-| `goosefs_short_circuit_fallback`    | counter   | Short-circuit reads that fell back to gRPC |
-| `goosefs_client_cache_hit`          | counter   | Page cache hits                          |
-| `goosefs_client_cache_miss`         | counter   | Page cache misses                        |
-| `goosefs_client_cache_eviction`     | counter   | Page cache evictions                     |
-
 ## Pushgateway
 
+To push metrics to a Prometheus Pushgateway:
+
 ```bash
-export GOOSEFS_METRICS_ENABLED=true
-export GOOSEFS_METRICS_PUSHGATEWAY_ADDR=http://pushgateway:9091
-export GOOSEFS_METRICS_HEARTBEAT_INTERVAL_SECS=15
+export GOOSEFS_METRICS_PUSHGATEWAY_ENABLED=true
+export GOOSEFS_METRICS_PUSHGATEWAY_ENDPOINT=http://pushgateway:9091
+export GOOSEFS_METRICS_PUSHGATEWAY_PUSH_INTERVAL_MS=15000
+export GOOSEFS_METRICS_PUSHGATEWAY_JOB=goosefs-client
+export GOOSEFS_METRICS_PUSHGATEWAY_INSTANCE=$(hostname)
 ```
 
-The client sends metrics to the Pushgateway at the configured interval. Use Prometheus to scrape the Pushgateway.
+The client pushes metrics to the Pushgateway at the configured interval. Use Prometheus to scrape the Pushgateway.
 
 ## Observability Without Metrics
 
