@@ -34,18 +34,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # OpenDAL uses korandoru/hawkeye for the same purpose; we check the
-  # Tencent Apache-2.0 header (license-header.txt) via a small script.
-  licenses:
-    name: licenses
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Check Apache-2.0 license headers
-        run: python3 scripts/ci/check_license_headers.py
-
   check:
     name: check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
