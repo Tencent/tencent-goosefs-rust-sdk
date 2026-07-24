@@ -20,6 +20,7 @@ on:
     paths:
       - "bindings/python/**"
       - "src/**"
+      - "proto/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "scripts/release/python.sh"
@@ -29,6 +30,7 @@ on:
     paths:
       - "bindings/python/**"
       - "src/**"
+      - "proto/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "scripts/release/python.sh"

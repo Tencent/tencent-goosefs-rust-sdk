@@ -8,6 +8,8 @@
 powered by a native Rust implementation (the [`goosefs-sdk`](https://crates.io/crates/goosefs-sdk) crate)
 exposed through [PyO3](https://pyo3.rs/).
 
+**Docs:** [https://tencent.github.io/tencent-goosefs-rust-sdk/](https://tencent.github.io/tencent-goosefs-rust-sdk/)
+
 > **Status:** alpha — the API is shaping up. See
 > [`CHANGELOG.md`](https://github.com/Tencent/tencent-goosefs-rust-sdk/blob/main/bindings/python/CHANGELOG.md)
 > and [`DEVELOPMENT.md`](https://github.com/Tencent/tencent-goosefs-rust-sdk/blob/main/bindings/python/DEVELOPMENT.md).
