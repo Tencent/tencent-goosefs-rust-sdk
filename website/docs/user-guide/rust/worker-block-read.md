@@ -54,15 +54,14 @@ let worker_info = router.select_worker(block_ids[0]).await?;
 use goosefs_sdk::client::WorkerClient;
 use goosefs_sdk::io::GrpcBlockReader;
 
-// WorkerInfo.address is Option<WorkerNetAddress>; unwrap and format host:port.
-// In production code, propagate the missing address as Error::MissingField instead.
+// WorkerInfo.address is Option<WorkerNetAddress>; propagate any missing field.
 let addr = worker_info.address.as_ref()
     .ok_or_else(|| goosefs_sdk::error::Error::MissingField { field: "address".into() })?;
-let worker_addr = format!(
-    "{}:{}",
-    addr.host.as_deref().unwrap_or("127.0.0.1"),
-    addr.rpc_port.unwrap_or(9203)
-);
+let host = addr.host.as_deref()
+    .ok_or_else(|| goosefs_sdk::error::Error::MissingField { field: "address.host".into() })?;
+let rpc_port = addr.rpc_port
+    .ok_or_else(|| goosefs_sdk::error::Error::MissingField { field: "address.rpc_port".into() })?;
+let worker_addr = format!("{host}:{rpc_port}");
 let worker = WorkerClient::connect(&worker_addr, &ctx.config()).await?;
 
 // One-shot: read the entire first block.
