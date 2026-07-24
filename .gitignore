@@ -31,3 +31,9 @@ bindings/python/.venv/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# Docusaurus website
+website/node_modules/
+website/build/
+website/.docusaurus/
+website/.cache-loader/

@@ -30,8 +30,8 @@ license = "Apache-2.0"
 authors = ["Goosefs Team"]
 readme = "README.md"
 repository = "https://github.com/Tencent/tencent-goosefs-rust-sdk"
-homepage = "https://github.com/Tencent/tencent-goosefs-rust-sdk"
-documentation = "https://docs.rs/goosefs-sdk"
+homepage = "https://tencent.github.io/tencent-goosefs-rust-sdk/"
+documentation = "https://tencent.github.io/tencent-goosefs-rust-sdk/"
 keywords = ["goosefs", "grpc", "storage", "filesystem", "cache"]
 categories = ["network-programming", "filesystem"]
 rust-version = "1.88"
@@ -45,6 +45,7 @@ exclude = [
     "docs/GOOSEFS_LANCE_GRPC_DESIGN.md",
     "docs/release/*",
     "target/*",
+    "website/*",
 ]
 
 [lib]

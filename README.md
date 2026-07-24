@@ -7,6 +7,8 @@
 
 A native Rust client library that communicates directly with [Goosefs](https://cloud.tencent.com/document/product/1424) Master/Worker via gRPC (tonic/protobuf).
 
+**Documentation:** [https://tencent.github.io/tencent-goosefs-rust-sdk/](https://tencent.github.io/tencent-goosefs-rust-sdk/)
+
 ## What's New in v0.1.8
 
 - **Default `worker_connection_pool_size`** — Bumped from `1` to `min(cores, 4)` (capped), using `available_parallelism` so cgroup CPU limits are respected on Linux. Opt back to the legacy single channel with `.with_worker_connection_pool_size(1)` or `goosefs.client.worker.connection.pool.size=1`.

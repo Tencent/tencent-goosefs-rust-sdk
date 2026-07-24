@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="630" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0063FF"/>
+      <stop offset="1" stop-color="#003A8C"/>
+    </linearGradient>
+    <linearGradient id="icon" x1="73%" y1="111%" x2="27%" y2="-11%">
+      <stop stop-color="#0063FF" offset="0%"/>
+      <stop stop-color="#00C8DE" offset="100%"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <g transform="translate(80, 203) scale(1.75)">
+    <polygon fill="url(#icon)" points="108.155 47.231 108.155 93.668 55.566 123.634 2.977 93.668 2.977 33.538 55.566 3.572 108.056 33.538 111.033 31.851 55.566 0.099 0 31.851 0 95.355 55.566 127.107 111.132 95.355 111.132 45.544"/>
+  </g>
+  <text x="320" y="280" fill="#FFFFFF" font-family="Inter, Arial, sans-serif" font-size="64" font-weight="700">GooseFS SDK</text>
+  <text x="320" y="340" fill="#B7E8FF" font-family="Inter, Arial, sans-serif" font-size="32">Rust and Python clients for Tencent GooseFS</text>
+</svg>
