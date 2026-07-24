@@ -31,4 +31,3 @@ bindings/python/.venv/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
-PR_DESCRIPTION_BATCH.md
