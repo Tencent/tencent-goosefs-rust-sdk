@@ -1,0 +1,150 @@
+---
+sidebar_position: 9
+---
+
+# Worker Block Direct Read
+
+For workloads that need block-level control (e.g., columnar access patterns, partial block reads), the Rust SDK exposes a low-level pipeline: `WorkerRouter` selects the worker responsible for a block, and `GrpcBlockReader` (backed by `WorkerClient`) reads the raw block bytes with full flow-control ACK control.
+
+## High-level convenience: `GoosefsFileReader`
+
+Most users should use `GoosefsFileReader::read_range_with_context` or `GoosefsFileInStream::read_at` instead of the low-level APIs described here. The high-level APIs resolve the block → worker mapping internally.
+
+```rust
+use goosefs_sdk::io::GoosefsFileReader;
+
+// Read bytes [100, 600) from a file.
+let data = GoosefsFileReader::read_range_with_context(ctx.clone(), "/data/file", 100, 500).await?;
+```
+
+## Low-level pipeline
+
+The low-level pipeline gives full control over flow-control ACK and chunk-level processing:
+
+```
+MasterClient::get_status(path)
+  → WorkerRouter::select_worker(block_id)
+    → WorkerClient::connect(addr, config)
+      → GrpcBlockReader::open(worker, block_id, offset, ...)
+        → reader.read_chunk() / reader.read_all()
+```
+
+### Step 1: Get file metadata and block list
+
+```rust
+use goosefs_sdk::client::MasterClient;
+
+let master = ctx.acquire_master();
+let status = master.get_status("/data/large.parquet").await?;
+let block_ids = &status.block_ids;
+```
+
+### Step 2: Route to the responsible worker
+
+```rust
+use goosefs_sdk::block::WorkerRouter;
+
+let router = ctx.acquire_router();
+let worker_info = router.select_worker(block_ids[0]).await?;
+```
+
+### Step 3: Connect to the worker and open a block reader
+
+```rust
+use goosefs_sdk::client::WorkerClient;
+use goosefs_sdk::io::GrpcBlockReader;
+
+// WorkerInfo.address is Option<WorkerNetAddress>; unwrap and format host:port.
+let addr = worker_info.address.as_ref().unwrap();
+let worker_addr = format!(
+    "{}:{}",
+    addr.host.as_deref().unwrap_or("127.0.0.1"),
+    addr.rpc_port.unwrap_or(9203)
+);
+let worker = WorkerClient::connect(&worker_addr, &ctx.config()).await?;
+
+// One-shot: read the entire block.
+let mut reader = GrpcBlockReader::open(
+    &worker, block_ids[0], 0, block_size as i64, chunk_size as i64, None,
+).await?;
+let data = reader.read_all().await?;
+println!("read {} bytes from block {}", data.len(), block_ids[0]);
+```
+
+### Step 4: Read chunk-by-chunk (with flow-control ACK)
+
+```rust
+use goosefs_sdk::io::GrpcBlockReader;
+
+let mut reader = GrpcBlockReader::open(
+    &worker, block_ids[0], 0, block_size as i64, chunk_size as i64, None,
+).await?;
+while let Some(chunk) = reader.read_chunk().await? {
+    process(&chunk);
+    // ACK the chunk to signal the worker to send more data.
+    // GrpcBlockReader handles ACK internally when the chunk is consumed.
+}
+println!("received {} bytes total", reader.bytes_received());
+```
+
+`GrpcBlockReader::open` internally calls `WorkerClient::read_block` with `position_short = false` (sequential streaming). For positioned reads, `GrpcBlockReader` includes `read_chunk` which incrementally ACKs received bytes to maintain flow control.
+
+### Step 5: Short-circuit (same-host optimization)
+
+If the client and worker are on the same host and [short-circuit](./short-circuit) is enabled, use `WorkerClient::open_local_block` to obtain an `OpenLocalBlockResponse` (containing the local file path) + an `OpenLocalBlockGuard`. The response can then be used to `mmap` the local block file, bypassing gRPC for data transfer:
+
+```rust
+// worker is a WorkerClient from Step 3.
+let (response, _guard) = worker.open_local_block(block_ids[0], block_size as i64, None).await?;
+// response.path contains the local file path for mmap-based reads.
+```
+
+## `GrpcBlockReader` API
+
+| Method | Description |
+|--------|-------------|
+| `open(worker, block_id, offset, length, chunk_size, options)` | Open a block reader (calls `WorkerClient::read_block` internally) |
+| `read_chunk()` | Read one chunk; returns `None` at EOF. Handles flow-control ACK. |
+| `read_all()` | Read all remaining bytes |
+| `positioned_read(worker, block_id, offset, length, chunk_size)` | One-shot positioned read from a specific block |
+| `block_id()` | The block being read |
+| `bytes_received()` | Total bytes received so far |
+| `is_complete()` | Whether the read is complete |
+
+## `WorkerClient` API
+
+| Method | Description |
+|--------|-------------|
+| `connect(addr, config)` | Connect with SASL auth (production) |
+| `connect_simple(addr, timeout)` | Deprecated, unauthenticated escape hatch (test-only) |
+| `read_block(block_id, offset, length, ...)` | Start a streaming read (returns `(Sender<ReadRequest>, Streaming<ReadResponse>)` — use `GrpcBlockReader::open` instead) |
+| `read_block_positioned(block_id, offset, length, ...)` | Start a positioned read (returns channel pair — use `GrpcBlockReader::positioned_read` instead) |
+| `open_local_block(block_id, block_size, capability)` | Short-circuit `mmap` read (returns `(OpenLocalBlockResponse, OpenLocalBlockGuard)`) |
+| `write_block(...)` | Block write (for streaming writers) |
+| `addr()` | Worker `host:port` |
+| `close()` | Close the connection (returns to pool) |
+
+:::note
+`WorkerClient` is not `Clone` — each `acquire()` from the pool returns an owned `WorkerClient`. Dropping it returns the underlying gRPC channel to the `WorkerClientPool` for reuse; no reconnection cost on the next acquire.
+:::
+
+## `WorkerRouter` API
+
+| Method | Description |
+|--------|-------------|
+| `select_worker(block_id)` | Pick the worker holding this block |
+| `get_workers()` | Snapshot of all known workers |
+| `mark_failed(addr)` | Mark a worker as temporarily unavailable |
+| `is_block_source_local(block_id)` | Check if the block is on the local host (short-circuit eligible) |
+| `needs_refresh()` | Whether the worker list is stale |
+
+## When to use
+
+| Scenario | Recommended API |
+|----------|----------------|
+| Read a small range from a large file | `GoosefsFileReader::read_range_with_context` |
+| Read a specific block by index | `GoosefsFileInStream::read_at` or low-level pipeline |
+| Multiple chunked reads from a block | `GrpcBlockReader::open` + `read_chunk()` |
+| Full-file sequential read | `GoosefsFileInStream::read_all` or `GoosefsFileReader::read_next_block` |
+
+See `examples/lowlevel_block_read.rs` for a complete end-to-end example.
