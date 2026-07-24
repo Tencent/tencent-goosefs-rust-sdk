@@ -21,12 +21,13 @@ use std::sync::Arc;
 use goosefs_sdk::context::FileSystemContext;
 use goosefs_sdk::config::GoosefsConfig;
 use goosefs_sdk::io::GoosefsFileInStream;
+use goosefs_sdk::fs::options::OpenFileOptions;
 
 #[tokio::main]
 async fn main() -> goosefs_sdk::error::Result<()> {
     let ctx = FileSystemContext::connect(GoosefsConfig::new("127.0.0.1:9200")).await?;
 
-    let mut stream = GoosefsFileInStream::open_with_context(ctx.clone(), "/data/large.bin").await?;
+    let mut stream = GoosefsFileInStream::open_with_context(ctx.clone(), "/data/large.bin", OpenFileOptions::new()).await?;
 
     // Sequential read into a caller-provided buffer.
     let mut buf = vec![0u8; 4096];
@@ -89,7 +90,7 @@ while let Some(chunk) = reader.read_next_block().await? {
 ## Streaming Write: `GoosefsFileWriter`
 
 ```rust
-use goosefs_sdk::fs::{BaseFileSystem, options::CreateFileOptions};
+use goosefs_sdk::fs::{BaseFileSystem, FileSystem, options::CreateFileOptions};
 use goosefs_sdk::config::WriteType;
 
 let fs = BaseFileSystem::from_context(ctx.clone());

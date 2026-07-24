@@ -42,7 +42,7 @@ async fn main() {
         .unwrap();
 
     match ctx.acquire_master().get_status("/data/missing").await {
-        Ok(status) => println!("found: {}", status.path),
+        Ok(status) => println!("found: {:?}", status.path),
         Err(Error::NotFound { path }) => println!("not found: {}", path),
         Err(Error::PermissionDenied { message }) => eprintln!("denied: {}", message),
         Err(e) => eprintln!("other error: {}", e),
@@ -63,7 +63,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 use goosefs_sdk::error::Result;
 use bytes::Bytes;
 
-async fn read_file(ctx: &goosefs_sdk::context::FileSystemContext) -> Result<Bytes> {
+async fn read_file(ctx: &std::sync::Arc<goosefs_sdk::context::FileSystemContext>) -> Result<Bytes> {
     goosefs_sdk::io::GoosefsFileReader::read_file_with_context(ctx.clone(), "/data/file").await
 }
 ```
@@ -81,7 +81,7 @@ use goosefs_sdk::error::Error;
 use bytes::Bytes;
 use std::time::Duration;
 
-async fn retry_read(ctx: &goosefs_sdk::context::FileSystemContext, path: &str) -> Result<Bytes> {
+async fn retry_read(ctx: &std::sync::Arc<goosefs_sdk::context::FileSystemContext>, path: &str) -> Result<Bytes> {
     for attempt in 0..3 {
         match goosefs_sdk::io::GoosefsFileReader::read_file_with_context(ctx.clone(), path).await {
             Ok(data) => return Ok(data),

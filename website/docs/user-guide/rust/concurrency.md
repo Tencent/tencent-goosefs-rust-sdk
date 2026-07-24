@@ -14,7 +14,7 @@ The GooseFS Rust SDK is fully async (`tokio`) and designed for high-concurrency 
 use std::sync::Arc;
 use goosefs_sdk::context::FileSystemContext;
 use goosefs_sdk::config::GoosefsConfig;
-use goosefs_sdk::fs::BaseFileSystem;
+use goosefs_sdk::fs::{BaseFileSystem, FileSystem};
 
 #[tokio::main]
 async fn main() -> goosefs_sdk::error::Result<()> {
