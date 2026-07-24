@@ -12,12 +12,12 @@ The Python binding provides nine batch APIs that fan out multiple RPCs with **bo
 | --------------------------------- | ---------- | -------------------------------------- |
 | Check existence of 100+ paths     | `batch_exists` | One GIL crossing instead of 100       |
 | Fetch metadata for a file list    | `batch_get_status` | Results in input order, bounded fan-out |
-| Create / delete / rename a batch  | `batch_create_*` / `batch_delete` / `batch_rename` | Atomic-fail semantics |
+| Create / delete / rename a batch  | `batch_create_*` / `batch_delete` / `batch_rename` | Concurrent ops; partial changes may remain on failure |
 | Open 50 files for parallel read   | `batch_open_file` | Streams cleaned up on partial failure  |
 | List multiple directories         | `batch_list_status` / `batch_list_status_grouped` | Concurrent listing |
 
 :::warning
-All batch APIs **fail the whole batch on the first error**. Use individual calls if you need per-path error isolation.
+All batch APIs **fail the whole batch on the first error**, but operations that already completed are **not rolled back**. Use individual calls if you need per-path error isolation or atomicity.
 :::
 
 ## Status APIs

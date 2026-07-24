@@ -53,7 +53,7 @@ The fallback is **automatic and transparent** — the application sees identical
 
 ## Verifying Short-Circuit
 
-Set `RUST_LOG=goosefs_sdk::block::short_circuit=debug` to see whether short-circuit is engaging:
+Call `goosefs.enable_tracing(level="debug")` near script startup to install the tracing subscriber, then set `RUST_LOG` for the short-circuit target:
 
 ```bash
 RUST_LOG=goosefs_sdk::block::short_circuit=debug python your_script.py

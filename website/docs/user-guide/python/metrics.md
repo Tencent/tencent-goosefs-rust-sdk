@@ -4,7 +4,7 @@ sidebar_position: 12
 
 # Metrics
 
-The GooseFS Python client exports Prometheus-compatible metrics via a background heartbeat. Metrics collection is **enabled by default** (mirrors the Java client's `USER_METRICS_COLLECTION_ENABLED`).
+The GooseFS Python client reports metrics to the master through a heartbeat enabled by default. An optional Prometheus Pushgateway exporter is disabled by default; the client does not expose a scrape endpoint.
 
 ## Configuration
 
@@ -45,7 +45,7 @@ The client pushes metrics to the Pushgateway at the configured interval. Use Pro
 
 ## Observability Without Metrics
 
-For lightweight debugging without a metrics backend, set `RUST_LOG`:
+For lightweight debugging without a metrics backend, call `goosefs.enable_tracing()` near script startup to install the tracing subscriber, then set `RUST_LOG`:
 
 ```bash
 # See all RPCs

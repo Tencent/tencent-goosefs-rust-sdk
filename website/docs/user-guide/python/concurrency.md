@@ -40,7 +40,7 @@ asyncio.run(bad())
 
 ### Guard
 
-The client records the creator PID in `__new__` / `connect`. Any subsequent call from a different PID raises `RuntimeError`:
+The synchronous `Goosefs` client records its creator PID in `__new__`, and subsequent calls from a different PID raise `RuntimeError`. `AsyncGoosefs` is also unsafe after a fork, but currently does not provide this guard — never reuse either client in a child process.
 
 ```python
 import os
@@ -75,7 +75,7 @@ p.join()
 
 ## Atexit Safety Net
 
-If you forget to call `close()` or use a context manager, the binding registers an `atexit` handler that closes any leaked `Goosefs` / `AsyncGoosefs` instances at process shutdown. This prevents resource leaks in scripts and notebooks.
+If you forget to close a synchronous `Goosefs` instance, the binding's `atexit` handler attempts to close it at process shutdown. Unclosed `AsyncGoosefs` instances cannot be driven without an event loop, so the handler emits a `ResourceWarning` and relies on the OS to reclaim their sockets.
 
 ```python
 from goosefs import Goosefs, Config

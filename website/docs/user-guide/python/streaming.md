@@ -38,7 +38,7 @@ await reader.close()
 
 ```python
 async with await fs.open_file("/data/large.bin") as reader:
-    async for chunk in iter(lambda: await reader.read(4096), b""):
+    while chunk := await reader.read(4096):
         process(chunk)
 ```
 
@@ -46,7 +46,7 @@ async with await fs.open_file("/data/large.bin") as reader:
 
 `AsyncFileReader` is backed by a single `tokio::sync::Mutex`. Concurrent calls on the same handle are **serialised** — calling `read()` while another `read()` is in flight queues behind it. `tell()` is synchronous and raises `RuntimeError` if a read/seek is in flight.
 
-For true parallel reads, open multiple readers or use `read_at()` (positioned, doesn't conflict with the cursor).
+For true parallel reads, open multiple readers. `read_at()` preserves the cursor position, but calls on the same reader are still serialised by its mutex.
 
 ## Streaming Write
 
@@ -90,6 +90,6 @@ writer = await fs.create_file(
 ```python
 await writer.write(b"bytes")           # bytes
 await writer.write(bytearray(1024))    # bytearray
-await writer.write(memoryview(buf))    # memoryview (zero-copy)
+await writer.write(memoryview(buf))    # memoryview (zero-copy only for read-only C-contiguous buffers in abi3-py311 builds)
 # await writer.write("string")         # TypeError — use .encode() first
 ```

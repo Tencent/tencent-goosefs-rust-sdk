@@ -92,7 +92,7 @@ See [Streaming](./streaming) for the full `AsyncFileReader` / `AsyncFileWriter` 
 ```python
 await fs.mkdir("/data/subdir", recursive=True)
 await fs.rename("/data/old.txt", "/data/new.txt")
-await fs.delete("/data/old.txt")
+await fs.delete("/data/new.txt")
 await fs.delete("/data/tree", recursive=True)
 ```
 
@@ -110,4 +110,4 @@ Two or more addresses → multi-master mode (polls to discover the Primary autom
 
 ## Context Manager
 
-Both `AsyncGoosefs` and `Goosefs` support context managers (`async with` / `with`) that call `close()` on exit. An `atexit` safety net also closes forgotten handles at process shutdown.
+Both `AsyncGoosefs` and `Goosefs` support context managers (`async with` / `with`) that call `close()` on exit. An `atexit` safety net attempts to close forgotten synchronous handles and warns about forgotten async handles.

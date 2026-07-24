@@ -4,7 +4,7 @@ sidebar_position: 7
 
 # Error Handling
 
-Every error raised by the GooseFS Python client inherits from `GoosefsError`, which itself inherits from `Exception`. This means `except GoosefsError` is a safe, exhaustive fallback that catches every SDK-specific error without swallowing unrelated exceptions like `KeyboardInterrupt` or `ValueError`.
+Errors mapped from the GooseFS SDK core inherit from `GoosefsError`, which itself inherits from `Exception`. Local Python API validation and safety guards may instead raise built-in exceptions such as `ValueError` or `RuntimeError`.
 
 ## Exception Hierarchy
 
@@ -73,6 +73,7 @@ The Rust binding maps every `goosefs_sdk::error::Error` variant to a specific Py
 ### Retry on transient errors
 
 ```python
+import asyncio
 from goosefs.exceptions import RpcError, MasterUnavailable, NoWorkerAvailable
 
 TRANSIENT = (RpcError, MasterUnavailable, NoWorkerAvailable)

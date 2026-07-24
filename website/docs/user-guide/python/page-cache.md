@@ -65,7 +65,8 @@ async def main():
         data1 = await reader.read()
         await reader.close()
 
-        # Second read — cache hit, served from local memory
+        # Second read — cache hit (requires sequential read cache enabled:
+        # GOOSEFS_USER_CLIENT_CACHE_SEQUENTIAL_READ_ENABLED=true)
         reader = await fs.open_file("/data/hot.parquet")
         data2 = await reader.read()
         await reader.close()
@@ -77,7 +78,7 @@ asyncio.run(main())
 
 ## Observability
 
-Set `RUST_LOG=goosefs_sdk::cache=debug` to see cache hit/miss logs:
+Call `goosefs.enable_tracing(level="debug")` near the start of the script to install the tracing subscriber, then set `RUST_LOG` to filter cache hit/miss logs:
 
 ```bash
 RUST_LOG=goosefs_sdk::cache=debug python your_script.py

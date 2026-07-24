@@ -20,7 +20,7 @@ async with await AsyncGoosefs.connect(cfg) as fs:
     )
 ```
 
-`positioned_read` resolves `path` → picks `block_ids[block_index]` → routes to the responsible Worker via the shared `WorkerRouter` → positioned-reads the requested byte range in a single round-trip.
+`positioned_read` resolves `path` → picks `block_ids[block_index]` → routes to the responsible Worker via the shared `WorkerRouter` → streams the requested byte range from that worker.
 
 :::note
 For the last block of a file, the actual block size may be smaller than `block_size_bytes` reported by master. `length=-1` returns only the remaining bytes of that block.
@@ -48,7 +48,7 @@ async with await AsyncGoosefs.connect(cfg) as fs:
 | Method                     | Description                                          |
 | -------------------------- | ---------------------------------------------------- |
 | `connect(addr, config)`    | Connect directly to a worker (static factory)        |
-| `connect_simple(addr)`     | Simplified connect with default timeouts             |
+| `connect_simple(addr)`     | Deprecated, unauthenticated test-only connection; use `connect(addr, config)` in production |
 | `read_block_positioned(id, offset, length)` | Positioned read from a specific block |
 | `close()`                  | Release the wrapper (underlying channel stays pooled) |
 
