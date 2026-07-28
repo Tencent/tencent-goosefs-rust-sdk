@@ -198,13 +198,36 @@ pub struct UringPageStore {
     /// Directory fd cache: `file_id → DirFdEntry`.
     /// DashMap provides lock-free reads (shard-level RwLock, read-optimised).
     dir_fd_cache: DashMap<Arc<str>, DirFdEntry>,
+    /// When `true`, the read path (dir open / page openat / read) uses
+    /// synchronous libc syscalls (`open`/`openat`/`pread`) on the calling
+    /// thread instead of io_uring SQE/CQE.
+    ///
+    /// Intended for complex analytical workloads where io_uring
+    /// underperforms plain `pread`. The calling tokio worker is blocked
+    /// for the duration of the local disk read, so this is opt-in
+    /// (`client_cache_sync_read_enabled`, default `false`) and only
+    /// recommended when the cache directory sits on local NVMe and the
+    /// working set mostly fits the OS page cache. Write/delete paths
+    /// always stay on io_uring.
+    pread_enabled: bool,
 }
 
 impl UringPageStore {
-    /// Create the store and its root directory.
+    /// Create the store and its root directory (io_uring read mode).
     ///
     /// Directory creation uses `tokio::fs` (not on the hot path).
     pub async fn create(dir: &Path, page_size: u64) -> Result<Self> {
+        Self::create_with_pread(dir, page_size, false).await
+    }
+
+    /// Create the store, selecting the read-mode: `pread_enabled = true`
+    /// routes reads through synchronous `pread` on the calling thread;
+    /// `false` keeps the io_uring SQE/CQE path.
+    pub async fn create_with_pread(
+        dir: &Path,
+        page_size: u64,
+        pread_enabled: bool,
+    ) -> Result<Self> {
         let root = dir.join(page_size.to_string());
         tokio::fs::create_dir_all(&root)
             .await
@@ -213,6 +236,7 @@ impl UringPageStore {
             root,
             page_size,
             dir_fd_cache: DashMap::new(),
+            pread_enabled,
         })
     }
 
@@ -335,8 +359,29 @@ impl UringPageStore {
     ///
     /// `flags` should include `O_RDONLY` / `O_WRONLY` etc. `O_CLOEXEC` is
     /// added automatically. Returns the raw fd.
+    ///
+    /// When `pread_enabled` is set, opens synchronously via `open(2)` on
+    /// the calling thread instead (no SQE/CQE round-trip).
     async fn open_fd(&self, path: &Path, flags: i32) -> std::io::Result<RawFd> {
         let buffer = Self::path_buffer_with_nul(&path.to_string_lossy())?;
+
+        if self.pread_enabled {
+            // SAFETY: `buffer` is NUL-terminated by `path_buffer_with_nul`.
+            // O_CLOEXEC matches the io_uring open path (driver.rs). No
+            // `mode` argument is passed because the read path never uses
+            // O_CREAT here.
+            let fd = unsafe {
+                libc::open(
+                    buffer.as_ptr() as *const libc::c_char,
+                    flags | libc::O_CLOEXEC,
+                )
+            };
+            return if fd < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(fd)
+            };
+        }
 
         let request = Arc::new(IoRequest {
             fd: libc::AT_FDCWD,
@@ -382,6 +427,9 @@ impl UringPageStore {
     /// 4, avoiding 3 levels of dcache/inode lock contention under concurrency.
     ///
     /// `flags` should include `O_RDONLY` etc. `O_CLOEXEC` is added automatically.
+    ///
+    /// When `pread_enabled` is set, opens synchronously via `openat(2)` on
+    /// the calling thread instead (no SQE/CQE round-trip).
     async fn openat_relative(
         &self,
         dirfd: RawFd,
@@ -389,6 +437,26 @@ impl UringPageStore {
         flags: i32,
     ) -> std::io::Result<RawFd> {
         let buffer = Self::path_buffer_with_nul(name)?;
+
+        if self.pread_enabled {
+            // SAFETY: `buffer` is NUL-terminated by `path_buffer_with_nul`;
+            // `dirfd` is a valid directory fd from the dir fd cache.
+            // O_CLOEXEC matches the io_uring open path (driver.rs). No
+            // `mode` argument is passed because the read path never uses
+            // O_CREAT here.
+            let fd = unsafe {
+                libc::openat(
+                    dirfd,
+                    buffer.as_ptr() as *const libc::c_char,
+                    flags | libc::O_CLOEXEC,
+                )
+            };
+            return if fd < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(fd)
+            };
+        }
 
         let request = Arc::new(IoRequest {
             fd: dirfd,
@@ -548,10 +616,68 @@ impl UringPageStore {
 
     /// Read from an already-opened fd via io_uring `OP_READ` and return the
     /// kernel-filled buffer directly.
+    ///
+    /// When `pread_enabled` is set, reads synchronously via `pread(2)` on
+    /// the calling thread instead (no SQE/CQE round-trip).
     async fn read_with_fd(&self, fd: RawFd, offset: usize, len: usize) -> std::io::Result<Bytes> {
+        if self.pread_enabled {
+            return Self::pread_read_sync(fd, offset, len);
+        }
         let request = Self::new_read_request(fd, offset, len);
         submit_request(Arc::clone(&request));
         Self::wait_read_request(request).await
+    }
+
+    /// Synchronously read up to `len` bytes from `fd` at `offset` via
+    /// `pread(2)`, looping over short reads and `EINTR` until the buffer
+    /// is full or EOF. Returns the buffer truncated to the bytes actually
+    /// read (empty at EOF) — the same contract as the io_uring read path
+    /// (short-read retry + EOF truncate in `driver.rs`).
+    ///
+    /// Runs on the calling thread: the caller (a tokio worker) is blocked
+    /// for the duration of the syscall. Only used when `pread_enabled`
+    /// is set.
+    ///
+    /// `pread` uses an explicit offset and never mutates the fd's file
+    /// position, so concurrent `pread` calls on the same fd from multiple
+    /// threads are safe (POSIX).
+    fn pread_read_sync(fd: RawFd, offset: usize, len: usize) -> std::io::Result<Bytes> {
+        let mut buffer = BytesMut::with_capacity(len);
+        // SAFETY: buffer has capacity for `len` bytes; pread writes into it
+        // before the buffer is frozen and exposed as `Bytes`, and the final
+        // `truncate(filled)` drops any uninitialised tail.
+        unsafe {
+            buffer.set_len(len);
+        }
+
+        let mut filled = 0usize;
+        while filled < len {
+            // SAFETY: `buffer` is valid for `len - filled` writable bytes
+            // starting at `filled`; `fd` is a valid open fd (kept alive by
+            // the caller's `Arc<PageFdEntry>` on the hot path, or freshly
+            // opened on the cold path).
+            let n = unsafe {
+                libc::pread(
+                    fd,
+                    buffer[filled..].as_mut_ptr() as *mut libc::c_void,
+                    len - filled,
+                    (offset + filled) as libc::off_t,
+                )
+            };
+            if n < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue; // EINTR — retry
+                }
+                return Err(e);
+            }
+            if n == 0 {
+                break; // EOF — partial read complete
+            }
+            filled += n as usize;
+        }
+        buffer.truncate(filled);
+        Ok(buffer.freeze())
     }
 
     /// Compatibility wrapper for existing tests/callers that provide output
@@ -1509,5 +1635,207 @@ mod tests {
 
         PAGE_FD_CACHE.invalidate(&id).await;
         let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    // ── Sync pread mode tests (`pread_enabled = true`) ─────────
+    //
+    // These exercise the sync read path (`open`/`openat`/`pread` on the
+    // calling thread). Page files are written directly with `std::fs`
+    // instead of `put()` so the tests run without an io_uring-capable
+    // kernel — `put`/`delete` always use io_uring regardless of the
+    // switch, and their cache-invalidation semantics are mode-independent
+    // (covered by the io_uring-mode tests above).
+
+    /// Helper: create a store in sync pread read mode.
+    async fn temp_pread_store(page_size: u64) -> (UringPageStore, PathBuf) {
+        let base = std::env::temp_dir().join(format!("gfs_pread_test_{}", uuid::Uuid::new_v4()));
+        let store = UringPageStore::create_with_pread(&base, page_size, true)
+            .await
+            .unwrap();
+        (store, base)
+    }
+
+    /// Helper: write a page file directly, bypassing `put()` (io_uring).
+    /// Uses the store's own `page_path` so the bucket layout matches.
+    fn write_page_direct(store: &UringPageStore, id: &PageId, data: &[u8]) {
+        let path = store.page_path(id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, data).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pread_get_roundtrip() {
+        let (store, base) = temp_pread_store(1024).await;
+        let id = unique_id("pread-roundtrip", 0);
+        let data = b"hello sync pread page cache".to_vec();
+        write_page_direct(&store, &id, &data);
+
+        let mut dst = vec![0u8; data.len()];
+        let n = store.get(&id, 0, &mut dst).await.unwrap();
+        assert_eq!(n, data.len());
+        assert_eq!(&dst, &data);
+
+        PAGE_FD_CACHE.invalidate(&id).await;
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    #[tokio::test]
+    async fn pread_get_with_offset() {
+        let (store, base) = temp_pread_store(1024).await;
+        let id = unique_id("pread-offset", 0);
+        write_page_direct(&store, &id, b"0123456789");
+
+        let mut dst = vec![0u8; 4];
+        let n = store.get(&id, 3, &mut dst).await.unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(&dst, b"3456");
+
+        PAGE_FD_CACHE.invalidate(&id).await;
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    #[tokio::test]
+    async fn pread_get_missing_returns_zero() {
+        let (store, base) = temp_pread_store(1024).await;
+        let id = unique_id("pread-missing", 0);
+        let mut dst = vec![0u8; 8];
+        assert_eq!(store.get(&id, 0, &mut dst).await.unwrap(), 0);
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    #[tokio::test]
+    async fn pread_get_short_read_at_tail() {
+        let (store, base) = temp_pread_store(1024).await;
+        let id = unique_id("pread-tail", 0);
+        write_page_direct(&store, &id, b"abc");
+
+        // Ask for more than the page holds → fills only the available bytes.
+        let mut dst = vec![0u8; 16];
+        let n = store.get(&id, 0, &mut dst).await.unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(&dst[..3], b"abc");
+
+        PAGE_FD_CACHE.invalidate(&id).await;
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    #[tokio::test]
+    async fn pread_get_bytes_returns_page_slice() {
+        let (store, base) = temp_pread_store(1024).await;
+        let id = unique_id("pread-get-bytes", 0);
+        write_page_direct(&store, &id, b"0123456789");
+
+        let bytes = store.get_bytes(&id, 2, 5).await.unwrap();
+        assert_eq!(&bytes[..], b"23456");
+
+        PAGE_FD_CACHE.invalidate(&id).await;
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    #[tokio::test]
+    async fn pread_concurrent_get_same_page() {
+        let (store, base) = temp_pread_store(1024).await;
+        let id = unique_id("pread-conc", 0);
+        write_page_direct(&store, &id, &vec![0x7Eu8; 64]);
+
+        // 32 concurrent sync preads of the same page (shared cached fd —
+        // pread is position-independent and thread-safe).
+        let store = Arc::new(store);
+        let mut handles = Vec::new();
+        for _ in 0..32 {
+            let store = Arc::clone(&store);
+            let id = id.clone();
+            handles.push(tokio::spawn(async move {
+                let mut dst = vec![0u8; 64];
+                let n = store.get(&id, 0, &mut dst).await.unwrap();
+                assert_eq!(n, 64);
+                assert_eq!(dst, vec![0x7Eu8; 64]);
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        PAGE_FD_CACHE.invalidate(&id).await;
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    #[tokio::test]
+    async fn pread_page_fd_cache_hit_after_first_read() {
+        // First get() opens the file via sync openat (cold) → inserts into
+        // PAGE_FD_CACHE; second get() hits the cache and preads the cached fd.
+        let (store, base) = temp_pread_store(1024).await;
+        let id = unique_id("pread-pgcache", 0);
+        let data = b"pread fd cache test".to_vec();
+        write_page_direct(&store, &id, &data);
+
+        let mut dst = vec![0u8; data.len()];
+        assert_eq!(store.get(&id, 0, &mut dst).await.unwrap(), data.len());
+        assert_eq!(&dst, &data);
+        assert!(
+            is_in_page_cache(&id).await,
+            "page fd cache should contain entry after first read"
+        );
+
+        let mut dst2 = vec![0u8; data.len()];
+        assert_eq!(store.get(&id, 0, &mut dst2).await.unwrap(), data.len());
+        assert_eq!(&dst2, &data);
+        assert!(
+            is_in_page_cache(&id).await,
+            "page fd cache should still contain entry (reuse)"
+        );
+
+        PAGE_FD_CACHE.invalidate(&id).await;
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    #[tokio::test]
+    async fn pread_dir_fd_cache_reused_across_pages() {
+        // Multiple pages of the same file share one cached directory fd in
+        // pread mode too (DashMap logic is mode-independent).
+        let (store, base) = temp_pread_store(1024).await;
+        let file_id: Arc<str> = Arc::from("pread-file-multi");
+        let id0 = PageId::new(file_id.clone(), 0);
+        let id1 = PageId::new(file_id.clone(), 1);
+
+        write_page_direct(&store, &id0, b"page-zero-data!!");
+        write_page_direct(&store, &id1, b"page-one-data!!!");
+
+        let mut dst = vec![0u8; 16];
+        assert_eq!(store.get(&id0, 0, &mut dst).await.unwrap(), 16);
+        assert_eq!(&dst, b"page-zero-data!!");
+        assert_eq!(store.get(&id1, 0, &mut dst).await.unwrap(), 16);
+        assert_eq!(&dst, b"page-one-data!!!");
+        assert_eq!(store.dir_fd_cache.len(), 1);
+
+        PAGE_FD_CACHE.invalidate(&id0).await;
+        PAGE_FD_CACHE.invalidate(&id1).await;
+        let _ = tokio::fs::remove_dir_all(&base).await;
+    }
+
+    #[test]
+    fn pread_read_sync_eof_truncates_to_available_bytes() {
+        // Direct unit coverage of `pread_read_sync`: a read longer than the
+        // file must truncate at EOF, and a read at/past EOF must be empty.
+        let dir = std::env::temp_dir().join(format!("gfs_pread_unit_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("page");
+        std::fs::write(&path, b"abc").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let fd = file.as_raw_fd();
+
+        let bytes = UringPageStore::pread_read_sync(fd, 0, 16).unwrap();
+        assert_eq!(&bytes[..], b"abc");
+
+        let at_eof = UringPageStore::pread_read_sync(fd, 3, 4).unwrap();
+        assert!(at_eof.is_empty());
+
+        let past_eof = UringPageStore::pread_read_sync(fd, 100, 4).unwrap();
+        assert!(past_eof.is_empty());
+
+        let offset = UringPageStore::pread_read_sync(fd, 1, 2).unwrap();
+        assert_eq!(&offset[..], b"bc");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
