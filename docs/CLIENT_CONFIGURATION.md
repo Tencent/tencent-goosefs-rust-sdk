@@ -255,6 +255,7 @@ never affect correctness). Mirrors Java's `goosefs.user.client.cache.*`.
 | `client_cache_uring_enabled` | `bool` | `true` on Linux / `false` on other platforms | **io_uring backend selector (P4, Linux 5.1+).** When `true` and io_uring is available at runtime, cache-hit reads use io_uring SQE/CQE instead of `tokio::fs` `spawn_blocking`, eliminating the per-hit thread-switch overhead (the dominant cost in the 300 QPS `clientcache_oncpu_3` profile). Falls back transparently to `LocalPageStore` (tokio::fs) when io_uring is unavailable, so the setting is safe to leave on by default. See [`docs/CLIENT_PAGE_CACHE_DESIGN.md`](CLIENT_PAGE_CACHE_DESIGN.md). |
 | `client_cache_uring_queue_depth` | `usize` | `32768` | **io_uring SQ/CQ depth.** Per-ring entry capacity. Raise further (e.g. `65536`) for high-concurrency workloads to avoid SQ-full back-pressure; lower to reduce per-process kernel memory. `0` falls back to the built-in default of 32768. |
 | `client_cache_uring_thread_count` | `usize` | `2` | **io_uring background thread count.** Each thread owns one `IoUring` instance; requests are dispatched round-robin. Raise to `4` on hosts with many idle cores and high concurrency; the threads spend most of their time in `io_uring_enter`, so over-provisioning wastes RAM without throughput gain. `0` falls back to the built-in default of 2. |
+| `client_cache_sync_read_enabled` | `bool` | `false` | **Sync `pread` read mode for the io_uring backend (Linux only).** When `true`, `UringPageStore` serves cache-hit reads with synchronous `pread`/`openat` on the calling thread instead of io_uring SQE/CQE — intended for complex analytical workloads where io_uring underperforms plain `pread`. The calling tokio worker is blocked for the duration of the local disk read (~µs on OS-page-cache hit; ~10-100µs per small read on NVMe), and batched reads on one task become serial per worker, so enable only when the cache directory sits on local NVMe and the working set mostly fits the OS page cache. **Do not enable with cache dirs on HDD/NFS/Lustre** (no read timeout — a slow device blocks the worker unbounded). Write/delete paths stay on io_uring regardless. See [Sync pread read mode](#sync-pread-read-mode-linux-only) below. |
 | `file_info_cache_ttl` | `Duration` | `30s` (enabled) | Client-side `FileInfo` (metadata) cache TTL. **On by default per FLAMEGRAPH_OPTIMIZATION_PLAN §A3** (30 s) — amortises the per-open `MasterClient::get_status` cost when the same file is opened multiple times inside one query. Set to `Duration::ZERO` to opt out (disable the cache). The SDK **explicitly invalidates** the entry on every write / delete / rename issued through this client, so the staleness window only affects **out-of-band** mutations by other writers. |
 | `file_info_cache_capacity` | `usize` | `16384` | Maximum `(path, FileInfo)` LRU entries kept when `file_info_cache_ttl > 0`. Values `< 1` are clamped to `1`. |
 | `range_coalesce_enabled` | `bool` | `false` (**disabled**) | Whether [`GoosefsFileReader::read_ranges_with_context`] merges adjacent input ranges into fewer, larger `read_range` calls. **Opt-in per FLAMEGRAPH_OPTIMIZATION_PLAN §B2.** When off (default), the multi-range API serves each input verbatim — behaviour is bit-identical to a caller-side loop. When on, adjacent ranges within `range_coalesce_gap_bytes` are merged (subject to `range_coalesce_max_bytes`) and the payload is spliced back so each output slice is byte-identical to a standalone `read_range`. Trades small over-read (`≤ Σ gap_i` bytes) for a large drop in H2 stream count on Lance / DuckDB scan patterns. **Failure semantics.** Because a merged fetch shares one transport with all its constituent input ranges, a fetch failure fails **all** those ranges together (this matches the failure model the underlying H2 layer would produce anyway, but it does enlarge the blast radius compared with per-range independent reads — enable per-workload if failure isolation between adjacent small ranges matters). |
@@ -288,6 +289,45 @@ counters/gauges report SQE/CQE throughput, in-flight requests and error
 counts. **Config-vs-runtime mismatch** (e.g. `client_cache_uring_enabled = true`
 on a non-Linux host) is logged at `WARN` and the client transparently falls
 back to `LocalPageStore`.
+
+##### Sync pread read mode (Linux only)
+
+`client_cache_sync_read_enabled = true` switches the **read path** of
+`UringPageStore` from io_uring SQE/CQE to synchronous `open`/`openat`/`pread`
+syscalls on the calling thread. It exists because for complex analytical
+workloads (large scans, high cache hit rate) plain `pread` can outperform
+io_uring: no SQE/CQE round-trip, no channel hop to the background uring
+threads, and no CPU spent by the uring spin/yield loop.
+
+Read-only switch — `put`, `delete`, and identity writes always stay on
+io_uring/tokio::fs. The fd caches (page fd cache, dir fd cache) and all
+error/miss semantics are identical in both modes; the on-disk layout is
+unchanged, so the flag can be flipped across restarts freely.
+
+**Threading caveats** (evaluated before enabling):
+
+- The calling **tokio worker is blocked** for the duration of each syscall.
+  Cache misses never reach the store (the manager returns early), so the
+  block is bounded by *local* read latency: ~µs when the page is in the OS
+  page cache, ~10-100µs per small read on NVMe (sub-ms for a 1 MiB page).
+- Batched reads (`get_batch_bytes` via `join_all`) run on one task, so in
+  sync mode a batch becomes **serial preads on one worker** — with an
+  OS-page-cache-hot working set this is still faster than the io_uring
+  per-op overhead; with a cold working set (frequent disk reads) io_uring's
+  overlapped reads may win.
+- **No read timeout**: unlike the io_uring path (30s `URING_OP_TIMEOUT`),
+  a sync `pread` cannot be cancelled. Never enable this mode with cache
+  directories on HDD or network filesystems (NFS/Lustre).
+- Safe to share the runtime: no locks are held across the syscall (only a
+  shared read guard), `pread` is position-independent and thread-safe on a
+  shared fd, and the io_uring driver threads idle at ~zero CPU when no
+  SQEs are submitted.
+
+**When to enable**: analytical scans with high cache hit rate on local
+NVMe where profiling shows io_uring submission/completion overhead
+dominating. **When to keep off (default)**: latency-sensitive point-lookup
+workloads sharing the tokio runtime, cold-working-set scans, or any
+deployment with non-NVMe cache storage.
 
 > The cache lives on the `FileSystemContext` and is shared by every reader it
 > opens. On (re)open the cache compares the file's `(length,
@@ -423,6 +463,7 @@ properties file values and built-in defaults.
 | `GOOSEFS_USER_CLIENT_CACHE_URING_ENABLED` | `client_cache_uring_enabled` | `true` on Linux / `false` on other platforms | Use the io_uring page-cache backend (`true`/`false`). Falls back to tokio::fs when io_uring is unavailable. |
 | `GOOSEFS_USER_CLIENT_CACHE_URING_QUEUE_DEPTH` | `client_cache_uring_queue_depth` | `32768` | io_uring SQ/CQ depth (plain integer). `0` is ignored. |
 | `GOOSEFS_USER_CLIENT_CACHE_URING_THREAD_COUNT` | `client_cache_uring_thread_count` | `2` | io_uring background thread count (plain integer). `0` is ignored. |
+| `GOOSEFS_USER_CLIENT_CACHE_SYNC_READ_ENABLED` | `client_cache_sync_read_enabled` | `false` | Serve cache-hit reads with synchronous `pread` on the calling thread instead of io_uring (`true`/`false`). Linux only; local-NVMe analytical workloads only — see the field table for caveats. |
 | `GOOSEFS_WORKER_CONNECTION_POOL_SIZE` | `worker_connection_pool_size` | `min(cores, 4)` | Per-worker gRPC channel pool size (plain integer). `0` is clamped to `1`; non-numeric values are ignored (default kept). See FLAMEGRAPH_OPTIMIZATION_PLAN §B3. |
 | `GOOSEFS_MASTER_CONNECTION_POOL_SIZE` | `master_connection_pool_size` | `1` | Master gRPC channel pool size (plain integer). `0` is clamped to `1`; non-numeric values are ignored (default kept). Raise to `4`/`8` in high-concurrency remote scenarios to spread metadata RPCs across multiple HTTP/2 connections. |
 | `GOOSEFS_MASTER_POOL_SCHEDULE` | `master_connection_pool_schedule` | `RoundRobin` | Master pool scheduling strategy. Accepted: `roundrobin`, `round_robin`, `round-robin`, `RoundRobin` (case-insensitive, separators ignored) or `p2c`, `P2C`. Unknown values are ignored (default kept). Only effective when `master_connection_pool_size > 1`. |
@@ -533,6 +574,7 @@ These keys are used in `goosefs-site.properties` files (Java-style `key=value` f
 | `goosefs.user.client.cache.uring.enabled` | `client_cache_uring_enabled` | `true` / `false` | `true` on Linux / `false` elsewhere | Use the io_uring page-cache backend. Falls back to tokio::fs when unavailable. |
 | `goosefs.user.client.cache.uring.queue.depth` | `client_cache_uring_queue_depth` | integer | `32768` | io_uring SQ/CQ depth. `0` falls back to default. |
 | `goosefs.user.client.cache.uring.thread.count` | `client_cache_uring_thread_count` | integer | `2` | io_uring background thread count. `0` falls back to default. |
+| `goosefs.user.client.cache.sync.read.enabled` | `client_cache_sync_read_enabled` | `true` / `false` | `false` | Sync `pread` read mode for the io_uring backend (Linux only; local-NVMe analytical workloads only). |
 | `goosefs.user.worker.connection.pool.size` | `worker_connection_pool_size` | integer | `min(cores, 4)` | Per-worker gRPC channel pool size. `0` is clamped to `1`. See FLAMEGRAPH_OPTIMIZATION_PLAN §B3. |
 | `goosefs.user.master.connection.pool.size` | `master_connection_pool_size` | integer | `1` | Master gRPC channel pool size. `0` is clamped to `1`. Raise to `4`/`8` in high-concurrency remote scenarios to spread metadata RPCs across multiple HTTP/2 connections. |
 | `goosefs.user.master.pool.schedule` | `master_connection_pool_schedule` | `roundrobin` / `round_robin` / `round-robin` / `RoundRobin` / `p2c` / `P2C` | `RoundRobin` | Master pool scheduling strategy (case-insensitive, separators ignored). Unknown values are ignored (default kept). Only effective when `master_connection_pool_size > 1`. |
@@ -793,6 +835,7 @@ goosefs.security.login.impersonation.username=_HDFS_USER_
 # goosefs.user.client.cache.uring.enabled=true
 # goosefs.user.client.cache.uring.queue.depth=16384
 # goosefs.user.client.cache.uring.thread.count=2
+# goosefs.user.client.cache.sync.read.enabled=false
 ```
 
 ### Byte Size Format

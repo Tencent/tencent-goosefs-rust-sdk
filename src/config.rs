@@ -435,6 +435,9 @@ impl PropertiesMap {
                 cfg.client_cache_uring_thread_count = n;
             }
         }
+        if let Some(enabled) = self.get_bool("goosefs.user.client.cache.sync.read.enabled") {
+            cfg.client_cache_sync_read_enabled = enabled;
+        }
 
         // ── Performance tuning knobs ─
         // Per-worker gRPC channel pool size:
@@ -976,6 +979,9 @@ pub const ENV_CLIENT_CACHE_URING_QUEUE_DEPTH: &str = "GOOSEFS_USER_CLIENT_CACHE_
 /// io_uring background thread count.
 pub const ENV_CLIENT_CACHE_URING_THREAD_COUNT: &str =
     "GOOSEFS_USER_CLIENT_CACHE_URING_THREAD_COUNT";
+/// Whether the io_uring page store serves reads via synchronous `pread`
+/// instead of io_uring SQE/CQE (`true`/`false`).
+pub const ENV_CLIENT_CACHE_SYNC_READ_ENABLED: &str = "GOOSEFS_USER_CLIENT_CACHE_SYNC_READ_ENABLED";
 
 // ── Performance tuning env vars ─
 /// Environment variable: per-worker gRPC channel pool size.
@@ -1717,6 +1723,20 @@ pub struct GoosefsConfig {
     #[serde(default = "default_client_cache_uring_thread_count")]
     pub client_cache_uring_thread_count: usize,
 
+    /// Whether `UringPageStore` serves cache-hit reads with synchronous
+    /// `pread` on the calling thread instead of io_uring SQE/CQE (default:
+    /// `false`).
+    ///
+    /// Intended for complex analytical workloads where io_uring
+    /// underperforms plain `pread`. The calling tokio worker is blocked
+    /// for the duration of the local disk read, so enable only when the
+    /// cache directory sits on local NVMe and the working set mostly fits
+    /// the OS page cache. Cache misses never touch disk (the manager
+    /// returns early), so the block is bounded by local read latency.
+    /// Write/delete paths stay on io_uring regardless of this switch.
+    #[serde(default)]
+    pub client_cache_sync_read_enabled: bool,
+
     /// Whether **sequential** reads (`read`) are routed through the local page
     /// cache (default: `false`).
     ///
@@ -2065,6 +2085,7 @@ impl Default for GoosefsConfig {
             client_cache_uring_enabled: default_client_cache_uring_enabled(),
             client_cache_uring_queue_depth: default_client_cache_uring_queue_depth(),
             client_cache_uring_thread_count: default_client_cache_uring_thread_count(),
+            client_cache_sync_read_enabled: false,
             client_cache_sequential_read_enabled: false,
             file_info_cache_ttl: default_file_info_cache_ttl(),
             file_info_cache_capacity: default_file_info_cache_capacity(),
@@ -2896,6 +2917,11 @@ impl GoosefsConfig {
                 if n > 0 {
                     self.client_cache_uring_thread_count = n;
                 }
+            }
+        }
+        if let Ok(val) = env::var(ENV_CLIENT_CACHE_SYNC_READ_ENABLED) {
+            if let Ok(b) = val.to_lowercase().parse::<bool>() {
+                self.client_cache_sync_read_enabled = b;
             }
         }
 
@@ -4412,6 +4438,10 @@ goosefs.user.file.info.cache.capacity=2048
             cfg.client_cache_uring_thread_count,
             default_client_cache_uring_thread_count()
         );
+        assert!(
+            !cfg.client_cache_sync_read_enabled,
+            "sync pread read mode must stay disabled by default"
+        );
         assert!(!cfg.range_coalesce_enabled);
         assert_eq!(
             cfg.range_coalesce_gap_bytes,
@@ -4434,6 +4464,7 @@ goosefs.user.file.info.cache.capacity=2048
         std::env::set_var(ENV_CLIENT_CACHE_URING_ENABLED, "false");
         std::env::set_var(ENV_CLIENT_CACHE_URING_QUEUE_DEPTH, "4096");
         std::env::set_var(ENV_CLIENT_CACHE_URING_THREAD_COUNT, "8");
+        std::env::set_var(ENV_CLIENT_CACHE_SYNC_READ_ENABLED, "true");
         std::env::set_var(ENV_CLIENT_CACHE_TTL_SECS, "30");
         let cfg = GoosefsConfig::default().apply_env();
         std::env::remove_var(ENV_CLIENT_CACHE_ENABLED);
@@ -4444,6 +4475,7 @@ goosefs.user.file.info.cache.capacity=2048
         std::env::remove_var(ENV_CLIENT_CACHE_URING_ENABLED);
         std::env::remove_var(ENV_CLIENT_CACHE_URING_QUEUE_DEPTH);
         std::env::remove_var(ENV_CLIENT_CACHE_URING_THREAD_COUNT);
+        std::env::remove_var(ENV_CLIENT_CACHE_SYNC_READ_ENABLED);
         std::env::remove_var(ENV_CLIENT_CACHE_TTL_SECS);
 
         assert!(cfg.client_cache_enabled);
@@ -4457,6 +4489,7 @@ goosefs.user.file.info.cache.capacity=2048
         assert!(!cfg.client_cache_uring_enabled);
         assert_eq!(cfg.client_cache_uring_queue_depth, 4096);
         assert_eq!(cfg.client_cache_uring_thread_count, 8);
+        assert!(cfg.client_cache_sync_read_enabled);
         assert_eq!(cfg.client_cache_ttl_secs, 30);
     }
 
@@ -4471,6 +4504,7 @@ goosefs.user.client.cache.eviction.policy=lru
 goosefs.user.client.cache.uring.enabled=true
 goosefs.user.client.cache.uring.queue.depth=8192
 goosefs.user.client.cache.uring.thread.count=4
+goosefs.user.client.cache.sync.read.enabled=true
 goosefs.user.client.cache.ttl.seconds=60
 ";
         let cfg = GoosefsConfig::from_properties_str(props);
@@ -4485,6 +4519,7 @@ goosefs.user.client.cache.ttl.seconds=60
         assert!(cfg.client_cache_uring_enabled);
         assert_eq!(cfg.client_cache_uring_queue_depth, 8192);
         assert_eq!(cfg.client_cache_uring_thread_count, 4);
+        assert!(cfg.client_cache_sync_read_enabled);
         assert_eq!(cfg.client_cache_ttl_secs, 60);
     }
 
@@ -4771,6 +4806,12 @@ goosefs.client.short.circuit.thp=true
     fn test_config_refresher_file_overrides_only_switch_params() {
         use std::io::Write;
 
+        // Serialise against other env-mutating tests: this test points
+        // `ENV_CONFIG_FILE` at a temp file while sibling refresher tests
+        // remove it — without the lock the two race and the refresh below
+        // intermittently reads the wrong configuration.
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         // 1. Create a temporary properties file with specific switch values
         // AND different master/block settings.
         let dir = std::env::temp_dir().join("goosefs_refresher_test");
@@ -4900,6 +4941,10 @@ goosefs.client.short.circuit.thp=true
     /// user-seeded values and does not reset them to defaults.
     #[test]
     fn test_config_refresher_no_file_keeps_user_values() {
+        // Serialise against other env-mutating tests (see the sibling
+        // refresher test above): this test removes `ENV_CONFIG_FILE`.
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         // Ensure no config file is discoverable.
         std::env::remove_var(ENV_CONFIG_FILE);
         std::env::remove_var(ENV_CONF_DIR);

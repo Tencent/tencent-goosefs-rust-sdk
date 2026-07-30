@@ -180,7 +180,13 @@ impl LocalCacheManager {
             let store: Arc<dyn PageStore> = if use_uring {
                 #[cfg(target_os = "linux")]
                 {
-                    match UringPageStore::create(dir, options.page_size).await {
+                    match UringPageStore::create_with_pread(
+                        dir,
+                        options.page_size,
+                        options.sync_read_enabled,
+                    )
+                    .await
+                    {
                         Ok(s) => Arc::new(s),
                         Err(e) => {
                             warn!(error = %e, "UringPageStore creation failed; fallback to LocalPageStore");
@@ -959,6 +965,7 @@ mod tests {
                 uring_enabled: false,
                 uring_queue_depth: 0,
                 uring_thread_count: 0,
+                sync_read_enabled: false,
             },
             dirs,
         )
@@ -1307,6 +1314,7 @@ mod tests {
             uring_enabled: false,
             uring_queue_depth: 0,
             uring_thread_count: 0,
+            sync_read_enabled: false,
         };
         Arc::new(LocalCacheManager::create(options).await.unwrap())
     }

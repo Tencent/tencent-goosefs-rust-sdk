@@ -53,6 +53,11 @@ pub struct CacheManagerOptions {
     pub uring_queue_depth: usize,
     /// io_uring background thread count (0 = use driver default of 2).
     pub uring_thread_count: usize,
+    /// Whether `UringPageStore` reads via synchronous `pread` on the calling
+    /// thread instead of io_uring (Linux only; write paths stay on io_uring).
+    /// Intended for analytical workloads on local NVMe; see
+    /// `docs/CLIENT_CONFIGURATION.md`.
+    pub sync_read_enabled: bool,
 }
 
 impl CacheManagerOptions {
@@ -92,6 +97,7 @@ impl CacheManagerOptions {
             uring_enabled: config.client_cache_uring_enabled,
             uring_queue_depth: config.client_cache_uring_queue_depth,
             uring_thread_count: config.client_cache_uring_thread_count,
+            sync_read_enabled: config.client_cache_sync_read_enabled,
         }
     }
 
