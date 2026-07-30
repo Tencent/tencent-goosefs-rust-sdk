@@ -642,24 +642,30 @@ impl UringPageStore {
     /// position, so concurrent `pread` calls on the same fd from multiple
     /// threads are safe (POSIX).
     fn pread_read_sync(fd: RawFd, offset: usize, len: usize) -> std::io::Result<Bytes> {
+        // Keep the buffer's length at zero and write through the spare
+        // capacity so we never expose uninitialised bytes as an initialised
+        // `&[u8]`. `set_len` is advanced to `filled` only after each `pread`
+        // reports how many bytes it initialised, so the value frozen as
+        // `Bytes` covers exactly the initialised prefix (no `zeroed`/`memset`
+        // and no `truncate` needed).
         let mut buffer = BytesMut::with_capacity(len);
-        // SAFETY: buffer has capacity for `len` bytes; pread writes into it
-        // before the buffer is frozen and exposed as `Bytes`, and the final
-        // `truncate(filled)` drops any uninitialised tail.
-        unsafe {
-            buffer.set_len(len);
-        }
 
         let mut filled = 0usize;
         while filled < len {
-            // SAFETY: `buffer` is valid for `len - filled` writable bytes
-            // starting at `filled`; `fd` is a valid open fd (kept alive by
-            // the caller's `Arc<PageFdEntry>` on the hot path, or freshly
-            // opened on the cold path).
+            // `spare_capacity_mut()` returns the uninitialised tail starting at
+            // the current length (`filled`), typed as `[MaybeUninit<u8>]`, so
+            // no reference to uninitialised memory is ever created.
+            let spare = buffer.spare_capacity_mut();
+            // SAFETY: `spare` points to at least `len - filled` writable bytes
+            // (capacity is `len`, current length is `filled`); we ask `pread`
+            // for at most `len - filled` bytes so the write stays in bounds.
+            // `fd` is a valid open fd (kept alive by the caller's
+            // `Arc<PageFdEntry>` on the hot path, or freshly opened on the
+            // cold path).
             let n = unsafe {
                 libc::pread(
                     fd,
-                    buffer[filled..].as_mut_ptr() as *mut libc::c_void,
+                    spare.as_mut_ptr() as *mut libc::c_void,
                     len - filled,
                     (offset + filled) as libc::off_t,
                 )
@@ -675,8 +681,15 @@ impl UringPageStore {
                 break; // EOF — partial read complete
             }
             filled += n as usize;
+            // SAFETY: `pread` initialised the `[prev_len, filled)` bytes and the
+            // `[0, prev_len)` prefix was initialised by earlier iterations, so
+            // the whole `[0, filled)` range is initialised. `filled <= len`
+            // (loop guard + `pread` never returns more than requested), so
+            // `filled <= capacity`, satisfying `set_len`'s contract.
+            unsafe {
+                buffer.set_len(filled);
+            }
         }
-        buffer.truncate(filled);
         Ok(buffer.freeze())
     }
 
