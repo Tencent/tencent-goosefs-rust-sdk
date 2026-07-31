@@ -56,4 +56,52 @@ Try the bundled demo:
 cargo run --example page_cache_demo
 ```
 
+## Sync pread read mode (Linux only)
+
+When the cache backend is `io_uring` (the default on Linux), the SDK exposes an opt-in **synchronous `pread` read mode** for the `UringPageStore`. It is intended for complex analytical workloads (large scans, high cache hit rate) where plain `pread` outperforms io_uring on local NVMe — no SQE/CQE round-trip, no channel hop to the background uring threads, and no CPU spent by the uring spin/yield loop.
+
+| Field                                | Property                                       | Env var                                       | Default |
+| ------------------------------------ | ---------------------------------------------- | --------------------------------------------- | ------- |
+| `client_cache_sync_read_enabled`     | `goosefs.user.client.cache.sync.read.enabled`  | `GOOSEFS_USER_CLIENT_CACHE_SYNC_READ_ENABLED` | `false` |
+
+### When to enable
+
+- Analytical scans with a **high cache hit rate** running on **local NVMe**, where profiling shows io_uring submission/completion overhead dominating.
+- The working set mostly fits the OS page cache (~µs per read); cold-working-set scans with frequent disk reads may be faster with io_uring's overlapped reads.
+
+### When to keep off (default)
+
+- **Latency-sensitive point-lookup workloads** that share the tokio runtime — the calling worker is blocked for the duration of each read.
+- **HDD / NFS / Lustre** cache directories — there is **no read timeout** on a sync `pread` (the io_uring path uses a 30 s `URING_OP_TIMEOUT`); a slow device can block the worker unbounded.
+- Cold-working-set scans where disk reads dominate.
+
+### Threading caveats
+
+- The calling **tokio worker is blocked** for the duration of each syscall. Cache misses never reach the store (the manager returns early), so the block is bounded by *local* read latency.
+- Batched reads (`get_batch_bytes` via `join_all`) run on one task, so in sync mode a batch becomes **serial preads on one worker** — fine when the working set is OS-page-cache-hot, lossy when it is not.
+- The page fd cache and dir fd cache are shared with the io_uring path; on-disk layout is unchanged, so the flag can be flipped across restarts freely.
+- Write / delete paths always stay on io_uring regardless of this switch.
+
+### Example
+
+```rust
+use goosefs_sdk::config::GoosefsConfig;
+
+let mut config = GoosefsConfig::new("127.0.0.1:9200");
+config.client_cache_enabled = true;
+config.client_cache_dirs = vec!["/var/cache/goosefs".into()];  // local NVMe
+config.client_cache_uring_enabled = true;
+config.client_cache_sync_read_enabled = true;                  // analytical workload
+```
+
+Or via properties:
+
+```properties
+goosefs.user.client.cache.enabled=true
+goosefs.user.client.cache.uring.enabled=true
+goosefs.user.client.cache.sync.read.enabled=true
+```
+
+Design notes: [`docs/CLIENT_CONFIGURATION.md`](https://github.com/Tencent/tencent-goosefs-rust-sdk/blob/main/docs/CLIENT_CONFIGURATION.md#sync-pread-read-mode-linux-only).
+
 Design notes: [`docs/CLIENT_PAGE_CACHE_DESIGN.md`](https://github.com/Tencent/tencent-goosefs-rust-sdk/blob/main/docs/CLIENT_PAGE_CACHE_DESIGN.md).
