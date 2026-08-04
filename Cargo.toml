@@ -168,7 +168,7 @@ tokio = { version = "1.23", features = ["full", "test-util"] }
 # (see benchmarks/master_hotpath.rs).
 # `default-features = false` drops the optional `rayon`/`html_reports` chain;
 # `cargo_bench_support` enables `cargo bench` integration without the rest.
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 # Custom benchmark target. `harness = false` is required so that criterion's
 # own `main()` is used instead of the libtest harness. Lives under
