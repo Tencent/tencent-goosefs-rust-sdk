@@ -52,8 +52,9 @@ abi3-py311 = ["pyo3/abi3-py311"]
 # version matches the root `Cargo.toml` (see DEPENDENCIES.rust.tsv in P8).
 goosefs-sdk = { path = "../.." }
 
-pyo3 = { version = "0.27", features = ["generate-import-lib"] }
-pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"] }
+# Floor is 0.29.0 for RUSTSEC-2026-0176 / RUSTSEC-2026-0177.
+pyo3 = { version = "0.29", features = ["generate-import-lib"] }
+pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 bytes = "1"

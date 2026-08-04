@@ -26,8 +26,8 @@
 //!
 //! - **Data structure**: `LruCache<Arc<str>, CachedFileInfo>` guarded by a
 //!   `std::sync::Mutex` (short critical sections, no async), bounded by
-//!   `file_info_cache_capacity`. Uses the pre-existing `lru = "0.12"`
-//!   dependency — no new crates.
+//!   `file_info_cache_capacity`. Uses the pre-existing `lru` dependency
+//!   — no new crates.
 //! - **TTL**: monotonic `Instant` per entry; `get` returns `None` on
 //!   expiry and lazily evicts.
 //! - **Kill switch**: `Duration::ZERO` disables the cache entirely; the

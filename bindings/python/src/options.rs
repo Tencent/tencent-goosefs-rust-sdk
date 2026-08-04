@@ -46,7 +46,7 @@ use crate::types::{PyReadType, PyWriteType};
 /// opts = OpenFileOptions()                          # default → Cache
 /// opts = OpenFileOptions(read_type=ReadType.NoCache) # opt-out of caching
 /// ```
-#[pyclass(module = "goosefs._goosefs", name = "OpenFileOptions")]
+#[pyclass(module = "goosefs._goosefs", name = "OpenFileOptions", from_py_object)]
 #[derive(Clone)]
 pub struct PyOpenFileOptions {
     pub(crate) read_type: PyReadType,
@@ -106,7 +106,11 @@ impl PyOpenFileOptions {
 ///
 /// opts = CreateFileOptions(recursive=True, write_type=WriteType.CACHE_THROUGH)
 /// ```
-#[pyclass(module = "goosefs._goosefs", name = "CreateFileOptions")]
+#[pyclass(
+    module = "goosefs._goosefs",
+    name = "CreateFileOptions",
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PyCreateFileOptions {
     pub(crate) write_type: Option<PyWriteType>,
@@ -186,7 +190,7 @@ impl PyCreateFileOptions {
 /// Defaults match `DeleteOptions::default()` in the SDK: no recursion, no
 /// `unchecked`, no `goosefs_only`. The most common case — recursively
 /// deleting a directory tree — can be expressed as `DeleteOptions(recursive=True)`.
-#[pyclass(module = "goosefs._goosefs", name = "DeleteOptions")]
+#[pyclass(module = "goosefs._goosefs", name = "DeleteOptions", from_py_object)]
 #[derive(Clone)]
 pub struct PyDeleteOptions {
     pub(crate) recursive: bool,

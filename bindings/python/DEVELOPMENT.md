@@ -78,7 +78,7 @@ for f in examples/0*.py; do echo "==> $f"; uv run python "$f" || break; done
 
 ```
 bindings/python/
-├── Cargo.toml          # cdylib + rlib, pyo3 0.27, depends on ../../goosefs-sdk
+├── Cargo.toml          # cdylib + rlib, pyo3 0.29, depends on ../../goosefs-sdk
 ├── pyproject.toml      # maturin config + uv dependency groups + ruff/mypy/pytest config
 ├── PYPI_README.md      # Long description on PyPI (user perspective)
 ├── README.md           # Entry point for this directory (developer + docs navigation)
@@ -114,7 +114,7 @@ bindings/python/
 * Modified a Rust-side pyclass / pyfunction → you **must** manually sync `python/goosefs/__init__.pyi`.
 * Modified a runtime exception subclass → sync `python/goosefs/exceptions.pyi`.
 * `mypy.stubtest goosefs` strictly validates that the stubs match the real signatures.
-* We deliberately do not pull in `pyo3-stub-gen`: the current PyO3 0.27 generator does not fully support our use of `#[pyclass(eq, eq_int, frozen, hash)]` / `#[pyo3(get)]`; writing stubs by hand lets us precisely express constraints like "Awaitable[T]" and "not shareable across tasks/threads".
+* We deliberately do not pull in `pyo3-stub-gen`: the current PyO3 0.29 generator does not fully support our use of `#[pyclass(eq, eq_int, frozen, hash)]` / `#[pyo3(get)]`; writing stubs by hand lets us precisely express constraints like "Awaitable[T]" and "not shareable across tasks/threads".
 
 ## Debugging Tips
 

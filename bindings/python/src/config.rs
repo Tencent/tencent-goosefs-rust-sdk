@@ -62,7 +62,7 @@ use crate::errors::ConfigError;
 ///
 /// Wraps an owned `GoosefsConfig`; cloned cheaply when passed to
 /// `AsyncGoosefs.connect` / `Goosefs(...)` (P2/P3).
-#[pyclass(module = "goosefs._goosefs", name = "Config")]
+#[pyclass(module = "goosefs._goosefs", name = "Config", from_py_object)]
 #[derive(Clone)]
 pub struct PyConfig {
     pub(crate) inner: GoosefsConfig,
