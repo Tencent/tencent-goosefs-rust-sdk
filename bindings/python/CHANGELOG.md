@@ -10,6 +10,42 @@ This document records all notable changes to the `goosefs` Python binding. The f
 
 ---
 
+## [0.1.9] — 2026-08-04
+
+### Added
+
+- **Lazy `list_status` API** — `AsyncGoosefs` / `Goosefs` gain
+  `list_status_grouped` and `batch_list_status_grouped`, returning a
+  `URIStatusList` that holds the Rust `Vec<URIStatus>` in one Python object
+  and materialises individual `URIStatus` entries on `__getitem__` /
+  `__iter__`. For large directories this cuts GIL occupancy vs eager
+  `list_status` (~99% for N=100 in micro-benchmarks). The gRPC round-trip
+  itself is still eager; only Python-object construction is deferred. See
+  `examples/batch_status.py`.
+- **Batch API examples & integration tests** —
+  `examples/batch_files.py` / `examples/batch_status.py`, plus
+  `tests/test_list_status_grouped.py`, `test_metadata.py`, and
+  `test_read_write.py`.
+- **Master connection pool P2C scheduling (SDK)** — raise
+  `master_connection_pool_size` and set `master_connection_pool_schedule=P2C`
+  to spread concurrent metadata RPCs across pooled channels (Power of Two
+  Choices). Exposed via config builder / env / properties / storage options;
+  defaults remain `size=1` / `RoundRobin` (no behaviour change unless opted
+  in).
+- **Sync `pread` page-cache read mode (SDK)** — opt-in
+  `client_cache_sync_read_enabled` for `UringPageStore` cache hits (Linux /
+  local NVMe analytical workloads).
+
+### Changed
+
+- **Underlying SDK upgrade**: `goosefs-sdk` 0.1.8 → 0.1.9.
+- **`bindings/python/Cargo.toml`** version `0.1.8` → `0.1.9`, kept in
+  sync with the root crate; `goosefs.__version__` now reports `0.1.9`.
+- **PyO3 0.29** — floor raised for RUSTSEC-2026-0176 / 0177
+  (`pyo3` / `pyo3-async-runtimes` 0.27 → 0.29).
+
+---
+
 ## [0.1.8] — 2026-07-21
 
 ### Changed

@@ -2,18 +2,25 @@
 
 ![Experimental](https://img.shields.io/badge/status-experimental-orange)
 ![Rust](https://img.shields.io/badge/rust-1.88%2B-blue)
-![Version](https://img.shields.io/badge/version-0.1.8-blue)
+![Version](https://img.shields.io/badge/version-0.1.9-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-green)
 
 A native Rust client library that communicates directly with [Goosefs](https://cloud.tencent.com/document/product/1424) Master/Worker via gRPC (tonic/protobuf).
 
 **Documentation:** [https://tencent.github.io/tencent-goosefs-rust-sdk/](https://tencent.github.io/tencent-goosefs-rust-sdk/)
 
-## What's New in v0.1.8
+## What's New in v0.1.9
+
+- **Master connection pool P2C scheduling** — New `master_connection_pool_size` (default `1`) and `master_connection_pool_schedule` (`RoundRobin` / `P2C`). Opt into Power of Two Choices to spread concurrent metadata RPCs across multiple HTTP/2 channels under high concurrency / remote RTT. Configure via builder, `GOOSEFS_MASTER_*` env vars, properties, or storage options.
+- **Sync `pread` page-cache reads** — Opt-in `client_cache_sync_read_enabled` makes `UringPageStore` serve cache hits with synchronous `pread` instead of io_uring (Linux / local-NVMe analytical workloads). Write/delete paths stay on io_uring.
+- **Python lazy `list_status`** — `list_status_grouped` / `batch_list_status_grouped` return a lazy `URIStatusList` that materialises entries on demand, cutting GIL occupancy for large directories.
+- **Docs site** — Rust + Python user guides on [GitHub Pages](https://tencent.github.io/tencent-goosefs-rust-sdk/).
+- **No breaking API changes** — Drop-in upgrade from `0.1.8`; new knobs are opt-in.
+
+### Also in recent releases (v0.1.8)
 
 - **Default `worker_connection_pool_size`** — Bumped from `1` to `min(cores, 4)` (capped), using `available_parallelism` so cgroup CPU limits are respected on Linux. Opt back to the legacy single channel with `.with_worker_connection_pool_size(1)` or `goosefs.client.worker.connection.pool.size=1`.
 - **Open-source scrub** — Public contribution docs, scrubbed internal paths / registry instructions, and Docker fixture image override via `GOOSEFS_IMAGE`.
-- **No breaking API changes** — Drop-in upgrade from `0.1.7`; downstream `OpenDAL` / `Lance` integrations require no code changes.
 
 ### Also in recent releases (v0.1.7)
 

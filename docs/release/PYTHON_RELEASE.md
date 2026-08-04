@@ -53,8 +53,8 @@ CI (`ci_bindings_python.yml`) also runs the zig manylinux path (`x86_64` +
 5. Tag and push:
 
 ```bash
-git tag py-v0.1.8
-git push origin py-v0.1.8
+git tag py-v0.1.9
+git push origin py-v0.1.9
 ```
 
 ## Notes
