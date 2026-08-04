@@ -118,7 +118,7 @@ memmap2 = "0.9"
 # Bounded LRU used by `ShortCircuitFactory` for the per-task hot-block reader
 # cache and the (also bounded) negative cache. See SHORT_CIRCUIT_DESIGN.md
 #  / . Floor is 0.16.3 for RUSTSEC-2026-0002 (IterMut Stacked Borrows).
-lru = "0.16.3"
+lru = "0.18.1"
 rand = "0.9.1"
 uuid = { version = "1.2", features = ["v4"] }
 hostname = "0.4"
