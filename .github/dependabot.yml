@@ -11,38 +11,120 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Grouping style follows apache/opendal `.github/dependabot.yml`:
+# - github-actions + core cargo: quarterly (half of OpenDAL's semiannual)
+# - bindings: quarterly + 90-day patch cooldown (same as OpenDAL)
+# - website npm: monthly with Docusaurus grouped (same as OpenDAL)
 
 version: 2
 updates:
-  # Rust crate advisories / version bumps (catches issues like RUSTSEC-2026-0002).
-  - package-ecosystem: cargo
-    directory: /
+  # GitHub Actions - quarterly updates with groups
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    open-pull-requests-limit: 2
+    # Half of OpenDAL's semiannual interval → quarterly (3 months).
     schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 10
-    labels:
-      - dependencies
-      - rust
+      interval: "quarterly"
+    groups:
+      github-actions:
+        patterns:
+          - "actions/*"
+      third-party-actions:
+        patterns:
+          - "*"
 
-  - package-ecosystem: cargo
-    directory: /bindings/python
+  # Core SDK dependencies - quarterly updates with groups
+  - package-ecosystem: "cargo"
+    directory: "/"
+    open-pull-requests-limit: 4
+    # Half of OpenDAL's semiannual interval → quarterly (3 months).
+    #
+    # Developers can update dependencies via dependabot manually by:
+    # 1. Go to Dependabot page https://github.com/Tencent/tencent-goosefs-rust-sdk/network/updates
+    # 2. Choose a project by "Recent update jobs"
+    # 3. Click "Check for updates"
     schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - rust
-      - python
+      interval: "quarterly"
+    groups:
+      # gRPC / protobuf / HTTP / TLS / serialization
+      grpc-http-serialization:
+        patterns:
+          - "tonic*"
+          - "prost*"
+          - "http*"
+          - "reqwest"
+          - "rustls*"
+          - "serde*"
+          - "bytes"
+          - "uuid"
+      # Async runtime and runtime tools
+      async-runtime:
+        patterns:
+          - "tokio*"
+          - "async-*"
+          - "futures*"
+          - "moka"
+      # Logs, errors, hashing and utilities
+      logs-errors-utils:
+        patterns:
+          - "anyhow"
+          - "*error*"
+          - "tracing"
+          - "xxhash*"
+          - "itoa"
+          - "arc-swap"
+          - "dashmap"
+          - "lru"
+          - "memmap2"
+          - "hostname"
+          - "fastrand"
+      others:
+        patterns:
+          - "*"
+        exclude-patterns:
+          # Please upgrade carefully when updating "rand"
+          - "rand"
+          - "getrandom"
 
-  # Keep GitHub Actions runners/actions current.
-  - package-ecosystem: github-actions
-    directory: /
+  # Python binding cargo deps
+  - package-ecosystem: "cargo"
+    directory: "/bindings/python"
+    open-pull-requests-limit: 1
     schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - ci
+      interval: "quarterly"
+    groups:
+      # Keep sync with core / binding async stack
+      core-sync:
+        patterns:
+          - "tokio*"
+          - "futures*"
+          - "bytes"
+      pyo3:
+        patterns:
+          - "pyo3*"
+      others:
+        patterns:
+          - "*"
+    cooldown:
+      semver-patch-days: 90
+      include:
+        - "*"
+
+  # Website npm dependencies
+  - package-ecosystem: "npm"
+    directory: "/website"
+    open-pull-requests-limit: 1
+    schedule:
+      interval: "monthly"
+    groups:
+      docusaur:
+        patterns:
+          - "@docusaurus/*"
+      others:
+        patterns:
+          - "*"
+    cooldown:
+      semver-patch-days: 90
+      include:
+        - "*"
