@@ -54,7 +54,7 @@ jobs:
           - macos-14
         python-version: ["3.11"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Rust
         uses: ./.github/actions/setup
@@ -65,7 +65,7 @@ jobs:
           enable-cache: true
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -106,14 +106,14 @@ jobs:
           ls -la dist-manylinux
 
       - name: Upload native wheel
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: goosefs-wheel-native-${{ matrix.os }}-py${{ matrix.python-version }}
           path: bindings/python/dist/*
           if-no-files-found: error
 
       - name: Upload manylinux wheels (zig)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: goosefs-wheel-manylinux-${{ matrix.os }}-py${{ matrix.python-version }}
           path: bindings/python/dist-manylinux/*
