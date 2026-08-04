@@ -42,7 +42,8 @@ use goosefs_sdk::fs::ReadType as SdkReadType;
     eq,
     eq_int,
     frozen,
-    hash
+    hash,
+    from_py_object
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(i32)]
@@ -124,7 +125,8 @@ impl From<PyWriteType> for SdkWriteType {
     eq,
     eq_int,
     frozen,
-    hash
+    hash,
+    from_py_object
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(i32)]

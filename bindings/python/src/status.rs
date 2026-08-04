@@ -41,7 +41,12 @@ use pyo3::types::PyBytes;
 use goosefs_sdk::fs::URIStatus;
 
 /// Read-only metadata for a single Goosefs path.
-#[pyclass(module = "goosefs._goosefs", name = "URIStatus", frozen)]
+#[pyclass(
+    module = "goosefs._goosefs",
+    name = "URIStatus",
+    frozen,
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PyURIStatus {
     pub(crate) inner: URIStatus,
