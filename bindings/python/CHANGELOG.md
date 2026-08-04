@@ -8,19 +8,16 @@ This document records all notable changes to the `goosefs` Python binding. The f
 
 ## [Unreleased]
 
-### Added
-
-- **Windows CI + wheels** — `ci.yml` and `ci_bindings_python.yml` now run on
-  `windows-latest` (check / unit tests / offline benches / native
-  `win_amd64` wheel). `io-uring` remains Linux-only via
-  `target.'cfg(target_os = "linux")'`; manylinux zig builds stay unix-only.
-
 ---
 
 ## [0.1.9] — 2026-08-04
 
 ### Added
 
+- **Windows CI + wheels** — `ci.yml` and `ci_bindings_python.yml` now run on
+  `windows-latest` (check / unit tests / offline benches / native
+  `win_amd64` wheel). `io-uring` remains Linux-only via
+  `target.'cfg(target_os = "linux")'`; manylinux zig builds stay unix-only.
 - **Lazy `list_status` API** — `AsyncGoosefs` / `Goosefs` gain
   `list_status_grouped` and `batch_list_status_grouped`, returning a
   `URIStatusList` that holds the Rust `Vec<URIStatus>` in one Python object
@@ -511,7 +508,7 @@ The first internally usable alpha release. Covers all milestones from P0 through
 #### Packaging / Installation
 
 - abi3 wheel, runtime floor CPython 3.9.
-- Platform support: Linux x86_64 / aarch64 (manylinux_2_28), macOS x86_64 / arm64, Windows x86_64 (MSVC).
+- Platform support: Linux x86_64 / aarch64 (manylinux_2_28), macOS x86_64 / arm64; Windows best-effort.
 - Optional dependencies: `goosefs[arrow]` (pyarrow), `goosefs[pandas]` (pandas + pyarrow), `goosefs[examples]` (pyarrow + pandas).
 
 ### Changed

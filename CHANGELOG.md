@@ -11,17 +11,14 @@ kept aligned. Python-specific notes also appear in
 
 ## [Unreleased]
 
+## [0.1.9] — 2026-08-04
+
 ### Added
 
 - **Windows CI + wheels** — `ci.yml` / `ci_bindings_python.yml` matrices include
   `windows-latest` (check, unit tests, offline benches, native `win_amd64`
   wheel). `io-uring` stays Linux-only via target cfg; manylinux zig builds
   remain unix-only.
-
-## [0.1.9] — 2026-08-04
-
-### Added
-
 - **Master connection pool P2C scheduling** — `master_connection_pool_size`
   (default `1`) plus `master_connection_pool_schedule` (`RoundRobin` /
   `P2C`). With `P2C`, the pool samples two channels and picks the one with

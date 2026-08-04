@@ -20,7 +20,7 @@ pip install goosefs
 ## Requirements
 
 - CPython **3.9+** (abi3 wheel)
-- Platforms: Linux x86_64 / aarch64 (manylinux_2_28), macOS x86_64 / arm64; Windows best-effort
+- Platforms: Linux x86_64 / aarch64 (manylinux_2_28), macOS x86_64 / arm64, Windows x86_64 (MSVC)
 - A reachable GooseFS Master
 
 ## Build from Source
