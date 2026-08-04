@@ -11,6 +11,13 @@ kept aligned. Python-specific notes also appear in
 
 ## [Unreleased]
 
+### Added
+
+- **Windows CI + wheels** — `ci.yml` / `ci_bindings_python.yml` matrices include
+  `windows-latest` (check, unit tests, offline benches, native `win_amd64`
+  wheel). `io-uring` stays Linux-only via target cfg; manylinux zig builds
+  remain unix-only.
+
 ## [0.1.9] — 2026-08-04
 
 ### Added

@@ -10,7 +10,7 @@
 | --- | --- |
 | **Package / Import name** | `goosefs` (PyPI package name and import name are identical) |
 | **Python support** | abi3 wheel, runtime floor CPython 3.9+ |
-| **Platforms** | Linux x86_64 / aarch64 (manylinux_2_28), macOS x86_64 / arm64; Windows best-effort |
+| **Platforms** | Linux x86_64 / aarch64 (manylinux_2_28), macOS x86_64 / arm64, Windows x86_64 (MSVC) |
 | **API style** | Synchronous blocking (`Goosefs`) + coroutine-based async (`AsyncGoosefs`) |
 | **Status** | alpha — see [`CHANGELOG.md`](CHANGELOG.md) and [`DEVELOPMENT.md`](DEVELOPMENT.md) |
 

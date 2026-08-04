@@ -24,8 +24,7 @@ Pre-built wheels are provided for:
 
 - Linux x86_64 / aarch64 (manylinux_2_28)
 - macOS x86_64 / arm64
-
-Windows wheels are best-effort and may be added in a later release.
+- Windows x86_64 (MSVC)
 
 ## Building From Source (Optional)
 

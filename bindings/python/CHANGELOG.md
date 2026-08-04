@@ -8,6 +8,13 @@ This document records all notable changes to the `goosefs` Python binding. The f
 
 ## [Unreleased]
 
+### Added
+
+- **Windows CI + wheels** — `ci.yml` and `ci_bindings_python.yml` now run on
+  `windows-latest` (check / unit tests / offline benches / native
+  `win_amd64` wheel). `io-uring` remains Linux-only via
+  `target.'cfg(target_os = "linux")'`; manylinux zig builds stay unix-only.
+
 ---
 
 ## [0.1.9] — 2026-08-04
@@ -504,7 +511,7 @@ The first internally usable alpha release. Covers all milestones from P0 through
 #### Packaging / Installation
 
 - abi3 wheel, runtime floor CPython 3.9.
-- Platform support: Linux x86_64 / aarch64 (manylinux_2_28), macOS x86_64 / arm64; Windows best-effort.
+- Platform support: Linux x86_64 / aarch64 (manylinux_2_28), macOS x86_64 / arm64, Windows x86_64 (MSVC).
 - Optional dependencies: `goosefs[arrow]` (pyarrow), `goosefs[pandas]` (pandas + pyarrow), `goosefs[examples]` (pyarrow + pandas).
 
 ### Changed
