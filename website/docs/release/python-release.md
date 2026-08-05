@@ -42,8 +42,10 @@ bash scripts/release/python.sh --publish
 5. Tag and push:
 
 ```bash
-git tag py-v0.1.8
-git push origin py-v0.1.8
+git tag py-v0.1.9
+git push origin py-v0.1.9
 ```
 
-The wheel is `abi3-py39`: one Linux wheel covers CPython 3.9+. Prefer manylinux; never commit tokens.
+The wheel is `abi3-py39`: one wheel per platform covers CPython 3.9+. Prefer
+manylinux for Linux; Windows `win_amd64` wheels are produced by
+`ci_bindings_python.yml` on `windows-latest`. Never commit tokens.

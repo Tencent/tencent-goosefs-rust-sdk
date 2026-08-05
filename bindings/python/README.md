@@ -10,11 +10,25 @@
 | --- | --- |
 | **Package / Import name** | `goosefs` (PyPI package name and import name are identical) |
 | **Python support** | abi3 wheel, runtime floor CPython 3.9+ |
-| **Platforms** | Linux x86_64 / aarch64 (manylinux_2_28), macOS x86_64 / arm64; Windows best-effort |
+| **Platforms** | Linux x86_64 / aarch64 (manylinux_2_28), macOS x86_64 / arm64, Windows x86_64 (MSVC) |
 | **API style** | Synchronous blocking (`Goosefs`) + coroutine-based async (`AsyncGoosefs`) |
 | **Status** | alpha — see [`CHANGELOG.md`](CHANGELOG.md) and [`DEVELOPMENT.md`](DEVELOPMENT.md) |
 
 ## What's New
+
+- **v0.1.9** — aligned with `goosefs-sdk` 0.1.9.
+  - **Lazy `list_status`**: `list_status_grouped` /
+    `batch_list_status_grouped` return a lazy `URIStatusList` that
+    materialises `URIStatus` objects on demand (indexing / iteration),
+    cutting GIL occupancy for large directories. See
+    `examples/batch_status.py`.
+  - **Master pool P2C** (SDK, opt-in): raise
+    `master_connection_pool_size` and set schedule to `P2C` for high-
+    concurrency metadata workloads.
+  - **Sync `pread` page-cache reads** (SDK, opt-in):
+    `client_cache_sync_read_enabled` for local-NVMe analytical workloads.
+  - PyO3 floor raised to 0.29 (RustSec). Drop-in upgrade from 0.1.8 —
+    see [`CHANGELOG.md`](./CHANGELOG.md).
 
 - **v0.1.8** — aligned with `goosefs-sdk` 0.1.8. Default
   `worker_connection_pool_size` bumped from `1` to `min(cores, 4)`

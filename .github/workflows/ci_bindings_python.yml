@@ -49,9 +49,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # windows-latest builds a native win_amd64 wheel (MSVC). manylinux
+        # zig cross-compile runs only on unix runners — see step condition.
         os:
           - ubuntu-latest
           - macos-14
+          - windows-latest
         python-version: ["3.11"]
     steps:
       - uses: actions/checkout@v7
@@ -70,15 +73,19 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Sync deps
+        shell: bash
         working-directory: bindings/python
         run: uv sync --all-extras --group dev --group test
 
       # Host-native wheel: fast smoke that the binding links and imports.
+      # On Windows this produces the win_amd64 wheel used for PyPI releases.
       - name: maturin build (native)
+        shell: bash
         working-directory: bindings/python
         run: uv run maturin build --release --out dist
 
       - name: Install native wheel + import smoke
+        shell: bash
         working-directory: bindings/python
         run: |
           uv pip install dist/*.whl
@@ -87,7 +94,11 @@ jobs:
       # Same path as scripts/release/python.sh: zig cross-compile manylinux
       # wheels (x86_64 + aarch64). Validates release artifacts on both Linux
       # and macOS runners without needing a Linux host for the aarch64 wheel.
+      # Skipped on Windows — manylinux tags are Linux-only; Windows ships the
+      # native MSVC wheel from the step above.
       - name: maturin build (manylinux via zig)
+        if: runner.os != 'Windows'
+        shell: bash
         working-directory: bindings/python
         run: |
           set -euo pipefail
@@ -113,6 +124,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload manylinux wheels (zig)
+        if: runner.os != 'Windows'
         uses: actions/upload-artifact@v7
         with:
           name: goosefs-wheel-manylinux-${{ matrix.os }}-py${{ matrix.python-version }}

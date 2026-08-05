@@ -41,8 +41,10 @@ Useful flags:
 The script always checks that root `Cargo.toml` and `bindings/python/Cargo.toml`
 versions match.
 
-CI (`ci_bindings_python.yml`) also runs the zig manylinux path (`x86_64` +
-`aarch64`) so release artifacts are verified on every relevant push/PR.
+CI (`ci_bindings_python.yml`) builds and uploads native wheels on Linux,
+macOS, and Windows, and also runs the zig manylinux path (`x86_64` +
+`aarch64`) on unix runners so release artifacts are verified on every
+relevant push/PR.
 
 ## Manual checklist (still required)
 
@@ -53,8 +55,8 @@ CI (`ci_bindings_python.yml`) also runs the zig manylinux path (`x86_64` +
 5. Tag and push:
 
 ```bash
-git tag py-v0.1.8
-git push origin py-v0.1.8
+git tag py-v0.1.9
+git push origin py-v0.1.9
 ```
 
 ## Notes
@@ -64,7 +66,8 @@ git push origin py-v0.1.8
 - `2_28` is the default baseline (CentOS 8 / TencentOS 3 / Ubuntu 20.04+). Use
   `--manylinux 2_17` only when you must support glibc 2.17 (CentOS 7 era).
 - The wheel is `abi3-py39`: one Linux wheel covers CPython 3.9+.
-- Build Windows wheels on a Windows host with MSVC (best-effort; not covered by
-  this script).
+- Windows `win_amd64` wheels are built on `windows-latest` in
+  `ci_bindings_python.yml` (MSVC). Download the `goosefs-wheel-native-windows-latest-*`
+  artifact and upload it alongside the manylinux wheels when publishing.
 - PyPI does **not** allow re-uploading the same version.
 - Never commit tokens; use `MATURIN_PYPI_TOKEN` (or `UV_PUBLISH_TOKEN`) only.

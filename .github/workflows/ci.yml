@@ -41,9 +41,11 @@ jobs:
       fail-fast: false
       matrix:
         # macos-14 = Apple Silicon (M-series / M4-class GHA runners)
+        # windows-latest = MSVC; io-uring is Linux-only and target-gated
         os:
           - ubuntu-latest
           - macos-14
+          - windows-latest
     steps:
       - uses: actions/checkout@v7
 
@@ -75,6 +77,7 @@ jobs:
         os:
           - ubuntu-latest
           - macos-14
+          - windows-latest
     steps:
       - uses: actions/checkout@v7
 
@@ -84,6 +87,7 @@ jobs:
           need-nextest: "true"
 
       - name: Unit + hermetic integration tests
+        shell: bash
         run: |
           # Skips #[ignore] (cluster e2e + uring store tests that need
           # host io_uring OPENAT, which GitHub Actions denies with EPERM).
@@ -101,6 +105,7 @@ jobs:
         os:
           - ubuntu-latest
           - macos-14
+          - windows-latest
         python-version: ["3.11"]
     steps:
       - uses: actions/checkout@v7
@@ -119,6 +124,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Sync + build binding
+        shell: bash
         working-directory: bindings/python
         run: |
           uv sync --all-extras --group dev --group test
@@ -142,6 +148,7 @@ jobs:
         os:
           - ubuntu-latest
           - macos-14
+          - windows-latest
     steps:
       - uses: actions/checkout@v7
 
@@ -149,4 +156,5 @@ jobs:
         uses: ./.github/actions/setup
 
       - name: Offline Rust benchmarks
+        shell: bash
         run: bash scripts/ci/run_rust_benchmarks.sh offline
