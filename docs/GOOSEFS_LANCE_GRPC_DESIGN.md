@@ -89,7 +89,7 @@ UFS (COS / S3 / HDFS)
 ┌─────────────────────────────────────────────────────────────────────┐
 │ Hierarchy 1: Lance Provider(Lightweight adaptation layer,~150 OK)                         │
 │   GooseFsStoreProvider                                              │
-│   - accept goosefs:// URL                                             │
+│   - accept gfs:// URL                                             │
 │   - Build OpenDAL Operator → OpendalStore → Lance ObjectStore         │
 ├─────────────────────────────────────────────────────────────────────┤
 │ Hierarchy 2: OpenDAL GooseFS Service(impl Access trait)                 │
@@ -1114,7 +1114,7 @@ use goosefs_sdk::{
 use goosefs_sdk::config::WriteType;
 
 // exist Lance storage_options Use constants in
-let dataset = lance::dataset::DatasetBuilder::from_uri("goosefs://10.0.0.1:9200/datasets/v1")
+let dataset = lance::dataset::DatasetBuilder::from_uri("gfs://10.0.0.1:9200/datasets/v1")
     .with_storage_option(STORAGE_OPT_WRITE_TYPE, WriteType::CacheThrough.as_str())
     .with_storage_option(STORAGE_OPT_MASTER_ADDR, "10.0.0.1:9200")
     .load()
@@ -1557,16 +1557,16 @@ use goosefs_sdk::config::WriteType;
 
 // Way 1: environment variables
 std::env::set_var("GOOSEFS_MASTER_ADDR", "goosefs-master:9200");
-let dataset = Dataset::open("goosefs://goosefs-master:9200/lance-datasets/embeddings").await?;
+let dataset = Dataset::open("gfs://goosefs-master:9200/lance-datasets/embeddings").await?;
 
 // Way 2: storage_options(Recommended, use constants to avoid magic strings)
-let dataset = DatasetBuilder::from_uri("goosefs://goosefs-master:9200/datasets/v1")
+let dataset = DatasetBuilder::from_uri("gfs://goosefs-master:9200/datasets/v1")
     .with_storage_option(STORAGE_OPT_MASTER_ADDR, "goosefs-master:9200")
     .with_storage_option(STORAGE_OPT_WRITE_TYPE, WriteType::CacheThrough.as_str())
     .load().await?;
 
 // Way 3: Use strings directly (not recommended, backwards compatible)
-let dataset = DatasetBuilder::from_uri("goosefs://goosefs-master:9200/datasets/v1")
+let dataset = DatasetBuilder::from_uri("gfs://goosefs-master:9200/datasets/v1")
     .with_storage_option("goosefs_master_addr", "goosefs-master:9200")
     .with_storage_option("goosefs_write_type", "cache_through")
     .load().await?;
@@ -1577,11 +1577,11 @@ let dataset = DatasetBuilder::from_uri("goosefs://goosefs-master:9200/datasets/v
 ```python
 import lance, os
 os.environ["GOOSEFS_MASTER_ADDR"] = "goosefs-master:9200"
-ds = lance.dataset("goosefs://goosefs-master:9200/lance-datasets/embeddings")
+ds = lance.dataset("gfs://goosefs-master:9200/lance-datasets/embeddings")
 
 # or storage_options
 ds = lance.dataset(
-    "goosefs://...",
+    "gfs://...",
     storage_options={
         "goosefs_master_addr": "goosefs-master:9200",
         "goosefs_write_type": "cache_through",   # Persistent writing
@@ -1862,7 +1862,7 @@ impl opendal_core::Configurator for GooseFsConfig {
     fn from_uri(uri: &opendal_core::OperatorUri) -> opendal_core::Result<Self> {
         let mut map = uri.options().clone();
         if let Some(authority) = uri.authority() {
-            // goosefs://host:port/path → master_addr = "host:port"
+            // gfs://host:port/path → master_addr = "host:port"
             map.insert("master_addr".to_string(), authority.to_string());
         }
         if let Some(root) = uri.root() {
@@ -1887,7 +1887,7 @@ mod tests {
     #[test]
     fn from_uri_sets_master_and_root() {
         let uri = OperatorUri::new(
-            "goosefs://10.0.0.1:9200/data/raw",
+            "gfs://10.0.0.1:9200/data/raw",
             Vec::<(String, String)>::new(),
         )
         .unwrap();
@@ -2745,7 +2745,7 @@ use opendal_core::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let op = Operator::from_uri("goosefs://10.0.0.1:9200/data", [])?.finish();
+    let op = Operator::from_uri("gfs://10.0.0.1:9200/data", [])?.finish();
     Ok(())
 }
 ```
@@ -2929,7 +2929,7 @@ exist Lance of `lance-io` crate Added in `goosefs` feature and `GooseFsStoreProv
 ┌─────────────────────────────────────────────────────────────────────┐
 │ ★ Phase 2c: Lance GooseFS Provider(Design of this chapter)✅ Completed              │
 │   GooseFsStoreProvider implements ObjectStoreProvider               │
-│   - accept goosefs://host:port/path URL                              │
+│   - accept gfs://host:port/path URL                              │
 │   - parse storage_options + environment variables                                  │
 │   - Build OpenDAL Operator<GooseFs> → OpendalStore → Lance ObjectStore│
 ├─────────────────────────────────────────────────────────────────────┤
@@ -2948,7 +2948,7 @@ exist Lance of `lance-io` crate Added in `goosefs` feature and `GooseFsStoreProv
 | Contrast Dimensions | OSS Provider (Reference template) | GooseFS Provider (New) |
 |----------|------------------------|------------------------|
 | transport protocol | HTTP REST (OpenDAL `services-oss`) | gRPC (OpenDAL `services-goosefs`) |
-| URL scheme | `oss://bucket/path` | `goosefs://host:port/path` |
+| URL scheme | `oss://bucket/path` | `gfs://host:port/path` |
 | authority Semantics | bucket name | Master address `host:port` |
 | path Semantics | bucket object path within | GooseFS File system absolute path |
 | Configuration method | `oss_endpoint`, `oss_access_key_id` wait | `goosefs_master_addr`, `goosefs_write_type` wait |
@@ -2962,11 +2962,11 @@ exist Lance of `lance-io` crate Added in `goosefs` feature and `GooseFsStoreProv
 #### 12.2.1 URL Format
 
 ```
-goosefs://[master_host:master_port]/path/to/dataset
+gfs://[master_host:master_port]/path/to/dataset
 
 Example:
-  goosefs://10.0.0.1:9200/lance-datasets/embeddings.lance
-  goosefs://goosefs-master:9200/data/v1/train.lance
+  gfs://10.0.0.1:9200/lance-datasets/embeddings.lance
+  gfs://goosefs-master:9200/data/v1/train.lance
 ```
 
 - **scheme**: `goosefs`
@@ -2980,7 +2980,7 @@ single URL can only contain one authority,HA pass `storage_options` transfer:
 ```python
 # Python
 ds = lance.dataset(
-    "goosefs://10.0.0.1:9200/data/embeddings.lance",
+    "gfs://10.0.0.1:9200/data/embeddings.lance",
     storage_options={
         "goosefs_master_addr": "10.0.0.1:9200,10.0.0.2:9200,10.0.0.3:9200"
     }
@@ -2991,7 +2991,7 @@ ds = lance.dataset(
 // Rust
 let mut params = ObjectStoreParams::default();
 params.set_storage_option("goosefs_master_addr", "10.0.0.1:9200,10.0.0.2:9200,10.0.0.3:9200");
-let dataset = DatasetBuilder::from_uri("goosefs://10.0.0.1:9200/data/embeddings.lance")
+let dataset = DatasetBuilder::from_uri("gfs://10.0.0.1:9200/data/embeddings.lance")
     .with_params(params)
     .load().await?;
 ```
@@ -3103,7 +3103,7 @@ exist `commit_handler_from_url()` Functional scheme Add to match `"goosefs"`:
 }
 ```
 
-**effect**:make sure `goosefs://` URL use `ConditionalPutCommitHandler` Handling concurrent commits, this is useful for Lance The transactional correctness of the data set is critical.
+**effect**:make sure `gfs://` URL use `ConditionalPutCommitHandler` Handling concurrent commits, this is useful for Lance The transactional correctness of the data set is critical.
 
 ### 12.6 goosefs.rs — GooseFsStoreProvider Complete implementation (✅ has landed)
 
@@ -3137,7 +3137,7 @@ const DEFAULT_GOOSEFS_PORT: u16 = 9200;
 /// GooseFS object store provider.
 ///
 /// Uses OpenDAL's GooseFs service to access GooseFS via gRPC.
-/// URL format: `goosefs://host:port/path`
+/// URL format: `gfs://host:port/path`
 ///
 /// Where:
 /// - `host:port` is the GooseFS Master address (default port: 9200)
@@ -3174,7 +3174,7 @@ impl GooseFsStoreProvider {
         // 3. URL authority
         let host = url.host_str().ok_or_else(|| {
             Error::invalid_input(
-                "GooseFS URL must contain a master address (host), e.g. goosefs://host:port/path",
+                "GooseFS URL must contain a master address (host), e.g. gfs://host:port/path",
             )
         })?;
 
@@ -3266,7 +3266,7 @@ impl ObjectStoreProvider for GooseFsStoreProvider {
     /// Extract the path relative to the root of the GooseFS filesystem.
     ///
     /// For GooseFS, the path in the URL IS the filesystem path.
-    /// `goosefs://host:port/data/file.lance` → `data/file.lance`
+    /// `gfs://host:port/data/file.lance` → `data/file.lance`
     fn extract_path(&self, url: &Url) -> Result<Path> {
         let path = url.path().trim_start_matches('/');
         Path::parse(path).map_err(|_| {
@@ -3294,7 +3294,7 @@ mod tests {
     #[test]
     fn test_goosefs_store_path() {
         let provider = GooseFsStoreProvider;
-        let url = Url::parse("goosefs://10.0.0.1:9200/data/embeddings.lance").unwrap();
+        let url = Url::parse("gfs://10.0.0.1:9200/data/embeddings.lance").unwrap();
         let path = provider.extract_path(&url).unwrap();
         let expected_path = Path::from("data/embeddings.lance");
         assert_eq!(path, expected_path);
@@ -3303,7 +3303,7 @@ mod tests {
     #[test]
     fn test_goosefs_store_root_path() {
         let provider = GooseFsStoreProvider;
-        let url = Url::parse("goosefs://10.0.0.1:9200/").unwrap();
+        let url = Url::parse("gfs://10.0.0.1:9200/").unwrap();
         let path = provider.extract_path(&url).unwrap();
         assert_eq!(path.to_string(), "");
     }
@@ -3311,7 +3311,7 @@ mod tests {
     #[test]
     fn test_goosefs_store_deep_path() {
         let provider = GooseFsStoreProvider;
-        let url = Url::parse("goosefs://master:9200/a/b/c/d.lance").unwrap();
+        let url = Url::parse("gfs://master:9200/a/b/c/d.lance").unwrap();
         let path = provider.extract_path(&url).unwrap();
         let expected_path = Path::from("a/b/c/d.lance");
         assert_eq!(path, expected_path);
@@ -3320,7 +3320,7 @@ mod tests {
     #[test]
     fn test_calculate_object_store_prefix() {
         let provider = GooseFsStoreProvider;
-        let url = Url::parse("goosefs://10.0.0.1:9200/data").unwrap();
+        let url = Url::parse("gfs://10.0.0.1:9200/data").unwrap();
         let prefix = provider.calculate_object_store_prefix(&url, None).unwrap();
         assert_eq!(prefix, "goosefs$10.0.0.1:9200");
     }
@@ -3328,14 +3328,14 @@ mod tests {
     #[test]
     fn test_calculate_object_store_prefix_with_hostname() {
         let provider = GooseFsStoreProvider;
-        let url = Url::parse("goosefs://myhost:9200/data").unwrap();
+        let url = Url::parse("gfs://myhost:9200/data").unwrap();
         let prefix = provider.calculate_object_store_prefix(&url, None).unwrap();
         assert_eq!(prefix, "goosefs$myhost:9200");
     }
 
     #[test]
     fn test_resolve_master_addr_from_url() {
-        let url = Url::parse("goosefs://10.0.0.1:9200/data").unwrap();
+        let url = Url::parse("gfs://10.0.0.1:9200/data").unwrap();
         let storage_options = StorageOptions(HashMap::new());
         let addr = GooseFsStoreProvider::resolve_master_addr(&url, &storage_options).unwrap();
         assert_eq!(addr, "10.0.0.1:9200");
@@ -3343,7 +3343,7 @@ mod tests {
 
     #[test]
     fn test_resolve_master_addr_default_port() {
-        let url = Url::parse("goosefs://10.0.0.1/data").unwrap();
+        let url = Url::parse("gfs://10.0.0.1/data").unwrap();
         let storage_options = StorageOptions(HashMap::new());
         let addr = GooseFsStoreProvider::resolve_master_addr(&url, &storage_options).unwrap();
         assert_eq!(addr, "10.0.0.1:9200");
@@ -3351,7 +3351,7 @@ mod tests {
 
     #[test]
     fn test_resolve_master_addr_from_storage_options() {
-        let url = Url::parse("goosefs://10.0.0.1:9200/data").unwrap();
+        let url = Url::parse("gfs://10.0.0.1:9200/data").unwrap();
         let storage_options = StorageOptions(HashMap::from([(
             "goosefs_master_addr".to_string(),
             "10.0.0.2:9200,10.0.0.3:9200".to_string(),
@@ -3378,7 +3378,7 @@ mod tests {
 by Lance The core `get_range()` Take the operation as an example to show how the request traverses the three layers:
 
 ```text
-Lance: Dataset::open("goosefs://master:9200/embeddings.lance")
+Lance: Dataset::open("gfs://master:9200/embeddings.lance")
   │
   ▼ URL scheme = "goosefs"
 ObjectStoreRegistry::get_store()
@@ -3441,18 +3441,18 @@ use goosefs_sdk::config::WriteType;
 
 // Way 1: environment variables
 std::env::set_var("GOOSEFS_MASTER_ADDR", "goosefs-master:9200");
-let dataset = Dataset::open("goosefs://goosefs-master:9200/lance-datasets/embeddings.lance").await?;
+let dataset = Dataset::open("gfs://goosefs-master:9200/lance-datasets/embeddings.lance").await?;
 
 // Way 2: storage_options(Recommended, use constants to avoid magic strings)
 let dataset = lance::dataset::DatasetBuilder::from_uri(
-    "goosefs://10.0.0.1:9200/datasets/v1"
+    "gfs://10.0.0.1:9200/datasets/v1"
 )
 .with_storage_option(STORAGE_OPT_WRITE_TYPE, WriteType::CacheThrough.as_str())
 .load().await?;
 
 // Way 3: HA model
 let dataset = lance::dataset::DatasetBuilder::from_uri(
-    "goosefs://10.0.0.1:9200/datasets/v1"
+    "gfs://10.0.0.1:9200/datasets/v1"
 )
 .with_storage_option(STORAGE_OPT_MASTER_ADDR, "10.0.0.1:9200,10.0.0.2:9200,10.0.0.3:9200")
 .with_storage_option(STORAGE_OPT_WRITE_TYPE, WriteType::CacheThrough.as_str())
@@ -3474,11 +3474,11 @@ import lance, os
 
 # Way 1: environment variables
 os.environ["GOOSEFS_MASTER_ADDR"] = "goosefs-master:9200"
-ds = lance.dataset("goosefs://goosefs-master:9200/lance-datasets/embeddings.lance")
+ds = lance.dataset("gfs://goosefs-master:9200/lance-datasets/embeddings.lance")
 
 # Way 2: storage_options(Python Just use the string directly)
 ds = lance.dataset(
-    "goosefs://10.0.0.1:9200/datasets/v1",
+    "gfs://10.0.0.1:9200/datasets/v1",
     storage_options={
         "goosefs_master_addr": "10.0.0.1:9200",
         "goosefs_write_type": "cache_through",
@@ -3488,7 +3488,7 @@ ds = lance.dataset(
 # Way 3: create Dataset
 lance.write_dataset(
     data,
-    "goosefs://10.0.0.1:9200/datasets/my_embeddings.lance",
+    "gfs://10.0.0.1:9200/datasets/my_embeddings.lance",
     storage_options={
         "goosefs_master_addr": "10.0.0.1:9200",
         "goosefs_write_type": "cache_through",
@@ -3536,7 +3536,7 @@ lance.write_dataset(
 | test scenario | operate |
 |----------|------|
 | **ObjectStore Base CRUD** | `put` → `head` → `get` → `get_range` → `delete` |
-| **Lance Dataset create** | `lance.write_dataset()` via goosefs:// |
+| **Lance Dataset create** | `lance.write_dataset()` via gfs:// |
 | **Lance Dataset read** | `lance.dataset()` + `to_table()` |
 | **Lance Dataset Append** | `dataset.append()` |
 | **vector search** | `dataset.create_index()` + `dataset.search()` |
@@ -3638,7 +3638,7 @@ feat(lance-io): add GooseFS object store provider
 Add GooseFsStoreProvider that enables Lance to access GooseFS distributed
 filesystem via gRPC through OpenDAL's GooseFs service.
 
-URL format: goosefs://host:port/path
+URL format: gfs://host:port/path
 
 Features:
 - GooseFS Master address resolution with priority: storage_options >
@@ -3648,7 +3648,7 @@ Features:
   or environment variables
 - HA support via comma-separated addresses in goosefs_master_addr
 - Proper cache prefix (goosefs$host:port) for multi-cluster isolation
-- ConditionalPut commit handler support for goosefs:// scheme
+- ConditionalPut commit handler support for gfs:// scheme
 - goosefs feature propagated through lance-io -> lance -> examples
 
 Architecture (3-layer):

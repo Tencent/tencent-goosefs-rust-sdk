@@ -25,8 +25,8 @@ cfg = Config("127.0.0.1:9200")
 # From a goosefs-site.properties file
 cfg = Config.from_properties_file("/etc/goosefs/goosefs-site.properties")
 
-# From a goosefs:// URI with inline params
-cfg = Config.from_uri("goosefs://127.0.0.1:9200/?auth.type=simple")
+# From a gfs:// URI (optional root path; auth via env / properties)
+cfg = Config.from_uri("gfs://127.0.0.1:9200/data")
 ```
 
 ## Environment Variables
