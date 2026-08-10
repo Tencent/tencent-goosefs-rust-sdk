@@ -131,6 +131,9 @@ fn resolve_write_strategy(write_type: Option<i32>, file_info: &FileInfo) -> Writ
             need_async_persist: false,
         },
         // ASYNC_THROUGH: cache only, schedule async persist after close
+        // TODO(java-parity): worker pick should use replication.durable /
+        // durable.min + capacity watermark filtering (see open_next_block).
+        // Deferred to a later phase.
         Some(5) => WriteStrategy {
             cache_stream: true,
             ufs_stream: false,
@@ -609,6 +612,17 @@ impl GoosefsFileWriter {
 
         // Select a worker for this block using the same replication.number
         // count as the read path (Java getBlockWorkers(blockId, count, true)).
+        //
+        // TODO(java-parity): ASYNC_THROUGH write selection — align with Java
+        // `GooseFSBlockStore.getOutStream`:
+        //   - initialReplicas = replication.durable when > replication.number
+        //   - filterNoSpaceWorkers (forbidWrite + persist capacity watermark:
+        //     persistCapacity = capacity*(1-cacheMinRatio), remain vs
+        //     minRemainBytes/minRemainRatio; first block strict, later blocks
+        //     may fall back)
+        //   - when replicas > 1 open N DataWriters (currently always write 1)
+        // Deferred to a later phase; this path still uses file_replication_number
+        // only and a single writer.
         let worker_info = self
             .router
             .select_worker_with_replication(block_id, self.config.file_replication_number)

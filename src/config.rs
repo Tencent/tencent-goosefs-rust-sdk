@@ -1426,6 +1426,11 @@ pub struct GoosefsConfig {
     /// `block_id` share the same deterministic worker set. When `> 1`, the
     /// client returns up to that many host-deduped workers (Java
     /// `getBlockWorkers(blockId, count, …)` semantics).
+    ///
+    /// TODO(java-parity): add `file_replication_durable` /
+    /// `file_replication_durable_min` and block-worker watermark configs
+    /// (`min_remain_bytes` / `min_remain_ratio` / cache-min-ratio) to match
+    /// Java ASYNC_THROUGH `getOutStream` + `filterNoSpaceWorkers`. Deferred.
     #[serde(default = "default_file_replication_number")]
     pub file_replication_number: i32,
 

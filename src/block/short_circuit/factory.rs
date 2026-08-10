@@ -258,6 +258,10 @@ impl ShortCircuitFactory {
     ///
     /// Gathers the live inputs (local-source pre-filter, sticky disable,
     /// negative cache) and applies [`should_use_short_circuit`].
+    ///
+    /// TODO(java-parity): gate SC on locations-first read selection (same as
+    /// Java / gRPC `select_worker_for_read`) instead of local-first
+    /// `select_worker`. Deferred; this PR does not change the SC path.
     pub async fn should_use(&self, block_id: i64, block_size: i64) -> bool {
         if !self.cfg.enabled || self.is_process_disabled() {
             return false;
@@ -278,6 +282,10 @@ impl ShortCircuitFactory {
     /// the error is returned so the caller falls back to gRPC (INV-S1). A
     /// *semantic* error is never produced here (it can only arise from
     /// per-read bounds checks).
+    ///
+    /// TODO(java-parity): acquire the control-plane worker via
+    /// `select_worker_for_read` (locations-first) so OpenLocalBlock is only
+    /// attempted when the Java-aligned read target is local. Deferred.
     pub async fn get_or_open(
         &self,
         block_id: i64,
@@ -403,6 +411,9 @@ impl ShortCircuitFactory {
     }
 
     /// Resolve the worker serving `block_id` and acquire a pooled client.
+    ///
+    /// TODO(java-parity): use `select_worker_for_read` + locations instead of
+    /// local-first `select_worker`. Deferred with the rest of the SC path.
     async fn acquire_worker(&self, block_id: i64) -> Result<crate::client::WorkerClient> {
         let worker_info = self.router.select_worker(block_id).await?;
         let addr = worker_info

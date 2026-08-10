@@ -996,6 +996,9 @@ impl GoosefsFileInStream {
     /// capability fetcher yet). On capability-enabled clusters the
     /// `OpenLocalBlock` RPC is rejected and this returns `None`, so the read
     /// still completes over gRPC with identical bytes.
+    ///
+    /// TODO(java-parity): align SC gating/open with Java (locations-first read
+    /// target must be local). Deferred; this PR does not change the SC path.
     async fn try_short_circuit_read(
         &self,
         block_id: i64,
@@ -1249,6 +1252,18 @@ impl GoosefsFileInStream {
         }
     }
 
+    /// Master `BlockInfo.locations` for `block_id`, or empty when unavailable.
+    ///
+    /// Empty → [`WorkerRouterView::select_worker_for_read`] falls back to hash
+    /// (Java `getInStream` when locations are empty).
+    fn block_locations(&self, block_id: i64) -> &[crate::proto::grpc::BlockLocation] {
+        self.status
+            .get_block_info(block_id)
+            .and_then(|fbi| fbi.block_info.as_ref())
+            .map(|bi| bi.locations.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// Connect to the worker responsible for `block_id`, with one retry on failure.
     ///
     /// # Connection pooling
@@ -1264,9 +1279,12 @@ impl GoosefsFileInStream {
     /// gRPC calls and triggers a `reconnect()` to drop the stale channel and
     /// establish a fresh authenticated connection.
     async fn connect_worker(&mut self, block_id: i64) -> Result<WorkerClient> {
+        let locations = self.block_locations(block_id);
+        // TODO(java-parity): count = max(maxRetryNode, replicationNum); when
+        // replicationNum > 1 shuffle candidates then pick one (Java getInStream).
         let worker_info = self
             .router
-            .select_worker_with_replication(block_id, self.config.file_replication_number)
+            .select_worker_for_read(block_id, locations, self.config.file_replication_number)
             .await?;
         let addr = worker_info
             .address
@@ -1313,10 +1331,15 @@ impl GoosefsFileInStream {
                 }
                 warn!(worker = %worker_addr, error = %e, "worker connect failed, retrying");
 
-                // Retry with a different worker
+                // Retry with a different worker (locations-first again; failed
+                // location workers are skipped, then hash fallback).
                 let retry_info = self
                     .router
-                    .select_worker_with_replication(block_id, self.config.file_replication_number)
+                    .select_worker_for_read(
+                        block_id,
+                        self.block_locations(block_id),
+                        self.config.file_replication_number,
+                    )
                     .await?;
                 let retry_addr_info =
                     retry_info.address.as_ref().ok_or_else(|| Error::Internal {
@@ -1350,7 +1373,11 @@ impl GoosefsFileInStream {
     ) -> Result<WorkerClient> {
         let worker_info = self
             .router
-            .select_worker_with_replication(block_id, self.config.file_replication_number)
+            .select_worker_for_read(
+                block_id,
+                self.block_locations(block_id),
+                self.config.file_replication_number,
+            )
             .await?;
         let addr = worker_info
             .address
