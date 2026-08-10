@@ -586,7 +586,12 @@ impl GoosefsFileReader {
         let ufs_options = self.build_ufs_read_options(plan);
 
         // ① Select worker + connection failover (mirrors the old read_next_block).
-        let worker_info = self.router.select_worker(block_id).await?;
+        // Use replication.number so read shares the same worker set as write
+        // for this block_id (Java getBlockWorkers semantics).
+        let worker_info = self
+            .router
+            .select_worker_with_replication(block_id, self.config.file_replication_number)
+            .await?;
         let worker_addr = Self::worker_addr(&worker_info)?;
         let worker = match self.acquire_worker(&worker_addr).await {
             Ok(w) => w,
@@ -609,7 +614,11 @@ impl GoosefsFileReader {
                     error = %e,
                     "worker connection failed, trying another worker"
                 );
-                let retry = self.router.select_worker(block_id).await.map_err(|_| e)?;
+                let retry = self
+                    .router
+                    .select_worker_with_replication(block_id, self.config.file_replication_number)
+                    .await
+                    .map_err(|_| e)?;
                 let retry_addr = Self::worker_addr(&retry)?;
                 self.acquire_worker(&retry_addr).await?
             }

@@ -1264,7 +1264,10 @@ impl GoosefsFileInStream {
     /// gRPC calls and triggers a `reconnect()` to drop the stale channel and
     /// establish a fresh authenticated connection.
     async fn connect_worker(&mut self, block_id: i64) -> Result<WorkerClient> {
-        let worker_info = self.router.select_worker(block_id).await?;
+        let worker_info = self
+            .router
+            .select_worker_with_replication(block_id, self.config.file_replication_number)
+            .await?;
         let addr = worker_info
             .address
             .as_ref()
@@ -1311,7 +1314,10 @@ impl GoosefsFileInStream {
                 warn!(worker = %worker_addr, error = %e, "worker connect failed, retrying");
 
                 // Retry with a different worker
-                let retry_info = self.router.select_worker(block_id).await?;
+                let retry_info = self
+                    .router
+                    .select_worker_with_replication(block_id, self.config.file_replication_number)
+                    .await?;
                 let retry_addr_info =
                     retry_info.address.as_ref().ok_or_else(|| Error::Internal {
                         message: "retry worker has no address".to_string(),
@@ -1342,7 +1348,10 @@ impl GoosefsFileInStream {
         block_id: i64,
         stale_generation: Option<u64>,
     ) -> Result<WorkerClient> {
-        let worker_info = self.router.select_worker(block_id).await?;
+        let worker_info = self
+            .router
+            .select_worker_with_replication(block_id, self.config.file_replication_number)
+            .await?;
         let addr = worker_info
             .address
             .as_ref()

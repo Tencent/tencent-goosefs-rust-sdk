@@ -607,9 +607,12 @@ impl GoosefsFileWriter {
         let block_index = self.committed_block_ids.len() as u64;
         let block_id = compute_block_id(file_id, block_index);
 
-        // Select a worker for this block (failed workers are automatically excluded
-        // by WorkerRouter's consistent hashing with failure tracking)
-        let worker_info = self.router.select_worker(block_id).await?;
+        // Select a worker for this block using the same replication.number
+        // count as the read path (Java getBlockWorkers(blockId, count, true)).
+        let worker_info = self
+            .router
+            .select_worker_with_replication(block_id, self.config.file_replication_number)
+            .await?;
         let addr = worker_info
             .address
             .as_ref()

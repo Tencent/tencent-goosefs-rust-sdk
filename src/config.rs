@@ -300,6 +300,16 @@ impl PropertiesMap {
             }
         }
 
+        // File replication: goosefs.user.file.replication.number
+        // Mirrors Java ClientPropertyKey.USER_FILE_REPLICATION_NUMBER (default 1).
+        // Used as the `count` argument when selecting block workers for read/write
+        // so both paths share the same worker set for a given block_id.
+        if let Some(n) = self.get_parsed::<i32>("goosefs.user.file.replication.number") {
+            if n > 0 {
+                cfg.file_replication_number = n;
+            }
+        }
+
         // Block size: goosefs.user.block.size.bytes.default
         if let Some(bs_str) = self.get("goosefs.user.block.size.bytes.default") {
             if let Ok(bs) = parse_byte_size(bs_str) {
@@ -874,6 +884,14 @@ pub const ENV_MASTER_ADDR: &str = "GOOSEFS_MASTER_ADDR";
 /// Environment variable: default write type.
 pub const ENV_WRITE_TYPE: &str = "GOOSEFS_WRITE_TYPE";
 
+/// Environment variable: `goosefs.user.file.replication.number`.
+///
+/// Mirrors [`GoosefsConfig::file_replication_number`]. Default is `1`.
+/// Values `<= 0` or non-numeric input are ignored (default kept).
+///
+/// Example: `export GOOSEFS_USER_FILE_REPLICATION_NUMBER=2`.
+pub const ENV_FILE_REPLICATION_NUMBER: &str = "GOOSEFS_USER_FILE_REPLICATION_NUMBER";
+
 /// Environment variable: block size.
 pub const ENV_BLOCK_SIZE: &str = "GOOSEFS_BLOCK_SIZE";
 
@@ -1397,6 +1415,19 @@ pub struct GoosefsConfig {
     /// If not set (`None`), the server-side default is used (typically `MustCache`).
     /// Use [`GoosefsConfig::with_write_type`] for a type-safe builder.
     pub write_type: Option<i32>,
+
+    /// Target replication level used when selecting block workers.
+    ///
+    /// Mirrors Java `goosefs.user.file.replication.number`
+    /// (`ClientPropertyKey.USER_FILE_REPLICATION_NUMBER`, default `1`).
+    ///
+    /// Passed as `count` to [`WorkerRouter::select_workers`] /
+    /// [`WorkerRouterView::select_workers`] so **read and write** for the same
+    /// `block_id` share the same deterministic worker set. When `> 1`, the
+    /// client returns up to that many host-deduped workers (Java
+    /// `getBlockWorkers(blockId, count, …)` semantics).
+    #[serde(default = "default_file_replication_number")]
+    pub file_replication_number: i32,
 
     // ── Streaming-read tuning() ──────────────────
     /// Sequential-read prefetch window in chunks (default: 8).
@@ -1999,6 +2030,10 @@ fn default_short_circuit_prefetch_max_batch() -> usize {
 }
 
 // ── Streaming-read tuning / master pool defaults() ─────
+fn default_file_replication_number() -> i32 {
+    // Matches Java ClientPropertyKey.USER_FILE_REPLICATION_NUMBER default.
+    1
+}
 fn default_prefetch_window() -> i32 {
     DEFAULT_PREFETCH_WINDOW
 }
@@ -2043,6 +2078,7 @@ impl Default for GoosefsConfig {
             use_vpc_mapping: false,
             root: String::new(),
             write_type: None,
+            file_replication_number: default_file_replication_number(),
             prefetch_window: default_prefetch_window(),
             read_buffer_messages: default_read_buffer_messages(),
             ack_interval_bytes: default_ack_interval_bytes(),
@@ -2289,6 +2325,17 @@ impl GoosefsConfig {
     /// ```
     pub fn with_write_type(mut self, wt: WritePType) -> Self {
         self.write_type = Some(wt as i32);
+        self
+    }
+
+    /// Set [`file_replication_number`](Self::file_replication_number).
+    ///
+    /// Values `<= 0` are ignored (keeps the current value). Default is `1`,
+    /// matching Java `goosefs.user.file.replication.number`.
+    pub fn with_file_replication_number(mut self, n: i32) -> Self {
+        if n > 0 {
+            self.file_replication_number = n;
+        }
         self
     }
 
@@ -2693,6 +2740,15 @@ impl GoosefsConfig {
             }
         }
 
+        // File replication number (goosefs.user.file.replication.number)
+        if let Ok(val) = env::var(ENV_FILE_REPLICATION_NUMBER) {
+            if let Ok(n) = val.parse::<i32>() {
+                if n > 0 {
+                    self.file_replication_number = n;
+                }
+            }
+        }
+
         // Block size
         if let Ok(bs_str) = env::var(ENV_BLOCK_SIZE) {
             if let Ok(bs) = bs_str.parse::<u64>() {
@@ -3036,6 +3092,7 @@ impl GoosefsConfig {
     /// goosefs.master.rpc.port=9200
     /// goosefs.security.authentication.type=SIMPLE
     /// goosefs.user.file.writetype.default=CACHE_THROUGH
+    /// goosefs.user.file.replication.number=1
     /// goosefs.user.block.size.bytes.default=4MB
     /// ```
     ///
@@ -3061,8 +3118,10 @@ impl GoosefsConfig {
     ///
     /// # Priority (highest to lowest)
     ///
-    /// 1. Environment variables (`GOOSEFS_*`)
-    /// 2. Properties config file (see search paths below)
+    /// 1. Environment variables (`GOOSEFS_*`), including
+    ///    [`ENV_FILE_REPLICATION_NUMBER`] (`GOOSEFS_USER_FILE_REPLICATION_NUMBER`)
+    /// 2. Properties config file (see search paths below) — recognises
+    ///    `goosefs.user.file.replication.number` among other keys
     /// 3. Built-in defaults
     ///
     /// # Config file search paths
@@ -3361,6 +3420,7 @@ mod tests {
         assert!(config.master_addrs.is_empty());
         assert_eq!(config.block_size, 64 * 1024 * 1024);
         assert_eq!(config.chunk_size, 1024 * 1024);
+        assert_eq!(config.file_replication_number, 1);
         assert!(!config.is_multi_master());
         assert!(config.validate().is_ok());
     }
@@ -3612,6 +3672,21 @@ mod tests {
     }
 
     #[test]
+    fn test_file_replication_number_builder_and_properties() {
+        let config = GoosefsConfig::new("127.0.0.1:9200").with_file_replication_number(3);
+        assert_eq!(config.file_replication_number, 3);
+        // Non-positive ignored
+        let config = config.with_file_replication_number(0);
+        assert_eq!(config.file_replication_number, 3);
+
+        let cfg = GoosefsConfig::from_properties_str(
+            "goosefs.user.file.replication.number=2\n\
+             goosefs.master.rpc.addresses=127.0.0.1:9200\n",
+        );
+        assert_eq!(cfg.file_replication_number, 2);
+    }
+
+    #[test]
     fn test_write_p_type_all_variants_config() {
         let cases = vec![
             (WritePType::MustCache, 1),
@@ -3811,6 +3886,10 @@ mod tests {
     fn test_env_var_constants() {
         assert_eq!(ENV_MASTER_ADDR, "GOOSEFS_MASTER_ADDR");
         assert_eq!(ENV_WRITE_TYPE, "GOOSEFS_WRITE_TYPE");
+        assert_eq!(
+            ENV_FILE_REPLICATION_NUMBER,
+            "GOOSEFS_USER_FILE_REPLICATION_NUMBER"
+        );
         assert_eq!(ENV_BLOCK_SIZE, "GOOSEFS_BLOCK_SIZE");
         assert_eq!(ENV_CHUNK_SIZE, "GOOSEFS_CHUNK_SIZE");
     }
@@ -3990,6 +4069,72 @@ goosefs.master.rpc.port=9200
         let cfg = GoosefsConfig::default().apply_env();
         std::env::remove_var("GOOSEFS_WRITE_TYPE");
         assert_eq!(cfg.get_write_type(), Some(WritePType::Through));
+    }
+
+    /// `GOOSEFS_USER_FILE_REPLICATION_NUMBER` must be honoured by `apply_env`
+    /// (and therefore by `from_properties_auto`, which overlays env last).
+    #[test]
+    fn test_apply_env_file_replication_number() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(ENV_FILE_REPLICATION_NUMBER, "3");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var(ENV_FILE_REPLICATION_NUMBER);
+        assert_eq!(cfg.file_replication_number, 3);
+    }
+
+    #[test]
+    fn test_apply_env_file_replication_number_invalid_keeps_default() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(ENV_FILE_REPLICATION_NUMBER, "0");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var(ENV_FILE_REPLICATION_NUMBER);
+        assert_eq!(cfg.file_replication_number, 1);
+
+        std::env::set_var(ENV_FILE_REPLICATION_NUMBER, "not-a-number");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var(ENV_FILE_REPLICATION_NUMBER);
+        assert_eq!(cfg.file_replication_number, 1);
+    }
+
+    /// End-to-end: `from_properties_auto` reads
+    /// `goosefs.user.file.replication.number` from the discovered properties
+    /// file, and env overrides the file value.
+    #[test]
+    fn test_from_properties_auto_file_replication_number() {
+        use std::io::Write;
+
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let dir = std::env::temp_dir().join("goosefs_replication_auto_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let props_path = dir.join(PROPERTIES_FILENAME);
+        {
+            let mut f = std::fs::File::create(&props_path).unwrap();
+            writeln!(f, "goosefs.master.rpc.addresses=127.0.0.1:9200").unwrap();
+            writeln!(f, "goosefs.user.file.replication.number=2").unwrap();
+        }
+
+        // Clear env so the file value wins.
+        std::env::remove_var(ENV_FILE_REPLICATION_NUMBER);
+        std::env::set_var(ENV_CONFIG_FILE, props_path.to_str().unwrap());
+
+        let cfg = GoosefsConfig::from_properties_auto().unwrap();
+        assert_eq!(
+            cfg.file_replication_number, 2,
+            "from_properties_auto must read goosefs.user.file.replication.number from file"
+        );
+
+        // Env overrides the file (highest priority).
+        std::env::set_var(ENV_FILE_REPLICATION_NUMBER, "4");
+        let cfg = GoosefsConfig::from_properties_auto().unwrap();
+        assert_eq!(
+            cfg.file_replication_number, 4,
+            "GOOSEFS_USER_FILE_REPLICATION_NUMBER must override the properties file"
+        );
+
+        std::env::remove_var(ENV_FILE_REPLICATION_NUMBER);
+        std::env::remove_var(ENV_CONFIG_FILE);
+        let _ = std::fs::remove_file(&props_path);
     }
 
     #[test]

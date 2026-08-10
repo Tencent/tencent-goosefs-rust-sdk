@@ -315,6 +315,11 @@ class Config:
         """Default ``WriteType`` as the proto integer (1..=5), or
         ``None`` if no explicit default was configured."""
         ...
+    @property
+    def file_replication_number(self) -> int:
+        """Target replication for block-worker selection
+        (``goosefs.user.file.replication.number``, default ``1``)."""
+        ...
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Bytes-like alias

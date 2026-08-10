@@ -545,6 +545,79 @@ impl WorkerRouter {
             })
     }
 
+    /// Select up to `count` workers for `block_id` via consistent hashing.
+    ///
+    /// Mirrors Java `ClientWorkerManager.getBlockWorkers(blockId, count, true)`:
+    /// walk the hash ring from `hash(block_id)`, collect **host-deduped**
+    /// workers, skip failed ones, and return at most `count` results in
+    /// deterministic order.
+    ///
+    /// **Does not** apply local-first preference (Java `getBlockWorkers` is
+    /// hash-only). Read and write paths must both call this with the same
+    /// `goosefs.user.file.replication.number` so they share the worker set.
+    ///
+    /// # Errors
+    ///
+    /// - `count == 0` → `InvalidArgument` (Java rejects `count <= 0`)
+    /// - empty worker list / no eligible worker → `NoWorkerAvailable`
+    pub async fn select_workers(&self, block_id: i64, count: usize) -> Result<Vec<WorkerInfo>> {
+        if count == 0 {
+            return Err(Error::InvalidArgument {
+                message: "count must be greater than 0".to_string(),
+            });
+        }
+
+        let workers = self.workers.load_full();
+        let ring = self.hash_ring.load_full();
+
+        if workers.is_empty() {
+            return Err(Error::NoWorkerAvailable {
+                message: "no workers registered".to_string(),
+            });
+        }
+
+        self.cleanup_expired_failures();
+
+        let selected =
+            consistent_hash_select_n_from_ring(block_id, &workers, &ring, count, true, |key| {
+                self.is_failed(key)
+            });
+        if !selected.is_empty() {
+            return Ok(selected);
+        }
+
+        // Last resort: ignore failure state (same escape hatch as select_worker).
+        let fallback =
+            consistent_hash_select_n_from_ring(block_id, &workers, &ring, count, false, |key| {
+                self.is_failed(key)
+            });
+        if fallback.is_empty() {
+            Err(Error::NoWorkerAvailable {
+                message: format!("no suitable worker for block_id={}", block_id),
+            })
+        } else {
+            Ok(fallback)
+        }
+    }
+
+    /// Select the primary worker for `block_id` using replication count.
+    ///
+    /// See [`WorkerRouterView::select_worker_with_replication`].
+    pub async fn select_worker_with_replication(
+        &self,
+        block_id: i64,
+        replication: i32,
+    ) -> Result<WorkerInfo> {
+        let count = replication.max(1) as usize;
+        let workers = self.select_workers(block_id, count).await?;
+        workers
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::NoWorkerAvailable {
+                message: format!("no suitable worker for block_id={}", block_id),
+            })
+    }
+
     /// Mark a worker as failed (e.g., after a connection error).
     ///
     /// increments `failed_count` iff `insert` returns `None` (a new
@@ -803,6 +876,81 @@ where
         }
     }
     None
+}
+
+/// Select up to `count` host-deduped workers from the ring (Java
+/// `getWorkersByBlockId` / `getBlockWorkers` semantics).
+///
+/// Starts at `hash(block_id)` and walks clockwise. Skips duplicate hosts and
+/// (when `skip_failed`) failed workers. Returns fewer than `count` when the
+/// ring cannot supply enough distinct hosts.
+fn consistent_hash_select_n_from_ring<F>(
+    block_id: i64,
+    workers: &[WorkerInfo],
+    ring: &[(u64, usize)],
+    count: usize,
+    skip_failed: bool,
+    is_failed_fn: F,
+) -> Vec<WorkerInfo>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut selected: Vec<WorkerInfo> = Vec::with_capacity(count.min(workers.len()));
+    if count == 0 || ring.is_empty() || workers.is_empty() {
+        return selected;
+    }
+
+    let target = hash_block_id(block_id);
+    let start = ring
+        .binary_search_by_key(&target, |(h, _)| *h)
+        .unwrap_or_else(|p| p)
+        % ring.len();
+
+    let mut selected_hosts: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(count);
+    // Track worker indices already chosen so workers without a host still
+    // dedupe correctly.
+    let mut selected_idxs: std::collections::HashSet<usize> =
+        std::collections::HashSet::with_capacity(count);
+
+    for offset in 0..ring.len() {
+        if selected.len() >= count {
+            break;
+        }
+        let pos = (start + offset) % ring.len();
+        let worker_idx = ring[pos].1;
+        if selected_idxs.contains(&worker_idx) {
+            continue;
+        }
+        let Some(w) = workers.get(worker_idx) else {
+            continue;
+        };
+
+        let host = w
+            .address
+            .as_ref()
+            .and_then(|a| a.host.clone())
+            .unwrap_or_default();
+        if !host.is_empty() && selected_hosts.contains(&host) {
+            continue;
+        }
+
+        if skip_failed {
+            if let Some(addr) = w.address.as_ref() {
+                if is_failed_fn(&worker_addr_key(addr)) {
+                    continue;
+                }
+            }
+        }
+
+        if !host.is_empty() {
+            selected_hosts.insert(host);
+        }
+        selected_idxs.insert(worker_idx);
+        selected.push(w.clone());
+    }
+
+    selected
 }
 
 /// Wait-free, immutable snapshot of the routing state for a single
@@ -1066,6 +1214,77 @@ impl WorkerRouterView {
         .ok_or_else(|| Error::NoWorkerAvailable {
             message: format!("no suitable worker for block_id={}", block_id),
         })
+    }
+
+    /// Select up to `count` workers for `block_id` via consistent hashing.
+    ///
+    /// Mirrors [`WorkerRouter::select_workers`] — same host-dedupe / failed
+    /// skip / deterministic order so read and write on the same
+    /// `WorkerRouterView` (or sibling views from the same shared ring) agree
+    /// for a given `(block_id, count)`.
+    ///
+    /// **Does not** apply local-first preference.
+    pub async fn select_workers(&self, block_id: i64, count: usize) -> Result<Vec<WorkerInfo>> {
+        if count == 0 {
+            return Err(Error::InvalidArgument {
+                message: "count must be greater than 0".to_string(),
+            });
+        }
+        if self.workers.is_empty() {
+            return Err(Error::NoWorkerAvailable {
+                message: "no workers registered".to_string(),
+            });
+        }
+
+        self.cleanup_expired_failures();
+
+        let selected = consistent_hash_select_n_from_ring(
+            block_id,
+            &self.workers,
+            &self.hash_ring,
+            count,
+            true,
+            |k| self.is_failed(k),
+        );
+        if !selected.is_empty() {
+            return Ok(selected);
+        }
+
+        let fallback = consistent_hash_select_n_from_ring(
+            block_id,
+            &self.workers,
+            &self.hash_ring,
+            count,
+            false,
+            |k| self.is_failed(k),
+        );
+        if fallback.is_empty() {
+            Err(Error::NoWorkerAvailable {
+                message: format!("no suitable worker for block_id={}", block_id),
+            })
+        } else {
+            Ok(fallback)
+        }
+    }
+
+    /// Select the primary worker for `block_id` using replication count.
+    ///
+    /// Equivalent to `select_workers(block_id, replication.max(1))` then taking
+    /// the first entry. Read and write must both use this (with the same
+    /// `GoosefsConfig::file_replication_number`) so they agree on the worker.
+    pub async fn select_worker_with_replication(
+        &self,
+        block_id: i64,
+        replication: i32,
+    ) -> Result<WorkerInfo> {
+        let count = replication.max(1) as usize;
+        let workers = self.select_workers(block_id, count).await?;
+        workers
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::NoWorkerAvailable {
+                message: format!("no suitable worker for block_id={}", block_id),
+            })
     }
 
     /// Pick any eligible worker at random. Mirrors
@@ -1364,6 +1583,80 @@ mod tests {
     async fn test_select_worker_empty() {
         let router = WorkerRouter::new();
         assert!(router.select_worker(123).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_select_workers_count_zero_rejected() {
+        let router = WorkerRouter::new();
+        router
+            .update_workers(vec![make_worker(1, "w1", 9203)])
+            .await;
+        let err = router.select_workers(1, 0).await.unwrap_err();
+        assert!(matches!(err, Error::InvalidArgument { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_select_workers_replication_deterministic() {
+        let router = WorkerRouter::new();
+        let workers = vec![
+            make_worker(1, "w1", 9203),
+            make_worker(2, "w2", 9203),
+            make_worker(3, "w3", 9203),
+            make_worker(4, "w4", 9203),
+        ];
+        router.update_workers(workers).await;
+
+        let block_id = 42_i64;
+        // Same (block_id, count) → same ordered worker set (read/write parity).
+        let a = router.select_workers(block_id, 3).await.unwrap();
+        let b = router.select_workers(block_id, 3).await.unwrap();
+        assert_eq!(a.len(), 3);
+        assert_eq!(b.len(), 3);
+        assert_eq!(
+            a.iter().map(|w| w.id).collect::<Vec<_>>(),
+            b.iter().map(|w| w.id).collect::<Vec<_>>()
+        );
+        // Hosts must be unique (Java getWorkersByBlockId host-dedupe).
+        let hosts: std::collections::HashSet<_> = a
+            .iter()
+            .map(|w| w.address.as_ref().unwrap().host.clone())
+            .collect();
+        assert_eq!(hosts.len(), 3);
+
+        // Primary worker for count=1 equals first of count=N.
+        let primary = router
+            .select_worker_with_replication(block_id, 1)
+            .await
+            .unwrap();
+        assert_eq!(primary.id, a[0].id);
+
+        let primary_n = router
+            .select_worker_with_replication(block_id, 3)
+            .await
+            .unwrap();
+        assert_eq!(primary_n.id, a[0].id);
+    }
+
+    #[tokio::test]
+    async fn test_select_workers_view_matches_shared() {
+        let shared = WorkerRouter::new();
+        shared
+            .update_workers(vec![
+                make_worker(1, "w1", 9203),
+                make_worker(2, "w2", 9203),
+                make_worker(3, "w3", 9203),
+            ])
+            .await;
+        let view = WorkerRouterView::from_shared(&shared);
+        for block_id in [0_i64, 1, 42, 99, 1000] {
+            let a = shared.select_workers(block_id, 2).await.unwrap();
+            let b = view.select_workers(block_id, 2).await.unwrap();
+            assert_eq!(
+                a.iter().map(|w| w.id).collect::<Vec<_>>(),
+                b.iter().map(|w| w.id).collect::<Vec<_>>(),
+                "mismatch at block_id={block_id}"
+            );
+        }
     }
 
     #[tokio::test]
