@@ -160,7 +160,7 @@ async def main() -> None:
         # batched block prefetch), you can skip the master round-trip
         # entirely on subsequent reads.
         block_id = status.block_ids[0]
-        async with await fs.acquire_worker_for_block(block_id) as wc:
+        async with await fs.acquire_worker_for_block(block_id, path=path_file) as wc:
             assert isinstance(wc, AsyncWorkerClient)
             mid = await wc.read_block_positioned(
                 block_id,

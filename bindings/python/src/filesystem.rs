@@ -879,19 +879,24 @@ impl PyAsyncGoosefs {
 
     // ── Worker block direct-read (P6 stage B) ───────────────────────────────
 
-    /// `await fs.acquire_worker_for_block(block_id)` → `AsyncWorkerClient`.
+    /// `await fs.acquire_worker_for_block(block_id, path=None)` → `AsyncWorkerClient`.
     ///
     /// One-stop helper that performs the three steps every direct-block
     /// caller would otherwise have to repeat by hand:
     ///
     /// 1. Pick the responsible worker for `block_id` via the shared
-    ///    `WorkerRouter` using `select_worker_with_replication` (same
-    ///    hash + `goosefs.user.file.replication.number` as Rust
-    ///    `FileReader` / `FileWriter` — no local-first preference).
+    ///    `WorkerRouter` using `select_worker_for_read` (locations-first
+    ///    when `path` is given and Master returns `BlockInfo.locations`;
+    ///    otherwise consistent-hash fallback — same as Rust
+    ///    `FileInStream` / Java `getInStream`).
     /// 2. Format the worker's `host:rpc_port` address.
     /// 3. Acquire an authenticated `WorkerClient` from the shared
     ///    `WorkerClientPool` — connection reuse and single-flight reconnect
     ///    on SASL expiry come for free.
+    ///
+    /// Pass `path` whenever possible so routing can prefer Master
+    /// locations for that block (avoids sending reads to a worker that
+    /// does not hold the cached block).
     ///
     /// The returned [`AsyncWorkerClient`] wraps the same pooled
     /// [`goosefs_sdk::client::WorkerClient`] used internally by
@@ -901,19 +906,27 @@ impl PyAsyncGoosefs {
     /// Closing the returned `AsyncWorkerClient` only releases the binding-
     /// level wrapper; the underlying pooled connection stays in the
     /// `FileSystemContext`'s pool for the next caller.
+    #[pyo3(signature = (block_id, path=None))]
     fn acquire_worker_for_block<'py>(
         &self,
         py: Python<'py>,
         block_id: i64,
+        path: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let h = self.handle()?;
         future_into_py(py, async move {
-            // 1. Route — match Rust file_reader / file_writer selection.
+            let locations = if let Some(ref p) = path {
+                let status = h.fs.get_status(p).await.map_err(map_err)?;
+                crate::positioned_read::block_locations_from_status(&status, block_id)
+            } else {
+                Vec::new()
+            };
+            // Locations-first when path provided; empty → hash fallback.
             let replication = h.ctx.config().file_replication_number;
             let worker_info = h
                 .ctx
                 .acquire_router()
-                .select_worker_with_replication(block_id, replication)
+                .select_worker_for_read(block_id, &locations, replication)
                 .await
                 .map_err(map_err)?;
             let net_addr = worker_info.address.as_ref().ok_or_else(|| {
@@ -1028,9 +1041,16 @@ impl PyAsyncGoosefs {
             // 2–4. Route + acquire + read with SASL auth-failure retry.
             //       Delegated to `positioned_read_with_reauth` so both
             //       async and sync paths share the same retry logic.
-            let bytes =
-                positioned_read_with_reauth(h.ctx, block_id, offset, effective_length, chunk_size)
-                    .await?;
+            let locations = crate::positioned_read::block_locations_from_status(&status, block_id);
+            let bytes = positioned_read_with_reauth(
+                h.ctx,
+                block_id,
+                &locations,
+                offset,
+                effective_length,
+                chunk_size,
+            )
+            .await?;
 
             // 5. Single copy across the PyO3 boundary.
             Python::attach(|py| Ok(pyo3::types::PyBytes::new(py, &bytes).unbind()))

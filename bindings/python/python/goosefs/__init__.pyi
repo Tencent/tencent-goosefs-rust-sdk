@@ -743,8 +743,14 @@ class AsyncGoosefs:
     def acquire_worker_for_block(
         self,
         block_id: int,
+        path: str | None = ...,
     ) -> Awaitable[AsyncWorkerClient]:
         """Pick the responsible Worker for ``block_id`` (router + pool acquire).
+
+        When ``path`` is provided, routing prefers Master
+        ``BlockInfo.locations`` for that block (locations-first, same as
+        Rust / Java read selection). Without ``path``, falls back to
+        consistent-hash only.
 
         Returns a binding-level wrapper around the *pooled*
         ``WorkerClient`` — closing it only releases the wrapper, the
@@ -933,8 +939,13 @@ class Goosefs:
     def acquire_worker_for_block(
         self,
         block_id: int,
+        path: str | None = ...,
     ) -> AsyncWorkerClient:
         """Pick the responsible Worker for ``block_id``.
+
+        When ``path`` is provided, routing prefers Master
+        ``BlockInfo.locations`` (locations-first). Without ``path``,
+        falls back to consistent-hash only.
 
         The returned object is still an :class:`AsyncWorkerClient` — its
         ``read_block_positioned`` method must be ``await``-ed from an

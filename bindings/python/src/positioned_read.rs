@@ -131,6 +131,21 @@ pub(crate) fn resolve_block_id(
     Ok((block_ids[block_index], status.block_size_bytes))
 }
 
+/// Master `BlockInfo.locations` for `block_id`, or empty when unavailable.
+///
+/// Empty → [`WorkerRouter::select_worker_for_read`] falls back to consistent
+/// hash (same as Rust `FileInStream` / Java `getInStream`).
+pub(crate) fn block_locations_from_status(
+    status: &URIStatus,
+    block_id: i64,
+) -> Vec<goosefs_sdk::proto::grpc::BlockLocation> {
+    status
+        .get_block_info(block_id)
+        .and_then(|fbi| fbi.block_info.as_ref())
+        .map(|bi| bi.locations.clone())
+        .unwrap_or_default()
+}
+
 // ── Generic auth-retry helpers (testable) ──────────────────────────────────
 
 /// Acquire a client from the pool, retrying on SASL auth failure.
@@ -271,11 +286,15 @@ where
 pub(crate) async fn positioned_read_with_reauth(
     ctx: Arc<FileSystemContext>,
     block_id: i64,
+    locations: &[goosefs_sdk::proto::grpc::BlockLocation],
     offset: i64,
     effective_length: i64,
     chunk_size: i64,
 ) -> PyResult<Vec<u8>> {
     // 1. Route to the responsible worker.
+    //
+    // Prefer Master BlockInfo.locations (Java getInStream / Rust
+    // `select_worker_for_read`); empty/unmatched → consistent-hash fallback.
     //
     // NOTE on auth-retry routing strategy: the auth-failure retry below
     // (steps 2 + 3) intentionally does **not** re-route to a different
@@ -287,20 +306,15 @@ pub(crate) async fn positioned_read_with_reauth(
     // what the SDK reader-path policy does (`file_reader.rs` /
     // `file_in_stream.rs`) and what the server is prepared for.
     //
-    // Re-running `select_worker_with_replication(block_id, …)` between the
+    // Re-running `select_worker_for_read(block_id, …)` between the
     // failure and the retry would risk landing on a worker that does not
-    // host the block (block_id → worker mapping is consistent-hashed, so
-    // the same call would also tend to return the same worker), and would
-    // not fix any SASL-level failure.  Worker-availability problems (e.g.
-    // a worker marked failed by a concurrent task) are handled by the SDK
-    // reader-path's *separate* worker-failover branch in
-    // `file_reader.rs`, which `positioned_read` does not need to
-    // duplicate because the binding-layer pool already provides
-    // single-flight reconnect.
+    // host the block, and would not fix any SASL-level failure.
+    // TODO(java-parity): count = max(maxRetryNode, replicationNum); shuffle
+    // when replicationNum > 1 (same deferred note as Rust FileInStream).
     let replication = ctx.config().file_replication_number;
     let worker_info = ctx
         .acquire_router()
-        .select_worker_with_replication(block_id, replication)
+        .select_worker_for_read(block_id, locations, replication)
         .await
         .map_err(map_err)?;
     let net_addr = worker_info
