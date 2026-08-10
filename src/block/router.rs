@@ -906,12 +906,13 @@ where
         .unwrap_or_else(|p| p)
         % ring.len();
 
+    let capacity = count.min(workers.len());
     let mut selected_hosts: std::collections::HashSet<String> =
-        std::collections::HashSet::with_capacity(count);
+        std::collections::HashSet::with_capacity(capacity);
     // Track worker indices already chosen so workers without a host still
     // dedupe correctly.
     let mut selected_idxs: std::collections::HashSet<usize> =
-        std::collections::HashSet::with_capacity(count);
+        std::collections::HashSet::with_capacity(capacity);
 
     for offset in 0..ring.len() {
         if selected.len() >= count {
@@ -926,21 +927,19 @@ where
             continue;
         };
 
-        let host = w
-            .address
-            .as_ref()
-            .and_then(|a| a.host.clone())
-            .unwrap_or_default();
-        if !host.is_empty() && selected_hosts.contains(&host) {
+        // Skip address-less workers: callers always need a usable net address,
+        // and selecting one would make the non-empty result look successful
+        // while every read/write path immediately rejects it.
+        let Some(addr) = w.address.as_ref() else {
+            continue;
+        };
+        if skip_failed && is_failed_fn(&worker_addr_key(addr)) {
             continue;
         }
 
-        if skip_failed {
-            if let Some(addr) = w.address.as_ref() {
-                if is_failed_fn(&worker_addr_key(addr)) {
-                    continue;
-                }
-            }
+        let host = addr.host.clone().unwrap_or_default();
+        if !host.is_empty() && selected_hosts.contains(&host) {
+            continue;
         }
 
         if !host.is_empty() {
@@ -1598,11 +1597,13 @@ mod tests {
     #[tokio::test]
     async fn test_select_workers_replication_deterministic() {
         let router = WorkerRouter::new();
+        // Two workers share host "w1" so host-dedupe is actually exercised;
+        // three distinct hosts remain overall.
         let workers = vec![
             make_worker(1, "w1", 9203),
-            make_worker(2, "w2", 9203),
-            make_worker(3, "w3", 9203),
-            make_worker(4, "w4", 9203),
+            make_worker(2, "w1", 9204),
+            make_worker(3, "w2", 9203),
+            make_worker(4, "w3", 9203),
         ];
         router.update_workers(workers).await;
 
@@ -1622,6 +1623,12 @@ mod tests {
             .map(|w| w.address.as_ref().unwrap().host.clone())
             .collect();
         assert_eq!(hosts.len(), 3);
+        // Same-host pair must contribute at most one worker.
+        let w1_count = a
+            .iter()
+            .filter(|w| w.address.as_ref().unwrap().host.as_deref() == Some("w1"))
+            .count();
+        assert_eq!(w1_count, 1);
 
         // Primary worker for count=1 equals first of count=N.
         let primary = router
@@ -1635,6 +1642,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(primary_n.id, a[0].id);
+    }
+
+    #[tokio::test]
+    async fn test_select_workers_skips_address_less() {
+        let router = WorkerRouter::new();
+        let mut no_addr = make_worker(99, "ignored", 9203);
+        no_addr.address = None;
+        router
+            .update_workers(vec![
+                no_addr,
+                make_worker(1, "w1", 9203),
+                make_worker(2, "w2", 9203),
+            ])
+            .await;
+
+        let selected = router.select_workers(7, 2).await.unwrap();
+        assert_eq!(selected.len(), 2);
+        assert!(selected.iter().all(|w| w.address.is_some()));
+        assert!(selected.iter().all(|w| w.id != Some(99)));
     }
 
     #[tokio::test]
