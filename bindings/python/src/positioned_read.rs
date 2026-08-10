@@ -287,19 +287,20 @@ pub(crate) async fn positioned_read_with_reauth(
     // what the SDK reader-path policy does (`file_reader.rs` /
     // `file_in_stream.rs`) and what the server is prepared for.
     //
-    // Re-running `select_worker(block_id)` between the failure and the
-    // retry would risk landing on a worker that does not host the block
-    // (block_id → worker mapping is consistent-hashed, so the same call
-    // would also tend to return the same worker), and would not fix any
-    // SASL-level failure.  Worker-availability problems (e.g. a worker
-    // marked failed by a concurrent task) are handled by the SDK
+    // Re-running `select_worker_with_replication(block_id, …)` between the
+    // failure and the retry would risk landing on a worker that does not
+    // host the block (block_id → worker mapping is consistent-hashed, so
+    // the same call would also tend to return the same worker), and would
+    // not fix any SASL-level failure.  Worker-availability problems (e.g.
+    // a worker marked failed by a concurrent task) are handled by the SDK
     // reader-path's *separate* worker-failover branch in
     // `file_reader.rs`, which `positioned_read` does not need to
     // duplicate because the binding-layer pool already provides
     // single-flight reconnect.
+    let replication = ctx.config().file_replication_number;
     let worker_info = ctx
         .acquire_router()
-        .select_worker(block_id)
+        .select_worker_with_replication(block_id, replication)
         .await
         .map_err(map_err)?;
     let net_addr = worker_info

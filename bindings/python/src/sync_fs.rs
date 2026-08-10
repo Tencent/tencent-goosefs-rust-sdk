@@ -652,10 +652,11 @@ impl PyGoosefs {
     ) -> PyResult<crate::worker::PyAsyncWorkerClient> {
         let h = self.handle()?;
         Self::guarded_block_on(py, async move {
+            let replication = h.ctx.config().file_replication_number;
             let worker_info = h
                 .ctx
                 .acquire_router()
-                .select_worker(block_id)
+                .select_worker_with_replication(block_id, replication)
                 .await
                 .map_err(map_err)?;
             let net_addr = worker_info

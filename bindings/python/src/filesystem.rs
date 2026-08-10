@@ -885,8 +885,9 @@ impl PyAsyncGoosefs {
     /// caller would otherwise have to repeat by hand:
     ///
     /// 1. Pick the responsible worker for `block_id` via the shared
-    ///    `WorkerRouter` (consistent hash + local-worker preference +
-    ///    failure filtering).
+    ///    `WorkerRouter` using `select_worker_with_replication` (same
+    ///    hash + `goosefs.user.file.replication.number` as Rust
+    ///    `FileReader` / `FileWriter` — no local-first preference).
     /// 2. Format the worker's `host:rpc_port` address.
     /// 3. Acquire an authenticated `WorkerClient` from the shared
     ///    `WorkerClientPool` — connection reuse and single-flight reconnect
@@ -907,11 +908,12 @@ impl PyAsyncGoosefs {
     ) -> PyResult<Bound<'py, PyAny>> {
         let h = self.handle()?;
         future_into_py(py, async move {
-            // 1. Route.
+            // 1. Route — match Rust file_reader / file_writer selection.
+            let replication = h.ctx.config().file_replication_number;
             let worker_info = h
                 .ctx
                 .acquire_router()
-                .select_worker(block_id)
+                .select_worker_with_replication(block_id, replication)
                 .await
                 .map_err(map_err)?;
             let net_addr = worker_info.address.as_ref().ok_or_else(|| {
