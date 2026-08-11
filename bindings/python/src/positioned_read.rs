@@ -83,7 +83,14 @@ pub(crate) const DEFAULT_CHUNK_SIZE: i64 = 1 << 20;
 ///
 /// # Returns
 ///
-/// `(block_id, block_size_bytes)` on success.
+/// `(block_id, actual_block_length)` on success.
+///
+/// `actual_block_length` is the number of bytes stored in that block (the
+/// trailing / only block of a short file is often smaller than the file's
+/// configured `block_size_bytes`). Callers that pass `length=-1` ("read to
+/// end of block") must use this value — requesting the configured block size
+/// makes [`GrpcBlockReader::positioned_read`] fail with a short-read error
+/// when the worker half-closes after delivering the real data.
 ///
 /// # Errors
 ///
@@ -128,7 +135,48 @@ pub(crate) fn resolve_block_id(
             block_ids.len()
         )));
     }
-    Ok((block_ids[block_index], status.block_size_bytes))
+    let block_id = block_ids[block_index];
+    Ok((block_id, actual_block_length(status, block_id, block_index)))
+}
+
+/// Bytes stored in `block_id` / `block_index` for this file.
+///
+/// Preference order:
+/// 1. `FileBlockInfo.block_info.length` when Master populated it
+/// 2. `min(configured block_size, file_length - block_offset)`
+/// 3. configured `block_size_bytes` as a last resort
+fn actual_block_length(status: &URIStatus, block_id: i64, block_index: usize) -> i64 {
+    let configured = status.block_size_bytes.max(0);
+    if let Some(fbi) = status.get_block_info(block_id) {
+        if let Some(len) = fbi.block_info.as_ref().and_then(|bi| bi.length) {
+            if len > 0 {
+                return len;
+            }
+        }
+        let offset = fbi.offset.unwrap_or(0).max(0);
+        let remaining = status.length.saturating_sub(offset);
+        if remaining > 0 {
+            return if configured > 0 {
+                remaining.min(configured)
+            } else {
+                remaining
+            };
+        }
+    }
+    let offset = if configured > 0 {
+        (block_index as i64).saturating_mul(configured)
+    } else {
+        0
+    };
+    let remaining = status.length.saturating_sub(offset);
+    if remaining > 0 {
+        return if configured > 0 {
+            remaining.min(configured)
+        } else {
+            remaining
+        };
+    }
+    configured
 }
 
 /// Master `BlockInfo.locations` for `block_id`, or empty when unavailable.
@@ -382,10 +430,80 @@ pub(crate) async fn positioned_read_with_reauth(
 mod tests {
     use goosefs_sdk::client::WorkerClient;
     use goosefs_sdk::error::Error;
+    use goosefs_sdk::proto::grpc::file::{FileBlockInfo, FileInfo};
+    use goosefs_sdk::proto::grpc::BlockInfo;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use super::*;
+
+    fn status_with_blocks(
+        length: i64,
+        block_size_bytes: i64,
+        blocks: &[(i64, i64, i64)], // (block_id, offset, block_length)
+    ) -> URIStatus {
+        let file_block_infos: Vec<FileBlockInfo> = blocks
+            .iter()
+            .map(|(id, offset, blen)| FileBlockInfo {
+                block_info: Some(BlockInfo {
+                    block_id: Some(*id),
+                    length: Some(*blen),
+                    max_replicas: None,
+                    locations: vec![],
+                }),
+                offset: Some(*offset),
+                ufs_locations: vec![],
+                ufs_string_locations: vec![],
+            })
+            .collect();
+        let block_ids: Vec<i64> = blocks.iter().map(|(id, _, _)| *id).collect();
+        URIStatus::from_proto(FileInfo {
+            length: Some(length),
+            block_size_bytes: Some(block_size_bytes),
+            block_ids,
+            file_block_infos,
+            completed: Some(true),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn resolve_block_id_uses_actual_length_for_short_file() {
+        // 1 MiB file with 64 MiB configured block size — CI positioned_read
+        // example regression: length=-1 must not request 64 MiB.
+        let status = status_with_blocks(1 << 20, 64 << 20, &[(1879048192, 0, 1 << 20)]);
+        let (id, len) = resolve_block_id(&status, 0, "/blob.bin").unwrap();
+        assert_eq!(id, 1879048192);
+        assert_eq!(len, 1 << 20);
+    }
+
+    #[test]
+    fn resolve_block_id_clamps_via_file_length_without_block_info_length() {
+        let status = URIStatus::from_proto(FileInfo {
+            length: Some(1 << 20),
+            block_size_bytes: Some(64 << 20),
+            block_ids: vec![42],
+            file_block_infos: vec![],
+            completed: Some(true),
+            ..Default::default()
+        });
+        let (id, len) = resolve_block_id(&status, 0, "/blob.bin").unwrap();
+        assert_eq!(id, 42);
+        assert_eq!(len, 1 << 20);
+    }
+
+    #[test]
+    fn resolve_block_id_keeps_full_middle_block_length() {
+        let status = status_with_blocks(
+            (64 << 20) + 100,
+            64 << 20,
+            &[(1, 0, 64 << 20), (2, 64 << 20, 100)],
+        );
+        let (_, len0) = resolve_block_id(&status, 0, "/big.bin").unwrap();
+        let (_, len1) = resolve_block_id(&status, 1, "/big.bin").unwrap();
+        assert_eq!(len0, 64 << 20);
+        assert_eq!(len1, 100);
+    }
 
     // ── Helper: fabricate a WorkerClient from a never-connected channel ────
     //

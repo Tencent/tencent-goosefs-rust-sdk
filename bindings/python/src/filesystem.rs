@@ -1015,20 +1015,16 @@ impl PyAsyncGoosefs {
             //    written files — see `positioned_read::resolve_block_id` docs.
             let status = h.fs.get_status(&path).await.map_err(map_err)?;
             let (block_id, block_size) = resolve_block_id(&status, block_index, &path)?;
+            // `block_size` is the *actual* stored length of this block (see
+            // `resolve_block_id`), which may be smaller than the file's
+            // configured `block_size_bytes` for a trailing/short block.
             if offset >= block_size {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "offset={} >= block_size_bytes={}",
+                    "offset={} >= actual_block_length={}",
                     offset, block_size
                 )));
             }
-            // -1 ⇒ "read to end of block" (clamped at block size). The SDK
-            // also clamps at block boundary, but checking up-front lets us
-            // surface a clean ValueError instead of an obscure RPC error.
-            //
-            // Note: for the **last block** of a file the actual block size
-            // may be smaller than `block_size_bytes` reported by master,
-            // so `effective_length` may be larger than the real data. The
-            // SDK's short-read handling returns only the available bytes.
+            // -1 ⇒ "read to end of block" (clamped at actual block length).
             let effective_length = if length < 0 {
                 block_size - offset
             } else {

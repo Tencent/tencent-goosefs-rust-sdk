@@ -226,6 +226,7 @@ message CheckBlocksRequest {
   repeated int64 block_ids = 1;
 }
 
+// GooseFS 2.1.0 / branch-2.1.0 wire format: existence only.
 message CheckBlocksResponse {
   map<int64, bool> block_exists = 1;
 }

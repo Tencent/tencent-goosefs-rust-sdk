@@ -589,6 +589,25 @@ impl WorkerClient {
         Ok((first, guard))
     }
 
+    /// Probe this worker for which of `block_ids` exist in the local block store.
+    ///
+    /// Mirrors Java 2.1.0 `BlockWorkerClient.checkBlocks` /
+    /// `CheckBlocksResponse.block_exists`. Returns `block_id → exists`.
+    #[instrument(skip(self, block_ids), fields(block_count = block_ids.len()))]
+    pub async fn check_blocks(
+        &self,
+        block_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, bool>> {
+        if block_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let req = crate::proto::grpc::block::CheckBlocksRequest {
+            block_ids: block_ids.to_vec(),
+        };
+        let resp = self.inner.clone().check_blocks(req).await?;
+        Ok(resp.into_inner().block_exists)
+    }
+
     /// Start a bidirectional streaming WriteBlock RPC.
     ///
     /// Returns a [`WriteBlockHandle`] that manages the background gRPC task.

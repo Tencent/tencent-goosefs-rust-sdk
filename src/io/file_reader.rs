@@ -287,20 +287,21 @@ impl GoosefsFileReader {
         // (zero clone on the insert path too — the old code did
         // `fetched.clone()` for the cache + moved `fetched` out).
         let file_info_cache = ctx.acquire_file_info_cache();
-        let file_info = if let Some(cached) = file_info_cache.as_ref().and_then(|c| c.get(path)) {
+        let mut file_info = if let Some(cached) = file_info_cache.as_ref().and_then(|c| c.get(path))
+        {
             debug!(path = %path, "FileInfo cache hit — Arc clone, zero deep copy");
-            cached
+            (*cached).clone()
         } else {
             let master = ctx.acquire_master();
             let fetched = master.get_status(path).await?;
             // Wrap once in Arc; the cache stores an Arc clone (atomic
-            // inc) and we keep the original Arc — zero deep copy on
-            // both the insert and the return path (S3).
+            // inc). Enrichment below mutates a separate owned copy so
+            // CheckBlocks locations are never written back into the cache.
             let arc_fetched = Arc::new(fetched);
             if let Some(cache) = &file_info_cache {
                 cache.insert_arc(path, Arc::clone(&arc_fetched));
             }
-            arc_fetched
+            (*arc_fetched).clone()
         };
 
         let file_length = file_info.length.unwrap_or(0);
@@ -332,7 +333,18 @@ impl GoosefsFileReader {
         let router = WorkerRouterView::from_shared(&shared_router);
         debug!("reusing worker snapshot from context (A1)");
 
-        Ok((file_info, router))
+        let pool = ctx.acquire_worker_pool();
+        let config = ctx.config();
+        crate::block::maybe_enrich_file_block_locations(
+            &mut file_info,
+            &router,
+            Some(&pool),
+            config,
+            config.check_block_replicas,
+        )
+        .await;
+
+        Ok((Arc::new(file_info), router))
     }
 
     /// Internal: build the reader from file info and router.

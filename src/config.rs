@@ -310,6 +310,13 @@ impl PropertiesMap {
             }
         }
 
+        // CheckBlocks probe width (Java GetStatusPOptions.checkBlockReplicas).
+        if let Some(n) = self.get_parsed::<i32>("goosefs.user.file.check.block.replicas") {
+            if n >= 0 {
+                cfg.check_block_replicas = n;
+            }
+        }
+
         // Block size: goosefs.user.block.size.bytes.default
         if let Some(bs_str) = self.get("goosefs.user.block.size.bytes.default") {
             if let Ok(bs) = parse_byte_size(bs_str) {
@@ -892,6 +899,15 @@ pub const ENV_WRITE_TYPE: &str = "GOOSEFS_WRITE_TYPE";
 /// Example: `export GOOSEFS_USER_FILE_REPLICATION_NUMBER=2`.
 pub const ENV_FILE_REPLICATION_NUMBER: &str = "GOOSEFS_USER_FILE_REPLICATION_NUMBER";
 
+/// Environment variable: `goosefs.user.file.check.block.replicas`.
+///
+/// Mirrors [`GoosefsConfig::check_block_replicas`]. Default is `1`.
+/// Values `< 0` or non-numeric input are ignored. `0` disables CheckBlocks
+/// location enrichment.
+///
+/// Example: `export GOOSEFS_USER_FILE_CHECK_BLOCK_REPLICAS=0`.
+pub const ENV_CHECK_BLOCK_REPLICAS: &str = "GOOSEFS_USER_FILE_CHECK_BLOCK_REPLICAS";
+
 /// Environment variable: block size.
 pub const ENV_BLOCK_SIZE: &str = "GOOSEFS_BLOCK_SIZE";
 
@@ -1433,6 +1449,21 @@ pub struct GoosefsConfig {
     /// Java ASYNC_THROUGH `getOutStream` + `filterNoSpaceWorkers`. Deferred.
     #[serde(default = "default_file_replication_number")]
     pub file_replication_number: i32,
+
+    /// How many hash-selected workers to probe per block via `CheckBlocks`
+    /// when enriching `FileInfo.locations` (Java `checkBlockReplicas` /
+    /// `fs stat --check_replicas`).
+    ///
+    /// Master `GetStatus` often returns empty locations even when blocks are
+    /// cached on workers. When this value is `> 0`, open/read paths (and
+    /// [`BaseFileSystem::get_status`](crate::fs::base_filesystem::BaseFileSystem::get_status))
+    /// probe workers and overwrite locations — matching Java
+    /// `populateFilePercentage` / default `fs stat` behaviour.
+    ///
+    /// Default is `1` (same as Java `fs stat`). Set to `0` to skip probing
+    /// (Java `openFile` / `getStatusDefaults` leave this unset).
+    #[serde(default = "default_check_block_replicas")]
+    pub check_block_replicas: i32,
 
     // ── Streaming-read tuning() ──────────────────
     /// Sequential-read prefetch window in chunks (default: 8).
@@ -2039,6 +2070,12 @@ fn default_file_replication_number() -> i32 {
     // Matches Java ClientPropertyKey.USER_FILE_REPLICATION_NUMBER default.
     1
 }
+
+fn default_check_block_replicas() -> i32 {
+    // Matches Java `fs stat` default `--check_replicas=1` so open/read can
+    // discover worker-cached blocks when Master locations are empty.
+    1
+}
 fn default_prefetch_window() -> i32 {
     DEFAULT_PREFETCH_WINDOW
 }
@@ -2084,6 +2121,7 @@ impl Default for GoosefsConfig {
             root: String::new(),
             write_type: None,
             file_replication_number: default_file_replication_number(),
+            check_block_replicas: default_check_block_replicas(),
             prefetch_window: default_prefetch_window(),
             read_buffer_messages: default_read_buffer_messages(),
             ack_interval_bytes: default_ack_interval_bytes(),
@@ -2340,6 +2378,16 @@ impl GoosefsConfig {
     pub fn with_file_replication_number(mut self, n: i32) -> Self {
         if n > 0 {
             self.file_replication_number = n;
+        }
+        self
+    }
+
+    /// Set [`check_block_replicas`](Self::check_block_replicas).
+    ///
+    /// `n < 0` is ignored. `0` disables CheckBlocks enrichment.
+    pub fn with_check_block_replicas(mut self, n: i32) -> Self {
+        if n >= 0 {
+            self.check_block_replicas = n;
         }
         self
     }
@@ -2750,6 +2798,15 @@ impl GoosefsConfig {
             if let Ok(n) = val.parse::<i32>() {
                 if n > 0 {
                     self.file_replication_number = n;
+                }
+            }
+        }
+
+        // CheckBlocks replicas (goosefs.user.file.check.block.replicas)
+        if let Ok(val) = env::var(ENV_CHECK_BLOCK_REPLICAS) {
+            if let Ok(n) = val.parse::<i32>() {
+                if n >= 0 {
+                    self.check_block_replicas = n;
                 }
             }
         }

@@ -235,23 +235,9 @@ impl GoosefsFileInStream {
             .map_err(|e| Error::ConfigError { message: e })?;
 
         let master = MasterClient::connect(config).await?;
-        let file_info = master.get_status(path).await?;
+        let mut file_info = master.get_status(path).await?;
 
-        let status = URIStatus::from_proto(file_info);
-
-        // Reject INCOMPLETE non-folder files
-        if status.is_folder() {
-            return Err(Error::OpenDirectory {
-                path: path.to_string(),
-            });
-        }
-        if !status.is_completed() {
-            return Err(Error::FileIncomplete {
-                message: format!("{path} is incomplete"),
-            });
-        }
-
-        // Discover workers
+        // Discover workers before CheckBlocks enrichment (needs the router).
         let inquire_client = master.inquire_client().clone();
         let wm = WorkerManagerClient::connect_with_inquire(config, inquire_client).await?;
         let workers = wm.get_worker_info_list().await?;
@@ -273,6 +259,31 @@ impl GoosefsFileInStream {
         // `test_view_from_workers_no_local_first_when_not_probed`.
         let router =
             WorkerRouterView::from_workers(workers, WorkerRouterView::default_failure_ttl());
+
+        // Java populateFilePercentage / fs stat --check_replicas: probe workers
+        // so empty Master locations become usable for select_worker_for_read.
+        crate::block::maybe_enrich_file_block_locations(
+            &mut file_info,
+            &router,
+            None,
+            config,
+            config.check_block_replicas,
+        )
+        .await;
+
+        let status = URIStatus::from_proto(file_info);
+
+        // Reject INCOMPLETE non-folder files
+        if status.is_folder() {
+            return Err(Error::OpenDirectory {
+                path: path.to_string(),
+            });
+        }
+        if !status.is_completed() {
+            return Err(Error::FileIncomplete {
+                message: format!("{path} is incomplete"),
+            });
+        }
 
         let file_length = status.length;
 
@@ -337,7 +348,8 @@ impl GoosefsFileInStream {
         // miss, populate the cache after a successful `get_status`. Cache is
         // `None` unless the caller has opted in via `with_file_info_cache_ttl`.
         let file_info_cache = ctx.acquire_file_info_cache();
-        let file_info = if let Some(cached) = file_info_cache.as_ref().and_then(|c| c.get(path)) {
+        let mut file_info = if let Some(cached) = file_info_cache.as_ref().and_then(|c| c.get(path))
+        {
             debug!(path = %path, "FileInfo cache hit");
             // S3: `cached` is `Arc<FileInfo>`; `from_proto` needs owned
             // `FileInfo`, so one clone is unavoidable here (it moves
@@ -352,13 +364,37 @@ impl GoosefsFileInStream {
             // avoiding the old `fetched.clone()` for the cache. The
             // caller still needs owned `FileInfo` for `from_proto`, so
             // we clone once here — but that's one clone instead of two.
+            // Cache stores Master-only metadata (no CheckBlocks enrichment).
             let arc_fetched = Arc::new(fetched);
             if let Some(cache) = &file_info_cache {
                 cache.insert_arc(path, Arc::clone(&arc_fetched));
             }
-            // Clone out of the Arc for `from_proto` (which moves).
+            // Clone out of the Arc for enrichment + `from_proto` (which moves).
             (*arc_fetched).clone()
         };
+
+        // Reuse shared router — already populated and TTL-refreshed.
+        // A1: clone the workers +
+        // hash_ring `Arc`s wait-free instead of rebuilding the ring. Failure
+        // isolation is preserved via the new router's own `failed_workers`
+        // DashMap.
+        let shared_router = ctx.acquire_router();
+        let router = WorkerRouterView::from_shared(&shared_router);
+        let worker_pool = ctx.acquire_worker_pool();
+
+        // Java populateFilePercentage / fs stat --check_replicas: probe workers
+        // so empty Master locations become usable for select_worker_for_read.
+        // Enrich a local clone only — never write probed locations back into
+        // the FileInfo cache.
+        crate::block::maybe_enrich_file_block_locations(
+            &mut file_info,
+            &router,
+            Some(&worker_pool),
+            &config,
+            config.check_block_replicas,
+        )
+        .await;
+
         let status = URIStatus::from_proto(file_info);
 
         // Reject INCOMPLETE non-folder files
@@ -373,16 +409,7 @@ impl GoosefsFileInStream {
             });
         }
 
-        // Reuse shared router — already populated and TTL-refreshed.
-        // A1: clone the workers +
-        // hash_ring `Arc`s wait-free instead of rebuilding the ring. Failure
-        // isolation is preserved via the new router's own `failed_workers`
-        // DashMap.
-        let shared_router = ctx.acquire_router();
-        let router = WorkerRouterView::from_shared(&shared_router);
-
         let file_length = status.length;
-        let worker_pool = ctx.acquire_worker_pool();
 
         // Reuse the context-shared short-circuit factory (P8): all streams from
         // this context share one hot-block reader LRU, so a hot local block is

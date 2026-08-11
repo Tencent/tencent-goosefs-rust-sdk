@@ -724,9 +724,12 @@ impl PyGoosefs {
             let status = h.fs.get_status(&path).await.map_err(map_err)?;
             let (block_id, block_size) =
                 crate::positioned_read::resolve_block_id(&status, block_index, &path)?;
+            // `block_size` is the *actual* stored length of this block (see
+            // `resolve_block_id`), which may be smaller than the file's
+            // configured `block_size_bytes` for a trailing/short block.
             if offset >= block_size {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "offset={} >= block_size_bytes={}",
+                    "offset={} >= actual_block_length={}",
                     offset, block_size
                 )));
             }
