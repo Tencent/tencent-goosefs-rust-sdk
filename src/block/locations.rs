@@ -79,16 +79,29 @@ pub fn ensure_block_ids_from_file_block_infos(file_info: &mut FileInfo) {
     file_info.block_ids = pairs.into_iter().map(|(_, id)| id).collect();
 }
 
+/// Result of probing workers for block cache locations.
+struct ProbedLocations {
+    /// Locations discovered via successful `CheckBlocks` RPCs.
+    locations: HashMap<i64, Vec<BlockLocation>>,
+    /// Blocks that received ≥1 successful CheckBlocks response (authoritative
+    /// even when the returned location list is empty). Blocks missing from
+    /// this set had only failed/skipped probes — Master locations are kept.
+    probed_ok: HashSet<i64>,
+}
+
 /// Overwrite `FileInfo` block locations by probing workers via `CheckBlocks`.
 ///
 /// Mirrors Java `GooseFSBlockStore.getFileBlockLocations` +
-/// `BaseFileSystem.populateFilePercentage`.
+/// `BaseFileSystem.populateFilePercentage`, with one intentional hardening:
+/// Master locations are retained when every probe for a block failed
+/// (connect/RPC error), so a transient failure does not wipe known locations
+/// and force hash fallback. A successful probe that reports "not present"
+/// still overwrites with `[]` (authoritative negative).
 ///
 /// - `check_count == 0`: no-op (Java when `checkBlockReplicas` unset / 0).
 /// - Failures talking to individual workers are logged and skipped; other
 ///   workers still contribute locations.
-/// - Always recomputes `in_goose_fs_percentage` from probed `cached_bytes`
-///   when `check_count > 0` and the file has block infos.
+/// - Recomputes `in_goose_fs_percentage` from the post-merge locations.
 pub async fn enrich_file_block_locations_with_router(
     file_info: &mut FileInfo,
     router: &WorkerRouter,
@@ -125,9 +138,16 @@ pub async fn enrich_file_block_locations(
         return Ok(());
     }
 
-    let fetched = fetch_block_locations(router, pool, config, &block_ids, check_count).await?;
+    let probed = fetch_block_locations(router, pool, config, &block_ids, check_count).await?;
+    apply_probed_locations(file_info, &probed);
+    Ok(())
+}
 
-    // Overwrite Master locations with probed ones (Java populateFilePercentage).
+/// Apply probe results onto `FileInfo`.
+///
+/// - Block in `probed_ok`: overwrite Master locations (empty = authoritative miss).
+/// - Block not in `probed_ok`: keep Master locations (probe never succeeded).
+fn apply_probed_locations(file_info: &mut FileInfo, probed: &ProbedLocations) {
     for fbi in &mut file_info.file_block_infos {
         let Some(bi) = fbi.block_info.as_mut() else {
             continue;
@@ -135,26 +155,36 @@ pub async fn enrich_file_block_locations(
         let Some(block_id) = bi.block_id else {
             continue;
         };
-        if let Some(locations) = fetched.get(&block_id) {
-            bi.locations = locations.clone();
+        if !probed.probed_ok.contains(&block_id) {
+            continue;
         }
+        bi.locations = probed.locations.get(&block_id).cloned().unwrap_or_default();
     }
-
-    recompute_in_goosefs_percentage(file_info, &fetched);
-    Ok(())
+    recompute_in_goosefs_percentage(file_info);
 }
 
-/// Hash-select workers per block, batch `CheckBlocks`, return locations with
-/// `cached_bytes > 0`.
+/// Outcome of one worker's CheckBlocks RPC.
+enum WorkerCheckOutcome {
+    /// RPC succeeded for `queried` block ids (map may omit absent blocks).
+    Ok {
+        worker: WorkerInfo,
+        queried: Vec<i64>,
+        exists: HashMap<i64, bool>,
+    },
+    /// Connect or RPC failed — do not treat queried blocks as probed.
+    Failed,
+}
+
+/// Hash-select workers per block, batch `CheckBlocks`.
 async fn fetch_block_locations(
     router: &WorkerRouterView,
     pool: Option<&Arc<WorkerClientPool>>,
     config: &GoosefsConfig,
     block_ids: &[i64],
     check_count: usize,
-) -> Result<HashMap<i64, Vec<BlockLocation>>> {
-    let mut result: HashMap<i64, Vec<BlockLocation>> =
-        block_ids.iter().map(|id| (*id, Vec::new())).collect();
+) -> Result<ProbedLocations> {
+    let mut locations: HashMap<i64, Vec<BlockLocation>> = HashMap::new();
+    let mut probed_ok: HashSet<i64> = HashSet::new();
 
     // block_id → candidate workers (Java getBlockWorkers).
     let mut block_to_workers: HashMap<i64, Vec<WorkerInfo>> = HashMap::new();
@@ -193,7 +223,7 @@ async fn fetch_block_locations(
     // Parallel CheckBlocks per worker.
     let mut tasks = Vec::with_capacity(worker_to_blocks.len());
     for (endpoint, (worker, ids)) in worker_to_blocks {
-        let ids: Vec<i64> = ids.into_iter().collect();
+        let queried: Vec<i64> = ids.into_iter().collect();
         let pool = pool.cloned();
         let config = config.clone();
         tasks.push(async move {
@@ -205,56 +235,74 @@ async fn fetch_block_locations(
                         error = %e,
                         "checkBlocks: failed to connect worker"
                     );
-                    return (worker, HashMap::new());
+                    return WorkerCheckOutcome::Failed;
                 }
             };
-            match client.check_blocks(&ids).await {
-                Ok(map) => (worker, map),
+            match client.check_blocks(&queried).await {
+                Ok(exists) => WorkerCheckOutcome::Ok {
+                    worker,
+                    queried,
+                    exists,
+                },
                 Err(e) => {
                     warn!(
                         worker = %endpoint,
                         error = %e,
                         "checkBlocks: RPC failed"
                     );
-                    (worker, HashMap::new())
+                    WorkerCheckOutcome::Failed
                 }
             }
         });
     }
 
     let outcomes = futures::future::join_all(tasks).await;
-    for (worker, exists_map) in outcomes {
+    for outcome in outcomes {
+        let WorkerCheckOutcome::Ok {
+            worker,
+            queried,
+            exists,
+        } = outcome
+        else {
+            continue;
+        };
+
+        // Successful RPC is authoritative for every queried block id, even
+        // when the map omits them or reports exists=false.
+        for &block_id in &queried {
+            probed_ok.insert(block_id);
+            locations.entry(block_id).or_default();
+        }
+
         let worker_id = worker.id;
         let address = worker.address.clone();
-        for (block_id, exists) in exists_map {
-            if !exists {
+        for (block_id, present) in exists {
+            if !present {
                 continue;
             }
-            if let Some(locations) = result.get_mut(&block_id) {
-                locations.push(BlockLocation {
-                    worker_id,
-                    worker_address: address.clone(),
-                });
-                debug!(
-                    block_id,
-                    worker_id = ?worker_id,
-                    "checkBlocks: block_exists=true on worker"
-                );
-            }
+            locations.entry(block_id).or_default().push(BlockLocation {
+                worker_id,
+                worker_address: address.clone(),
+            });
+            debug!(
+                block_id,
+                worker_id = ?worker_id,
+                "checkBlocks: block_exists=true on worker"
+            );
         }
     }
 
-    Ok(result)
+    Ok(ProbedLocations {
+        locations,
+        probed_ok,
+    })
 }
 
-/// Recompute `in_goose_fs_percentage` from probed locations.
+/// Recompute `in_goose_fs_percentage` from current `FileInfo` locations.
 ///
 /// GooseFS 2.1.0 `CheckBlocks` returns existence (`bool`) only. When a
 /// location exists we count the full block length toward the percentage.
-fn recompute_in_goosefs_percentage(
-    file_info: &mut FileInfo,
-    fetched: &HashMap<i64, Vec<BlockLocation>>,
-) {
+fn recompute_in_goosefs_percentage(file_info: &mut FileInfo) {
     let file_length = file_info.length.unwrap_or(0);
     if file_length == 0 {
         file_info.in_goose_fs_percentage = Some(100);
@@ -268,14 +316,7 @@ fn recompute_in_goosefs_percentage(
         let Some(bi) = fbi.block_info.as_ref() else {
             continue;
         };
-        let Some(block_id) = bi.block_id else {
-            continue;
-        };
-        let locations = fetched
-            .get(&block_id)
-            .map(|v| v.as_slice())
-            .unwrap_or(bi.locations.as_slice());
-        if locations.is_empty() {
+        if bi.locations.is_empty() {
             continue;
         }
         let block_length = bi.length.unwrap_or(0).max(0);
@@ -329,6 +370,16 @@ mod tests {
         }
     }
 
+    fn master_loc(worker_id: i64, host: &str) -> BlockLocation {
+        BlockLocation {
+            worker_id: Some(worker_id),
+            worker_address: Some(WorkerNetAddress {
+                host: Some(host.into()),
+                ..Default::default()
+            }),
+        }
+    }
+
     #[test]
     fn test_ensure_block_ids_from_file_block_infos() {
         let mut fi = FileInfo {
@@ -360,33 +411,17 @@ mod tests {
             file_block_infos: vec![fbi(1, 0, 100), fbi(2, 100, 100)],
             ..Default::default()
         };
-        let mut fetched = HashMap::new();
-        fetched.insert(
-            1,
-            vec![BlockLocation {
-                worker_id: Some(1),
-                worker_address: Some(WorkerNetAddress {
-                    host: Some("w1".into()),
-                    ..Default::default()
-                }),
-            }],
-        );
-        fetched.insert(
-            2,
-            vec![BlockLocation {
-                worker_id: Some(2),
-                worker_address: Some(WorkerNetAddress {
-                    host: Some("w2".into()),
-                    ..Default::default()
-                }),
-            }],
-        );
-        // Apply locations onto file_info as enrich would.
-        for fbi in &mut fi.file_block_infos {
-            let id = fbi.block_info.as_ref().unwrap().block_id.unwrap();
-            fbi.block_info.as_mut().unwrap().locations = fetched[&id].clone();
-        }
-        recompute_in_goosefs_percentage(&mut fi, &fetched);
+        fi.file_block_infos[0]
+            .block_info
+            .as_mut()
+            .unwrap()
+            .locations = vec![master_loc(1, "w1")];
+        fi.file_block_infos[1]
+            .block_info
+            .as_mut()
+            .unwrap()
+            .locations = vec![master_loc(2, "w2")];
+        recompute_in_goosefs_percentage(&mut fi);
         assert_eq!(fi.in_goose_fs_percentage, Some(100));
     }
 
@@ -397,8 +432,105 @@ mod tests {
             file_block_infos: vec![fbi(1, 0, 100), fbi(2, 100, 100)],
             ..Default::default()
         };
-        let fetched: HashMap<i64, Vec<BlockLocation>> = HashMap::new();
-        recompute_in_goosefs_percentage(&mut fi, &fetched);
+        recompute_in_goosefs_percentage(&mut fi);
         assert_eq!(fi.in_goose_fs_percentage, Some(0));
+    }
+
+    #[test]
+    fn apply_keeps_master_locations_when_probe_failed() {
+        let mut fi = FileInfo {
+            length: Some(100),
+            file_block_infos: vec![fbi(1, 0, 100)],
+            ..Default::default()
+        };
+        fi.file_block_infos[0]
+            .block_info
+            .as_mut()
+            .unwrap()
+            .locations = vec![master_loc(9, "master-known")];
+
+        // No successful probe for block 1 → keep Master.
+        apply_probed_locations(
+            &mut fi,
+            &ProbedLocations {
+                locations: HashMap::new(),
+                probed_ok: HashSet::new(),
+            },
+        );
+
+        let locs = &fi.file_block_infos[0]
+            .block_info
+            .as_ref()
+            .unwrap()
+            .locations;
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0].worker_id, Some(9));
+        assert_eq!(fi.in_goose_fs_percentage, Some(100));
+    }
+
+    #[test]
+    fn apply_overwrites_with_empty_on_authoritative_miss() {
+        let mut fi = FileInfo {
+            length: Some(100),
+            file_block_infos: vec![fbi(1, 0, 100)],
+            ..Default::default()
+        };
+        fi.file_block_infos[0]
+            .block_info
+            .as_mut()
+            .unwrap()
+            .locations = vec![master_loc(9, "stale")];
+
+        // Probe succeeded but found nothing → wipe stale Master location.
+        let mut locations = HashMap::new();
+        locations.insert(1, Vec::new());
+        apply_probed_locations(
+            &mut fi,
+            &ProbedLocations {
+                locations,
+                probed_ok: HashSet::from([1]),
+            },
+        );
+
+        assert!(fi.file_block_infos[0]
+            .block_info
+            .as_ref()
+            .unwrap()
+            .locations
+            .is_empty());
+        assert_eq!(fi.in_goose_fs_percentage, Some(0));
+    }
+
+    #[test]
+    fn apply_overwrites_with_probed_locations() {
+        let mut fi = FileInfo {
+            length: Some(100),
+            file_block_infos: vec![fbi(1, 0, 100)],
+            ..Default::default()
+        };
+        fi.file_block_infos[0]
+            .block_info
+            .as_mut()
+            .unwrap()
+            .locations = vec![master_loc(9, "stale")];
+
+        let mut locations = HashMap::new();
+        locations.insert(1, vec![master_loc(3, "probed")]);
+        apply_probed_locations(
+            &mut fi,
+            &ProbedLocations {
+                locations,
+                probed_ok: HashSet::from([1]),
+            },
+        );
+
+        let locs = &fi.file_block_infos[0]
+            .block_info
+            .as_ref()
+            .unwrap()
+            .locations;
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0].worker_id, Some(3));
+        assert_eq!(fi.in_goose_fs_percentage, Some(100));
     }
 }
