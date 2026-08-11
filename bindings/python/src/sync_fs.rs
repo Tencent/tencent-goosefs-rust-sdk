@@ -633,9 +633,14 @@ impl PyGoosefs {
 
     // ── Worker block direct-read (P6 stage B) ───────────────────────────────
 
-    /// `fs.acquire_worker_for_block(block_id)` → `AsyncWorkerClient`.
+    /// `fs.acquire_worker_for_block(block_id, path=None)` → `AsyncWorkerClient`.
     ///
     /// Synchronous counterpart of [`PyAsyncGoosefs::acquire_worker_for_block`].
+    ///
+    /// Pass `path` when possible so routing prefers Master
+    /// `BlockInfo.locations` for `block_id` (locations-first, same as
+    /// Rust / Java read selection). Without `path`, falls back to
+    /// consistent-hash only.
     ///
     /// The returned object is **still an `AsyncWorkerClient`** — direct
     /// `read_block_positioned` calls on it must be awaited from an async
@@ -645,17 +650,26 @@ impl PyGoosefs {
     /// class because the only sensible thing to do on the binding
     /// boundary is the one-shot positioned read, which we already
     /// provide as `positioned_read(path, ...)`.
+    #[pyo3(signature = (block_id, path=None))]
     fn acquire_worker_for_block(
         &self,
         py: Python<'_>,
         block_id: i64,
+        path: Option<String>,
     ) -> PyResult<crate::worker::PyAsyncWorkerClient> {
         let h = self.handle()?;
         Self::guarded_block_on(py, async move {
+            let locations = if let Some(ref p) = path {
+                let status = h.fs.get_status(p).await.map_err(map_err)?;
+                crate::positioned_read::block_locations_from_status(&status, block_id)
+            } else {
+                Vec::new()
+            };
+            let replication = h.ctx.config().file_replication_number;
             let worker_info = h
                 .ctx
                 .acquire_router()
-                .select_worker(block_id)
+                .select_worker_for_read(block_id, &locations, replication)
                 .await
                 .map_err(map_err)?;
             let net_addr = worker_info
@@ -710,9 +724,12 @@ impl PyGoosefs {
             let status = h.fs.get_status(&path).await.map_err(map_err)?;
             let (block_id, block_size) =
                 crate::positioned_read::resolve_block_id(&status, block_index, &path)?;
+            // `block_size` is the *actual* stored length of this block (see
+            // `resolve_block_id`), which may be smaller than the file's
+            // configured `block_size_bytes` for a trailing/short block.
             if offset >= block_size {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "offset={} >= block_size_bytes={}",
+                    "offset={} >= actual_block_length={}",
                     offset, block_size
                 )));
             }
@@ -729,9 +746,11 @@ impl PyGoosefs {
             //       Delegated to `positioned_read_with_reauth` so both
             //       async and sync paths share the same retry logic
             //       (Critical #1 fix: sync was previously missing this).
+            let locations = crate::positioned_read::block_locations_from_status(&status, block_id);
             let bytes = crate::positioned_read::positioned_read_with_reauth(
                 h.ctx,
                 block_id,
+                &locations,
                 offset,
                 effective_length,
                 chunk_size,

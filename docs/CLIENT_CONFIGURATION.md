@@ -173,6 +173,7 @@ properties-file, and env-var callers keep working unchanged.
 | `block_size` | `u64` | `67108864` (64 MiB) | Default block size in bytes for new files. Matches Goosefs server default. |
 | `chunk_size` | `u64` | `1048576` (1 MiB) | Chunk size for streaming read/write RPCs. Each gRPC message carries one chunk. |
 | `write_type` | `Option<i32>` | `None` | Default write type for newly created files. `None` = use server default (typically `MustCache`). See [WriteType](#71-writetype) for values. |
+| `file_replication_number` | `i32` | `1` | Target replication for block-worker selection (`goosefs.user.file.replication.number`). Read and write use this as `count` so the same `block_id` maps to the same worker set. |
 | `prefetch_window` | `i32` | `8` | Sequential-read prefetch window in chunks (sent in the first `ReadRequest`); lets the worker keep up to `(1 + prefetch_window)` chunks in flight. Mirrors Java `goosefs.user.streaming.reader.max.prefetch.window`. **Set programmatically** via `with_prefetch_window()`. (Optimization doc Part V R1-B-a.) **Note**: distinct from the per-open `InStreamOptions.prefetch_window` (default `1`, see §6.4). |
 | `read_buffer_messages` | `usize` | `16` | Receive-buffer depth (in messages) between the background stream-drain task and the consumer. Mirrors Java `goosefs.user.streaming.reader.buffer.size.messages`. (Optimization doc Part V R1-B-b.) |
 | `ack_interval_bytes` | `i64` | `0` | Flow-control ACK coalescing threshold in bytes. `0` = ACK every chunk (deadlock-safe default). Coalescing (`>0`, e.g. 4 MiB) is opt-in and only safe on workers that honour `prefetch_window`. **Set programmatically** via `with_ack_interval_bytes()`. (Optimization doc Part V R1-B-c.) |
@@ -437,6 +438,7 @@ properties file values and built-in defaults.
 |---------------------|---------------------|---------|-------------|
 | `GOOSEFS_MASTER_ADDR` | `master_addr` / `master_addrs` | `"127.0.0.1:9200"` (single) / `[]` (HA list) | Master address(es). Three accepted forms: single `host:port`; comma-separated list `addr1:port,addr2:port` for HA; or a Hadoop-style URI `gfs://addr1:port,addr2:port/root-path` (URI form also seeds `root`). |
 | `GOOSEFS_WRITE_TYPE` | `write_type` | `None` (server default, typically `MustCache`) | Default write type. Accepted: `must_cache`, `try_cache`, `cache_through`, `through`, `async_through` (case-insensitive). |
+| `GOOSEFS_USER_FILE_REPLICATION_NUMBER` | `file_replication_number` | `1` | Block-worker selection count (`goosefs.user.file.replication.number`). Values `<= 0` ignored. |
 | `GOOSEFS_BLOCK_SIZE` | `block_size` | `67108864` (64 MiB) | Block size in bytes (plain integer). |
 | `GOOSEFS_CHUNK_SIZE` | `chunk_size` | `1048576` (1 MiB) | Chunk size in bytes (plain integer). |
 | `GOOSEFS_AUTH_TYPE` | `auth_type` | `Simple` | Authentication type. Accepted: `nosasl`, `simple` (case-insensitive). |
@@ -557,6 +559,7 @@ These keys are used in `goosefs-site.properties` files (Java-style `key=value` f
 | `goosefs.security.authorization.permission.enabled` | `authorization_permission_enabled` | `true` / `false` | `false` | Permission-based access control. |
 | `goosefs.security.login.impersonation.username` | `login_impersonation_username` | string | `"_HDFS_USER_"` | Impersonation username. |
 | `goosefs.user.file.writetype.default` | `write_type` | `MUST_CACHE` / `TRY_CACHE` / `CACHE_THROUGH` / `THROUGH` / `ASYNC_THROUGH` | unset (server default, typically `MUST_CACHE`) | Default write type. |
+| `goosefs.user.file.replication.number` | `file_replication_number` | integer `>= 1` | `1` | Target replication used as `count` when selecting block workers (`getBlockWorkers(blockId, count)`). Read and write share the same worker set for a given `block_id`. Values `<= 0` are ignored. |
 | `goosefs.user.block.size.bytes.default` | `block_size` | byte size (e.g. `64MB`, `512KB`, `134217728`) | `67108864` (64 MiB) | Default block size. Supports `KB`/`MB`/`GB` suffixes. |
 | `goosefs.user.network.data.transfer.chunk.size` | `chunk_size` | byte size (e.g. `1MB`, `512KB`) | `1048576` (1 MiB) | Streaming chunk size. Supports `KB`/`MB`/`GB` suffixes. |
 | `goosefs.user.client.transparent_acceleration.enabled` | `transparent_acceleration_enabled` | `true` / `false` | `true` | Transparent acceleration. |

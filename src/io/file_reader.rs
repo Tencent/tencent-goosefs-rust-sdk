@@ -287,20 +287,21 @@ impl GoosefsFileReader {
         // (zero clone on the insert path too — the old code did
         // `fetched.clone()` for the cache + moved `fetched` out).
         let file_info_cache = ctx.acquire_file_info_cache();
-        let file_info = if let Some(cached) = file_info_cache.as_ref().and_then(|c| c.get(path)) {
+        let mut file_info = if let Some(cached) = file_info_cache.as_ref().and_then(|c| c.get(path))
+        {
             debug!(path = %path, "FileInfo cache hit — Arc clone, zero deep copy");
-            cached
+            (*cached).clone()
         } else {
             let master = ctx.acquire_master();
             let fetched = master.get_status(path).await?;
             // Wrap once in Arc; the cache stores an Arc clone (atomic
-            // inc) and we keep the original Arc — zero deep copy on
-            // both the insert and the return path (S3).
+            // inc). Enrichment below mutates a separate owned copy so
+            // CheckBlocks locations are never written back into the cache.
             let arc_fetched = Arc::new(fetched);
             if let Some(cache) = &file_info_cache {
                 cache.insert_arc(path, Arc::clone(&arc_fetched));
             }
-            arc_fetched
+            (*arc_fetched).clone()
         };
 
         let file_length = file_info.length.unwrap_or(0);
@@ -332,7 +333,18 @@ impl GoosefsFileReader {
         let router = WorkerRouterView::from_shared(&shared_router);
         debug!("reusing worker snapshot from context (A1)");
 
-        Ok((file_info, router))
+        let pool = ctx.acquire_worker_pool();
+        let config = ctx.config();
+        crate::block::maybe_enrich_file_block_locations(
+            &mut file_info,
+            &router,
+            Some(&pool),
+            config,
+            config.check_block_replicas,
+        )
+        .await;
+
+        Ok((Arc::new(file_info), router))
     }
 
     /// Internal: build the reader from file info and router.
@@ -586,7 +598,14 @@ impl GoosefsFileReader {
         let ufs_options = self.build_ufs_read_options(plan);
 
         // ① Select worker + connection failover (mirrors the old read_next_block).
-        let worker_info = self.router.select_worker(block_id).await?;
+        // Prefer BlockInfo.locations (Java getInStream); hash when empty/unmatched.
+        // TODO(java-parity): count = max(maxRetryNode, replicationNum); when
+        // replicationNum > 1 shuffle candidates then pick one (Java getInStream).
+        let locations = self.block_locations(block_id);
+        let worker_info = self
+            .router
+            .select_worker_for_read(block_id, locations, self.config.file_replication_number)
+            .await?;
         let worker_addr = Self::worker_addr(&worker_info)?;
         let worker = match self.acquire_worker(&worker_addr).await {
             Ok(w) => w,
@@ -609,7 +628,15 @@ impl GoosefsFileReader {
                     error = %e,
                     "worker connection failed, trying another worker"
                 );
-                let retry = self.router.select_worker(block_id).await.map_err(|_| e)?;
+                let retry = self
+                    .router
+                    .select_worker_for_read(
+                        block_id,
+                        self.block_locations(block_id),
+                        self.config.file_replication_number,
+                    )
+                    .await
+                    .map_err(|_| e)?;
                 let retry_addr = Self::worker_addr(&retry)?;
                 self.acquire_worker(&retry_addr).await?
             }
@@ -689,6 +716,9 @@ impl GoosefsFileReader {
     ///   surfaced unchanged; the caller must NOT fall back.
     /// - `None`           — SC was not used, or hit a recoverable failure; the
     ///   caller transparently falls back to gRPC.
+    ///
+    /// TODO(java-parity): align SC gating/open with Java (locations-first read
+    /// target must be local). Deferred; this PR does not change the SC path.
     async fn try_short_circuit_read(
         &self,
         block_id: i64,
@@ -905,6 +935,22 @@ impl GoosefsFileReader {
         }
         // Fall back to block_ids list
         plan.block_id
+    }
+
+    /// Master `BlockInfo.locations` for `block_id`, or empty when unavailable.
+    fn block_locations(&self, block_id: i64) -> &[crate::proto::grpc::BlockLocation] {
+        self.file_info
+            .file_block_infos
+            .iter()
+            .find_map(|fbi| {
+                let bi = fbi.block_info.as_ref()?;
+                if bi.block_id == Some(block_id) {
+                    Some(bi.locations.as_slice())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(&[])
     }
 
     /// Build `OpenUfsBlockOptions` for a block that may reside in UFS.

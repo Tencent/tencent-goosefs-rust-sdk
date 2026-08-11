@@ -235,23 +235,9 @@ impl GoosefsFileInStream {
             .map_err(|e| Error::ConfigError { message: e })?;
 
         let master = MasterClient::connect(config).await?;
-        let file_info = master.get_status(path).await?;
+        let mut file_info = master.get_status(path).await?;
 
-        let status = URIStatus::from_proto(file_info);
-
-        // Reject INCOMPLETE non-folder files
-        if status.is_folder() {
-            return Err(Error::OpenDirectory {
-                path: path.to_string(),
-            });
-        }
-        if !status.is_completed() {
-            return Err(Error::FileIncomplete {
-                message: format!("{path} is incomplete"),
-            });
-        }
-
-        // Discover workers
+        // Discover workers before CheckBlocks enrichment (needs the router).
         let inquire_client = master.inquire_client().clone();
         let wm = WorkerManagerClient::connect_with_inquire(config, inquire_client).await?;
         let workers = wm.get_worker_info_list().await?;
@@ -273,6 +259,31 @@ impl GoosefsFileInStream {
         // `test_view_from_workers_no_local_first_when_not_probed`.
         let router =
             WorkerRouterView::from_workers(workers, WorkerRouterView::default_failure_ttl());
+
+        // Java populateFilePercentage / fs stat --check_replicas: probe workers
+        // so empty Master locations become usable for select_worker_for_read.
+        crate::block::maybe_enrich_file_block_locations(
+            &mut file_info,
+            &router,
+            None,
+            config,
+            config.check_block_replicas,
+        )
+        .await;
+
+        let status = URIStatus::from_proto(file_info);
+
+        // Reject INCOMPLETE non-folder files
+        if status.is_folder() {
+            return Err(Error::OpenDirectory {
+                path: path.to_string(),
+            });
+        }
+        if !status.is_completed() {
+            return Err(Error::FileIncomplete {
+                message: format!("{path} is incomplete"),
+            });
+        }
 
         let file_length = status.length;
 
@@ -337,7 +348,8 @@ impl GoosefsFileInStream {
         // miss, populate the cache after a successful `get_status`. Cache is
         // `None` unless the caller has opted in via `with_file_info_cache_ttl`.
         let file_info_cache = ctx.acquire_file_info_cache();
-        let file_info = if let Some(cached) = file_info_cache.as_ref().and_then(|c| c.get(path)) {
+        let mut file_info = if let Some(cached) = file_info_cache.as_ref().and_then(|c| c.get(path))
+        {
             debug!(path = %path, "FileInfo cache hit");
             // S3: `cached` is `Arc<FileInfo>`; `from_proto` needs owned
             // `FileInfo`, so one clone is unavoidable here (it moves
@@ -352,13 +364,37 @@ impl GoosefsFileInStream {
             // avoiding the old `fetched.clone()` for the cache. The
             // caller still needs owned `FileInfo` for `from_proto`, so
             // we clone once here — but that's one clone instead of two.
+            // Cache stores Master-only metadata (no CheckBlocks enrichment).
             let arc_fetched = Arc::new(fetched);
             if let Some(cache) = &file_info_cache {
                 cache.insert_arc(path, Arc::clone(&arc_fetched));
             }
-            // Clone out of the Arc for `from_proto` (which moves).
+            // Clone out of the Arc for enrichment + `from_proto` (which moves).
             (*arc_fetched).clone()
         };
+
+        // Reuse shared router — already populated and TTL-refreshed.
+        // A1: clone the workers +
+        // hash_ring `Arc`s wait-free instead of rebuilding the ring. Failure
+        // isolation is preserved via the new router's own `failed_workers`
+        // DashMap.
+        let shared_router = ctx.acquire_router();
+        let router = WorkerRouterView::from_shared(&shared_router);
+        let worker_pool = ctx.acquire_worker_pool();
+
+        // Java populateFilePercentage / fs stat --check_replicas: probe workers
+        // so empty Master locations become usable for select_worker_for_read.
+        // Enrich a local clone only — never write probed locations back into
+        // the FileInfo cache.
+        crate::block::maybe_enrich_file_block_locations(
+            &mut file_info,
+            &router,
+            Some(&worker_pool),
+            &config,
+            config.check_block_replicas,
+        )
+        .await;
+
         let status = URIStatus::from_proto(file_info);
 
         // Reject INCOMPLETE non-folder files
@@ -373,16 +409,7 @@ impl GoosefsFileInStream {
             });
         }
 
-        // Reuse shared router — already populated and TTL-refreshed.
-        // A1: clone the workers +
-        // hash_ring `Arc`s wait-free instead of rebuilding the ring. Failure
-        // isolation is preserved via the new router's own `failed_workers`
-        // DashMap.
-        let shared_router = ctx.acquire_router();
-        let router = WorkerRouterView::from_shared(&shared_router);
-
         let file_length = status.length;
-        let worker_pool = ctx.acquire_worker_pool();
 
         // Reuse the context-shared short-circuit factory (P8): all streams from
         // this context share one hot-block reader LRU, so a hot local block is
@@ -996,6 +1023,9 @@ impl GoosefsFileInStream {
     /// capability fetcher yet). On capability-enabled clusters the
     /// `OpenLocalBlock` RPC is rejected and this returns `None`, so the read
     /// still completes over gRPC with identical bytes.
+    ///
+    /// TODO(java-parity): align SC gating/open with Java (locations-first read
+    /// target must be local). Deferred; this PR does not change the SC path.
     async fn try_short_circuit_read(
         &self,
         block_id: i64,
@@ -1249,6 +1279,18 @@ impl GoosefsFileInStream {
         }
     }
 
+    /// Master `BlockInfo.locations` for `block_id`, or empty when unavailable.
+    ///
+    /// Empty → [`WorkerRouterView::select_worker_for_read`] falls back to hash
+    /// (Java `getInStream` when locations are empty).
+    fn block_locations(&self, block_id: i64) -> &[crate::proto::grpc::BlockLocation] {
+        self.status
+            .get_block_info(block_id)
+            .and_then(|fbi| fbi.block_info.as_ref())
+            .map(|bi| bi.locations.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// Connect to the worker responsible for `block_id`, with one retry on failure.
     ///
     /// # Connection pooling
@@ -1264,7 +1306,13 @@ impl GoosefsFileInStream {
     /// gRPC calls and triggers a `reconnect()` to drop the stale channel and
     /// establish a fresh authenticated connection.
     async fn connect_worker(&mut self, block_id: i64) -> Result<WorkerClient> {
-        let worker_info = self.router.select_worker(block_id).await?;
+        let locations = self.block_locations(block_id);
+        // TODO(java-parity): count = max(maxRetryNode, replicationNum); when
+        // replicationNum > 1 shuffle candidates then pick one (Java getInStream).
+        let worker_info = self
+            .router
+            .select_worker_for_read(block_id, locations, self.config.file_replication_number)
+            .await?;
         let addr = worker_info
             .address
             .as_ref()
@@ -1310,8 +1358,16 @@ impl GoosefsFileInStream {
                 }
                 warn!(worker = %worker_addr, error = %e, "worker connect failed, retrying");
 
-                // Retry with a different worker
-                let retry_info = self.router.select_worker(block_id).await?;
+                // Retry with a different worker (locations-first again; failed
+                // location workers are skipped, then hash fallback).
+                let retry_info = self
+                    .router
+                    .select_worker_for_read(
+                        block_id,
+                        self.block_locations(block_id),
+                        self.config.file_replication_number,
+                    )
+                    .await?;
                 let retry_addr_info =
                     retry_info.address.as_ref().ok_or_else(|| Error::Internal {
                         message: "retry worker has no address".to_string(),
@@ -1342,7 +1398,14 @@ impl GoosefsFileInStream {
         block_id: i64,
         stale_generation: Option<u64>,
     ) -> Result<WorkerClient> {
-        let worker_info = self.router.select_worker(block_id).await?;
+        let worker_info = self
+            .router
+            .select_worker_for_read(
+                block_id,
+                self.block_locations(block_id),
+                self.config.file_replication_number,
+            )
+            .await?;
         let addr = worker_info
             .address
             .as_ref()

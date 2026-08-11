@@ -272,6 +272,13 @@ impl PyConfig {
         self.inner.write_type
     }
 
+    /// Target replication used when selecting block workers
+    /// (`goosefs.user.file.replication.number`, default `1`).
+    #[getter]
+    fn file_replication_number(&self) -> i32 {
+        self.inner.file_replication_number
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "Config(master_addr={:?}, block_size={}, auth_type={:?})",

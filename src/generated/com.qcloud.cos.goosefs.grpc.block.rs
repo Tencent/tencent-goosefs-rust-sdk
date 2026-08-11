@@ -247,6 +247,7 @@ pub struct CheckBlocksRequest {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CheckBlocksResponse {
+    /// Whether each requested block exists on this worker (GooseFS 2.1.0).
     #[prost(map = "int64, bool", tag = "1")]
     pub block_exists: ::std::collections::HashMap<i64, bool>,
 }

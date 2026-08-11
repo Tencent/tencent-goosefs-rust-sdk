@@ -45,8 +45,9 @@ Worker block direct positioned read (``goosefs >= 0.1.3``)::
                                     offset=0,
                                     length=64 * 1024)
 
-    # Low-level escape hatch when you already know the block_id:
-    async with await fs.acquire_worker_for_block(block_id) as wc:
+    # Low-level escape hatch when you already know the block_id.
+    # Prefer passing ``path`` so routing can use BlockInfo.locations.
+    async with await fs.acquire_worker_for_block(block_id, path="/data/blob.bin") as wc:
         data = await wc.read_block_positioned(block_id, 0, 64 * 1024)
 
 The native extension module is named ``goosefs._goosefs`` and is built from

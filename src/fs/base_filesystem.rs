@@ -255,7 +255,25 @@ impl FileSystem for BaseFileSystem {
 
     async fn get_status(&self, path: &str) -> Result<URIStatus> {
         let master = self.master();
-        let fi = master.get_status(path).await?;
+        let mut fi = master.get_status(path).await?;
+        // Mirror Java getStatus when checkBlockReplicas > 0: probe workers and
+        // overwrite BlockInfo.locations (same as `fs stat --check_replicas`).
+        let check = self.ctx.config().check_block_replicas;
+        if check > 0 {
+            let router = self.ctx.acquire_router();
+            let view = crate::block::router::WorkerRouterView::from_shared(&router);
+            let pool = self.ctx.acquire_worker_pool();
+            crate::block::maybe_enrich_file_block_locations(
+                &mut fi,
+                &view,
+                Some(&pool),
+                self.ctx.config(),
+                check,
+            )
+            .await;
+        } else {
+            crate::block::ensure_block_ids_from_file_block_infos(&mut fi);
+        }
         Ok(URIStatus::from_proto(fi))
     }
 
