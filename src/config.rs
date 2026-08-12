@@ -317,6 +317,13 @@ impl PropertiesMap {
             }
         }
 
+        // Read worker pool width (Java USER_CLIENT_FILE_READ_MAX_NODE_RETRY).
+        if let Some(n) = self.get_parsed::<i32>("goosefs.user.file.read.max.node.retry") {
+            if n > 0 {
+                cfg.file_read_max_node_retry = n;
+            }
+        }
+
         // Block size: goosefs.user.block.size.bytes.default
         if let Some(bs_str) = self.get("goosefs.user.block.size.bytes.default") {
             if let Ok(bs) = parse_byte_size(bs_str) {
@@ -901,12 +908,25 @@ pub const ENV_FILE_REPLICATION_NUMBER: &str = "GOOSEFS_USER_FILE_REPLICATION_NUM
 
 /// Environment variable: `goosefs.user.file.check.block.replicas`.
 ///
-/// Mirrors [`GoosefsConfig::check_block_replicas`]. Default is `1`.
+/// Mirrors [`GoosefsConfig::check_block_replicas`]. Default is `0`.
 /// Values `< 0` or non-numeric input are ignored. `0` disables CheckBlocks
-/// location enrichment.
+/// location enrichment (matches Java `openFile` / default `getStatus`).
 ///
-/// Example: `export GOOSEFS_USER_FILE_CHECK_BLOCK_REPLICAS=0`.
+/// Example: `export GOOSEFS_USER_FILE_CHECK_BLOCK_REPLICAS=1` for
+/// `fs stat --check_replicas`-style enrichment.
 pub const ENV_CHECK_BLOCK_REPLICAS: &str = "GOOSEFS_USER_FILE_CHECK_BLOCK_REPLICAS";
+
+/// Environment variable: `goosefs.user.file.read.max.node.retry`.
+///
+/// Mirrors [`GoosefsConfig::file_read_max_node_retry`]. Default is `3`.
+/// Values `<= 0` or non-numeric input are ignored.
+///
+/// Example: `export GOOSEFS_USER_FILE_READ_MAX_NODE_RETRY=3`.
+pub const ENV_FILE_READ_MAX_NODE_RETRY: &str = "GOOSEFS_USER_FILE_READ_MAX_NODE_RETRY";
+
+/// Default [`GoosefsConfig::file_read_max_node_retry`] / Java
+/// `goosefs.user.file.read.max.node.retry` (`InStreamOptions.maxRetryNode`).
+pub const DEFAULT_FILE_READ_MAX_NODE_RETRY: i32 = 3;
 
 /// Environment variable: block size.
 pub const ENV_BLOCK_SIZE: &str = "GOOSEFS_BLOCK_SIZE";
@@ -1437,9 +1457,11 @@ pub struct GoosefsConfig {
     /// Mirrors Java `goosefs.user.file.replication.number`
     /// (`ClientPropertyKey.USER_FILE_REPLICATION_NUMBER`, default `1`).
     ///
-    /// Passed as `count` to [`WorkerRouter::select_workers`] /
-    /// [`WorkerRouterView::select_workers`] so **read and write** for the same
-    /// `block_id` share the same deterministic worker set. When `> 1`, the
+    /// **Write** paths pass this as `count` to [`WorkerRouter::select_workers`]
+    /// / [`WorkerRouterView::select_workers`]. **Read** paths use it as the
+    /// lower bound of the candidate pool width together with
+    /// [`file_read_max_node_retry`](Self::file_read_max_node_retry)
+    /// (`max(maxRetryNode, replication)`). When `> 1` on the write path, the
     /// client returns up to that many host-deduped workers (Java
     /// `getBlockWorkers(blockId, count, …)` semantics).
     ///
@@ -1454,16 +1476,27 @@ pub struct GoosefsConfig {
     /// when enriching `FileInfo.locations` (Java `checkBlockReplicas` /
     /// `fs stat --check_replicas`).
     ///
-    /// Master `GetStatus` often returns empty locations even when blocks are
-    /// cached on workers. When this value is `> 0`, open/read paths (and
-    /// [`BaseFileSystem::get_status`](crate::fs::base_filesystem::BaseFileSystem::get_status))
-    /// probe workers and overwrite locations — matching Java
-    /// `populateFilePercentage` / default `fs stat` behaviour.
+    /// Default is `0` — no probing on open/read, matching Java `openFile` /
+    /// `getStatusDefaults` (unset). Worker selection then relies on Master
+    /// `locations` or consistent-hash fallback (`getWorkersByBlockId` parity).
     ///
-    /// Default is `1` (same as Java `fs stat`). Set to `0` to skip probing
-    /// (Java `openFile` / `getStatusDefaults` leave this unset).
+    /// Set to `> 0` only when you need CheckBlocks enrichment (e.g. cache
+    /// percentage / `fs stat --check_replicas`).
     #[serde(default = "default_check_block_replicas")]
     pub check_block_replicas: i32,
+
+    /// Max workers to consider when opening a block for **read** (Java
+    /// `goosefs.user.file.read.max.node.retry` / `InStreamOptions.maxRetryNode`).
+    ///
+    /// Java `getInStream` builds the candidate pool with
+    /// `count = max(maxRetryNode, replicationNum)` (default **3**). After a
+    /// failed worker is marked, the next attempt picks from the remaining
+    /// pool — so empty Master locations can still reach a cached replica that
+    /// is not the hash primary.
+    ///
+    /// Write paths continue to use only [`file_replication_number`].
+    #[serde(default = "default_file_read_max_node_retry")]
+    pub file_read_max_node_retry: i32,
 
     // ── Streaming-read tuning() ──────────────────
     /// Sequential-read prefetch window in chunks (default: 8).
@@ -2072,9 +2105,14 @@ fn default_file_replication_number() -> i32 {
 }
 
 fn default_check_block_replicas() -> i32 {
-    // Matches Java `fs stat` default `--check_replicas=1` so open/read can
-    // discover worker-cached blocks when Master locations are empty.
-    1
+    // Match Java openFile / getStatusDefaults: checkBlockReplicas unset → 0.
+    // Probing is opt-in (fs stat --check_replicas), not the read hot path.
+    0
+}
+
+fn default_file_read_max_node_retry() -> i32 {
+    // Matches Java ClientPropertyKey.USER_CLIENT_FILE_READ_MAX_NODE_RETRY.
+    DEFAULT_FILE_READ_MAX_NODE_RETRY
 }
 fn default_prefetch_window() -> i32 {
     DEFAULT_PREFETCH_WINDOW
@@ -2122,6 +2160,7 @@ impl Default for GoosefsConfig {
             write_type: None,
             file_replication_number: default_file_replication_number(),
             check_block_replicas: default_check_block_replicas(),
+            file_read_max_node_retry: default_file_read_max_node_retry(),
             prefetch_window: default_prefetch_window(),
             read_buffer_messages: default_read_buffer_messages(),
             ack_interval_bytes: default_ack_interval_bytes(),
@@ -2388,6 +2427,17 @@ impl GoosefsConfig {
     pub fn with_check_block_replicas(mut self, n: i32) -> Self {
         if n >= 0 {
             self.check_block_replicas = n;
+        }
+        self
+    }
+
+    /// Set [`file_read_max_node_retry`](Self::file_read_max_node_retry).
+    ///
+    /// Values `<= 0` are ignored. Default is `3`, matching Java
+    /// `goosefs.user.file.read.max.node.retry`.
+    pub fn with_file_read_max_node_retry(mut self, n: i32) -> Self {
+        if n > 0 {
+            self.file_read_max_node_retry = n;
         }
         self
     }
@@ -2807,6 +2857,15 @@ impl GoosefsConfig {
             if let Ok(n) = val.parse::<i32>() {
                 if n >= 0 {
                     self.check_block_replicas = n;
+                }
+            }
+        }
+
+        // Read max node retry (goosefs.user.file.read.max.node.retry)
+        if let Ok(val) = env::var(ENV_FILE_READ_MAX_NODE_RETRY) {
+            if let Ok(n) = val.parse::<i32>() {
+                if n > 0 {
+                    self.file_read_max_node_retry = n;
                 }
             }
         }
@@ -3483,6 +3542,8 @@ mod tests {
         assert_eq!(config.block_size, 64 * 1024 * 1024);
         assert_eq!(config.chunk_size, 1024 * 1024);
         assert_eq!(config.file_replication_number, 1);
+        assert_eq!(config.check_block_replicas, 0);
+        assert_eq!(config.file_read_max_node_retry, 3);
         assert!(!config.is_multi_master());
         assert!(config.validate().is_ok());
     }
@@ -3952,6 +4013,14 @@ mod tests {
             ENV_FILE_REPLICATION_NUMBER,
             "GOOSEFS_USER_FILE_REPLICATION_NUMBER"
         );
+        assert_eq!(
+            ENV_FILE_READ_MAX_NODE_RETRY,
+            "GOOSEFS_USER_FILE_READ_MAX_NODE_RETRY"
+        );
+        assert_eq!(
+            ENV_CHECK_BLOCK_REPLICAS,
+            "GOOSEFS_USER_FILE_CHECK_BLOCK_REPLICAS"
+        );
         assert_eq!(ENV_BLOCK_SIZE, "GOOSEFS_BLOCK_SIZE");
         assert_eq!(ENV_CHUNK_SIZE, "GOOSEFS_CHUNK_SIZE");
     }
@@ -4142,6 +4211,15 @@ goosefs.master.rpc.port=9200
         let cfg = GoosefsConfig::default().apply_env();
         std::env::remove_var(ENV_FILE_REPLICATION_NUMBER);
         assert_eq!(cfg.file_replication_number, 3);
+    }
+
+    #[test]
+    fn test_apply_env_file_read_max_node_retry() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(ENV_FILE_READ_MAX_NODE_RETRY, "5");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var(ENV_FILE_READ_MAX_NODE_RETRY);
+        assert_eq!(cfg.file_read_max_node_retry, 5);
     }
 
     #[test]

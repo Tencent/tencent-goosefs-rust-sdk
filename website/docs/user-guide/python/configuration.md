@@ -36,6 +36,9 @@ cfg = Config.from_uri("gfs://127.0.0.1:9200/data")
 | `GOOSEFS_MASTER_ADDR`                 | Master host:port (or comma-separated HA list) |
 | `GOOSEFS_AUTH_TYPE`                   | `nosasl` / `simple` / `custom`                |
 | `GOOSEFS_AUTH_USERNAME`               | Username for SIMPLE auth                      |
+| `GOOSEFS_USER_FILE_REPLICATION_NUMBER` | Block-worker selection count (default `1`)   |
+| `GOOSEFS_USER_FILE_READ_MAX_NODE_RETRY` | Read candidate pool / Java `maxRetryNode` (default `3`) |
+| `GOOSEFS_USER_FILE_CHECK_BLOCK_REPLICAS` | CheckBlocks probe count; `0` disables (default) |
 | `GOOSEFS_MASTER_CONNECTION_POOL_SIZE` | Master gRPC channel pool size (default 1)     |
 | `GOOSEFS_MASTER_POOL_SCHEDULE`        | `roundrobin` / `p2c`                          |
 | `GOOSEFS_WORKER_CONNECTION_POOL_SIZE` | Per-worker gRPC channel pool size             |

@@ -36,6 +36,9 @@ Common environment variables:
 | `GOOSEFS_AUTH_TYPE`              | `nosasl` / `simple` / …                       |
 | `GOOSEFS_USER`                   | Username for SIMPLE auth                      |
 | `GOOSEFS_CONF` / properties path | Location of `goosefs-site.properties`         |
+| `GOOSEFS_USER_FILE_REPLICATION_NUMBER` | Block-worker selection count (default `1`) |
+| `GOOSEFS_USER_FILE_READ_MAX_NODE_RETRY` | Read candidate pool width / Java `maxRetryNode` (default `3`) |
+| `GOOSEFS_USER_FILE_CHECK_BLOCK_REPLICAS` | CheckBlocks probe count; `0` disables (default) |
 
 ## Write / Read Types
 

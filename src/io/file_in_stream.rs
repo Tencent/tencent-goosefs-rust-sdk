@@ -1307,11 +1307,14 @@ impl GoosefsFileInStream {
     /// establish a fresh authenticated connection.
     async fn connect_worker(&mut self, block_id: i64) -> Result<WorkerClient> {
         let locations = self.block_locations(block_id);
-        // TODO(java-parity): count = max(maxRetryNode, replicationNum); when
-        // replicationNum > 1 shuffle candidates then pick one (Java getInStream).
         let worker_info = self
             .router
-            .select_worker_for_read(block_id, locations, self.config.file_replication_number)
+            .select_worker_for_read(
+                block_id,
+                locations,
+                self.config.file_replication_number,
+                self.config.file_read_max_node_retry,
+            )
             .await?;
         let addr = worker_info
             .address
@@ -1366,6 +1369,7 @@ impl GoosefsFileInStream {
                         block_id,
                         self.block_locations(block_id),
                         self.config.file_replication_number,
+                        self.config.file_read_max_node_retry,
                     )
                     .await?;
                 let retry_addr_info =
@@ -1404,6 +1408,7 @@ impl GoosefsFileInStream {
                 block_id,
                 self.block_locations(block_id),
                 self.config.file_replication_number,
+                self.config.file_read_max_node_retry,
             )
             .await?;
         let addr = worker_info
