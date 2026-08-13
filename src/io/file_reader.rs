@@ -93,13 +93,11 @@ pub struct GoosefsFileReader {
     path: String,
     /// File info from Master (contains block IDs, block size, length).
     ///
-    ///:
-    /// wrapped in `Arc<FileInfo>` so a `FileInfoCache` hit on a
-    /// repeated `open_with_context` / `open_range_with_context` call
-    /// returns an `Arc` clone (one atomic inc) instead of a deep
-    /// `FileInfo::clone` (which copies `block_ids: Vec<i64>`,
-    /// `file_block_infos`, `ufs_path`, etc.). `Arc` implements `Deref`,
-    /// so all `self.file_info.field` call sites work unchanged.
+    /// Stored as `Arc<FileInfo>` so a metadata-cache hit on a repeated
+    /// `open_with_context` / `open_range_with_context` is an `Arc` clone
+    /// (one atomic inc) instead of a deep `FileInfo::clone`. `Arc`
+    /// implements `Deref`, so all `self.file_info.field` call sites work
+    /// unchanged.
     file_info: Arc<FileInfo>,
     /// Worker router for block → worker mapping.
     /// Worker router view for block → worker mapping.
@@ -271,38 +269,9 @@ impl GoosefsFileReader {
         ctx: &Arc<FileSystemContext>,
         path: &str,
     ) -> Result<(Arc<FileInfo>, WorkerRouterView)> {
-        // 1. Reuse the shared Master client (zero handshake).
-        //
-        //: consult the opt-in
-        // FileInfo metadata cache first. On hit, skip the RPC entirely; on
-        // miss, populate the cache after a successful `get_status`. The
-        // cache is `None` only when the caller has explicitly opted out
-        // (`file_info_cache_ttl == 0`). By default the TTL is 30 s, so this
-        // branch consults the live cache.
-        //
-        //: `get` returns `Arc<FileInfo>` — a cache hit is now a
-        // single `Arc::clone` (atomic inc) instead of a deep
-        // `FileInfo::clone`. On miss, the fetched `FileInfo` is wrapped
-        // in `Arc` once, inserted into the cache, and returned directly
-        // (zero clone on the insert path too — the old code did
-        // `fetched.clone()` for the cache + moved `fetched` out).
-        let file_info_cache = ctx.acquire_file_info_cache();
-        let mut file_info = if let Some(cached) = file_info_cache.as_ref().and_then(|c| c.get(path))
-        {
-            debug!(path = %path, "FileInfo cache hit — Arc clone, zero deep copy");
-            (*cached).clone()
-        } else {
-            let master = ctx.acquire_master();
-            let fetched = master.get_status(path).await?;
-            // Wrap once in Arc; the cache stores an Arc clone (atomic
-            // inc). Enrichment below mutates a separate owned copy so
-            // CheckBlocks locations are never written back into the cache.
-            let arc_fetched = Arc::new(fetched);
-            if let Some(cache) = &file_info_cache {
-                cache.insert_arc(path, Arc::clone(&arc_fetched));
-            }
-            (*arc_fetched).clone()
-        };
+        // Shared Master + metadata cache (status / NotFound / incomplete fall-through).
+        // CheckBlocks enrichment below mutates this owned copy (INV-MC-D1).
+        let mut file_info = ctx.get_file_info_cached(path).await?;
 
         let file_length = file_info.length.unwrap_or(0);
         if file_length == 0 {

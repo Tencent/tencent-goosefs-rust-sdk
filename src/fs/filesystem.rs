@@ -34,7 +34,9 @@
 use async_trait::async_trait;
 
 use crate::error::Result;
-use crate::fs::options::{CreateFileOptions, DeleteOptions, OpenFileOptions};
+use crate::fs::options::{
+    CreateFileOptions, DeleteOptions, GetStatusOptions, ListStatusOptions, OpenFileOptions,
+};
 use crate::fs::uri_status::URIStatus;
 use crate::io::GoosefsFileInStream;
 
@@ -57,6 +59,15 @@ pub trait FileSystem: Send + Sync + 'static {
     /// - [`crate::error::Error::NotFound`] if the path does not exist.
     async fn get_status(&self, path: &str) -> Result<URIStatus>;
 
+    /// Retrieve metadata with per-call cache / sync options.
+    ///
+    /// `None` fields in `opts` fall back to `GoosefsConfig`.
+    async fn get_status_with_options(
+        &self,
+        path: &str,
+        opts: GetStatusOptions,
+    ) -> Result<URIStatus>;
+
     /// List the direct children of a directory.
     ///
     /// # Arguments
@@ -69,6 +80,13 @@ pub trait FileSystem: Send + Sync + 'static {
     /// - [`crate::error::Error::NotFound`] if `path` does not exist.
     /// - [`crate::error::Error::OpenDirectory`] if `path` is a file.
     async fn list_status(&self, path: &str, recursive: bool) -> Result<Vec<URIStatus>>;
+
+    /// List a directory with per-call cache / load-metadata options.
+    async fn list_status_with_options(
+        &self,
+        path: &str,
+        opts: ListStatusOptions,
+    ) -> Result<Vec<URIStatus>>;
 
     /// Return `true` if a path exists in Goosefs.
     ///

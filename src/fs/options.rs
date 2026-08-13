@@ -305,6 +305,72 @@ impl DeleteOptions {
     }
 }
 
+// ---------------------------------------------------------------------------
+// GetStatusOptions / ListStatusOptions
+// ---------------------------------------------------------------------------
+
+/// Per-call options for [`crate::fs::FileSystem::get_status_with_options`].
+///
+/// `None` fields fall back to [`crate::config::GoosefsConfig`].
+#[derive(Debug, Clone, Default)]
+pub struct GetStatusOptions {
+    /// `None` = `GoosefsConfig::file_metadata_sync_interval`.
+    /// `Some(0)` = this call skips the metadata cache.
+    pub sync_interval_ms: Option<i64>,
+}
+
+impl GetStatusOptions {
+    /// Force this `get_status` to skip the cache (`sync_interval_ms = 0`).
+    pub fn always_sync() -> Self {
+        Self {
+            sync_interval_ms: Some(0),
+        }
+    }
+}
+
+/// Per-call options for [`crate::fs::FileSystem::list_status_with_options`].
+///
+/// `None` fields fall back to [`crate::config::GoosefsConfig`].
+/// `load_metadata_only` is per-call only (Java has no config key).
+#[derive(Debug, Clone)]
+pub struct ListStatusOptions {
+    /// Recurse into child directories. Recursive listings never use the cache.
+    pub recursive: bool,
+    /// `None` = `GoosefsConfig::file_metadata_sync_interval`.
+    pub sync_interval_ms: Option<i64>,
+    /// `None` = `GoosefsConfig::file_metadata_load_type` (default `ONCE`).
+    /// `ALWAYS` skips the listing cache.
+    pub load_metadata_type: Option<crate::proto::grpc::file::LoadMetadataPType>,
+    /// When true, skip the listing cache. Per-call only.
+    pub load_metadata_only: bool,
+}
+
+impl Default for ListStatusOptions {
+    fn default() -> Self {
+        Self {
+            recursive: false,
+            sync_interval_ms: None,
+            load_metadata_type: None,
+            load_metadata_only: false,
+        }
+    }
+}
+
+impl ListStatusOptions {
+    /// Non-recursive listing (default).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Recursive listing — always bypasses the metadata cache.
+    pub fn recursive() -> Self {
+        Self {
+            recursive: true,
+            ..Self::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,5 +478,19 @@ mod tests {
             opts.write_type,
             WriteTypeXAttr::Explicit(WriteType::CacheThrough)
         );
+    }
+
+    #[test]
+    fn test_get_status_options_always_sync() {
+        let opts = GetStatusOptions::always_sync();
+        assert_eq!(opts.sync_interval_ms, Some(0));
+    }
+
+    #[test]
+    fn test_list_status_options_recursive_skips_defaults() {
+        let opts = ListStatusOptions::recursive();
+        assert!(opts.recursive);
+        assert!(opts.sync_interval_ms.is_none());
+        assert!(!opts.load_metadata_only);
     }
 }

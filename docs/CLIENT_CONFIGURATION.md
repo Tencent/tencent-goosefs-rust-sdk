@@ -187,10 +187,9 @@ properties-file, and env-var callers keep working unchanged.
 > only** via `GoosefsConfig` builder methods — they have no environment-variable,
 > properties-file, or storage-option entry points.
 >
-> The three knobs targeted by `FLAMEGRAPH_OPTIMIZATION_PLAN` §A3 / §B3
-> (`worker_connection_pool_size`, `file_info_cache_ttl`, `file_info_cache_capacity`)
-> **do** have full env / properties / storage-option support since 0.2.1 — see
-> §3, §4, §5 and §9.6 for the exact keys.
+> The knobs targeted by `FLAMEGRAPH_OPTIMIZATION_PLAN` §B3
+> (`worker_connection_pool_size`) **do** have full env / properties /
+> storage-option support — see §3, §4, §5 and §9.6 for the exact keys.
 >
 > See [`docs/RUST_PYTHON_SDK_OPTIMIZATION.md`](RUST_PYTHON_SDK_OPTIMIZATION.md)
 > Part V for when and how to raise them, and §9.6 below for an example.
@@ -259,8 +258,11 @@ never affect correctness). Mirrors Java's `goosefs.user.client.cache.*`.
 | `client_cache_uring_queue_depth` | `usize` | `32768` | **io_uring SQ/CQ depth.** Per-ring entry capacity. Raise further (e.g. `65536`) for high-concurrency workloads to avoid SQ-full back-pressure; lower to reduce per-process kernel memory. `0` falls back to the built-in default of 32768. |
 | `client_cache_uring_thread_count` | `usize` | `2` | **io_uring background thread count.** Each thread owns one `IoUring` instance; requests are dispatched round-robin. Raise to `4` on hosts with many idle cores and high concurrency; the threads spend most of their time in `io_uring_enter`, so over-provisioning wastes RAM without throughput gain. `0` falls back to the built-in default of 2. |
 | `client_cache_sync_read_enabled` | `bool` | `false` | **Sync `pread` read mode for the io_uring backend (Linux only).** When `true`, `UringPageStore` serves cache-hit reads with synchronous `pread`/`openat` on the calling thread instead of io_uring SQE/CQE — intended for complex analytical workloads where io_uring underperforms plain `pread`. The calling tokio worker is blocked for the duration of the local disk read (~µs on OS-page-cache hit; ~10-100µs per small read on NVMe), and batched reads on one task become serial per worker, so enable only when the cache directory sits on local NVMe and the working set mostly fits the OS page cache. **Do not enable with cache dirs on HDD/NFS/Lustre** (no read timeout — a slow device blocks the worker unbounded). Write/delete paths stay on io_uring regardless. See [Sync pread read mode](#sync-pread-read-mode-linux-only) below. |
-| `file_info_cache_ttl` | `Duration` | `30s` (enabled) | Client-side `FileInfo` (metadata) cache TTL. **On by default per FLAMEGRAPH_OPTIMIZATION_PLAN §A3** (30 s) — amortises the per-open `MasterClient::get_status` cost when the same file is opened multiple times inside one query. Set to `Duration::ZERO` to opt out (disable the cache). The SDK **explicitly invalidates** the entry on every write / delete / rename issued through this client, so the staleness window only affects **out-of-band** mutations by other writers. |
-| `file_info_cache_capacity` | `usize` | `16384` | Maximum `(path, FileInfo)` LRU entries kept when `file_info_cache_ttl > 0`. Values `< 1` are clamped to `1`. |
+| `metadata_cache_enabled` | `bool` | `false` | Java `goosefs.user.metadata.cache.enabled`. When `true`, `get_status` / `list_status` / `exists` / open share one process-local LRU (status + listing + negative cache). Writes invalidate path + parent after a successful RPC. |
+| `metadata_cache_max_size` | `usize` | `100000` | Java `goosefs.user.metadata.cache.max.size`. LRU capacity when the cache is constructed. Values `< 1` are clamped to `1`. |
+| `metadata_cache_expiration` | `Duration` | `10min` | Java `goosefs.user.metadata.cache.expiration.time` (`parseTimeSize`: `10min`, `30s`, `2day`, or raw milliseconds). `<= 0` skips construction even when enabled. |
+| `file_metadata_sync_interval` | `i64` | `-1` | Java `goosefs.user.file.metadata.sync.interval` in milliseconds. `0` skips the cache on every get/list; `-1` does not. |
+| `file_metadata_load_type` | `LoadMetadataPType` | `ONCE` | Java `goosefs.user.file.metadata.load.type` (`ONCE` / `ALWAYS` / `NEVER`). `ALWAYS` skips the listing cache. |
 | `range_coalesce_enabled` | `bool` | `false` (**disabled**) | Whether [`GoosefsFileReader::read_ranges_with_context`] merges adjacent input ranges into fewer, larger `read_range` calls. **Opt-in per FLAMEGRAPH_OPTIMIZATION_PLAN §B2.** When off (default), the multi-range API serves each input verbatim — behaviour is bit-identical to a caller-side loop. When on, adjacent ranges within `range_coalesce_gap_bytes` are merged (subject to `range_coalesce_max_bytes`) and the payload is spliced back so each output slice is byte-identical to a standalone `read_range`. Trades small over-read (`≤ Σ gap_i` bytes) for a large drop in H2 stream count on Lance / DuckDB scan patterns. **Failure semantics.** Because a merged fetch shares one transport with all its constituent input ranges, a fetch failure fails **all** those ranges together (this matches the failure model the underlying H2 layer would produce anyway, but it does enlarge the blast radius compared with per-range independent reads — enable per-workload if failure isolation between adjacent small ranges matters). |
 | `range_coalesce_gap_bytes` | `u64` | `65536` (64 KiB) | Maximum permitted gap between two adjacent input ranges for them to be merged. Consulted only when `range_coalesce_enabled = true`. |
 | `range_coalesce_max_bytes` | `u64` | `4194304` (4 MiB) | Upper bound on any single **merged** fetch. A caller-requested range whose own length already exceeds this cap is served as one fetch of that size (splitting a single caller request would violate the byte-equivalence contract) — the cap only prevents *merging* from ballooning the request. Values `< 1` are clamped to `1`. |
@@ -473,8 +475,11 @@ properties file values and built-in defaults.
 | `GOOSEFS_WORKER_CONNECTION_POOL_SIZE` | `worker_connection_pool_size` | `min(cores, 4)` | Per-worker gRPC channel pool size (plain integer). `0` is clamped to `1`; non-numeric values are ignored (default kept). See FLAMEGRAPH_OPTIMIZATION_PLAN §B3. |
 | `GOOSEFS_MASTER_CONNECTION_POOL_SIZE` | `master_connection_pool_size` | `1` | Master gRPC channel pool size (plain integer). `0` is clamped to `1`; non-numeric values are ignored (default kept). Raise to `4`/`8` in high-concurrency remote scenarios to spread metadata RPCs across multiple HTTP/2 connections. |
 | `GOOSEFS_MASTER_POOL_SCHEDULE` | `master_connection_pool_schedule` | `RoundRobin` | Master pool scheduling strategy. Accepted: `roundrobin`, `round_robin`, `round-robin`, `RoundRobin` (case-insensitive, separators ignored) or `p2c`, `P2C`. Unknown values are ignored (default kept). Only effective when `master_connection_pool_size > 1`. |
-| `GOOSEFS_FILE_INFO_CACHE_TTL_MS` | `file_info_cache_ttl` | `30000` (30 s) | Client-side `FileInfo` cache TTL in **milliseconds**. Default is 30 s (cache enabled). `0` disables the cache; any positive value controls staleness bound for out-of-band mutations. See FLAMEGRAPH_OPTIMIZATION_PLAN §A3. |
-| `GOOSEFS_FILE_INFO_CACHE_CAPACITY` | `file_info_cache_capacity` | `16384` | Maximum `(path, FileInfo)` LRU entries when the FileInfo cache is enabled (plain integer). `0` is clamped to `1`. |
+| `GOOSEFS_METADATA_CACHE_ENABLED` | `metadata_cache_enabled` | `false` | Enable the Java-aligned client metadata cache (`true`/`false`/`1`/`0`). |
+| `GOOSEFS_METADATA_CACHE_MAX_SIZE` | `metadata_cache_max_size` | `100000` | Metadata cache LRU capacity. `0` is clamped to `1`. |
+| `GOOSEFS_METADATA_CACHE_EXPIRATION` | `metadata_cache_expiration` | `10min` | TTL in Java `parseTimeSize` form (`10min`, `30s`, `2day`, or raw milliseconds). |
+| `GOOSEFS_FILE_METADATA_SYNC_INTERVAL` | `file_metadata_sync_interval` | `-1` | Sync interval (`parseTimeSize`). `0` skips the cache on every get/list. |
+| `GOOSEFS_FILE_METADATA_LOAD_TYPE` | `file_metadata_load_type` | `ONCE` | `ONCE` / `ALWAYS` / `NEVER` (case-insensitive). |
 | `GOOSEFS_SHORT_CIRCUIT_ENABLED` | `short_circuit_enabled` | `false` | Master kill switch for the short-circuit local-mmap read path (`true`/`false`). **Disabled by default** since 0.1.6 (see §2.9 and `../../goosefs-lance-tests/docs/design/FLAMEGRAPH_OPTIMIZATION_PLAN.md` §C6). |
 | `GOOSEFS_SHORT_CIRCUIT_CACHE_CAPACITY` | `short_circuit_cache_capacity` | `64` | Per-task LRU capacity for hot-block SC readers (plain integer). |
 | `GOOSEFS_SHORT_CIRCUIT_CACHE_TTL_MS` | `short_circuit_cache_ttl` | `30000` (30s) | Idle TTL of a cached SC reader in **milliseconds**. |
@@ -519,8 +524,11 @@ These constants are used in `storage_options` maps (e.g. Lance's
 | `STORAGE_OPT_WORKER_CONNECTION_POOL_SIZE` | `goosefs_worker_connection_pool_size` | `min(cores, 4)` | Per-worker gRPC channel pool size (integer as string). `0` is clamped to `1`. |
 | `STORAGE_OPT_MASTER_CONNECTION_POOL_SIZE` | `goosefs_master_connection_pool_size` | `1` | Master gRPC channel pool size (integer as string). `0` is clamped to `1`. Raise to `4`/`8` in high-concurrency remote scenarios. |
 | `STORAGE_OPT_MASTER_POOL_SCHEDULE` | `goosefs_master_pool_schedule` | `RoundRobin` | Master pool scheduling strategy. Accepts `roundrobin` / `round_robin` / `round-robin` / `RoundRobin` / `p2c` / `P2C` (case-insensitive, separators ignored). |
-| `STORAGE_OPT_FILE_INFO_CACHE_TTL_MS` | `goosefs_file_info_cache_ttl_ms` | `30000` (30 s) | Client-side `FileInfo` cache TTL in **milliseconds** (integer as string). Default is 30 s (cache enabled). `0` disables the cache; any positive value controls staleness bound for out-of-band mutations. |
-| `STORAGE_OPT_FILE_INFO_CACHE_CAPACITY` | `goosefs_file_info_cache_capacity` | `16384` | `FileInfo` LRU capacity when the cache is enabled (integer as string). `0` is clamped to `1`. |
+| `STORAGE_OPT_METADATA_CACHE_ENABLED` | `goosefs_metadata_cache_enabled` | `false` | Enable the client metadata cache (`true`/`false`/`1`/`0`). |
+| `STORAGE_OPT_METADATA_CACHE_MAX_SIZE` | `goosefs_metadata_cache_max_size` | `100000` | Metadata cache LRU capacity. |
+| `STORAGE_OPT_METADATA_CACHE_EXPIRATION` | `goosefs_metadata_cache_expiration` | `10min` | TTL (`parseTimeSize` string). |
+| `STORAGE_OPT_FILE_METADATA_SYNC_INTERVAL` | `goosefs_file_metadata_sync_interval` | `-1` | Sync interval (`parseTimeSize`). |
+| `STORAGE_OPT_FILE_METADATA_LOAD_TYPE` | `goosefs_file_metadata_load_type` | `ONCE` | `ONCE` / `ALWAYS` / `NEVER`. |
 | `STORAGE_OPT_SHORT_CIRCUIT_ENABLED` | `goosefs_short_circuit_enabled` | `false` | Master kill switch for the short-circuit local-mmap read path. **Disabled by default** since 0.1.6. |
 | `STORAGE_OPT_SHORT_CIRCUIT_CACHE_CAPACITY` | `goosefs_short_circuit_cache_capacity` | `64` | Per-task LRU capacity for hot-block SC readers. |
 | `STORAGE_OPT_SHORT_CIRCUIT_CACHE_TTL_MS` | `goosefs_short_circuit_cache_ttl_ms` | `30000` (30s) | Idle TTL of a cached SC reader in **milliseconds**. |
@@ -587,8 +595,11 @@ These keys are used in `goosefs-site.properties` files (Java-style `key=value` f
 | `goosefs.user.worker.connection.pool.size` | `worker_connection_pool_size` | integer | `min(cores, 4)` | Per-worker gRPC channel pool size. `0` is clamped to `1`. See FLAMEGRAPH_OPTIMIZATION_PLAN §B3. |
 | `goosefs.user.master.connection.pool.size` | `master_connection_pool_size` | integer | `1` | Master gRPC channel pool size. `0` is clamped to `1`. Raise to `4`/`8` in high-concurrency remote scenarios to spread metadata RPCs across multiple HTTP/2 connections. |
 | `goosefs.user.master.pool.schedule` | `master_connection_pool_schedule` | `roundrobin` / `round_robin` / `round-robin` / `RoundRobin` / `p2c` / `P2C` | `RoundRobin` | Master pool scheduling strategy (case-insensitive, separators ignored). Unknown values are ignored (default kept). Only effective when `master_connection_pool_size > 1`. |
-| `goosefs.user.file.info.cache.ttl.ms` | `file_info_cache_ttl` | integer (milliseconds) | `30000` (30 s) | Client-side `FileInfo` cache TTL. Default is 30 s (cache enabled). `0` disables the cache; any positive value controls staleness bound for out-of-band mutations. See FLAMEGRAPH_OPTIMIZATION_PLAN §A3. |
-| `goosefs.user.file.info.cache.capacity` | `file_info_cache_capacity` | integer | `16384` | `FileInfo` LRU capacity when the cache is enabled. `0` is clamped to `1`. |
+| `goosefs.user.metadata.cache.enabled` | `metadata_cache_enabled` | `true`/`false` | `false` | Construct the client metadata cache. |
+| `goosefs.user.metadata.cache.max.size` | `metadata_cache_max_size` | integer | `100000` | LRU capacity. `0` is clamped to `1`. |
+| `goosefs.user.metadata.cache.expiration.time` | `metadata_cache_expiration` | `parseTimeSize` | `10min` | TTL (`10min`, `30s`, `2day`, or raw milliseconds). |
+| `goosefs.user.file.metadata.sync.interval` | `file_metadata_sync_interval` | `parseTimeSize` | `-1` | `0` skips the cache on every get/list; `-1` does not. |
+| `goosefs.user.file.metadata.load.type` | `file_metadata_load_type` | `ONCE`/`ALWAYS`/`NEVER` | `ONCE` | `ALWAYS` skips the listing cache. |
 | `goosefs.user.short.circuit.enabled` | `short_circuit_enabled` | `true` / `false` | `false` | Master kill switch for the short-circuit local-mmap read path. **Disabled by default** since 0.1.6 (see §2.9). |
 | `goosefs.client.short.circuit.cache.capacity` | `short_circuit_cache_capacity` | integer | `64` | Per-task LRU capacity for hot-block SC readers. |
 | `goosefs.client.short.circuit.cache.ttl.ms` | `short_circuit_cache_ttl` | integer (milliseconds) | `30000` (30s) | Idle TTL of a cached SC reader. |
@@ -1078,11 +1089,9 @@ let config = GoosefsConfig::new("10.0.0.1:9200")
     // Worker IO path: pool channels per worker to lift per-connection
     // throughput cap (Part V R4 / FLAMEGRAPH_OPTIMIZATION_PLAN §B3).
     .with_worker_connection_pool_size(4)
-    // Client-side FileInfo cache: amortise per-open MasterClient::get_status
-    // when the same file is opened multiple times inside one query
-    // (FLAMEGRAPH_OPTIMIZATION_PLAN §A3). Opt-in: 0 = disabled (default).
-    .with_file_info_cache_ttl(Duration::from_millis(2000))
-    .with_file_info_cache_capacity(8192)
+    // Java-aligned metadata cache (default off). Opening the switch is
+    // enough — TTL 10min / capacity 100000 match the Java client.
+    .with_metadata_cache_enabled(true)
     // Sequential-read throughput: widen the prefetch window (Part V R1-B-a)…
     .with_prefetch_window(16)
     // …and coalesce flow-control ACKs (only on workers that honour the
@@ -1092,16 +1101,15 @@ let config = GoosefsConfig::new("10.0.0.1:9200")
 
 #### Environment variables
 
-The three FLAMEGRAPH_OPTIMIZATION_PLAN §A3 / §B3 knobs are also exposed via
-env vars (picked up by `GoosefsConfig::from_env()` /
+The FLAMEGRAPH_OPTIMIZATION_PLAN §B3 knobs and the Java metadata-cache
+keys are also exposed via env vars (picked up by `GoosefsConfig::from_env()` /
 `GoosefsConfig::from_properties_auto()`):
 
 ```bash
 export GOOSEFS_MASTER_CONNECTION_POOL_SIZE=8
 export GOOSEFS_MASTER_POOL_SCHEDULE=p2c
 export GOOSEFS_WORKER_CONNECTION_POOL_SIZE=8
-export GOOSEFS_FILE_INFO_CACHE_TTL_MS=2000
-export GOOSEFS_FILE_INFO_CACHE_CAPACITY=8192
+export GOOSEFS_METADATA_CACHE_ENABLED=true
 ```
 
 #### Properties file
@@ -1112,8 +1120,7 @@ Or the equivalent lines in `goosefs-site.properties`:
 goosefs.user.master.connection.pool.size=8
 goosefs.user.master.pool.schedule=p2c
 goosefs.user.worker.connection.pool.size=8
-goosefs.user.file.info.cache.ttl.ms=2000
-goosefs.user.file.info.cache.capacity=8192
+goosefs.user.metadata.cache.enabled=true
 ```
 
 #### Storage options (Lance / OpenDAL)
@@ -1129,8 +1136,7 @@ ds = lance.dataset(
         "goosefs_master_connection_pool_size": "8",
         "goosefs_master_pool_schedule": "p2c",
         "goosefs_worker_connection_pool_size": "8",
-        "goosefs_file_info_cache_ttl_ms": "2000",
-        "goosefs_file_info_cache_capacity": "8192",
+        "goosefs_metadata_cache_enabled": "true",
     },
 )
 ```
@@ -1142,8 +1148,7 @@ ds = lance.dataset(
 | `master_connection_pool_size` | High-concurrency metadata RPCs over remote RTT | `1` | `4`–`8` | `GOOSEFS_MASTER_CONNECTION_POOL_SIZE` | `goosefs.user.master.connection.pool.size` | `goosefs_master_connection_pool_size` |
 | `master_connection_pool_schedule` | Adaptive load balancing across pooled master channels | `RoundRobin` | `RoundRobin` (default) / `P2C` (opt-in for high concurrency) | `GOOSEFS_MASTER_POOL_SCHEDULE` | `goosefs.user.master.pool.schedule` | `goosefs_master_pool_schedule` |
 | `worker_connection_pool_size` | Single-process high-throughput block reads | `min(cores, 4)` | `4`–`8` | `GOOSEFS_WORKER_CONNECTION_POOL_SIZE` | `goosefs.user.worker.connection.pool.size` | `goosefs_worker_connection_pool_size` |
-| `file_info_cache_ttl` | Repeated opens of the same file inside one query | `30000` (30 s) | `1s`–`5s` | `GOOSEFS_FILE_INFO_CACHE_TTL_MS` | `goosefs.user.file.info.cache.ttl.ms` | `goosefs_file_info_cache_ttl_ms` |
-| `file_info_cache_capacity` | Wide fan-out workloads (many distinct paths) | `16384` | `16384`–`32768` | `GOOSEFS_FILE_INFO_CACHE_CAPACITY` | `goosefs.user.file.info.cache.capacity` | `goosefs_file_info_cache_capacity` |
+| `metadata_cache_enabled` | Repeated opens / get_status / list_status of the same paths | `false` | `true` | `GOOSEFS_METADATA_CACHE_ENABLED` | `goosefs.user.metadata.cache.enabled` | `goosefs_metadata_cache_enabled` |
 | `prefetch_window` | Sequential (SR) read throughput | `8` | `16` | *(programmatic only)* | *(programmatic only)* | *(programmatic only)* |
 | `ack_interval_bytes` | SR throughput, **only** on workers honouring prefetch | `0` (ACK every chunk) | `4MB`–`8MB` | *(programmatic only)* | *(programmatic only)* | *(programmatic only)* |
 | `short_circuit_enabled` | Kill switch for the local mmap read path (see §2.9) | `false` | `false` (default; safe for Lance/DuckDB); `true` to opt into the local mmap fast path on co-located workloads that benefit | `GOOSEFS_SHORT_CIRCUIT_ENABLED` | `goosefs.user.short.circuit.enabled` | `goosefs_short_circuit_enabled` |

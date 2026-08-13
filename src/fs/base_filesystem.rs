@@ -59,7 +59,9 @@ use crate::config::{GoosefsConfig, WriteType};
 use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
 use crate::fs::filesystem::FileSystem;
-use crate::fs::options::{CreateFileOptions, DeleteOptions, OpenFileOptions};
+use crate::fs::options::{
+    CreateFileOptions, DeleteOptions, GetStatusOptions, ListStatusOptions, OpenFileOptions,
+};
 use crate::fs::uri_status::URIStatus;
 use crate::fs::write_type::{get_write_type_from_xattr, WriteTypeXAttr};
 use crate::io::{GoosefsFileInStream, GoosefsFileWriter};
@@ -201,16 +203,7 @@ impl BaseFileSystem {
     ///
     /// Returns `None` for root `/`.
     fn parent_path(path: &str) -> Option<String> {
-        let trimmed = path.trim_end_matches('/');
-        if trimmed.is_empty() {
-            return None;
-        }
-        let last_slash = trimmed.rfind('/')?;
-        if last_slash == 0 {
-            Some("/".to_string())
-        } else {
-            Some(trimmed[..last_slash].to_string())
-        }
+        crate::metadata_cache::parent_path(path)
     }
 
     // ── One-shot write convenience ─────────────────────────────────────────
@@ -254,10 +247,29 @@ impl FileSystem for BaseFileSystem {
     // ── Status ────────────────────────────────────────────────────────────────
 
     async fn get_status(&self, path: &str) -> Result<URIStatus> {
+        self.get_status_with_options(path, GetStatusOptions::default())
+            .await
+    }
+
+    async fn get_status_with_options(
+        &self,
+        path: &str,
+        opts: GetStatusOptions,
+    ) -> Result<URIStatus> {
+        let sync = opts
+            .sync_interval_ms
+            .unwrap_or(self.config.file_metadata_sync_interval);
         let master = self.master();
-        let mut fi = master.get_status(path).await?;
+        let cache = self.ctx.acquire_metadata_cache();
+        let mut fi =
+            crate::metadata_cache::get_status_through_cache(cache.as_deref(), path, sync, || {
+                master.get_status(path)
+            })
+            .await?;
         // Mirror Java getStatus when checkBlockReplicas > 0: probe workers and
         // overwrite BlockInfo.locations (same as `fs stat --check_replicas`).
+        // Enrichment mutates this owned clone — never write locations back
+        // into the metadata cache (INV-MC-D1).
         let check = self.ctx.config().check_block_replicas;
         if check > 0 {
             let router = self.ctx.acquire_router();
@@ -278,31 +290,61 @@ impl FileSystem for BaseFileSystem {
     }
 
     async fn list_status(&self, path: &str, recursive: bool) -> Result<Vec<URIStatus>> {
+        self.list_status_with_options(
+            path,
+            ListStatusOptions {
+                recursive,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    async fn list_status_with_options(
+        &self,
+        path: &str,
+        opts: ListStatusOptions,
+    ) -> Result<Vec<URIStatus>> {
         let master = self.master();
-        if !recursive {
-            let items = master.list_status(path, false).await?;
-            return Ok(items.into_iter().map(URIStatus::from_proto).collect());
-        }
-        // The master's `recursive` option is best-effort and (on some cluster
-        // builds) only returns entries whose metadata is already loaded,
-        // collapsing a deep tree to its first level. To match the Java client
-        // and `goosefs fs ls -R` (which walk the namespace client-side), we
-        // perform the recursion ourselves: list one level at a time and
-        // descend into every directory child.
-        let mut out: Vec<URIStatus> = Vec::new();
-        let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-        queue.push_back(path.to_string());
-        while let Some(cur) = queue.pop_front() {
-            let items = master.list_status(&cur, false).await?;
-            for fi in items {
-                let status = URIStatus::from_proto(fi);
-                if status.is_folder() {
-                    queue.push_back(status.path.clone());
+        let sync = opts
+            .sync_interval_ms
+            .unwrap_or(self.config.file_metadata_sync_interval);
+        let load = opts
+            .load_metadata_type
+            .unwrap_or(self.config.file_metadata_load_type);
+
+        if opts.recursive {
+            // Recursive listings never use the cache (Java listStatus recursive
+            // + INV-MC-S5). Walk client-side so deep trees match `goosefs fs ls -R`.
+            let mut out: Vec<URIStatus> = Vec::new();
+            let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+            queue.push_back(path.to_string());
+            while let Some(cur) = queue.pop_front() {
+                let items = master.list_status(&cur, false).await?;
+                for fi in items {
+                    let status = URIStatus::from_proto(fi);
+                    if status.is_folder() {
+                        queue.push_back(status.path.clone());
+                    }
+                    out.push(status);
                 }
-                out.push(status);
             }
+            return Ok(out);
         }
-        Ok(out)
+
+        let skip = crate::metadata_cache::should_skip_listing_cache(
+            false,
+            load,
+            opts.load_metadata_only,
+            sync,
+        );
+        let cache = self.ctx.acquire_metadata_cache();
+        let items =
+            crate::metadata_cache::list_status_through_cache(cache.as_deref(), path, skip, || {
+                master.list_status(path, false)
+            })
+            .await?;
+        Ok(items.into_iter().map(URIStatus::from_proto).collect())
     }
 
     /// Return `true` if `path` exists and is either a completed file or a directory.
@@ -353,7 +395,9 @@ impl FileSystem for BaseFileSystem {
 
     async fn mkdir(&self, path: &str, recursive: bool) -> Result<()> {
         let master = self.master();
-        master.create_directory(path, recursive).await
+        master.create_directory(path, recursive).await?;
+        self.ctx.invalidate_metadata(path, true);
+        Ok(())
     }
 
     // ── Delete ────────────────────────────────────────────────────────────────
@@ -361,10 +405,7 @@ impl FileSystem for BaseFileSystem {
     async fn delete(&self, path: &str, options: DeleteOptions) -> Result<()> {
         let master = self.master();
         master.delete_with_options(path, options).await?;
-        // A3 consistency: drop any cached FileInfo so a subsequent open sees
-        // NotFound (or the fresh state after re-create). No-op when the
-        // opt-in cache is disabled.
-        self.ctx.invalidate_file_info(path);
+        self.ctx.invalidate_metadata(path, true);
         Ok(())
     }
 
@@ -373,10 +414,8 @@ impl FileSystem for BaseFileSystem {
     async fn rename(&self, src: &str, dst: &str) -> Result<()> {
         let master = self.master();
         master.rename(src, dst).await?;
-        // A3 consistency: both endpoints of the rename change identity — the
-        // src is gone, the dst now points at what src used to be.
-        self.ctx.invalidate_file_info(src);
-        self.ctx.invalidate_file_info(dst);
+        self.ctx.invalidate_metadata(src, true);
+        self.ctx.invalidate_metadata(dst, true);
         Ok(())
     }
 }
