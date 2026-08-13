@@ -923,10 +923,11 @@ impl PyAsyncGoosefs {
             };
             // Locations-first when path provided; empty → hash fallback.
             let replication = h.ctx.config().file_replication_number;
+            let max_retry_node = h.ctx.config().file_read_max_node_retry;
             let worker_info = h
                 .ctx
                 .acquire_router()
-                .select_worker_for_read(block_id, &locations, replication)
+                .select_worker_for_read(block_id, &locations, replication, max_retry_node)
                 .await
                 .map_err(map_err)?;
             let net_addr = worker_info.address.as_ref().ok_or_else(|| {

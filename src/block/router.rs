@@ -14,15 +14,18 @@
 
 //! Worker router: maps block IDs to workers using consistent hashing.
 //!
-//! Goosefs uses consistent hashing to decide which worker should serve
-//! a particular block. This module implements the routing logic with:
-//! - Consistent hash ring based on worker IDs
+//! Mirrors Java `ConsistentHashProvider` / `DynamicConsistentHashProvider`:
+//! - Ring keys and lookups use Guava-compatible `murmur3_128` over
+//!   `(long, int)` (`putLong` + `putInt`, little-endian)
+//! - Multi-replica selection uses `(blockId, attempt)` ceiling lookups with
+//!   host dedupe (`getWorkersByBlockId`)
 //! - Failed-worker filtering with configurable TTL
-//! - Thread-safe worker list updates via `RwLock<Arc<...>>`
+//! - Thread-safe worker list updates via `ArcSwap`
 //! - Worker list TTL — auto-refresh after `worker_refresh_ttl` (default 30 s)
 //! - Local worker preference — detect the local worker by hostname/IP
 //!   and route block reads there first (mirrors Java `LocalFirstPolicy`)
 
+use std::collections::{BTreeMap, HashSet};
 use std::hash::Hasher;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -45,8 +48,12 @@ const DEFAULT_FAILURE_TTL: Duration = Duration::from_secs(60);
 /// Matches Go SDK's `WorkerRefreshPeriod = 30s`.
 const DEFAULT_WORKER_REFRESH_TTL: Duration = Duration::from_secs(30);
 
-/// Number of virtual nodes per worker in the hash ring.
-const VIRTUAL_NODES_PER_WORKER: u32 = 100;
+/// Default virtual nodes per worker when `WorkerInfo.virtual_node_num` is unset.
+/// Matches Java `goosefs.master.consistent.hash.virtual.node.num.per.worker` (200).
+const VIRTUAL_NODES_PER_WORKER: u32 = 200;
+
+/// Matches Java `goosefs.user.client.hash.policy.max.attempt` (default 100).
+const DEFAULT_HASH_POLICY_MAX_ATTEMPTS: usize = 100;
 
 /// allocate the `failed_workers` `DashMap` with **2 shards** instead of the
 /// default 4. The failure map is written only by `mark_failed` (rare,
@@ -145,7 +152,7 @@ pub struct WorkerRouter {
     /// O(log N) `binary_search`.
     /// Previously the ring was rebuilt + sorted on every call (O(N log N)
     /// with N typically `VIRTUAL_NODES_PER_WORKER * worker_count`).
-    hash_ring: ArcSwap<Vec<(u64, usize)>>,
+    hash_ring: ArcSwap<Vec<(i64, usize)>>,
 }
 
 impl WorkerRouter {
@@ -261,7 +268,7 @@ impl WorkerRouter {
     /// fingerprint matches the currently published ring (defensive add-on
     ///  repeated background
     /// refreshes that observe the same worker set no longer pay the
-    /// N·V·xxh3 + O(N·V·log(N·V)) sort cost.
+    /// N·V·murmur3 + O(N·V·log(N·V)) sort cost.
     pub async fn update_workers(&self, workers: Vec<WorkerInfo>) {
         // Fast-path: skip the rebuild if the new set is identical to the
         // currently-published one. The fingerprint is order-independent and
@@ -675,21 +682,31 @@ impl WorkerRouter {
 
     /// Select the primary read worker for `block_id`, preferring locations.
     ///
-    /// Equivalent to `select_workers_for_read(block_id, locations,
-    /// replication.max(1))` then taking the first entry.
+    /// Candidate pool width matches Java `GooseFSBlockStore.getInStream`:
+    /// `count = max(max_retry_node, replication).max(1)`, then the first
+    /// non-failed worker is returned. After [`Self::mark_failed`], a later
+    /// call skips failed workers so the next hash/location candidate is used
+    /// (Java `failedWorkers` + `maxRetryNode` pool).
     ///
-    /// TODO(java-parity): Java `GooseFSBlockStore.getInStream` uses
-    /// `count = max(maxRetryNode, replicationNum)` and, when
-    /// `replicationNum > 1`, shuffles the candidate list before picking one.
-    /// Rust currently passes only `file_replication_number` and takes the
-    /// first worker. Deferred.
+    /// `max_retry_node` is Java `InStreamOptions.maxRetryNode` /
+    /// [`crate::config::GoosefsConfig::file_read_max_node_retry`] (default
+    /// [`crate::config::DEFAULT_FILE_READ_MAX_NODE_RETRY`]).
+    ///
+    /// When `replication > 1`, Java additionally shuffles the first
+    /// `replication` candidates before picking; that shuffle is still
+    /// deferred here (deterministic first-of-pool for now).
+    ///
+    /// **Note:** this signature takes four arguments (adds `max_retry_node`
+    /// vs earlier three-arg form). Callers must pass the configured value
+    /// (typically from `GoosefsConfig`).
     pub async fn select_worker_for_read(
         &self,
         block_id: i64,
         locations: &[BlockLocation],
         replication: i32,
+        max_retry_node: i32,
     ) -> Result<WorkerInfo> {
-        let count = replication.max(1) as usize;
+        let count = read_worker_candidate_count(replication, max_retry_node);
         let workers = self
             .select_workers_for_read(block_id, locations, count)
             .await?;
@@ -899,7 +916,7 @@ impl WorkerRouter {
         &self,
         block_id: i64,
         workers: &[WorkerInfo],
-        ring: &[(u64, usize)],
+        ring: &[(i64, usize)],
         skip_failed: bool,
     ) -> Option<WorkerInfo> {
         consistent_hash_select_from_ring(block_id, workers, ring, skip_failed, |key| {
@@ -908,21 +925,23 @@ impl WorkerRouter {
     }
 }
 
-/// Free-standing consistent-hash ring walk shared by [`WorkerRouter`] and
+/// Java `getInStream` candidate pool width:
+/// `Math.max(maxRetryNode, replicationNum)` (at least 1).
+#[inline]
+pub(crate) fn read_worker_candidate_count(replication: i32, max_retry_node: i32) -> usize {
+    replication.max(max_retry_node).max(1) as usize
+}
+
+/// Free-standing consistent-hash lookup shared by [`WorkerRouter`] and
 /// [`WorkerRouterView`].
 ///
-/// Extracted from `WorkerRouter::consistent_hash_select_with_ring` in
-/// Step 1 ):
-/// the algorithm is identical for the shared router and every per-reader
-/// snapshot / view, and the only piece of per-router state involved is
-/// the failed-worker predicate. Passing that in as a closure lets both
-/// types delegate here without duplicating the ~30 lines of ring
-/// arithmetic — critical to keep A/B behaviour bit-exact during the
-/// coexistence phase (Step 2).
+/// Mirrors Java `ConsistentHashProvider.get(blockId, attempt)` + failed-worker
+/// filtering: each attempt hashes `(blockId, attempt)` with Guava-compatible
+/// murmur3_128 and takes the ring ceiling (wrapping to the first entry).
 fn consistent_hash_select_from_ring<F>(
     block_id: i64,
     workers: &[WorkerInfo],
-    ring: &[(u64, usize)],
+    ring: &[(i64, usize)],
     skip_failed: bool,
     is_failed_fn: F,
 ) -> Option<WorkerInfo>
@@ -933,24 +952,15 @@ where
         return None;
     }
 
-    // A2: hash the raw i64 bytes instead of formatting the id to a
-    // decimal string. Same hasher (xxh3), same ring — the byte encoding
-    // matches `build_hash_ring`'s virtual-node encoding domain (both
-    // consumed by the same client process), so this is self-consistent.
-    let target = hash_block_id(block_id);
-    let start = ring
-        .binary_search_by_key(&target, |(h, _)| *h)
-        .unwrap_or_else(|p| p)
-        % ring.len();
-
-    // Walk forward at most `ring.len()` positions so we eventually
-    // probe every distinct virtual node before giving up.
-    for offset in 0..ring.len() {
-        let pos = (start + offset) % ring.len();
-        let worker_idx = ring[pos].1;
-        // Defensive: ring may reference an index outside `workers` if
-        // somehow stale (should not happen — ring is rebuilt with the
-        // same vector — but guard anyway).
+    let mut visited: HashSet<usize> = HashSet::new();
+    let mut attempts: i32 = 0;
+    while visited.len() < workers.len() && (attempts as usize) < DEFAULT_HASH_POLICY_MAX_ATTEMPTS {
+        let target = murmur3_guava_long_int(block_id, attempts);
+        attempts = attempts.wrapping_add(1);
+        let Some(worker_idx) = ring_ceiling_worker_index(ring, target) else {
+            return None;
+        };
+        visited.insert(worker_idx);
         let Some(w) = workers.get(worker_idx) else {
             continue;
         };
@@ -966,16 +976,17 @@ where
     None
 }
 
-/// Select up to `count` host-deduped workers from the ring (Java
-/// `getWorkersByBlockId` / `getBlockWorkers` semantics).
+/// Select up to `count` host-deduped workers (Java `getWorkersByBlockId` /
+/// `getBlockWorkers` semantics).
 ///
-/// Starts at `hash(block_id)` and walks clockwise. Skips duplicate hosts and
-/// (when `skip_failed`) failed workers. Returns fewer than `count` when the
-/// ring cannot supply enough distinct hosts.
+/// For `attempt = 0..maxAttempts`, compute `murmur3_128(blockId, attempt)`,
+/// take the ring ceiling, skip failed / duplicate / same-host workers, and
+/// stop when `count` workers are selected, all workers have been visited, or
+/// attempts are exhausted.
 fn consistent_hash_select_n_from_ring<F>(
     block_id: i64,
     workers: &[WorkerInfo],
-    ring: &[(u64, usize)],
+    ring: &[(i64, usize)],
     count: usize,
     skip_failed: bool,
     is_failed_fn: F,
@@ -988,26 +999,23 @@ where
         return selected;
     }
 
-    let target = hash_block_id(block_id);
-    let start = ring
-        .binary_search_by_key(&target, |(h, _)| *h)
-        .unwrap_or_else(|p| p)
-        % ring.len();
-
     let capacity = count.min(workers.len());
-    let mut selected_hosts: std::collections::HashSet<String> =
-        std::collections::HashSet::with_capacity(capacity);
-    // Track worker indices already chosen so workers without a host still
-    // dedupe correctly.
-    let mut selected_idxs: std::collections::HashSet<usize> =
-        std::collections::HashSet::with_capacity(capacity);
+    let mut selected_hosts: HashSet<String> = HashSet::with_capacity(capacity);
+    let mut selected_idxs: HashSet<usize> = HashSet::with_capacity(capacity);
+    let mut visited_idxs: HashSet<usize> = HashSet::with_capacity(workers.len());
+    let mut attempts: i32 = 0;
 
-    for offset in 0..ring.len() {
-        if selected.len() >= count {
+    while selected.len() < count
+        && visited_idxs.len() < workers.len()
+        && (attempts as usize) < DEFAULT_HASH_POLICY_MAX_ATTEMPTS
+    {
+        let target = murmur3_guava_long_int(block_id, attempts);
+        attempts = attempts.wrapping_add(1);
+        let Some(worker_idx) = ring_ceiling_worker_index(ring, target) else {
             break;
-        }
-        let pos = (start + offset) % ring.len();
-        let worker_idx = ring[pos].1;
+        };
+        visited_idxs.insert(worker_idx);
+
         if selected_idxs.contains(&worker_idx) {
             continue;
         }
@@ -1015,9 +1023,7 @@ where
             continue;
         };
 
-        // Skip address-less workers: callers always need a usable net address,
-        // and selecting one would make the non-empty result look successful
-        // while every read/write path immediately rejects it.
+        // Skip address-less workers: callers always need a usable net address.
         let Some(addr) = w.address.as_ref() else {
             continue;
         };
@@ -1038,6 +1044,18 @@ where
     }
 
     selected
+}
+
+/// `NavigableMap.ceilingEntry(target)` with wrap-around to `firstEntry`.
+fn ring_ceiling_worker_index(ring: &[(i64, usize)], target: i64) -> Option<usize> {
+    if ring.is_empty() {
+        return None;
+    }
+    match ring.binary_search_by_key(&target, |(h, _)| *h) {
+        Ok(i) => Some(ring[i].1),
+        Err(i) if i < ring.len() => Some(ring[i].1),
+        Err(_) => Some(ring[0].1),
+    }
 }
 
 /// Wait-free, immutable snapshot of the routing state for a single
@@ -1072,7 +1090,7 @@ where
 /// | Field           | Shape                         | Equivalent to snapshot? |
 /// |-----------------|-------------------------------|-------------------------|
 /// | `workers`       | `Arc<Vec<WorkerInfo>>`        | ✅ same `Arc` pointer   |
-/// | `hash_ring`     | `Arc<Vec<(u64, usize)>>`      | ✅ same `Arc` pointer   |
+/// | `hash_ring`     | `Arc<Vec<(i64, usize)>>`      | ✅ same `Arc` pointer   |
 /// | `failed_workers`| `DashMap<String, Instant>`    | ✅ fresh, per-view      |
 /// | `failed_count`  | `AtomicUsize`()          | ✅ fresh, per-view      |
 /// | `failure_ttl`   | `Duration`                    | ✅ value copy           |
@@ -1100,7 +1118,7 @@ pub struct WorkerRouterView {
     /// construction. Points to the same `Arc` as the shared router when
     /// built via [`WorkerRouterView::from_shared`], so a shared-router
     /// `update_workers` afterwards cannot tear existing views.
-    hash_ring: Arc<Vec<(u64, usize)>>,
+    hash_ring: Arc<Vec<(i64, usize)>>,
     /// Local-worker id captured at construction. `None` means either
     /// "no local worker" or "shared router was not probed yet"; the
     /// latter case is prevented in practice by  Step 0 (the shared
@@ -1423,16 +1441,14 @@ impl WorkerRouterView {
     /// Select the primary read worker, preferring locations.
     ///
     /// Mirrors [`WorkerRouter::select_worker_for_read`].
-    ///
-    /// TODO(java-parity): match Java `max(maxRetryNode, replicationNum)` and
-    /// shuffle-when-replication>1 before picking the source worker. Deferred.
     pub async fn select_worker_for_read(
         &self,
         block_id: i64,
         locations: &[BlockLocation],
         replication: i32,
+        max_retry_node: i32,
     ) -> Result<WorkerInfo> {
-        let count = replication.max(1) as usize;
+        let count = read_worker_candidate_count(replication, max_retry_node);
         let workers = self
             .select_workers_for_read(block_id, locations, count)
             .await?;
@@ -1570,7 +1586,7 @@ impl WorkerRouterView {
 
     /// Test-only accessor for the captured `hash_ring` `Arc` (parity tests).
     #[cfg(test)]
-    fn hash_ring_arc(&self) -> &Arc<Vec<(u64, usize)>> {
+    fn hash_ring_arc(&self) -> &Arc<Vec<(i64, usize)>> {
         &self.hash_ring
     }
 }
@@ -1620,29 +1636,23 @@ fn workers_from_block_locations(
 
 /// Build a sorted `(hash, worker_index)` ring for consistent hashing.
 ///
-/// Called from [`WorkerRouter::update_workers`] so the hot `select_worker`
-/// path can do an O(log N) binary search instead of rebuilding+sorting on
-/// every request.
-///
-///: virtual-node hashes are computed by feeding the raw `i64` /
-/// `u32` bytes to xxh3 directly (no `format!` / no allocation). The ring
-/// is client-local (never exchanged across processes), so intra-process
-/// self-consistency with [`hash_block_id`] is the only requirement.
-fn build_hash_ring(workers: &[WorkerInfo]) -> Vec<(u64, usize)> {
-    let mut ring: Vec<(u64, usize)> =
-        Vec::with_capacity(workers.len() * VIRTUAL_NODES_PER_WORKER as usize);
+/// Matches Java `ConsistentHashProvider.build()`:
+/// - Virtual node key = Guava `murmur3_128().putLong(workerId).putInt(vn).asLong()`
+/// - Collision on the same key overwrites (TreeMap.put semantics)
+/// - Ordered by **signed** `i64` (Java `TreeMap<Long>`)
+fn build_hash_ring(workers: &[WorkerInfo]) -> Vec<(i64, usize)> {
+    let mut map: BTreeMap<i64, usize> = BTreeMap::new();
     for (idx, worker) in workers.iter().enumerate() {
         let worker_id = worker.id.unwrap_or(idx as i64);
         let virtual_nodes = worker
             .virtual_node_num
             .unwrap_or(VIRTUAL_NODES_PER_WORKER as i32) as u32;
         for vn in 0..virtual_nodes {
-            let hash = hash_virtual_node(worker_id, vn);
-            ring.push((hash, idx));
+            let hash = murmur3_guava_long_int(worker_id, vn as i32);
+            map.insert(hash, idx);
         }
     }
-    ring.sort_by_key(|(h, _)| *h);
-    ring
+    map.into_iter().collect()
 }
 
 /// Compute a fingerprint of a worker set for `update_workers` fast-path.
@@ -1736,31 +1746,27 @@ pub(crate) fn rpc_endpoint(addr: &WorkerNetAddress) -> String {
     s
 }
 
-/// Hash a virtual-node identifier `(worker_id, vn)` into the ring.
+/// Guava `Hashing.murmur3_128().newHasher().putLong(key).putInt(index).hash().asLong()`.
 ///
-///: feeds the raw `i64` + separator + `u32` bytes to xxh3 with no
-/// allocation. Domain-separated from [`hash_block_id`] by construction
-/// (different byte layout: 8-byte id + 1-byte separator + 4-byte vn vs.
-/// bare 8-byte block id) so the two never collide within one ring.
+/// Delegates to the in-tree [`crate::block::murmur3`] implementation (no
+/// crates.io `mur3` dependency).
 #[inline]
-fn hash_virtual_node(worker_id: i64, vn: u32) -> u64 {
-    let mut h = Xxh3Default::default();
-    h.write(&worker_id.to_le_bytes());
-    h.write(b":");
-    h.write(&vn.to_le_bytes());
-    h.finish()
+fn murmur3_guava_long_int(key: i64, index: i32) -> i64 {
+    crate::block::murmur3::murmur3_128_as_long_put_long_int(key, index)
 }
 
-/// Hash a `block_id` for consistent-hash ring lookup.
-///
-///: replaces the old `hash_key(&block_id.to_string())` (fmt
-/// machinery + `String` allocation on every `select_worker`) with a
-/// direct `to_le_bytes()` feed to the xxh3 hasher.
+/// Virtual-node ring key — Java `putLong(workerId).putInt(vn)`.
 #[inline]
-fn hash_block_id(block_id: i64) -> u64 {
-    let mut h = Xxh3Default::default();
-    h.write(&block_id.to_le_bytes());
-    h.finish()
+#[cfg_attr(not(test), allow(dead_code))]
+fn hash_virtual_node(worker_id: i64, vn: u32) -> i64 {
+    murmur3_guava_long_int(worker_id, vn as i32)
+}
+
+/// Lookup key for attempt 0 — Java `putLong(blockId).putInt(0)`.
+#[inline]
+#[cfg_attr(not(test), allow(dead_code))]
+fn hash_block_id(block_id: i64) -> i64 {
+    murmur3_guava_long_int(block_id, 0)
 }
 
 #[cfg(test)]
@@ -1775,6 +1781,7 @@ mod tests {
                 rpc_port: Some(port),
                 ..Default::default()
             }),
+            virtual_node_num: Some(VIRTUAL_NODES_PER_WORKER as i32),
             ..Default::default()
         }
     }
@@ -1853,6 +1860,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_select_worker_for_read_uses_max_retry_node_pool() {
+        let router = WorkerRouter::new();
+        router
+            .update_workers(vec![
+                make_worker(1, "w1", 9203),
+                make_worker(2, "w2", 9203),
+                make_worker(3, "w3", 9203),
+                make_worker(4, "w4", 9203),
+            ])
+            .await;
+
+        let block_id = 42_i64;
+        // Java: count = max(maxRetryNode=3, replication=1) → first of top-3.
+        let via_pool = router
+            .select_worker_for_read(block_id, &[], 1, 3)
+            .await
+            .unwrap();
+        let top3 = router.select_workers(block_id, 3).await.unwrap();
+        assert_eq!(via_pool.id, top3[0].id);
+
+        // Mark primary failed → next call should advance within the pool.
+        router.mark_failed(via_pool.address.as_ref().unwrap());
+        let second = router
+            .select_worker_for_read(block_id, &[], 1, 3)
+            .await
+            .unwrap();
+        assert_eq!(second.id, top3[1].id);
+        assert_ne!(second.id, via_pool.id);
+    }
+
+    #[tokio::test]
     async fn test_select_workers_for_read_prefers_locations() {
         let router = WorkerRouter::new();
         let workers = vec![
@@ -1879,7 +1917,7 @@ mod tests {
         assert_eq!(selected[0].id, Some(preferred_id));
 
         let primary = router
-            .select_worker_for_read(block_id, &locations, 1)
+            .select_worker_for_read(block_id, &locations, 1, 1)
             .await
             .unwrap();
         assert_eq!(primary.id, Some(preferred_id));
@@ -2608,15 +2646,93 @@ mod tests {
         assert!(snap.failed_workers_is_uninitialised());
     }
 
+    /// Guava `murmur3_128().putLong(key).putInt(index).asLong()` golden vectors
+    /// (verified against Guava via GooseFS branch-2.0 `ConsistentHashProvider`).
+    #[test]
+    fn test_murmur3_guava_matches_java() {
+        assert_eq!(murmur3_guava_long_int(1, 0), 8673688779682957586);
+        assert_eq!(murmur3_guava_long_int(42, 7), 1969424773395075097);
+        assert_eq!(murmur3_guava_long_int(100, 1), -8854681018154386345);
+        assert_eq!(murmur3_guava_long_int(-1, 0), 7097917686268154775);
+        assert_eq!(murmur3_guava_long_int(0, 0), -6568239567428591645);
+        assert_eq!(murmur3_guava_long_int(85429583872, 0), -5867849384608515022);
+        assert_eq!(
+            murmur3_guava_long_int(8769479697893324776, 0),
+            -6296241382218419536
+        );
+    }
+
+    /// Live 5-worker ring: Rust `select_workers(_, 1)` must match Java
+    /// `DynamicConsistentHashProvider.get(blockId, 0)` on branch-2.0
+    /// (`murmur3_128` + `asLong`).
+    #[tokio::test]
+    async fn test_select_workers_matches_java_branch2_live_workers() {
+        let router = WorkerRouter::new();
+        router
+            .update_workers(vec![
+                make_worker(8769479697893324776, "172.16.16.42", 9203),
+                make_worker(8349952073724719185, "172.16.16.14", 9203),
+                make_worker(144281688392029313, "172.16.16.35", 9203),
+                make_worker(6124739522353643542, "172.16.16.46", 9203),
+                make_worker(8816614835528527236, "172.16.16.18", 9203),
+            ])
+            .await;
+
+        let cases = [
+            (85429583872_i64, 8816614835528527236_i64),
+            (85429583874, 8769479697893324776),
+            (85429583875, 6124739522353643542),
+            (85429583876, 8769479697893324776),
+            (85429583877, 8349952073724719185),
+        ];
+        for (block_id, expected) in cases {
+            let got = router.select_workers(block_id, 1).await.unwrap();
+            assert_eq!(
+                got[0].id,
+                Some(expected),
+                "block_id={block_id} primary mismatch"
+            );
+        }
+    }
+
+    /// Java `getWorkersByBlockId(42, 3, …)` on workers
+    /// `(1@w1, 2@w1, 3@w2, 4@w3)` with 200 virtual nodes → `[2, 3, 4]`.
+    #[tokio::test]
+    async fn test_select_workers_matches_java_get_workers_by_block_id() {
+        let router = WorkerRouter::new();
+        router
+            .update_workers(vec![
+                make_worker(1, "w1", 9203),
+                make_worker(2, "w1", 9204),
+                make_worker(3, "w2", 9203),
+                make_worker(4, "w3", 9203),
+            ])
+            .await;
+
+        let selected = router.select_workers(42, 3).await.unwrap();
+        let ids: Vec<_> = selected.iter().map(|w| w.id).collect();
+        assert_eq!(ids, vec![Some(2), Some(3), Some(4)]);
+        assert_eq!(
+            router
+                .select_worker_with_replication(42, 1)
+                .await
+                .unwrap()
+                .id,
+            Some(2)
+        );
+    }
+
     /// A2: hashing the same virtual node / block id twice must produce the
-    /// same value (self-consistency of the byte-encoding scheme).
+    /// same value (self-consistency of the Guava-compatible encoding).
     #[test]
     fn test_hash_functions_are_stable() {
         assert_eq!(hash_virtual_node(42, 7), hash_virtual_node(42, 7));
         assert_eq!(hash_block_id(1234567890), hash_block_id(1234567890));
-        // Domain separation: (worker_id, vn) must not collide with a bare
-        // block_id under the same numerical values.
-        assert_ne!(hash_virtual_node(42, 0), hash_block_id(42));
+        // attempt index participates in the key: (42,0) ≠ (42,1)
+        assert_ne!(murmur3_guava_long_int(42, 0), murmur3_guava_long_int(42, 1));
+        // Virtual-node (workerId, vn) and lookup (blockId, 0) share the same
+        // hasher; equal numeric args collide by design (Java does the same).
+        assert_eq!(hash_virtual_node(42, 0), hash_block_id(42));
     }
 
     /// `failed_workers` `DashMap` must NOT be allocated on the

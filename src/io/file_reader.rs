@@ -599,12 +599,16 @@ impl GoosefsFileReader {
 
         // ① Select worker + connection failover (mirrors the old read_next_block).
         // Prefer BlockInfo.locations (Java getInStream); hash when empty/unmatched.
-        // TODO(java-parity): count = max(maxRetryNode, replicationNum); when
-        // replicationNum > 1 shuffle candidates then pick one (Java getInStream).
+        // Candidate width = max(maxRetryNode, replication) like Java getInStream.
         let locations = self.block_locations(block_id);
         let worker_info = self
             .router
-            .select_worker_for_read(block_id, locations, self.config.file_replication_number)
+            .select_worker_for_read(
+                block_id,
+                locations,
+                self.config.file_replication_number,
+                self.config.file_read_max_node_retry,
+            )
             .await?;
         let worker_addr = Self::worker_addr(&worker_info)?;
         let worker = match self.acquire_worker(&worker_addr).await {
@@ -634,6 +638,7 @@ impl GoosefsFileReader {
                         block_id,
                         self.block_locations(block_id),
                         self.config.file_replication_number,
+                        self.config.file_read_max_node_retry,
                     )
                     .await
                     .map_err(|_| e)?;

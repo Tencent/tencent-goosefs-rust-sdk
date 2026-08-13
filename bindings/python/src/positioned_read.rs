@@ -357,12 +357,11 @@ pub(crate) async fn positioned_read_with_reauth(
     // Re-running `select_worker_for_read(block_id, …)` between the
     // failure and the retry would risk landing on a worker that does not
     // host the block, and would not fix any SASL-level failure.
-    // TODO(java-parity): count = max(maxRetryNode, replicationNum); shuffle
-    // when replicationNum > 1 (same deferred note as Rust FileInStream).
     let replication = ctx.config().file_replication_number;
+    let max_retry_node = ctx.config().file_read_max_node_retry;
     let worker_info = ctx
         .acquire_router()
-        .select_worker_for_read(block_id, locations, replication)
+        .select_worker_for_read(block_id, locations, replication, max_retry_node)
         .await
         .map_err(map_err)?;
     let net_addr = worker_info

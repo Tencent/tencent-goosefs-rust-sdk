@@ -97,16 +97,11 @@ itoa = "1"
 # `(channel, sasl_guard)` together as a single atomically-swapped unit during
 # HA failover (`reconnect`).
 arc-swap = "1"
-# Stable, spec-defined, high-performance hash (xxHash3) — the single hash the
-# whole crate is standardised on. Two usage shapes:
-#  - Ephemeral / in-process (dir allocation, page-lock striping, the block
-#    routing ring): the `Xxh3Default` Hasher replaces `std`'s SipHash
-#    `DefaultHasher` on hot paths where no DoS resistance is needed.
-#  - On-disk page store bucket selection (`file_id` → directory): the
-#    `xxh3_64` one-shot, whose output must stay byte-for-byte stable across
-#    Rust versions / platforms (the cache survives restarts & toolchain
-#    upgrades). Mirrors Lance's `xxhash_rust::xxh3` usage. Version aligned with
-#    Lance.
+# Stable, spec-defined, high-performance hash (xxHash3) — used for ephemeral /
+# in-process fingerprints (dir allocation, page-lock striping, worker-list
+# fingerprint) and on-disk page-store bucket selection. **Not** used for
+# block→worker consistent hashing (that is the in-tree Guava-compatible
+# murmur3_128 in `src/block/murmur3.rs`).
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 serde = { version = "1", features = ["derive"] }
 async-trait = "0.1"

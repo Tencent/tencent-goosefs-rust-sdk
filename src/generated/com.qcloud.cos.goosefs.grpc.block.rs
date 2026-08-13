@@ -247,9 +247,12 @@ pub struct CheckBlocksRequest {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CheckBlocksResponse {
-    /// Whether each requested block exists on this worker (GooseFS 2.1.0).
-    #[prost(map = "int64, bool", tag = "1")]
-    pub block_exists: ::std::collections::HashMap<i64, bool>,
+    /// Cached bytes per block on this worker (GooseFS 2.0).
+    ///
+    /// Wire-compatible with GooseFS 2.1.0 `block_exists` (same field number;
+    /// bool encodes as varint 0/1). Treat `cached_bytes > 0` as present.
+    #[prost(map = "int64, int64", tag = "1")]
+    pub block_cached_bytes: ::std::collections::HashMap<i64, i64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Block {

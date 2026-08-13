@@ -16,6 +16,7 @@
 
 pub mod locations;
 pub mod mapper;
+pub(crate) mod murmur3;
 pub mod router;
 pub mod short_circuit;
 

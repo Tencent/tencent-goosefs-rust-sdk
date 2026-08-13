@@ -22,8 +22,8 @@
 //! 1. Hash-selecting up to `checkCount` workers per block
 //!    (`ClientWorkerManager.getBlockWorkers`);
 //! 2. Batching `CheckBlocks` RPCs;
-//! 3. Overwriting `BlockInfo.locations` where the worker reports the block
-//!    present (`block_exists=true` on GooseFS 2.1.0);
+//! 3. Overwriting `BlockInfo.locations` where the worker reports
+//!    `block_cached_bytes > 0` (GooseFS 2.0; 2.1.0 sends bool-as-0/1);
 //! 4. Recomputing `inGooseFSPercentage`.
 //!
 //! This module ports that enrichment so Rust `select_worker_for_read` can
@@ -169,7 +169,8 @@ enum WorkerCheckOutcome {
     Ok {
         worker: WorkerInfo,
         queried: Vec<i64>,
-        exists: HashMap<i64, bool>,
+        /// `block_id → cached_bytes` (`> 0` means present; 2.1.0 wire is 0/1).
+        cached_bytes: HashMap<i64, i64>,
     },
     /// Connect or RPC failed — do not treat queried blocks as probed.
     Failed,
@@ -239,10 +240,10 @@ async fn fetch_block_locations(
                 }
             };
             match client.check_blocks(&queried).await {
-                Ok(exists) => WorkerCheckOutcome::Ok {
+                Ok(cached_bytes) => WorkerCheckOutcome::Ok {
                     worker,
                     queried,
-                    exists,
+                    cached_bytes,
                 },
                 Err(e) => {
                     warn!(
@@ -261,14 +262,14 @@ async fn fetch_block_locations(
         let WorkerCheckOutcome::Ok {
             worker,
             queried,
-            exists,
+            cached_bytes,
         } = outcome
         else {
             continue;
         };
 
         // Successful RPC is authoritative for every queried block id, even
-        // when the map omits them or reports exists=false.
+        // when the map omits them or reports cached_bytes=0.
         for &block_id in &queried {
             probed_ok.insert(block_id);
             locations.entry(block_id).or_default();
@@ -276,8 +277,8 @@ async fn fetch_block_locations(
 
         let worker_id = worker.id;
         let address = worker.address.clone();
-        for (block_id, present) in exists {
-            if !present {
+        for (block_id, bytes) in cached_bytes {
+            if bytes <= 0 {
                 continue;
             }
             locations.entry(block_id).or_default().push(BlockLocation {
@@ -287,7 +288,8 @@ async fn fetch_block_locations(
             debug!(
                 block_id,
                 worker_id = ?worker_id,
-                "checkBlocks: block_exists=true on worker"
+                cached_bytes = bytes,
+                "checkBlocks: block present on worker"
             );
         }
     }
@@ -300,8 +302,10 @@ async fn fetch_block_locations(
 
 /// Recompute `in_goose_fs_percentage` from current `FileInfo` locations.
 ///
-/// GooseFS 2.1.0 `CheckBlocks` returns existence (`bool`) only. When a
-/// location exists we count the full block length toward the percentage.
+/// Enrichment currently stores locations only (not per-worker cached bytes),
+/// so a location counts as the full block length — matching FILE-mode
+/// committed blocks. PAGE partial cache would need cached_bytes threaded
+/// through `BlockLocation` to be more precise.
 fn recompute_in_goosefs_percentage(file_info: &mut FileInfo) {
     let file_length = file_info.length.unwrap_or(0);
     if file_length == 0 {
@@ -309,8 +313,7 @@ fn recompute_in_goosefs_percentage(file_info: &mut FileInfo) {
         return;
     }
 
-    // 2.1.0 CheckBlocks is bool existence only — count full block length
-    // when a location was found (FILE-mode committed block approximation).
+    // Location present → count full block length (FILE-mode approximation).
     let mut cache_size: i64 = 0;
     for fbi in &file_info.file_block_infos {
         let Some(bi) = fbi.block_info.as_ref() else {

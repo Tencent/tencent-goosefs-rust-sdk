@@ -589,15 +589,18 @@ impl WorkerClient {
         Ok((first, guard))
     }
 
-    /// Probe this worker for which of `block_ids` exist in the local block store.
+    /// Probe this worker for cached bytes of `block_ids` in the local store.
     ///
-    /// Mirrors Java 2.1.0 `BlockWorkerClient.checkBlocks` /
-    /// `CheckBlocksResponse.block_exists`. Returns `block_id → exists`.
+    /// Mirrors Java 2.0 `BlockWorkerClient.checkBlocks` /
+    /// `CheckBlocksResponse.block_cached_bytes`. Returns `block_id → cached_bytes`.
+    ///
+    /// On GooseFS 2.1.0 workers the same field carries bool-as-0/1; treat
+    /// `cached_bytes > 0` as present.
     #[instrument(skip(self, block_ids), fields(block_count = block_ids.len()))]
     pub async fn check_blocks(
         &self,
         block_ids: &[i64],
-    ) -> Result<std::collections::HashMap<i64, bool>> {
+    ) -> Result<std::collections::HashMap<i64, i64>> {
         if block_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
@@ -605,7 +608,7 @@ impl WorkerClient {
             block_ids: block_ids.to_vec(),
         };
         let resp = self.inner.clone().check_blocks(req).await?;
-        Ok(resp.into_inner().block_exists)
+        Ok(resp.into_inner().block_cached_bytes)
     }
 
     /// Start a bidirectional streaming WriteBlock RPC.

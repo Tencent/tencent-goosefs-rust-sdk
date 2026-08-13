@@ -173,7 +173,9 @@ properties-file, and env-var callers keep working unchanged.
 | `block_size` | `u64` | `67108864` (64 MiB) | Default block size in bytes for new files. Matches Goosefs server default. |
 | `chunk_size` | `u64` | `1048576` (1 MiB) | Chunk size for streaming read/write RPCs. Each gRPC message carries one chunk. |
 | `write_type` | `Option<i32>` | `None` | Default write type for newly created files. `None` = use server default (typically `MustCache`). See [WriteType](#71-writetype) for values. |
-| `file_replication_number` | `i32` | `1` | Target replication for block-worker selection (`goosefs.user.file.replication.number`). Read and write use this as `count` so the same `block_id` maps to the same worker set. |
+| `file_replication_number` | `i32` | `1` | Target replication for block-worker selection (`goosefs.user.file.replication.number`). Writes use this as the selection count; reads use it as the lower bound for their candidate width (`max` with `file_read_max_node_retry`). |
+| `file_read_max_node_retry` | `i32` | `3` | Read-path candidate pool width (`goosefs.user.file.read.max.node.retry` / Java `InStreamOptions.maxRetryNode`). Empty-location reads use `max(file_read_max_node_retry, file_replication_number)` then pick the first non-failed worker. Values `<= 0` ignored. |
+| `check_block_replicas` | `i32` | `0` | How many hash-selected workers to probe via `CheckBlocks` when enriching `FileInfo` locations (`goosefs.user.file.check.block.replicas`). `0` disables enrichment (Java `openFile` / default `getStatus` parity). |
 | `prefetch_window` | `i32` | `8` | Sequential-read prefetch window in chunks (sent in the first `ReadRequest`); lets the worker keep up to `(1 + prefetch_window)` chunks in flight. Mirrors Java `goosefs.user.streaming.reader.max.prefetch.window`. **Set programmatically** via `with_prefetch_window()`. (Optimization doc Part V R1-B-a.) **Note**: distinct from the per-open `InStreamOptions.prefetch_window` (default `1`, see §6.4). |
 | `read_buffer_messages` | `usize` | `16` | Receive-buffer depth (in messages) between the background stream-drain task and the consumer. Mirrors Java `goosefs.user.streaming.reader.buffer.size.messages`. (Optimization doc Part V R1-B-b.) |
 | `ack_interval_bytes` | `i64` | `0` | Flow-control ACK coalescing threshold in bytes. `0` = ACK every chunk (deadlock-safe default). Coalescing (`>0`, e.g. 4 MiB) is opt-in and only safe on workers that honour `prefetch_window`. **Set programmatically** via `with_ack_interval_bytes()`. (Optimization doc Part V R1-B-c.) |
@@ -438,7 +440,9 @@ properties file values and built-in defaults.
 |---------------------|---------------------|---------|-------------|
 | `GOOSEFS_MASTER_ADDR` | `master_addr` / `master_addrs` | `"127.0.0.1:9200"` (single) / `[]` (HA list) | Master address(es). Three accepted forms: single `host:port`; comma-separated list `addr1:port,addr2:port` for HA; or a Hadoop-style URI `gfs://addr1:port,addr2:port/root-path` (URI form also seeds `root`). |
 | `GOOSEFS_WRITE_TYPE` | `write_type` | `None` (server default, typically `MustCache`) | Default write type. Accepted: `must_cache`, `try_cache`, `cache_through`, `through`, `async_through` (case-insensitive). |
-| `GOOSEFS_USER_FILE_REPLICATION_NUMBER` | `file_replication_number` | `1` | Block-worker selection count (`goosefs.user.file.replication.number`). Values `<= 0` ignored. |
+| `GOOSEFS_USER_FILE_REPLICATION_NUMBER` | `file_replication_number` | `1` | Write selection count / read candidate lower bound (`goosefs.user.file.replication.number`). Values `<= 0` ignored. |
+| `GOOSEFS_USER_FILE_READ_MAX_NODE_RETRY` | `file_read_max_node_retry` | `3` | Read worker pool width (`goosefs.user.file.read.max.node.retry` / Java `maxRetryNode`). Values `<= 0` ignored. |
+| `GOOSEFS_USER_FILE_CHECK_BLOCK_REPLICAS` | `check_block_replicas` | `0` | CheckBlocks probe count when enriching locations (`goosefs.user.file.check.block.replicas`). `0` disables. |
 | `GOOSEFS_BLOCK_SIZE` | `block_size` | `67108864` (64 MiB) | Block size in bytes (plain integer). |
 | `GOOSEFS_CHUNK_SIZE` | `chunk_size` | `1048576` (1 MiB) | Chunk size in bytes (plain integer). |
 | `GOOSEFS_AUTH_TYPE` | `auth_type` | `Simple` | Authentication type. Accepted: `nosasl`, `simple` (case-insensitive). |
@@ -559,7 +563,9 @@ These keys are used in `goosefs-site.properties` files (Java-style `key=value` f
 | `goosefs.security.authorization.permission.enabled` | `authorization_permission_enabled` | `true` / `false` | `false` | Permission-based access control. |
 | `goosefs.security.login.impersonation.username` | `login_impersonation_username` | string | `"_HDFS_USER_"` | Impersonation username. |
 | `goosefs.user.file.writetype.default` | `write_type` | `MUST_CACHE` / `TRY_CACHE` / `CACHE_THROUGH` / `THROUGH` / `ASYNC_THROUGH` | unset (server default, typically `MUST_CACHE`) | Default write type. |
-| `goosefs.user.file.replication.number` | `file_replication_number` | integer `>= 1` | `1` | Target replication used as `count` when selecting block workers (`getBlockWorkers(blockId, count)`). Read and write share the same worker set for a given `block_id`. Values `<= 0` are ignored. |
+| `goosefs.user.file.replication.number` | `file_replication_number` | integer `>= 1` | `1` | Write-path worker selection count (`getBlockWorkers(blockId, count)`). On reads, used as the lower bound of the candidate pool width (`max` with `goosefs.user.file.read.max.node.retry`). Values `<= 0` are ignored. |
+| `goosefs.user.file.read.max.node.retry` | `file_read_max_node_retry` | integer `>= 1` | `3` | Read-path candidate pool width (Java `InStreamOptions.maxRetryNode`). Empty-location reads select from `max(maxRetryNode, replication)` hash/location candidates. Values `<= 0` are ignored. |
+| `goosefs.user.file.check.block.replicas` | `check_block_replicas` | integer `>= 0` | `0` | Workers to probe via `CheckBlocks` when enriching file locations. `0` disables (matches Java open/default getStatus). |
 | `goosefs.user.block.size.bytes.default` | `block_size` | byte size (e.g. `64MB`, `512KB`, `134217728`) | `67108864` (64 MiB) | Default block size. Supports `KB`/`MB`/`GB` suffixes. |
 | `goosefs.user.network.data.transfer.chunk.size` | `chunk_size` | byte size (e.g. `1MB`, `512KB`) | `1048576` (1 MiB) | Streaming chunk size. Supports `KB`/`MB`/`GB` suffixes. |
 | `goosefs.user.client.transparent_acceleration.enabled` | `transparent_acceleration_enabled` | `true` / `false` | `true` | Transparent acceleration. |

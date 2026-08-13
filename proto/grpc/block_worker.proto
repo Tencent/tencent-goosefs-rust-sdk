@@ -226,9 +226,15 @@ message CheckBlocksRequest {
   repeated int64 block_ids = 1;
 }
 
-// GooseFS 2.1.0 / branch-2.1.0 wire format: existence only.
+// GooseFS 2.0 / branch-2.0 wire format (also accepts 2.1.0 on the wire).
+// Field 1 is a map with varint values: 2.0 sends cached bytes; 2.1.0 sends
+// bool as 0/1. Clients treat `cached_bytes > 0` as present.
+//
+// Response carries the actual cached bytes for each block on the worker.
+// - FILE/Tiered mode: equals block size when the block is committed, 0 otherwise
+// - PAGE mode: sum of all cached pages for the block (may be < blockSize)
 message CheckBlocksResponse {
-  map<int64, bool> block_exists = 1;
+  map<int64, int64> block_cached_bytes = 1;
 }
 
 message Block {
