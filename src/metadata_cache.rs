@@ -108,7 +108,10 @@ impl MetadataCache {
     /// Look up the status slot for `path`.
     ///
     /// Expired entries are evicted lazily. A listing-only item counts as a
-    /// status miss without dropping the listing.
+    /// status miss without dropping the listing. Incomplete present slots are
+    /// returned as [`StatusLookup::Present`] so callers can fall through to
+    /// RPC (INV-MC-S3), but they are counted as misses, matching
+    /// `CLIENT_METADATA_CACHE_HITS`.
     pub fn lookup_status(&self, path: &str) -> StatusLookup {
         let key = normalize_path(path);
         let mut inner = self.lock();
@@ -125,8 +128,13 @@ impl MetadataCache {
         };
         match slot {
             Some(StatusLookup::Present(info)) => {
-                inner.hits += 1;
-                self.bump_hit_metric();
+                if status_is_completed(&info) {
+                    inner.hits += 1;
+                    self.bump_hit_metric();
+                } else {
+                    inner.misses += 1;
+                    self.bump_miss_metric();
+                }
                 StatusLookup::Present(info)
             }
             Some(StatusLookup::NotFound) => {
@@ -590,6 +598,9 @@ mod tests {
             StatusLookup::Miss => panic!("expected Present(incomplete), got Miss"),
             StatusLookup::NotFound => panic!("expected Present(incomplete), got NotFound"),
         }
+        let s = cache.stats();
+        assert_eq!(s.hits, 0, "incomplete fall-through is not a hit");
+        assert_eq!(s.misses, 1);
     }
 
     #[test]

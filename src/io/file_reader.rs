@@ -93,11 +93,9 @@ pub struct GoosefsFileReader {
     path: String,
     /// File info from Master (contains block IDs, block size, length).
     ///
-    /// Stored as `Arc<FileInfo>` so a metadata-cache hit on a repeated
-    /// `open_with_context` / `open_range_with_context` is an `Arc` clone
-    /// (one atomic inc) instead of a deep `FileInfo::clone`. `Arc`
-    /// implements `Deref`, so all `self.file_info.field` call sites work
-    /// unchanged.
+    /// Stored as `Arc<FileInfo>` for cheap sharing after reader initialization.
+    /// Metadata-cache hits are first cloned into an owned `FileInfo` so
+    /// CheckBlocks enrichment cannot mutate the cached Master snapshot.
     file_info: Arc<FileInfo>,
     /// Worker router for block → worker mapping.
     /// Worker router view for block → worker mapping.
