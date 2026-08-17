@@ -16,7 +16,7 @@
 //!
 //! Wraps `FileSystemMasterClientService` (Master:9200) providing:
 //! - `get_status` — stat / head
-//! - `list_status` — list directory (server-side streaming)
+//! - `list_status` — list directory (client-side recursion when requested)
 //! - `create_file` — create a new file
 //! - `complete_file` — mark file write complete (with idempotency operation-ID)
 //! - `remove_blocks` — clean up block metadata for in-flight or failed writes
@@ -477,24 +477,56 @@ impl MasterClient {
 
     /// List the contents of a directory. Returns all FileInfo entries.
     ///
-    /// GooseFS 2.0 dropped `ListStatusPOptions.recursive`; the master lists a
-    /// single directory level. High-level [`crate::fs::FileSystem::list_status`]
-    /// walks descendants client-side. This low-level `recursive` flag only
-    /// sets `load_metadata_type = Always` so UFS metadata is loaded for that
-    /// one level (same intent as Java `listStatus` + client recursion).
+    /// GooseFS 2.0 dropped `ListStatusPOptions.recursive`; each Master RPC
+    /// returns a single directory level. When `recursive` is `true`, this
+    /// method walks descendants **client-side** (BFS), matching Java
+    /// `BaseFileSystem.iterateStatusInternal` and the historical SDK contract
+    /// that `list_status(path, true)` returns the full subtree.
     ///
-    /// This wraps a **server-side streaming** RPC — the server sends
+    /// Recursive walks also set `load_metadata_type = Always` on each level so
+    /// UFS-backed children are discovered (same intent as the pre-2.0
+    /// `recursive` + Always pairing).
+    ///
+    /// Each level wraps a **server-side streaming** RPC — the server sends
     /// multiple `ListStatusPResponse` messages, each containing a batch
     /// of `FileInfo`.
-    #[instrument(skip(self), fields(path = %path))]
+    #[instrument(skip(self), fields(path = %path, recursive))]
     pub async fn list_status(&self, path: &str, recursive: bool) -> Result<Vec<FileInfo>> {
-        let start = std::time::Instant::now();
-        let path = path.to_string();
         let load_metadata_type = if recursive {
             Some(LoadMetadataPType::Always as i32)
         } else {
             None
         };
+        if !recursive {
+            return self.list_status_one_level(path, load_metadata_type).await;
+        }
+
+        // Client-side BFS: Master no longer accepts a recursive ListStatus option.
+        let mut out: Vec<FileInfo> = Vec::new();
+        let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+        queue.push_back(path.to_string());
+        while let Some(cur) = queue.pop_front() {
+            let items = self.list_status_one_level(&cur, load_metadata_type).await?;
+            for fi in items {
+                if fi.folder.unwrap_or(false) {
+                    if let Some(child) = fi.path.as_ref() {
+                        queue.push_back(child.clone());
+                    }
+                }
+                out.push(fi);
+            }
+        }
+        Ok(out)
+    }
+
+    /// One-level `ListStatus` RPC (no client-side descent).
+    async fn list_status_one_level(
+        &self,
+        path: &str,
+        load_metadata_type: Option<i32>,
+    ) -> Result<Vec<FileInfo>> {
+        let start = std::time::Instant::now();
+        let path = path.to_string();
         let result = self
             .with_retry("list_status", |mut client| {
                 let path = path.clone();
@@ -516,7 +548,6 @@ impl MasterClient {
                 }
             })
             .await;
-        // Instrument: ops count and latency (cached counter handles).
         self.counter_list_status_ops.inc(1);
         self.counter_list_status_latency_us
             .inc(start.elapsed().as_micros() as i64);

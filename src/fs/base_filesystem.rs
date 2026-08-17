@@ -315,21 +315,10 @@ impl FileSystem for BaseFileSystem {
 
         if opts.recursive {
             // Recursive listings never use the cache (Java listStatus recursive
-            // + INV-MC-S5). Walk client-side so deep trees match `goosefs fs ls -R`.
-            let mut out: Vec<URIStatus> = Vec::new();
-            let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-            queue.push_back(path.to_string());
-            while let Some(cur) = queue.pop_front() {
-                let items = master.list_status(&cur, false).await?;
-                for fi in items {
-                    let status = URIStatus::from_proto(fi);
-                    if status.is_folder() {
-                        queue.push_back(status.path.clone());
-                    }
-                    out.push(status);
-                }
-            }
-            return Ok(out);
+            // + INV-MC-S5). MasterClient owns client-side BFS (GooseFS 2.0
+            // dropped ListStatusPOptions.recursive) and Always load per level.
+            let items = master.list_status(path, true).await?;
+            return Ok(items.into_iter().map(URIStatus::from_proto).collect());
         }
 
         let skip = crate::metadata_cache::should_skip_listing_cache(
