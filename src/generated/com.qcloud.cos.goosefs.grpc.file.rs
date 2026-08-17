@@ -103,6 +103,12 @@ pub struct OpenFilePOptions {
     pub common_options: ::core::option::Option<FileSystemMasterCommonPOptions>,
     #[prost(bool, optional, tag = "4", default = "true")]
     pub update_last_access_time: ::core::option::Option<bool>,
+    /// Disable UFS fallback reads; for persistence jobs that only need local blocks.
+    #[prost(bool, optional, tag = "5", default = "false")]
+    pub no_ufs_fallback: ::core::option::Option<bool>,
+    /// Prefer a local worker when reading.
+    #[prost(bool, optional, tag = "6", default = "false")]
+    pub local_first: ::core::option::Option<bool>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CommitLocationPOptions {
@@ -192,6 +198,9 @@ pub struct DeletePOptions {
     pub common_options: ::core::option::Option<FileSystemMasterCommonPOptions>,
     #[prost(bool, optional, tag = "5", default = "false")]
     pub ttl: ::core::option::Option<bool>,
+    /// For TTL deletes: when non-zero, require inode mtime to match this value.
+    #[prost(int64, optional, tag = "6", default = "0")]
+    pub ttl_expect_mtime: ::core::option::Option<i64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeletePRequest {
@@ -211,6 +220,8 @@ pub struct FreePOptions {
     pub forced: ::core::option::Option<bool>,
     #[prost(message, optional, tag = "3")]
     pub common_options: ::core::option::Option<FileSystemMasterCommonPOptions>,
+    #[prost(int32, optional, tag = "4")]
+    pub replication: ::core::option::Option<i32>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct FreePRequest {
@@ -252,6 +263,23 @@ pub struct GetStatusPRequest {
     #[prost(string, optional, tag = "3")]
     pub request_id: ::core::option::Option<::prost::alloc::string::String>,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetStatusBatchPRequest {
+    /// * the paths of the files or directories
+    #[prost(string, repeated, tag = "1")]
+    pub paths: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "2")]
+    pub options: ::core::option::Option<GetStatusPOptions>,
+    #[prost(string, optional, tag = "3")]
+    pub request_id: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetStatusBatchPResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub file_infos: ::prost::alloc::vec::Vec<FileInfo>,
+    #[prost(string, repeated, tag = "2")]
+    pub failed_paths: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExistsPOptions {
     #[prost(enumeration = "LoadMetadataPType", optional, tag = "1")]
@@ -284,23 +312,18 @@ pub struct ListStatusPResponse {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ListStatusPOptions {
-    /// This is deprecated since 1.1.1 and will be removed in 2.0. Use loadMetadataType.
-    #[prost(bool, optional, tag = "1")]
-    pub load_direct_children: ::core::option::Option<bool>,
-    #[prost(enumeration = "LoadMetadataPType", optional, tag = "2")]
+    #[prost(enumeration = "LoadMetadataPType", optional, tag = "1")]
     pub load_metadata_type: ::core::option::Option<i32>,
-    #[prost(message, optional, tag = "3")]
+    #[prost(message, optional, tag = "2")]
     pub common_options: ::core::option::Option<FileSystemMasterCommonPOptions>,
-    #[prost(bool, optional, tag = "4")]
-    pub recursive: ::core::option::Option<bool>,
     /// No data will be transferred.
-    #[prost(bool, optional, tag = "5")]
+    #[prost(bool, optional, tag = "3", default = "false")]
     pub load_metadata_only: ::core::option::Option<bool>,
-    #[prost(enumeration = "LoadMetadataPType", optional, tag = "6")]
+    #[prost(enumeration = "LoadMetadataPType", optional, tag = "4")]
     pub default_load_metadata_type: ::core::option::Option<i32>,
-    #[prost(bool, optional, tag = "7", default = "false")]
+    #[prost(bool, optional, tag = "5", default = "false")]
     pub is_load_metadata: ::core::option::Option<bool>,
-    #[prost(int32, optional, tag = "8", default = "0")]
+    #[prost(int32, optional, tag = "6", default = "0")]
     pub check_block_replicas: ::core::option::Option<i32>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1005,6 +1028,37 @@ pub struct GetFileInfoPRequest {
     pub file_id: ::core::option::Option<i64>,
     #[prost(message, optional, tag = "2")]
     pub options: ::core::option::Option<GetFileInfoPOptions>,
+}
+/// * Request for batch persistence-state query.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetPersistenceStateBatchPRequest {
+    /// * the list of file ids to query
+    #[prost(int64, repeated, packed = "false", tag = "1")]
+    pub file_ids: ::prost::alloc::vec::Vec<i64>,
+}
+/// * Per-entry result in a batch persistence-state response.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PersistenceStateBatchEntry {
+    /// * the file id
+    #[prost(int64, optional, tag = "1")]
+    pub file_id: ::core::option::Option<i64>,
+    /// *
+    ///
+    /// the persistence state string (e.g. "PERSISTED", "NOT_PERSISTED");
+    /// absent if the file does not exist on master (treated as orphan by the worker).
+    #[prost(string, optional, tag = "2")]
+    pub persistence_state: ::core::option::Option<::prost::alloc::string::String>,
+    /// *
+    ///
+    /// whether the file has been completed (i.e. the write has been finalized);
+    #[prost(bool, optional, tag = "3")]
+    pub completed: ::core::option::Option<bool>,
+}
+/// * Response for batch persistence-state query.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetPersistenceStateBatchPResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub entries: ::prost::alloc::vec::Vec<PersistenceStateBatchEntry>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetUfsInfoPResponse {
@@ -1758,6 +1812,38 @@ pub mod file_system_master_client_service_client {
                     GrpcMethod::new(
                         "com.qcloud.cos.goosefs.grpc.file.FileSystemMasterClientService",
                         "GetStatus",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// *
+        ///
+        /// Returns the statuses of multiple files or directories in batch.
+        pub async fn get_status_batch(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetStatusBatchPRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetStatusBatchPResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/com.qcloud.cos.goosefs.grpc.file.FileSystemMasterClientService/GetStatusBatch",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "com.qcloud.cos.goosefs.grpc.file.FileSystemMasterClientService",
+                        "GetStatusBatch",
                     ),
                 );
             self.inner.unary(req, path, codec).await
@@ -2845,6 +2931,39 @@ pub mod file_system_master_worker_service_client {
                     GrpcMethod::new(
                         "com.qcloud.cos.goosefs.grpc.file.FileSystemMasterWorkerService",
                         "GetFileInfo",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// *
+        ///
+        /// Returns only the persistence state for a batch of file ids in a single RPC.
+        /// Entries for files that do not exist on master are included with persistenceState absent.
+        pub async fn get_persistence_state_batch(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetPersistenceStateBatchPRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetPersistenceStateBatchPResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/com.qcloud.cos.goosefs.grpc.file.FileSystemMasterWorkerService/GetPersistenceStateBatch",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "com.qcloud.cos.goosefs.grpc.file.FileSystemMasterWorkerService",
+                        "GetPersistenceStateBatch",
                     ),
                 );
             self.inner.unary(req, path, codec).await

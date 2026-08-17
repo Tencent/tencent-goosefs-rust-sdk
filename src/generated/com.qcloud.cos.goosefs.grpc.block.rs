@@ -128,7 +128,7 @@ pub struct WriteResponse {
 }
 /// Request for caching a block asynchronously
 /// next available id: 6
-/// TODO: deprecated: use CacheRequest instead
+/// TODO:deprecated: use CacheRequest instead
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AsyncCacheRequest {
     #[prost(int64, optional, tag = "1")]
@@ -245,6 +245,10 @@ pub struct CheckBlocksRequest {
     #[prost(int64, repeated, packed = "false", tag = "1")]
     pub block_ids: ::prost::alloc::vec::Vec<i64>,
 }
+/// Response carries the actual cached bytes for each block on the worker.
+///
+/// * FILE/Tiered mode: equals block size when the block is committed, 0 otherwise
+/// * PAGE mode: sum of all cached pages for the block (may be \< blockSize)
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CheckBlocksResponse {
     /// Cached bytes per block on this worker (GooseFS 2.0).
@@ -295,6 +299,48 @@ pub struct UfsReadOptions {
     pub bandwidth: ::core::option::Option<i64>,
     #[prost(string, optional, tag = "4")]
     pub user: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// Block migration messages
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MigrateBlockRequest {
+    #[prost(oneof = "migrate_block_request::Value", tags = "1, 2")]
+    pub value: ::core::option::Option<migrate_block_request::Value>,
+}
+/// Nested message and enum types in `MigrateBlockRequest`.
+pub mod migrate_block_request {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Value {
+        #[prost(message, tag = "1")]
+        Command(super::MigrateBlockCommand),
+        #[prost(message, tag = "2")]
+        Chunk(super::Chunk),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MigrateBlockCommand {
+    /// The block ID to migrate
+    #[prost(int64, optional, tag = "1")]
+    pub block_id: ::core::option::Option<i64>,
+    /// The block size in bytes
+    #[prost(int64, optional, tag = "2")]
+    pub block_length: ::core::option::Option<i64>,
+    /// The source worker ID
+    #[prost(int64, optional, tag = "3")]
+    pub source_worker_id: ::core::option::Option<i64>,
+    /// The migration task ID
+    #[prost(string, optional, tag = "4")]
+    pub task_id: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MigrateBlockResponse {
+    #[prost(bool, optional, tag = "1")]
+    pub success: ::core::option::Option<bool>,
+    #[prost(string, optional, tag = "2")]
+    pub error_message: ::core::option::Option<::prost::alloc::string::String>,
+    /// True when the target worker has no space left; the source worker should stop migrating
+    /// to this target and treat remaining blocks as skipped (migration considered complete).
+    #[prost(bool, optional, tag = "3")]
+    pub out_of_space: ::core::option::Option<bool>,
 }
 /// The read/write request type. It can either be an GooseFS block operation or a UFS file operation.
 /// next available id: 3
@@ -775,6 +821,38 @@ pub mod block_worker_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Block migration: source worker pushes block data to target worker via client streaming
+        pub async fn migrate_block(
+            &mut self,
+            request: impl tonic::IntoStreamingRequest<
+                Message = super::MigrateBlockRequest,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<super::MigrateBlockResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/com.qcloud.cos.goosefs.grpc.block.BlockWorker/MigrateBlock",
+            );
+            let mut req = request.into_streaming_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "com.qcloud.cos.goosefs.grpc.block.BlockWorker",
+                        "MigrateBlock",
+                    ),
+                );
+            self.inner.client_streaming(req, path, codec).await
+        }
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -834,9 +912,9 @@ pub struct WorkerInfo {
     #[prost(int64, optional, tag = "6")]
     pub used_bytes: ::core::option::Option<i64>,
     #[prost(int64, optional, tag = "7")]
-    pub read_cache_used_bytes: ::core::option::Option<i64>,
+    pub cache_used_bytes: ::core::option::Option<i64>,
     #[prost(int64, optional, tag = "8")]
-    pub write_cache_used_bytes: ::core::option::Option<i64>,
+    pub persist_used_bytes: ::core::option::Option<i64>,
     #[prost(int64, optional, tag = "9")]
     pub start_time_ms: ::core::option::Option<i64>,
     #[prost(int32, optional, tag = "10")]
@@ -985,15 +1063,18 @@ pub struct BlockHeartbeatPRequest {
     /// * the map of added blocks on all tiers (deprecated since 2.0, replaced by addedBlocks)
     #[prost(message, optional, tag = "3")]
     pub options: ::core::option::Option<BlockHeartbeatPOptions>,
-    /// * the space used by read cache directories in bytes
+    /// * the space used by evictable cache (e.g. read cache, sync write) in bytes
     #[prost(int64, optional, tag = "4")]
-    pub read_cache_used_bytes: ::core::option::Option<i64>,
-    /// * the space used by write cache directories in bytes
+    pub cache_used_bytes: ::core::option::Option<i64>,
+    /// * the space used by persistent cache (e.g. async write) in bytes
     #[prost(int64, optional, tag = "5")]
-    pub write_cache_used_bytes: ::core::option::Option<i64>,
+    pub persist_used_bytes: ::core::option::Option<i64>,
     /// * the lost storage paths
     #[prost(message, optional, tag = "6")]
     pub lost_storage: ::core::option::Option<StorageList>,
+    /// * migration progress report (aggregated numbers only, no block ID lists)
+    #[prost(message, optional, tag = "7")]
+    pub migration_progress: ::core::option::Option<MigrationProgressReport>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BlockHeartbeatPResponse {
@@ -1001,6 +1082,12 @@ pub struct BlockHeartbeatPResponse {
     pub command: ::core::option::Option<super::Command>,
     #[prost(message, optional, tag = "2")]
     pub sync_cache_rate_limit: ::core::option::Option<super::WorkerRateLimit>,
+    /// * migration command from master to worker
+    #[prost(message, optional, tag = "3")]
+    pub migration_command: ::core::option::Option<MigrationCommand>,
+    /// * block ids to move from persist cache to evictable cache on this worker (cross-tier move)
+    #[prost(int64, repeated, packed = "false", tag = "5")]
+    pub persisted_move_blocks: ::prost::alloc::vec::Vec<i64>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetWorkerIdPOptions {}
@@ -1026,17 +1113,127 @@ pub struct RegisterWorkerPRequest {
     pub capacity_bytes: ::core::option::Option<i64>,
     #[prost(int64, optional, tag = "3")]
     pub used_bytes: ::core::option::Option<i64>,
-    /// * the space used by read cache directories in bytes
+    /// * the space used by evictable cache (e.g. read cache, sync write) in bytes
     #[prost(int64, optional, tag = "4")]
-    pub read_cache_used_bytes: ::core::option::Option<i64>,
-    /// * the space used by write cache directories in bytes
+    pub cache_used_bytes: ::core::option::Option<i64>,
+    /// * the space used by persistent cache (e.g. async write) in bytes
     #[prost(int64, optional, tag = "5")]
-    pub write_cache_used_bytes: ::core::option::Option<i64>,
+    pub persist_used_bytes: ::core::option::Option<i64>,
     #[prost(message, optional, tag = "6")]
     pub lost_storage: ::core::option::Option<StorageList>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RegisterWorkerPResponse {}
+/// Migration progress report from worker to master (aggregated numbers only)
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MigrationProgressReport {
+    #[prost(string, optional, tag = "1")]
+    pub task_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(int64, optional, tag = "2")]
+    pub total_blocks: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "3")]
+    pub migrated_blocks: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "4")]
+    pub failed_blocks: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "5")]
+    pub skipped_blocks: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "6")]
+    pub total_bytes: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "7")]
+    pub migrated_bytes: ::core::option::Option<i64>,
+    #[prost(bool, optional, tag = "8")]
+    pub completed: ::core::option::Option<bool>,
+}
+/// Migration command from master to worker via heartbeat response
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MigrationCommand {
+    #[prost(enumeration = "MigrationCommandType", optional, tag = "1")]
+    pub r#type: ::core::option::Option<i32>,
+    #[prost(message, optional, tag = "2")]
+    pub start_info: ::core::option::Option<StartMigrationInfo>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StartMigrationInfo {
+    #[prost(string, optional, tag = "1")]
+    pub task_id: ::core::option::Option<::prost::alloc::string::String>,
+    /// Old hash ring: current serving hash ring (ACTIVE workers only).
+    #[prost(message, repeated, tag = "2")]
+    pub old_hash_ring_workers: ::prost::alloc::vec::Vec<WorkerInfo>,
+    /// New hash ring: ACTIVE + WARMING_UP workers.
+    #[prost(message, repeated, tag = "3")]
+    pub new_hash_ring_workers: ::prost::alloc::vec::Vec<WorkerInfo>,
+}
+/// Migration management request/response messages
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StartMigrationPRequest {
+    #[prost(string, optional, tag = "1")]
+    pub task_id: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StartMigrationPResponse {
+    #[prost(bool, optional, tag = "1")]
+    pub success: ::core::option::Option<bool>,
+    #[prost(string, optional, tag = "2")]
+    pub error_message: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "3")]
+    pub task_id: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PauseMigrationPRequest {
+    #[prost(string, optional, tag = "1")]
+    pub task_id: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PauseMigrationPResponse {}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CancelMigrationPRequest {
+    #[prost(string, optional, tag = "1")]
+    pub task_id: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CancelMigrationPResponse {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ActivateWarmingUpWorkersPRequest {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ActivateWarmingUpWorkersPResponse {
+    #[prost(int32, optional, tag = "1")]
+    pub activated_count: ::core::option::Option<i32>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetMigrationProgressPRequest {
+    #[prost(string, optional, tag = "1")]
+    pub task_id: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WorkerMigrationProgress {
+    #[prost(int64, optional, tag = "1")]
+    pub worker_id: ::core::option::Option<i64>,
+    #[prost(message, optional, tag = "2")]
+    pub progress: ::core::option::Option<MigrationProgressReport>,
+    #[prost(string, optional, tag = "3")]
+    pub worker_address: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetMigrationProgressPResponse {
+    #[prost(string, optional, tag = "1")]
+    pub task_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "2")]
+    pub status: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag = "3")]
+    pub worker_progress: ::prost::alloc::vec::Vec<WorkerMigrationProgress>,
+    #[prost(int64, optional, tag = "4")]
+    pub total_blocks: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "5")]
+    pub migrated_blocks: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "6")]
+    pub failed_blocks: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "7")]
+    pub skipped_blocks: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "8")]
+    pub total_bytes: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "9")]
+    pub migrated_bytes: ::core::option::Option<i64>,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum WorkerManagerMasterInfoField {
@@ -1117,8 +1314,8 @@ pub enum WorkerInfoField {
     WorkerUsedBytes = 5,
     WorkerSyncCacheRateLimit = 6,
     WorkerForbidWrite = 7,
-    WorkerReadCacheUsedBytes = 8,
-    WorkerWriteCacheUsedBytes = 9,
+    WorkerCacheUsedBytes = 8,
+    WorkerPersistUsedBytes = 9,
 }
 impl WorkerInfoField {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -1134,8 +1331,8 @@ impl WorkerInfoField {
             Self::WorkerUsedBytes => "WORKER_USED_BYTES",
             Self::WorkerSyncCacheRateLimit => "WORKER_SYNC_CACHE_RATE_LIMIT",
             Self::WorkerForbidWrite => "WORKER_FORBID_WRITE",
-            Self::WorkerReadCacheUsedBytes => "WORKER_READ_CACHE_USED_BYTES",
-            Self::WorkerWriteCacheUsedBytes => "WORKER_WRITE_CACHE_USED_BYTES",
+            Self::WorkerCacheUsedBytes => "WORKER_CACHE_USED_BYTES",
+            Self::WorkerPersistUsedBytes => "WORKER_PERSIST_USED_BYTES",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1148,8 +1345,8 @@ impl WorkerInfoField {
             "WORKER_USED_BYTES" => Some(Self::WorkerUsedBytes),
             "WORKER_SYNC_CACHE_RATE_LIMIT" => Some(Self::WorkerSyncCacheRateLimit),
             "WORKER_FORBID_WRITE" => Some(Self::WorkerForbidWrite),
-            "WORKER_READ_CACHE_USED_BYTES" => Some(Self::WorkerReadCacheUsedBytes),
-            "WORKER_WRITE_CACHE_USED_BYTES" => Some(Self::WorkerWriteCacheUsedBytes),
+            "WORKER_CACHE_USED_BYTES" => Some(Self::WorkerCacheUsedBytes),
+            "WORKER_PERSIST_USED_BYTES" => Some(Self::WorkerPersistUsedBytes),
             _ => None,
         }
     }
@@ -1182,6 +1379,41 @@ impl BlockApplyRateType {
             "RATE_WRITE" => Some(Self::RateWrite),
             "RATE_READ_WRITE" => Some(Self::RateReadWrite),
             "RATE_PERSIST" => Some(Self::RatePersist),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum MigrationCommandType {
+    MigrationNoop = 0,
+    MigrationStart = 1,
+    MigrationPause = 2,
+    MigrationResume = 3,
+    MigrationCancel = 4,
+}
+impl MigrationCommandType {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::MigrationNoop => "MIGRATION_NOOP",
+            Self::MigrationStart => "MIGRATION_START",
+            Self::MigrationPause => "MIGRATION_PAUSE",
+            Self::MigrationResume => "MIGRATION_RESUME",
+            Self::MigrationCancel => "MIGRATION_CANCEL",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "MIGRATION_NOOP" => Some(Self::MigrationNoop),
+            "MIGRATION_START" => Some(Self::MigrationStart),
+            "MIGRATION_PAUSE" => Some(Self::MigrationPause),
+            "MIGRATION_RESUME" => Some(Self::MigrationResume),
+            "MIGRATION_CANCEL" => Some(Self::MigrationCancel),
             _ => None,
         }
     }
@@ -1589,6 +1821,154 @@ pub mod worker_manager_master_client_service_client {
                     GrpcMethod::new(
                         "com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterClientService",
                         "BlockApplyRate",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// *
+        ///
+        /// Migration management RPCs.
+        pub async fn start_migration(
+            &mut self,
+            request: impl tonic::IntoRequest<super::StartMigrationPRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::StartMigrationPResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterClientService/StartMigration",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterClientService",
+                        "StartMigration",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn pause_migration(
+            &mut self,
+            request: impl tonic::IntoRequest<super::PauseMigrationPRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::PauseMigrationPResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterClientService/PauseMigration",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterClientService",
+                        "PauseMigration",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn cancel_migration(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CancelMigrationPRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CancelMigrationPResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterClientService/CancelMigration",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterClientService",
+                        "CancelMigration",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_migration_progress(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetMigrationProgressPRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetMigrationProgressPResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterClientService/GetMigrationProgress",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterClientService",
+                        "GetMigrationProgress",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn activate_warming_up_workers(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ActivateWarmingUpWorkersPRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ActivateWarmingUpWorkersPResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterClientService/ActivateWarmingUpWorkers",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "com.qcloud.cos.goosefs.grpc.block.WorkerManagerMasterClientService",
+                        "ActivateWarmingUpWorkers",
                     ),
                 );
             self.inner.unary(req, path, codec).await

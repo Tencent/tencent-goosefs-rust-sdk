@@ -477,12 +477,11 @@ impl MasterClient {
 
     /// List the contents of a directory. Returns all FileInfo entries.
     ///
-    /// When `recursive` is `true`, the master is asked to load metadata for
-    /// every descendant (`load_metadata_type = Always`) — mirroring the Java
-    /// `listStatusOptions.setRecursive(true)` default and the `goosefs fs ls -R`
-    /// shell behaviour. Without this, the server only returns entries whose
-    /// metadata is already loaded, which collapses a deep tree to its first
-    /// level.
+    /// GooseFS 2.0 dropped `ListStatusPOptions.recursive`; the master lists a
+    /// single directory level. High-level [`crate::fs::FileSystem::list_status`]
+    /// walks descendants client-side. This low-level `recursive` flag only
+    /// sets `load_metadata_type = Always` so UFS metadata is loaded for that
+    /// one level (same intent as Java `listStatus` + client recursion).
     ///
     /// This wraps a **server-side streaming** RPC — the server sends
     /// multiple `ListStatusPResponse` messages, each containing a batch
@@ -503,7 +502,6 @@ impl MasterClient {
                     let req = ListStatusPRequest {
                         path: Some(path),
                         options: Some(ListStatusPOptions {
-                            recursive: Some(recursive),
                             load_metadata_type,
                             ..Default::default()
                         }),

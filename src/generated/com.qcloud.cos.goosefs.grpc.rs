@@ -331,9 +331,15 @@ impl ErrorType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum WorkerStatus {
+    /// NOTE: numeric tags below are part of the wire format and the Raft Journal.
+    /// Never re-order or re-number existing values; new values MUST be appended.
     Init = 0,
     Active = 1,
     Inactive = 2,
+    /// WARMING_UP is a transient in-memory state for migration targets.
+    /// It is intentionally NOT persisted into Raft Journal (see DefaultWorkerManagerMaster
+    /// checkpoint/journal logic), so older versions will never read this value.
+    WarmingUp = 3,
 }
 impl WorkerStatus {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -345,6 +351,7 @@ impl WorkerStatus {
             Self::Init => "INIT",
             Self::Active => "ACTIVE",
             Self::Inactive => "INACTIVE",
+            Self::WarmingUp => "WARMING_UP",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -353,6 +360,7 @@ impl WorkerStatus {
             "INIT" => Some(Self::Init),
             "ACTIVE" => Some(Self::Active),
             "INACTIVE" => Some(Self::Inactive),
+            "WARMING_UP" => Some(Self::WarmingUp),
             _ => None,
         }
     }

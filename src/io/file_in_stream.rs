@@ -1420,6 +1420,7 @@ impl GoosefsFileInStream {
             no_cache: Some(!self.status.cacheable),
             user: None,
             caller_type: None,
+            file_length: Some(self.status.length),
         })
     }
 
