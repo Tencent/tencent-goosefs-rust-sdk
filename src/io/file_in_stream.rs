@@ -341,37 +341,8 @@ impl GoosefsFileInStream {
             .validate()
             .map_err(|e| Error::ConfigError { message: e })?;
 
-        // Reuse persistent Master connection — no network I/O.
-        //
-        //: consult the opt-in
-        // FileInfo metadata cache first. On hit, skip the RPC entirely; on
-        // miss, populate the cache after a successful `get_status`. Cache is
-        // `None` unless the caller has opted in via `with_file_info_cache_ttl`.
-        let file_info_cache = ctx.acquire_file_info_cache();
-        let mut file_info = if let Some(cached) = file_info_cache.as_ref().and_then(|c| c.get(path))
-        {
-            debug!(path = %path, "FileInfo cache hit");
-            // S3: `cached` is `Arc<FileInfo>`; `from_proto` needs owned
-            // `FileInfo`, so one clone is unavoidable here (it moves
-            // the fields into URIStatus). The win is that the cache
-            // itself no longer deep-copies on every hit — only the
-            // `from_proto` conversion does.
-            (*cached).clone()
-        } else {
-            let master = ctx.acquire_master();
-            let fetched = master.get_status(path).await?;
-            // S3: insert_arc shares the Arc with the cache (atomic inc),
-            // avoiding the old `fetched.clone()` for the cache. The
-            // caller still needs owned `FileInfo` for `from_proto`, so
-            // we clone once here — but that's one clone instead of two.
-            // Cache stores Master-only metadata (no CheckBlocks enrichment).
-            let arc_fetched = Arc::new(fetched);
-            if let Some(cache) = &file_info_cache {
-                cache.insert_arc(path, Arc::clone(&arc_fetched));
-            }
-            // Clone out of the Arc for enrichment + `from_proto` (which moves).
-            (*arc_fetched).clone()
-        };
+        // Shared Master + metadata cache (status / NotFound / incomplete fall-through).
+        let mut file_info = ctx.get_file_info_cached(path).await?;
 
         // Reuse shared router — already populated and TTL-refreshed.
         // A1: clone the workers +

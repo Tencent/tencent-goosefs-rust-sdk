@@ -29,6 +29,9 @@ pub mod write_type;
 
 pub use base_filesystem::BaseFileSystem;
 pub use filesystem::FileSystem;
-pub use options::{CreateFileOptions, DeleteOptions, InStreamOptions, OpenFileOptions, ReadType};
+pub use options::{
+    CreateFileOptions, DeleteOptions, GetStatusOptions, InStreamOptions, ListStatusOptions,
+    OpenFileOptions, ReadType,
+};
 pub use uri_status::URIStatus;
 pub use write_type::{get_write_type_from_xattr, WriteTypeXAttr, WRITE_TYPE_XATTR_KEY};

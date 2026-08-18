@@ -76,7 +76,7 @@ use crate::client::{
 };
 use crate::config::{ConfigRefresher, GoosefsConfig, TransparentAccelerationSwitch};
 use crate::error::Result;
-use crate::file_info_cache::FileInfoCache;
+use crate::metadata_cache::MetadataCache;
 use crate::metrics::heartbeat::{resolve_app_id, HeartbeatTask};
 #[cfg(feature = "metrics-pushgateway")]
 use crate::metrics::pushgateway::{PushgatewayConfig, PushgatewayTask};
@@ -143,17 +143,13 @@ pub struct FileSystemContext {
     /// failing `connect()`). Shared across all readers in this context.
     cache_manager: Option<Arc<dyn CacheManager>>,
 
-    /// Opt-in short-TTL `FileInfo` metadata cache
+    /// Client-side metadata cache (status + listing + negative).
     ///
-    ///
-    /// `None` only when `config.file_info_cache_ttl == 0`. By default the
-    /// TTL is 30 s, so this is a live cache. When enabled,
-    /// [`GoosefsFileReader::open_with_context`] and
-    /// [`GoosefsFileInStream::open_with_context`] consult this cache before
-    /// issuing `MasterClient::get_status`, and the write path
-    /// (create / delete / rename) explicitly invalidates entries so
-    /// through-client mutations are never observed as stale.
-    file_info_cache: Option<Arc<FileInfoCache>>,
+    /// `None` when `goosefs.user.metadata.cache.enabled` is false (the Java
+    /// default) or when expiration is `<= 0`. When present, `get_status` /
+    /// `list_status` / `exists` / open share this LRU, and the write path
+    /// invalidates path + parent after a successful mutation.
+    metadata_cache: Option<Arc<MetadataCache>>,
 
     /// HA Master address discovery client (shared between master + wm).
     inquire_client: Arc<dyn MasterInquireClient>,
@@ -290,17 +286,22 @@ impl FileSystemContext {
             None
         };
 
-        // Build the opt-in FileInfo (metadata) cache — . `maybe_new`
-        // returns `None` when the TTL is zero (default), so this is a
-        // no-op unless the caller explicitly opted in via
-        // `with_file_info_cache_ttl`.
-        let file_info_cache =
-            FileInfoCache::maybe_new(config.file_info_cache_ttl, config.file_info_cache_capacity);
-        if let Some(c) = &file_info_cache {
+        // Java `FileSystem.Factory`: enabled → MetadataCachingBaseFileSystem.
+        // Rust hangs the same LRU on the context instead of swapping types.
+        let metadata_cache = if config.metadata_cache_enabled {
+            MetadataCache::maybe_new(
+                config.metadata_cache_expiration,
+                config.metadata_cache_max_size,
+            )
+        } else {
+            None
+        };
+        if let Some(c) = &metadata_cache {
+            crate::metrics::gauge(crate::metrics::name::CLIENT_METADATA_CACHE_ENABLED).set(1);
             debug!(
-                ttl_ms = config.file_info_cache_ttl.as_millis(),
-                capacity = config.file_info_cache_capacity,
-                "FileInfo metadata cache enabled (opt-in), ttl={:?}",
+                ttl_ms = config.metadata_cache_expiration.as_millis(),
+                capacity = config.metadata_cache_max_size,
+                "metadata cache enabled, ttl={:?}",
                 c.ttl(),
             );
         }
@@ -313,7 +314,7 @@ impl FileSystemContext {
             worker_router,
             short_circuit,
             cache_manager,
-            file_info_cache,
+            metadata_cache,
             inquire_client,
             config_refresher: Arc::new(ConfigRefresher::from_config(&config)),
             closed: Arc::new(AtomicBool::new(false)),
@@ -388,27 +389,52 @@ impl FileSystemContext {
         self.cache_manager.clone()
     }
 
-    /// Return the shared opt-in `FileInfo` metadata cache
+    /// Return the shared metadata cache, if constructed.
     ///
-    ///
-    /// `None` only when `config.file_info_cache_ttl == 0` (opt-out).
-    /// By default the TTL is 30 s, so this returns the live cache.
-    pub fn acquire_file_info_cache(&self) -> Option<Arc<FileInfoCache>> {
-        self.file_info_cache.clone()
+    /// `None` when `metadata_cache_enabled` is false or expiration is `<= 0`.
+    pub fn acquire_metadata_cache(&self) -> Option<Arc<MetadataCache>> {
+        self.metadata_cache.clone()
     }
 
-    /// Convenience: invalidate the `FileInfo` cache entry for `path`, if the
-    /// cache is enabled. Idempotent no-op when the cache is disabled or the
-    /// path is not currently cached.
+    /// Invalidate `path`, and optionally its parent directory listing/status.
     ///
-    /// **Contract**: every write path (create, delete, rename, setAttr...)
-    /// that mutates `path` on the master through this client MUST call this
-    /// after the mutation is acknowledged, so subsequent reads observe the
-    /// fresh metadata().
-    pub fn invalidate_file_info(&self, path: &str) {
-        if let Some(cache) = &self.file_info_cache {
-            cache.invalidate(path);
+    /// Idempotent no-op when the cache is disabled. Write paths must call this
+    /// **after** a successful mutation (Rust is more conservative than Java,
+    /// which invalidates before the RPC).
+    pub fn invalidate_metadata(&self, path: &str, with_parent: bool) {
+        if let Some(cache) = &self.metadata_cache {
+            if with_parent {
+                cache.invalidate_with_parent(path);
+            } else {
+                cache.invalidate(path);
+            }
         }
+    }
+
+    /// OpenDAL-compatible entry. Equivalent to `invalidate_metadata(path, true)`.
+    ///
+    /// **Signature is frozen** — OpenDAL `core.rs` already calls this.
+    pub fn invalidate_file_info(&self, path: &str) {
+        self.invalidate_metadata(path, true);
+    }
+
+    /// Fetch `FileInfo` for `path`, consulting the metadata cache when present.
+    ///
+    /// Open paths share this with `BaseFileSystem::get_status` so a prior
+    /// `get_status` hit means open issues zero extra getStatus RPCs.
+    /// CheckBlocks enrichment must clone the result (INV-MC-D1).
+    pub(crate) async fn get_file_info_cached(
+        &self,
+        path: &str,
+    ) -> Result<crate::proto::grpc::file::FileInfo> {
+        let master = self.acquire_master();
+        crate::metadata_cache::get_status_through_cache(
+            self.metadata_cache.as_deref(),
+            path,
+            self.config.file_metadata_sync_interval,
+            || master.get_status(path),
+        )
+        .await
     }
 
     /// Return the shared `MasterInquireClient` (zero-cost Arc clone).
@@ -877,58 +903,63 @@ mod tests {
         );
     }
 
-    // ── A3: FileInfo cache opt-in semantics ─────────────────────────────
+    // ── Metadata cache construction gate ────────────────────────────────
 
-    /// The cache is **enabled** by default
-    /// with a 30 s TTL, so `FileSystemContext::acquire_file_info_cache()`
-    /// must return a live cache on a plain `GoosefsConfig::default()`.
+    /// Java default: cache is **off**. `maybe_new` is not consulted unless
+    /// `metadata_cache_enabled` is true.
     #[test]
-    fn file_info_cache_enabled_by_default() {
-        // We can't call `FileSystemContext::connect()` (needs live master),
-        // so exercise the field-population logic directly on the config
-        // + `FileInfoCache::maybe_new` gate.
+    fn metadata_cache_disabled_by_default() {
         let cfg = GoosefsConfig::default();
-        assert_eq!(
-            cfg.file_info_cache_ttl,
-            Duration::from_secs(30),
-            "default TTL must be 30 s (enabled by default)"
-        );
         assert!(
-            crate::file_info_cache::FileInfoCache::maybe_new(
-                cfg.file_info_cache_ttl,
-                cfg.file_info_cache_capacity,
+            !cfg.metadata_cache_enabled,
+            "Java USER_METADATA_CACHE_ENABLED default is false"
+        );
+        assert_eq!(
+            cfg.metadata_cache_expiration,
+            Duration::from_secs(600),
+            "Java expiration.time default is 10min"
+        );
+        assert_eq!(
+            cfg.metadata_cache_max_size, 100_000,
+            "Java max.size default is 100000"
+        );
+        let constructed = if cfg.metadata_cache_enabled {
+            crate::metadata_cache::MetadataCache::maybe_new(
+                cfg.metadata_cache_expiration,
+                cfg.metadata_cache_max_size,
             )
-            .is_some(),
-            "FileInfoCache::maybe_new must return Some when default TTL > 0"
+        } else {
+            None
+        };
+        assert!(
+            constructed.is_none(),
+            "default enabled=false must not construct a cache"
         );
     }
 
-    /// Explicit opt-in via `with_file_info_cache_ttl` must produce a live
-    /// cache with the requested TTL.
+    /// Opt-in via `with_metadata_cache_enabled(true)` keeps Java TTL / size.
     #[test]
-    fn file_info_cache_opt_in_produces_live_cache() {
-        let cfg = GoosefsConfig::new("127.0.0.1:9200")
-            .with_file_info_cache_ttl(Duration::from_secs(30))
-            .with_file_info_cache_capacity(256);
-        assert_eq!(cfg.file_info_cache_ttl, Duration::from_secs(30));
-        assert_eq!(cfg.file_info_cache_capacity, 256);
+    fn metadata_cache_opt_in_keeps_java_defaults() {
+        let cfg = GoosefsConfig::new("127.0.0.1:9200").with_metadata_cache_enabled(true);
+        assert!(cfg.metadata_cache_enabled);
+        assert_eq!(cfg.metadata_cache_expiration, Duration::from_secs(600));
+        assert_eq!(cfg.metadata_cache_max_size, 100_000);
 
-        let cache = crate::file_info_cache::FileInfoCache::maybe_new(
-            cfg.file_info_cache_ttl,
-            cfg.file_info_cache_capacity,
+        let cache = crate::metadata_cache::MetadataCache::maybe_new(
+            cfg.metadata_cache_expiration,
+            cfg.metadata_cache_max_size,
         )
-        .expect("opt-in TTL > 0 must produce a live cache");
-        assert_eq!(cache.ttl(), Duration::from_secs(30));
+        .expect("enabled + default expiration must produce a live cache");
+        assert_eq!(cache.ttl(), Duration::from_secs(600));
     }
 
-    /// `with_file_info_cache_capacity(0)` must be clamped to `1` (LRU
-    /// requires non-zero capacity).
+    /// `with_metadata_cache_max_size(0)` must be clamped to `1`.
     #[test]
-    fn file_info_cache_capacity_clamped_to_one() {
-        let cfg = GoosefsConfig::new("127.0.0.1:9200").with_file_info_cache_capacity(0);
+    fn metadata_cache_max_size_clamped_to_one() {
+        let cfg = GoosefsConfig::new("127.0.0.1:9200").with_metadata_cache_max_size(0);
         assert_eq!(
-            cfg.file_info_cache_capacity, 1,
-            "with_file_info_cache_capacity(0) must clamp to 1"
+            cfg.metadata_cache_max_size, 1,
+            "with_metadata_cache_max_size(0) must clamp to 1"
         );
     }
 }

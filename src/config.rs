@@ -22,7 +22,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::auth::AuthType;
-use crate::proto::grpc::file::WritePType;
+use crate::proto::grpc::file::{LoadMetadataPType, WritePType};
 
 // ── Config load error ─────────────────────────────────────────
 
@@ -175,10 +175,9 @@ impl PropertiesMap {
         self.get(key).and_then(|v| v.parse::<T>().ok())
     }
 
-    /// Get a boolean value (accepts `true`/`false`, case-insensitive).
+    /// Get a boolean value (`true`/`false`/`1`/`0`, case-insensitive).
     fn get_bool(&self, key: &str) -> Option<bool> {
-        self.get(key)
-            .and_then(|v| v.to_ascii_lowercase().parse::<bool>().ok())
+        self.get(key).and_then(|v| parse_bool_loose(&v))
     }
 
     /// Get a comma-separated list of strings.
@@ -222,6 +221,71 @@ fn parse_byte_size(s: &str) -> Result<u64, String> {
             n.checked_mul(multiplier)
                 .ok_or_else(|| format!("byte size '{}' overflows u64", s))
         })
+}
+
+/// Parse a boolean in the Java / env style: `true`/`false`/`1`/`0`
+/// (case-insensitive). Anything else is `None` so a typo cannot flip a default.
+pub(crate) fn parse_bool_loose(s: &str) -> Option<bool> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" => Some(true),
+        "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// Parse a time duration in Java `FormatUtils.parseTimeSize` form.
+///
+/// Returns milliseconds as `i64` (may be negative, e.g. `"-1"`).
+/// Unknown units yield `None` so the caller keeps the default.
+///
+/// Suffixes (case-insensitive): empty/`ms`/`millisecond`, `s`/`sec`/`second`,
+/// `m`/`min`/`minute`, `h`/`hr`/`hour`, `d`/`day`.
+pub(crate) fn parse_time_size(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    if bytes[0] == b'-' || bytes[0] == b'+' {
+        i = 1;
+    }
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == 0 || (i == 1 && (bytes[0] == b'-' || bytes[0] == b'+')) {
+        return None;
+    }
+    let num_str = &s[..i];
+    let unit = s[i..].trim();
+    let value: f64 = num_str.parse().ok()?;
+    let multiplier: f64 = match unit.to_ascii_lowercase().as_str() {
+        "" | "ms" | "millisecond" => 1.0,
+        "s" | "sec" | "second" => 1_000.0,
+        "m" | "min" | "minute" => 60_000.0,
+        "h" | "hr" | "hour" => 3_600_000.0,
+        "d" | "day" => 86_400_000.0,
+        _ => return None,
+    };
+    Some((value * multiplier) as i64)
+}
+
+/// Parse `ONCE` / `ALWAYS` / `NEVER` (case-insensitive). Invalid → `None`.
+pub(crate) fn parse_load_metadata_type(s: &str) -> Option<LoadMetadataPType> {
+    match s.trim().to_ascii_uppercase().as_str() {
+        "ONCE" => Some(LoadMetadataPType::Once),
+        "ALWAYS" => Some(LoadMetadataPType::Always),
+        "NEVER" => Some(LoadMetadataPType::Never),
+        _ => None,
+    }
+}
+
+fn duration_from_time_size_ms(ms: i64) -> Duration {
+    if ms <= 0 {
+        Duration::ZERO
+    } else {
+        Duration::from_millis(ms as u64)
+    }
 }
 
 impl PropertiesMap {
@@ -484,18 +548,49 @@ impl PropertiesMap {
                 cfg.master_connection_pool_schedule = sched;
             }
         }
-        // Client-side FileInfo cache TTL (milliseconds):
-        // goosefs.user.file.info.cache.ttl.ms
-        // `0` disables the cache (default). Chosen milliseconds rather than
-        // seconds because the intended tuning range (100 ms – a few s) is
-        // sub-second-sensitive on Lance / DuckDB open-heavy queries.
-        if let Some(ms) = self.get_parsed::<u64>("goosefs.user.file.info.cache.ttl.ms") {
-            cfg.file_info_cache_ttl = Duration::from_millis(ms);
+        // Client-side metadata cache (Java `goosefs.user.metadata.cache.*`).
+        if let Some(enabled) = self.get_bool("goosefs.user.metadata.cache.enabled") {
+            cfg.metadata_cache_enabled = enabled;
         }
-        // FileInfo LRU cache capacity:
-        // goosefs.user.file.info.cache.capacity
-        if let Some(n) = self.get_parsed::<usize>("goosefs.user.file.info.cache.capacity") {
-            cfg.file_info_cache_capacity = n.max(1);
+        if let Some(n) = self.get_parsed::<usize>("goosefs.user.metadata.cache.max.size") {
+            cfg.metadata_cache_max_size = n.max(1);
+        }
+        if let Some(s) = self.get("goosefs.user.metadata.cache.expiration.time") {
+            if let Some(ms) = parse_time_size(&s) {
+                cfg.metadata_cache_expiration = duration_from_time_size_ms(ms);
+            }
+        }
+        if let Some(s) = self.get("goosefs.user.file.metadata.sync.interval") {
+            if let Some(ms) = parse_time_size(&s) {
+                cfg.file_metadata_sync_interval = ms;
+            }
+        }
+        if let Some(s) = self.get("goosefs.user.file.metadata.load.type") {
+            if let Some(t) = parse_load_metadata_type(&s) {
+                cfg.file_metadata_load_type = t;
+            }
+        }
+        // SDK storage-option aliases (Lance / OpenDAL maps). Same values as env.
+        if let Some(enabled) = self.get_bool(STORAGE_OPT_METADATA_CACHE_ENABLED) {
+            cfg.metadata_cache_enabled = enabled;
+        }
+        if let Some(n) = self.get_parsed::<usize>(STORAGE_OPT_METADATA_CACHE_MAX_SIZE) {
+            cfg.metadata_cache_max_size = n.max(1);
+        }
+        if let Some(s) = self.get(STORAGE_OPT_METADATA_CACHE_EXPIRATION) {
+            if let Some(ms) = parse_time_size(&s) {
+                cfg.metadata_cache_expiration = duration_from_time_size_ms(ms);
+            }
+        }
+        if let Some(s) = self.get(STORAGE_OPT_FILE_METADATA_SYNC_INTERVAL) {
+            if let Some(ms) = parse_time_size(&s) {
+                cfg.file_metadata_sync_interval = ms;
+            }
+        }
+        if let Some(s) = self.get(STORAGE_OPT_FILE_METADATA_LOAD_TYPE) {
+            if let Some(t) = parse_load_metadata_type(&s) {
+                cfg.file_metadata_load_type = t;
+            }
         }
 
         // ── Short-circuit (local mmap) read path ─────────────────
@@ -1066,22 +1161,39 @@ pub const ENV_MASTER_CONNECTION_POOL_SIZE: &str = "GOOSEFS_MASTER_CONNECTION_POO
 /// Example: `export GOOSEFS_MASTER_POOL_SCHEDULE=p2c`.
 pub const ENV_MASTER_POOL_SCHEDULE: &str = "GOOSEFS_MASTER_POOL_SCHEDULE";
 
-/// Environment variable: client-side `FileInfo` cache TTL in **milliseconds**.
+/// Environment variable: enable the Java-aligned client metadata cache.
 ///
-/// Mirrors [`GoosefsConfig::file_info_cache_ttl`]. Default is `30000` (30 s),
-/// which enables the cache. Set to `0` to disable the cache. Any positive
-/// value controls staleness bound for out-of-band mutations. See
+/// Mirrors [`GoosefsConfig::metadata_cache_enabled`]. Accepts `true`/`false`/
+/// `1`/`0` (case-insensitive). Default is `false` (Java
+/// `goosefs.user.metadata.cache.enabled`).
 ///
-///
-/// Example: `export GOOSEFS_FILE_INFO_CACHE_TTL_MS=2000` (2 s TTL).
-pub const ENV_FILE_INFO_CACHE_TTL_MS: &str = "GOOSEFS_FILE_INFO_CACHE_TTL_MS";
+/// Example: `export GOOSEFS_METADATA_CACHE_ENABLED=true`.
+pub const ENV_METADATA_CACHE_ENABLED: &str = "GOOSEFS_METADATA_CACHE_ENABLED";
 
-/// Environment variable: maximum number of `(path, FileInfo)` LRU entries.
+/// Environment variable: metadata cache LRU capacity.
 ///
-/// Mirrors [`GoosefsConfig::file_info_cache_capacity`]. Only consulted when
-/// [`ENV_FILE_INFO_CACHE_TTL_MS`] resolves to a value `> 0`. Values `< 1`
-/// are clamped to `1`.
-pub const ENV_FILE_INFO_CACHE_CAPACITY: &str = "GOOSEFS_FILE_INFO_CACHE_CAPACITY";
+/// Mirrors [`GoosefsConfig::metadata_cache_max_size`]. Values `< 1` are
+/// clamped to `1`. Default is `100000`.
+pub const ENV_METADATA_CACHE_MAX_SIZE: &str = "GOOSEFS_METADATA_CACHE_MAX_SIZE";
+
+/// Environment variable: metadata cache TTL (`FormatUtils.parseTimeSize`).
+///
+/// Mirrors [`GoosefsConfig::metadata_cache_expiration`]. Same value format
+/// as the site property (`10min`, `30s`, `2day`, or a raw millisecond
+/// number). `<= 0` disables construction even when enabled is true.
+pub const ENV_METADATA_CACHE_EXPIRATION: &str = "GOOSEFS_METADATA_CACHE_EXPIRATION";
+
+/// Environment variable: file metadata sync interval (`parseTimeSize`).
+///
+/// Mirrors [`GoosefsConfig::file_metadata_sync_interval`]. Default `-1`.
+/// `0` forces every `get_status` / `list_status` to skip the cache.
+pub const ENV_FILE_METADATA_SYNC_INTERVAL: &str = "GOOSEFS_FILE_METADATA_SYNC_INTERVAL";
+
+/// Environment variable: file metadata load type (`ONCE` / `ALWAYS` / `NEVER`).
+///
+/// Mirrors [`GoosefsConfig::file_metadata_load_type`]. `ALWAYS` skips the
+/// listing cache. Case-insensitive; invalid values keep the default `ONCE`.
+pub const ENV_FILE_METADATA_LOAD_TYPE: &str = "GOOSEFS_FILE_METADATA_LOAD_TYPE";
 
 /// Storage option key for config manager RPC addresses.
 pub const STORAGE_OPT_CONFIG_MANAGER_RPC_ADDRESSES: &str = "goosefs_config_manager_rpc_addresses";
@@ -1149,17 +1261,20 @@ pub const STORAGE_OPT_MASTER_CONNECTION_POOL_SIZE: &str = "goosefs_master_connec
 /// forms as the env var (`roundrobin`, `p2c`, `round_robin`, `P2C`, ...).
 pub const STORAGE_OPT_MASTER_POOL_SCHEDULE: &str = "goosefs_master_pool_schedule";
 
-/// Storage option key for the client-side `FileInfo` cache TTL in **milliseconds**.
-///
-/// Companion to [`ENV_FILE_INFO_CACHE_TTL_MS`]. Default is `30000` (30 s),
-/// which enables the cache; `0` disables it.
-pub const STORAGE_OPT_FILE_INFO_CACHE_TTL_MS: &str = "goosefs_file_info_cache_ttl_ms";
+/// Storage option key for enabling the client metadata cache.
+pub const STORAGE_OPT_METADATA_CACHE_ENABLED: &str = "goosefs_metadata_cache_enabled";
 
-/// Storage option key for the `FileInfo` LRU cache capacity.
-///
-/// Companion to [`ENV_FILE_INFO_CACHE_CAPACITY`]. Only consulted when
-/// [`STORAGE_OPT_FILE_INFO_CACHE_TTL_MS`] resolves to a value `> 0`.
-pub const STORAGE_OPT_FILE_INFO_CACHE_CAPACITY: &str = "goosefs_file_info_cache_capacity";
+/// Storage option key for the metadata cache LRU capacity.
+pub const STORAGE_OPT_METADATA_CACHE_MAX_SIZE: &str = "goosefs_metadata_cache_max_size";
+
+/// Storage option key for the metadata cache TTL (`parseTimeSize` string).
+pub const STORAGE_OPT_METADATA_CACHE_EXPIRATION: &str = "goosefs_metadata_cache_expiration";
+
+/// Storage option key for `goosefs.user.file.metadata.sync.interval`.
+pub const STORAGE_OPT_FILE_METADATA_SYNC_INTERVAL: &str = "goosefs_file_metadata_sync_interval";
+
+/// Storage option key for `goosefs.user.file.metadata.load.type`.
+pub const STORAGE_OPT_FILE_METADATA_LOAD_TYPE: &str = "goosefs_file_metadata_load_type";
 
 // ── Short-circuit (local mmap) read env vars (SHORT_CIRCUIT_DESIGN ) ─
 /// Environment variable: master kill switch for the short-circuit local read path.
@@ -1850,33 +1965,41 @@ pub struct GoosefsConfig {
     #[serde(default)]
     pub client_cache_sequential_read_enabled: bool,
 
-    // ── FileInfo metadata cache ──
-    /// TTL for the client-side `FileInfo` (`get_status`) cache.
+    // ── Metadata cache (Java `goosefs.user.metadata.cache.*`) ──
+    /// Whether the Java-aligned client metadata cache is constructed.
     ///
-    /// **Default**: `Duration::ZERO` — cache is **disabled**. This is a
-    /// deliberate opt-in: caching
-    /// metadata trades away the "always live" guarantee (up to `ttl`
-    /// staleness on `length` / `block_ids` if the file is mutated
-    /// out-of-band). Enabling it amortises the ~2.8 % on-CPU cost of
-    /// `MasterClient::get_status` when the same file is opened multiple
-    /// times inside one query (typical Lance / DuckDB scan pattern).
-    ///
-    /// The SDK **explicitly invalidates** the cache entry for a path on
-    /// every write / delete / rename issued through this client, so the
-    /// staleness window only affects out-of-band mutations by other
-    /// writers.
-    #[serde(default = "default_file_info_cache_ttl")]
-    pub file_info_cache_ttl: Duration,
+    /// Default `false` (`goosefs.user.metadata.cache.enabled`). When true,
+    /// `get_status` / `list_status` / `exists` / open share one process-local
+    /// LRU. Writes invalidate path + parent after a successful RPC.
+    #[serde(default = "default_false_bool")]
+    pub metadata_cache_enabled: bool,
 
-    /// Maximum number of `(path, FileInfo)` entries kept in the metadata
-    /// cache when it is enabled.
+    /// Metadata cache LRU capacity (`goosefs.user.metadata.cache.max.size`).
     ///
-    /// Only consulted when `file_info_cache_ttl > 0`. Backed by an LRU so
-    /// the memory footprint is bounded regardless of workload path
-    /// diversity. Default: 4096 entries (a `FileInfo` is on the order of
-    /// a few hundred bytes, so ~1 MiB).
-    #[serde(default = "default_file_info_cache_capacity")]
-    pub file_info_cache_capacity: usize,
+    /// Default `100000`. Values `< 1` are clamped to `1`. Only consulted when
+    /// `metadata_cache_enabled` is true and expiration is `> 0`.
+    #[serde(default = "default_metadata_cache_max_size")]
+    pub metadata_cache_max_size: usize,
+
+    /// Metadata cache TTL (`goosefs.user.metadata.cache.expiration.time`).
+    ///
+    /// Default `10min`. `<= 0` skips construction even when enabled.
+    #[serde(default = "default_metadata_cache_expiration")]
+    pub metadata_cache_expiration: Duration,
+
+    /// `goosefs.user.file.metadata.sync.interval` in milliseconds.
+    ///
+    /// Default `-1`. `0` forces every get/list to skip the cache. Negative
+    /// values (including `-1`) do **not** skip the cache.
+    #[serde(default = "default_file_metadata_sync_interval")]
+    pub file_metadata_sync_interval: i64,
+
+    /// `goosefs.user.file.metadata.load.type` (`ONCE` / `ALWAYS` / `NEVER`).
+    ///
+    /// Default `ONCE`. `ALWAYS` skips the listing cache.
+    #[serde(default = "default_file_metadata_load_type")]
+    #[serde(with = "load_metadata_type_serde")]
+    pub file_metadata_load_type: LoadMetadataPType,
 
     // ── Range coalesce ──
     /// Whether the multi-range read API
@@ -2058,16 +2181,36 @@ fn default_false_bool() -> bool {
     false
 }
 
-// ── FileInfo metadata cache defaults ─
-fn default_file_info_cache_ttl() -> Duration {
-    // 30 s by default: a non-zero TTL
-    // enables the client-side FileInfo metadata cache out of the box and
-    // bounds staleness for out-of-band mutations. Set the TTL to `0` to
-    // disable the cache (opt-out).
-    Duration::from_secs(30)
+fn default_metadata_cache_max_size() -> usize {
+    100_000
 }
-fn default_file_info_cache_capacity() -> usize {
-    16384
+
+fn default_metadata_cache_expiration() -> Duration {
+    Duration::from_secs(600) // Java "10min"
+}
+
+fn default_file_metadata_sync_interval() -> i64 {
+    -1
+}
+
+fn default_file_metadata_load_type() -> LoadMetadataPType {
+    LoadMetadataPType::Once
+}
+
+mod load_metadata_type_serde {
+    use super::LoadMetadataPType;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &LoadMetadataPType, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(v.as_str_name())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<LoadMetadataPType, D::Error> {
+        let raw = String::deserialize(d)?;
+        crate::config::parse_load_metadata_type(&raw).ok_or_else(|| {
+            serde::de::Error::custom(format!("invalid file metadata load type {raw}"))
+        })
+    }
 }
 
 // ── Range coalesce defaults ─────────
@@ -2205,8 +2348,11 @@ impl Default for GoosefsConfig {
             client_cache_uring_thread_count: default_client_cache_uring_thread_count(),
             client_cache_sync_read_enabled: false,
             client_cache_sequential_read_enabled: false,
-            file_info_cache_ttl: default_file_info_cache_ttl(),
-            file_info_cache_capacity: default_file_info_cache_capacity(),
+            metadata_cache_enabled: false,
+            metadata_cache_max_size: default_metadata_cache_max_size(),
+            metadata_cache_expiration: default_metadata_cache_expiration(),
+            file_metadata_sync_interval: default_file_metadata_sync_interval(),
+            file_metadata_load_type: default_file_metadata_load_type(),
             range_coalesce_enabled: false,
             range_coalesce_gap_bytes: default_range_coalesce_gap_bytes(),
             range_coalesce_max_bytes: default_range_coalesce_max_bytes(),
@@ -2514,24 +2660,38 @@ impl GoosefsConfig {
         self
     }
 
-    /// Enable the client-side `FileInfo` (metadata) cache with the given TTL
+    /// Enable or disable the Java-aligned client metadata cache.
     ///
-    ///
-    /// Passing `Duration::ZERO` disables the cache (matches the default).
-    /// The cache is consulted on the read path (`get_status` / `open`) and
-    /// **explicitly invalidated** on every write / delete / rename issued
-    /// through this client, so the staleness window of length `ttl` only
-    /// affects out-of-band mutations by other writers.
-    pub fn with_file_info_cache_ttl(mut self, ttl: Duration) -> Self {
-        self.file_info_cache_ttl = ttl;
+    /// Default `false`. When true, TTL defaults to `10min` and capacity to
+    /// `100000` unless overridden.
+    pub fn with_metadata_cache_enabled(mut self, enabled: bool) -> Self {
+        self.metadata_cache_enabled = enabled;
         self
     }
 
-    /// Set the maximum number of `(path, FileInfo)` entries kept in the
-    /// metadata cache when it is enabled. Only consulted when the TTL is
-    /// non-zero. Values `< 1` are clamped to `1` (LRU cannot be empty).
-    pub fn with_file_info_cache_capacity(mut self, capacity: usize) -> Self {
-        self.file_info_cache_capacity = capacity.max(1);
+    /// Set the metadata cache LRU capacity. Values `< 1` are clamped to `1`.
+    pub fn with_metadata_cache_max_size(mut self, max_size: usize) -> Self {
+        self.metadata_cache_max_size = max_size.max(1);
+        self
+    }
+
+    /// Set the metadata cache TTL. `Duration::ZERO` skips construction even
+    /// when the cache is enabled.
+    pub fn with_metadata_cache_expiration(mut self, expiration: Duration) -> Self {
+        self.metadata_cache_expiration = expiration;
+        self
+    }
+
+    /// Set `goosefs.user.file.metadata.sync.interval` (milliseconds).
+    /// `0` skips the cache on every get/list; `-1` (default) does not.
+    pub fn with_file_metadata_sync_interval(mut self, interval_ms: i64) -> Self {
+        self.file_metadata_sync_interval = interval_ms;
+        self
+    }
+
+    /// Set `goosefs.user.file.metadata.load.type`. `ALWAYS` skips listing cache.
+    pub fn with_file_metadata_load_type(mut self, load_type: LoadMetadataPType) -> Self {
+        self.file_metadata_load_type = load_type;
         self
     }
 
@@ -3127,18 +3287,30 @@ impl GoosefsConfig {
                 self.master_connection_pool_schedule = s;
             }
         }
-        // Client-side FileInfo cache TTL (milliseconds). `0` = disabled
-        // (default). This is the only knob that actually turns the cache on,
-        // so parse errors are ignored to keep default behaviour (off).
-        if let Ok(val) = env::var(ENV_FILE_INFO_CACHE_TTL_MS) {
-            if let Ok(ms) = val.parse::<u64>() {
-                self.file_info_cache_ttl = Duration::from_millis(ms);
+        // Client metadata cache (Java keys). Parse errors keep the default.
+        if let Ok(val) = env::var(ENV_METADATA_CACHE_ENABLED) {
+            if let Some(b) = parse_bool_loose(&val) {
+                self.metadata_cache_enabled = b;
             }
         }
-        // FileInfo LRU cache capacity. Mirrors the builder's `.max(1)` clamp.
-        if let Ok(val) = env::var(ENV_FILE_INFO_CACHE_CAPACITY) {
+        if let Ok(val) = env::var(ENV_METADATA_CACHE_MAX_SIZE) {
             if let Ok(n) = val.parse::<usize>() {
-                self.file_info_cache_capacity = n.max(1);
+                self.metadata_cache_max_size = n.max(1);
+            }
+        }
+        if let Ok(val) = env::var(ENV_METADATA_CACHE_EXPIRATION) {
+            if let Some(ms) = parse_time_size(&val) {
+                self.metadata_cache_expiration = duration_from_time_size_ms(ms);
+            }
+        }
+        if let Ok(val) = env::var(ENV_FILE_METADATA_SYNC_INTERVAL) {
+            if let Some(ms) = parse_time_size(&val) {
+                self.file_metadata_sync_interval = ms;
+            }
+        }
+        if let Ok(val) = env::var(ENV_FILE_METADATA_LOAD_TYPE) {
+            if let Some(t) = parse_load_metadata_type(&val) {
+                self.file_metadata_load_type = t;
             }
         }
 
@@ -4476,10 +4648,22 @@ goosefs.user.network.data.transfer.chunk.size=1MB
             "GOOSEFS_MASTER_CONNECTION_POOL_SIZE"
         );
         assert_eq!(ENV_MASTER_POOL_SCHEDULE, "GOOSEFS_MASTER_POOL_SCHEDULE");
-        assert_eq!(ENV_FILE_INFO_CACHE_TTL_MS, "GOOSEFS_FILE_INFO_CACHE_TTL_MS");
+        assert_eq!(ENV_METADATA_CACHE_ENABLED, "GOOSEFS_METADATA_CACHE_ENABLED");
         assert_eq!(
-            ENV_FILE_INFO_CACHE_CAPACITY,
-            "GOOSEFS_FILE_INFO_CACHE_CAPACITY"
+            ENV_METADATA_CACHE_MAX_SIZE,
+            "GOOSEFS_METADATA_CACHE_MAX_SIZE"
+        );
+        assert_eq!(
+            ENV_METADATA_CACHE_EXPIRATION,
+            "GOOSEFS_METADATA_CACHE_EXPIRATION"
+        );
+        assert_eq!(
+            ENV_FILE_METADATA_SYNC_INTERVAL,
+            "GOOSEFS_FILE_METADATA_SYNC_INTERVAL"
+        );
+        assert_eq!(
+            ENV_FILE_METADATA_LOAD_TYPE,
+            "GOOSEFS_FILE_METADATA_LOAD_TYPE"
         );
         assert_eq!(
             STORAGE_OPT_WORKER_CONNECTION_POOL_SIZE,
@@ -4494,12 +4678,24 @@ goosefs.user.network.data.transfer.chunk.size=1MB
             "goosefs_master_pool_schedule"
         );
         assert_eq!(
-            STORAGE_OPT_FILE_INFO_CACHE_TTL_MS,
-            "goosefs_file_info_cache_ttl_ms"
+            STORAGE_OPT_METADATA_CACHE_ENABLED,
+            "goosefs_metadata_cache_enabled"
         );
         assert_eq!(
-            STORAGE_OPT_FILE_INFO_CACHE_CAPACITY,
-            "goosefs_file_info_cache_capacity"
+            STORAGE_OPT_METADATA_CACHE_MAX_SIZE,
+            "goosefs_metadata_cache_max_size"
+        );
+        assert_eq!(
+            STORAGE_OPT_METADATA_CACHE_EXPIRATION,
+            "goosefs_metadata_cache_expiration"
+        );
+        assert_eq!(
+            STORAGE_OPT_FILE_METADATA_SYNC_INTERVAL,
+            "goosefs_file_metadata_sync_interval"
+        );
+        assert_eq!(
+            STORAGE_OPT_FILE_METADATA_LOAD_TYPE,
+            "goosefs_file_metadata_load_type"
         );
     }
 
@@ -4604,32 +4800,57 @@ goosefs.user.network.data.transfer.chunk.size=1MB
     }
 
     #[test]
-    fn test_apply_env_file_info_cache_ttl_ms() {
+    fn test_apply_env_metadata_cache_enabled() {
         let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("GOOSEFS_FILE_INFO_CACHE_TTL_MS", "2500");
+        std::env::set_var("GOOSEFS_METADATA_CACHE_ENABLED", "true");
+        std::env::set_var("GOOSEFS_METADATA_CACHE_EXPIRATION", "2day");
+        std::env::set_var("GOOSEFS_METADATA_CACHE_MAX_SIZE", "1000000");
         let cfg = GoosefsConfig::default().apply_env();
-        std::env::remove_var("GOOSEFS_FILE_INFO_CACHE_TTL_MS");
-        assert_eq!(cfg.file_info_cache_ttl, Duration::from_millis(2500));
-    }
-
-    /// `0` is explicitly meaningful (= disabled) and must override the
-    /// 30 s default when set via the env var.
-    #[test]
-    fn test_apply_env_file_info_cache_ttl_zero_disables() {
-        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("GOOSEFS_FILE_INFO_CACHE_TTL_MS", "0");
-        let cfg = GoosefsConfig::default().apply_env();
-        std::env::remove_var("GOOSEFS_FILE_INFO_CACHE_TTL_MS");
-        assert_eq!(cfg.file_info_cache_ttl, Duration::ZERO);
+        std::env::remove_var("GOOSEFS_METADATA_CACHE_ENABLED");
+        std::env::remove_var("GOOSEFS_METADATA_CACHE_EXPIRATION");
+        std::env::remove_var("GOOSEFS_METADATA_CACHE_MAX_SIZE");
+        assert!(cfg.metadata_cache_enabled);
+        assert_eq!(
+            cfg.metadata_cache_expiration,
+            Duration::from_secs(2 * 86400)
+        );
+        assert_eq!(cfg.metadata_cache_max_size, 1_000_000);
     }
 
     #[test]
-    fn test_apply_env_file_info_cache_capacity_clamp() {
+    fn test_apply_env_metadata_cache_expiration_10min() {
         let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("GOOSEFS_FILE_INFO_CACHE_CAPACITY", "0");
+        std::env::set_var("GOOSEFS_METADATA_CACHE_EXPIRATION", "10min");
         let cfg = GoosefsConfig::default().apply_env();
-        std::env::remove_var("GOOSEFS_FILE_INFO_CACHE_CAPACITY");
-        assert_eq!(cfg.file_info_cache_capacity, 1);
+        std::env::remove_var("GOOSEFS_METADATA_CACHE_EXPIRATION");
+        assert_eq!(cfg.metadata_cache_expiration, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn test_apply_env_metadata_cache_max_size_clamp() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GOOSEFS_METADATA_CACHE_MAX_SIZE", "0");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var("GOOSEFS_METADATA_CACHE_MAX_SIZE");
+        assert_eq!(cfg.metadata_cache_max_size, 1);
+    }
+
+    #[test]
+    fn test_apply_env_file_metadata_sync_interval_zero() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GOOSEFS_FILE_METADATA_SYNC_INTERVAL", "0");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var("GOOSEFS_FILE_METADATA_SYNC_INTERVAL");
+        assert_eq!(cfg.file_metadata_sync_interval, 0);
+    }
+
+    #[test]
+    fn test_apply_env_file_metadata_load_type_always() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GOOSEFS_FILE_METADATA_LOAD_TYPE", "always");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var("GOOSEFS_FILE_METADATA_LOAD_TYPE");
+        assert_eq!(cfg.file_metadata_load_type, LoadMetadataPType::Always);
     }
 
     #[test]
@@ -4638,15 +4859,89 @@ goosefs.user.network.data.transfer.chunk.size=1MB
 goosefs.user.worker.connection.pool.size=6
 goosefs.user.master.connection.pool.size=8
 goosefs.user.master.pool.schedule=p2c
-goosefs.user.file.info.cache.ttl.ms=1500
-goosefs.user.file.info.cache.capacity=2048
+goosefs.user.metadata.cache.enabled=true
+goosefs.user.metadata.cache.expiration.time=2day
+goosefs.user.metadata.cache.max.size=1000000
 ";
         let cfg = GoosefsConfig::from_properties_str(props);
         assert_eq!(cfg.worker_connection_pool_size, 6);
         assert_eq!(cfg.master_connection_pool_size, 8);
         assert_eq!(cfg.master_connection_pool_schedule, MasterPoolSchedule::P2C);
-        assert_eq!(cfg.file_info_cache_ttl, Duration::from_millis(1500));
-        assert_eq!(cfg.file_info_cache_capacity, 2048);
+        assert!(cfg.metadata_cache_enabled);
+        assert_eq!(
+            cfg.metadata_cache_expiration,
+            Duration::from_secs(2 * 86400)
+        );
+        assert_eq!(cfg.metadata_cache_max_size, 1_000_000);
+    }
+
+    #[test]
+    fn test_metadata_cache_java_defaults() {
+        let cfg = GoosefsConfig::default();
+        assert!(!cfg.metadata_cache_enabled);
+        assert_eq!(cfg.metadata_cache_expiration, Duration::from_secs(600));
+        assert_eq!(cfg.metadata_cache_max_size, 100_000);
+        assert_eq!(cfg.file_metadata_sync_interval, -1);
+        assert_eq!(cfg.file_metadata_load_type, LoadMetadataPType::Once);
+    }
+
+    #[test]
+    fn test_metadata_cache_enabled_only_keeps_java_ttl_and_size() {
+        let cfg = GoosefsConfig::default().with_metadata_cache_enabled(true);
+        assert!(cfg.metadata_cache_enabled);
+        assert_eq!(cfg.metadata_cache_expiration, Duration::from_secs(600));
+        assert_eq!(cfg.metadata_cache_max_size, 100_000);
+    }
+
+    #[test]
+    fn test_old_file_info_cache_keys_are_ignored() {
+        let props = "\
+goosefs.user.file.info.cache.ttl.ms=1500
+goosefs.user.file.info.cache.capacity=2048
+";
+        let cfg = GoosefsConfig::from_properties_str(props);
+        assert!(!cfg.metadata_cache_enabled);
+        assert_eq!(cfg.metadata_cache_expiration, Duration::from_secs(600));
+        assert_eq!(cfg.metadata_cache_max_size, 100_000);
+    }
+
+    #[test]
+    fn test_from_properties_str_sync_interval_and_load_type() {
+        let props = "\
+goosefs.user.file.metadata.sync.interval=0
+goosefs.user.file.metadata.load.type=ALWAYS
+";
+        let cfg = GoosefsConfig::from_properties_str(props);
+        assert_eq!(cfg.file_metadata_sync_interval, 0);
+        assert_eq!(cfg.file_metadata_load_type, LoadMetadataPType::Always);
+    }
+
+    #[test]
+    fn test_storage_opt_metadata_cache_enabled() {
+        let props = "goosefs_metadata_cache_enabled=true\ngoosefs_metadata_cache_expiration=30s\n";
+        let cfg = GoosefsConfig::from_properties_str(props);
+        assert!(cfg.metadata_cache_enabled);
+        assert_eq!(cfg.metadata_cache_expiration, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_parse_time_size_java_units() {
+        assert_eq!(parse_time_size("10min"), Some(600_000));
+        assert_eq!(parse_time_size("30s"), Some(30_000));
+        assert_eq!(parse_time_size("2day"), Some(2 * 86_400_000));
+        assert_eq!(parse_time_size("0"), Some(0));
+        assert_eq!(parse_time_size("-1"), Some(-1));
+        assert_eq!(parse_time_size("100"), Some(100));
+        assert_eq!(parse_time_size("bogus"), None);
+    }
+
+    #[test]
+    fn test_builder_file_metadata_sync_interval_overrides() {
+        let cfg = GoosefsConfig::default()
+            .with_file_metadata_sync_interval(0)
+            .with_file_metadata_load_type(LoadMetadataPType::Never);
+        assert_eq!(cfg.file_metadata_sync_interval, 0);
+        assert_eq!(cfg.file_metadata_load_type, LoadMetadataPType::Never);
     }
 
     /// Properties file with `0` for the pool size must be clamped to `1`

@@ -37,12 +37,19 @@ Tracks the invocation count of each Master RPC, useful for identifying hot opera
 |---------|-------------------|------|------|
 | `Client.ReadOpsTotal` | `goosefs_client_read_ops_total` | Counter | File read operation count |
 | `Client.WriteOpsTotal` | `goosefs_client_write_ops_total` | Counter | File write operation count |
-| `Client.GetStatusOps` | `goosefs_client_get_status_ops` | Counter | getStatus (stat) RPC count |
+| `Client.GetStatusOps` | `goosefs_client_get_status_ops` | Counter | getStatus RPC count (cache hits are **not** counted) |
 | `Client.ListStatusOps` | `goosefs_client_list_status_ops` | Counter | listStatus (ls) RPC count |
 | `Client.CreateFileOps` | `goosefs_client_create_file_ops` | Counter | createFile RPC count |
 | `Client.CreateDirOps` | `goosefs_client_create_dir_ops` | Counter | createDirectory RPC count |
 | `Client.DeleteOps` | `goosefs_client_delete_ops` | Counter | delete RPC count |
 | `Client.RenameOps` | `goosefs_client_rename_ops` | Counter | rename RPC count |
+| `Client.MetadataCacheHits` | `goosefs_client_metadata_cache_hits` | Counter | Metadata cache status/listing hits |
+| `Client.MetadataCacheMisses` | `goosefs_client_metadata_cache_misses` | Counter | Metadata cache misses (including TTL expiry) |
+| `Client.MetadataCacheExpirations` | `goosefs_client_metadata_cache_expirations` | Counter | Entries dropped because TTL elapsed |
+| `Client.MetadataCacheInvalidations` | `goosefs_client_metadata_cache_invalidations` | Counter | Explicit write-path invalidations |
+| `Client.MetadataCacheNegativeHits` | `goosefs_client_metadata_cache_negative_hits` | Counter | Negative-cache (NotFound) hits |
+| `Client.MetadataCacheSize` | `goosefs_client_metadata_cache_size` | Gauge | Current LRU entry count |
+| `Client.MetadataCacheEnabled` | `goosefs_client_metadata_cache_enabled` | Gauge | `1` when a metadata cache was constructed |
 
 **Use Cases**:
 - `rate(goosefs_client_get_status_ops[5m])` — stat calls per second

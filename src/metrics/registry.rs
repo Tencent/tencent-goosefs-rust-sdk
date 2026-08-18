@@ -166,6 +166,27 @@ pub mod name {
     /// Total number of file write operations (create + complete).
     pub const CLIENT_WRITE_OPS_TOTAL: &str = "Client.WriteOpsTotal";
 
+    /// Status or listing cache hits. Does not include incomplete fall-through.
+    pub const CLIENT_METADATA_CACHE_HITS: &str = "Client.MetadataCacheHits";
+
+    /// Status or listing cache misses (including TTL expiry).
+    pub const CLIENT_METADATA_CACHE_MISSES: &str = "Client.MetadataCacheMisses";
+
+    /// Entries dropped because `inserted_at` exceeded TTL.
+    pub const CLIENT_METADATA_CACHE_EXPIRATIONS: &str = "Client.MetadataCacheExpirations";
+
+    /// Explicit invalidations (write path).
+    pub const CLIENT_METADATA_CACHE_INVALIDATIONS: &str = "Client.MetadataCacheInvalidations";
+
+    /// Negative-cache (NotFound) hits.
+    pub const CLIENT_METADATA_CACHE_NEGATIVE_HITS: &str = "Client.MetadataCacheNegativeHits";
+
+    /// Current LRU entry count.
+    pub const CLIENT_METADATA_CACHE_SIZE: &str = "Client.MetadataCacheSize";
+
+    /// `1` when a `MetadataCache` was constructed for this process context.
+    pub const CLIENT_METADATA_CACHE_ENABLED: &str = "Client.MetadataCacheEnabled";
+
     /// Total number of getStatus RPCs to Master.
     pub const CLIENT_GET_STATUS_OPS: &str = "Client.GetStatusOps";
 
@@ -420,6 +441,28 @@ mod tests {
         assert_eq!(name::CLIENT_CREATE_DIR_OPS, "Client.CreateDirOps");
         assert_eq!(name::CLIENT_DELETE_OPS, "Client.DeleteOps");
         assert_eq!(name::CLIENT_RENAME_OPS, "Client.RenameOps");
+        assert_eq!(name::CLIENT_METADATA_CACHE_HITS, "Client.MetadataCacheHits");
+        assert_eq!(
+            name::CLIENT_METADATA_CACHE_MISSES,
+            "Client.MetadataCacheMisses"
+        );
+        assert_eq!(
+            name::CLIENT_METADATA_CACHE_EXPIRATIONS,
+            "Client.MetadataCacheExpirations"
+        );
+        assert_eq!(
+            name::CLIENT_METADATA_CACHE_INVALIDATIONS,
+            "Client.MetadataCacheInvalidations"
+        );
+        assert_eq!(
+            name::CLIENT_METADATA_CACHE_NEGATIVE_HITS,
+            "Client.MetadataCacheNegativeHits"
+        );
+        assert_eq!(name::CLIENT_METADATA_CACHE_SIZE, "Client.MetadataCacheSize");
+        assert_eq!(
+            name::CLIENT_METADATA_CACHE_ENABLED,
+            "Client.MetadataCacheEnabled"
+        );
     }
 
     #[test]
