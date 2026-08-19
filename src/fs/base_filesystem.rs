@@ -314,10 +314,15 @@ impl FileSystem for BaseFileSystem {
             .unwrap_or(self.config.file_metadata_load_type);
 
         if opts.recursive {
-            // Recursive listings never use the cache (Java listStatus recursive
+            // Recursive listings never use the cache (Java MetadataCachingBaseFileSystem
             // + INV-MC-S5). MasterClient owns client-side BFS (GooseFS 2.0
-            // dropped ListStatusPOptions.recursive) and Always load per level.
-            let items = master.list_status(path, true).await?;
+            // dropped ListStatusPOptions.recursive). Pass the resolved load
+            // type so Never / Once / Always on options (or config) take effect
+            // at every BFS level — Java recursive listStatus does not force Always;
+            // the default is goosefs.user.file.metadata.load.type (ONCE).
+            let items = master
+                .list_status_with_load_type(path, true, Some(load))
+                .await?;
             return Ok(items.into_iter().map(URIStatus::from_proto).collect());
         }
 
@@ -330,7 +335,9 @@ impl FileSystem for BaseFileSystem {
         let cache = self.ctx.acquire_metadata_cache();
         let items =
             crate::metadata_cache::list_status_through_cache(cache.as_deref(), path, skip, || {
-                master.list_status(path, false)
+                // Java `listStatusDefaults()` always sets loadMetadataType
+                // (default ONCE), including non-recursive listings.
+                master.list_status_with_load_type(path, false, Some(load))
             })
             .await?;
         Ok(items.into_iter().map(URIStatus::from_proto).collect())

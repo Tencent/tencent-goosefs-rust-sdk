@@ -339,7 +339,8 @@ pub struct ListStatusOptions {
     /// `None` = `GoosefsConfig::file_metadata_sync_interval`.
     pub sync_interval_ms: Option<i64>,
     /// `None` = `GoosefsConfig::file_metadata_load_type` (default `ONCE`).
-    /// `ALWAYS` skips the listing cache.
+    /// Sent on the Master RPC for both recursive and non-recursive listings
+    /// (Java `listStatusDefaults`). `ALWAYS` also skips the listing cache.
     pub load_metadata_type: Option<crate::proto::grpc::file::LoadMetadataPType>,
     /// When true, skip the listing cache. Per-call only.
     pub load_metadata_only: bool,
