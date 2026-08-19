@@ -3705,6 +3705,7 @@ impl Default for ConfigRefresher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::AuthType;
 
     #[test]
     fn test_default_config() {
@@ -3923,6 +3924,61 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    // ── OpenDAL `GoosefsBuilder::build` config APIs ──────────────────────────
+    //
+    // OpenDAL (`opendal-src/core/services/goosefs/src/backend.rs`) calls
+    // `from_properties_auto`, `with_auth_type_str`, `with_auth_username`,
+    // then overlays `master_addr` / `master_addrs` / `block_size` /
+    // `chunk_size` / `write_type` and finishes with `validate()`.
+
+    #[test]
+    fn test_opendal_with_auth_type_str_and_username() {
+        let simple = GoosefsConfig::new("127.0.0.1:9200")
+            .with_auth_type_str("simple")
+            .expect("simple")
+            .with_auth_username("opendal");
+        assert_eq!(simple.auth_type, AuthType::Simple);
+        assert_eq!(simple.auth_username, "opendal");
+
+        let nosasl = GoosefsConfig::new("127.0.0.1:9200")
+            .with_auth_type_str("NOSASL")
+            .expect("nosasl is case-insensitive");
+        assert_eq!(nosasl.auth_type, AuthType::NoSasl);
+
+        let err = GoosefsConfig::new("127.0.0.1:9200")
+            .with_auth_type_str("kerberos")
+            .expect_err("unsupported auth_type must fail like OpenDAL ConfigInvalid");
+        assert!(
+            err.to_lowercase().contains("kerberos") || err.to_lowercase().contains("not yet"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_opendal_builder_overlay_and_validate() {
+        // Mirrors OpenDAL's Step 2 overlay after `from_properties_auto()`.
+        let mut cfg = GoosefsConfig::from_properties_auto().expect("from_properties_auto");
+        cfg.master_addr = "10.0.0.1:9200".into();
+        cfg.master_addrs = vec![
+            "10.0.0.1:9200".into(),
+            "10.0.0.2:9200".into(),
+            "10.0.0.3:9200".into(),
+        ];
+        cfg.root = "/data/".into();
+        cfg.block_size = 8 * 1024 * 1024;
+        cfg.chunk_size = 1024 * 1024;
+        cfg.write_type = Some(1); // MUST_CACHE
+        let cfg = cfg
+            .with_auth_type_str("simple")
+            .expect("auth_type")
+            .with_auth_username("opendal");
+        cfg.validate()
+            .expect("OpenDAL builder overlay must validate");
+        assert!(cfg.is_multi_master());
+        assert_eq!(cfg.root, "/data/");
+        assert_eq!(cfg.write_type, Some(1));
     }
 
     ///  / R3: new streaming-read / master-pool tuning fields have
