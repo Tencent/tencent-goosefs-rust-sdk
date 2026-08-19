@@ -111,6 +111,26 @@ pub fn default_file_mode() -> PMode {
     }
 }
 
+/// Child directory a recursive `list_status` BFS should visit next.
+///
+/// GooseFS `listStatus` normally returns children only. If a server echoes
+/// the listed directory itself (`child == cur`), re-queueing it would loop
+/// forever. Empty paths are skipped.
+fn list_status_bfs_child_dir<'a>(
+    cur: &str,
+    child_path: Option<&'a str>,
+    is_folder: bool,
+) -> Option<&'a str> {
+    if !is_folder {
+        return None;
+    }
+    let child = child_path.filter(|p| !p.is_empty())?;
+    if child == cur {
+        return None;
+    }
+    Some(child)
+}
+
 /// Client for Goosefs `FileSystemMasterClientService` (Master:9200).
 ///
 /// In HA mode, the client holds a reference to the [`MasterInquireClient`]
@@ -485,7 +505,9 @@ impl MasterClient {
     ///
     /// Recursive walks also set `load_metadata_type = Always` on each level so
     /// UFS-backed children are discovered (same intent as the pre-2.0
-    /// `recursive` + Always pairing).
+    /// `recursive` + Always pairing). The BFS skips a child whose path equals
+    /// the directory currently being listed, so a server that echoes `self`
+    /// cannot loop forever.
     ///
     /// Each level wraps a **server-side streaming** RPC — the server sends
     /// multiple `ListStatusPResponse` messages, each containing a batch
@@ -504,13 +526,17 @@ impl MasterClient {
         // Client-side BFS: Master no longer accepts a recursive ListStatus option.
         let mut out: Vec<FileInfo> = Vec::new();
         let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        visited.insert(path.to_string());
         queue.push_back(path.to_string());
         while let Some(cur) = queue.pop_front() {
             let items = self.list_status_one_level(&cur, load_metadata_type).await?;
             for fi in items {
-                if fi.folder.unwrap_or(false) {
-                    if let Some(child) = fi.path.as_ref() {
-                        queue.push_back(child.clone());
+                if let Some(child) =
+                    list_status_bfs_child_dir(&cur, fi.path.as_deref(), fi.folder.unwrap_or(false))
+                {
+                    if visited.insert(child.to_string()) {
+                        queue.push_back(child.to_string());
                     }
                 }
                 out.push(fi);
@@ -1009,6 +1035,29 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use arc_swap::ArcSwap;
+
+    #[test]
+    fn list_status_bfs_skips_non_folders_and_empty_paths() {
+        assert_eq!(
+            super::list_status_bfs_child_dir("/a", Some("/a/b.bin"), false),
+            None
+        );
+        assert_eq!(super::list_status_bfs_child_dir("/a", Some(""), true), None);
+        assert_eq!(super::list_status_bfs_child_dir("/a", None, true), None);
+    }
+
+    #[test]
+    fn list_status_bfs_skips_self_entry_to_avoid_infinite_loop() {
+        assert_eq!(
+            super::list_status_bfs_child_dir("/data", Some("/data"), true),
+            None,
+            "re-queueing the listed directory would loop forever"
+        );
+        assert_eq!(
+            super::list_status_bfs_child_dir("/data", Some("/data/nested"), true),
+            Some("/data/nested")
+        );
+    }
 
     /// Stand-in for `AuthedState`.  The exact field types do not matter for
     /// the property we are testing — what matters is that:

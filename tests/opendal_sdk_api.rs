@@ -289,6 +289,27 @@ async fn opendal_connect_mkdir_stat_list_delete() -> Result<()> {
         "list_status missing dir → NotFound (OpenDAL maps this to empty page), got {list_missing:?}"
     );
 
+    // GooseFS 2.0 dropped ListStatusPOptions.recursive; MasterClient BFS
+    // must still return the full subtree (nested file + dirs).
+    let rec = master.list_status(&root, true).await?;
+    let rec_names: Vec<String> = rec.iter().filter_map(|e| e.path.clone()).collect();
+    assert!(
+        rec_names
+            .iter()
+            .any(|p| p.ends_with("hello.bin") || p.ends_with("/hello.bin")),
+        "recursive list_status must include nested file, got {rec_names:?}"
+    );
+    assert!(
+        rec_names
+            .iter()
+            .any(|p| p.ends_with("/nested") || p.ends_with("nested")),
+        "recursive list_status must include nested dir, got {rec_names:?}"
+    );
+    assert!(
+        !rec_names.iter().any(|p| p == &root),
+        "recursive list must not re-emit the starting directory (BFS self-loop), got {rec_names:?}"
+    );
+
     delete_idempotent(&ctx, &file).await?;
     let gone = master.get_status(&file).await;
     assert!(matches!(gone, Err(Error::NotFound { .. })));
