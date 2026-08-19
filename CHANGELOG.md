@@ -11,6 +11,12 @@ kept aligned. Python-specific notes also appear in
 
 ## [Unreleased]
 
+### Changed
+
+- Align consistent-hash fallback virtual nodes per worker with GooseFS 2.0
+  (`goosefs.master.consistent.hash.virtual.node.num.per.worker` default
+  `200` → `5000`). Used only when `WorkerInfo.virtual_node_num` is unset.
+
 ## [0.1.9] — 2026-08-04
 
 ### Added
