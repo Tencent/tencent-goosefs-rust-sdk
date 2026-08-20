@@ -93,6 +93,7 @@ impl GrpcBlockWriter {
         space_to_reserve: i64,
         options: WriteBlockOptions,
     ) -> Result<Self> {
+        let _probe = crate::probe::phase(crate::probe::phase::client::OPEN_STREAM_US);
         let handle = worker
             .write_block(block_id, space_to_reserve, options)
             .await?;
@@ -129,20 +130,23 @@ impl GrpcBlockWriter {
             value: Some(write_request::Value::Chunk(Chunk { data: Some(data) })),
         };
 
-        self.handle
-            .request_tx
-            .as_ref()
-            .ok_or_else(|| Error::BlockIoError {
-                message: format!(
-                    "write channel already closed for block_id={}",
-                    self.block_id
-                ),
-            })?
-            .send(req)
-            .await
-            .map_err(|_| Error::BlockIoError {
-                message: format!("write channel closed for block_id={}", self.block_id),
-            })?;
+        {
+            let _probe = crate::probe::phase(crate::probe::phase::client::CHUNK_SEND_US);
+            self.handle
+                .request_tx
+                .as_ref()
+                .ok_or_else(|| Error::BlockIoError {
+                    message: format!(
+                        "write channel already closed for block_id={}",
+                        self.block_id
+                    ),
+                })?
+                .send(req)
+                .await
+                .map_err(|_| Error::BlockIoError {
+                    message: format!("write channel closed for block_id={}", self.block_id),
+                })?;
+        }
 
         self.bytes_written += chunk_len;
         trace!(
@@ -186,6 +190,7 @@ impl GrpcBlockWriter {
     /// `GoosefsFileWriter::flush` (ASYNC_THROUGH) and mid-file block switches.
     /// Last-block `close()` no longer calls this (Java-aligned).
     pub async fn flush(&mut self) -> Result<i64> {
+        let _probe = crate::probe::phase(crate::probe::phase::client::FLUSH_ACK_US);
         // Send flush command
         let flush_req = WriteRequest {
             value: Some(write_request::Value::Command(WriteRequestCommand {
@@ -235,6 +240,7 @@ impl GrpcBlockWriter {
         let block_id = self.block_id;
         let bytes_written = self.bytes_written;
 
+        let _probe = crate::probe::phase(crate::probe::phase::client::BLOCK_CLOSE_US);
         // Dropping the handle's request_tx closes the client→server half
         // of the stream, triggering server-side onCompleted → commitBlock.
         self.handle.close().await?;
@@ -274,8 +280,9 @@ impl GrpcBlockWriter {
     }
 }
 
-/// Copy `src` into a gRPC `Chunk.data` buffer.
+/// Copy `src` into a gRPC `Chunk.data` buffer. Timed as `chunk_copy_us`.
 pub(crate) fn owned_chunk(src: &[u8]) -> Vec<u8> {
+    let _probe = crate::probe::phase(crate::probe::phase::client::CHUNK_COPY_US);
     src.to_vec()
 }
 

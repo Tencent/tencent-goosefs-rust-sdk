@@ -688,6 +688,24 @@ impl PropertiesMap {
             cfg.file_persist_on_rename = b;
         }
 
+        // ── Client probe trace ───────────────────────────────────
+        if let Some(enabled) = self.get_bool("goosefs.user.client.probe.enabled") {
+            cfg.probe_enabled = enabled;
+        }
+        if let Some(s) = self.get("goosefs.user.client.probe.output") {
+            if !s.is_empty() {
+                cfg.probe_output = Some(s.to_string());
+            }
+        }
+        if let Some(enabled) = self.get_bool(STORAGE_OPT_PROBE_ENABLED) {
+            cfg.probe_enabled = enabled;
+        }
+        if let Some(s) = self.get(STORAGE_OPT_PROBE_OUTPUT) {
+            if !s.is_empty() {
+                cfg.probe_output = Some(s.to_string());
+            }
+        }
+
         cfg
     }
 }
@@ -1422,6 +1440,23 @@ pub const STORAGE_OPT_REQUEST_TIMEOUT: &str = "goosefs_request_timeout";
 
 /// Storage option key for VPC mapping (`true`/`false`).
 pub const STORAGE_OPT_USE_VPC_MAPPING: &str = "goosefs_use_vpc_mapping";
+
+// ── Client probe trace ───────────────────────────────────────
+/// Environment variable: enable client probe trace (`true`/`false`/`1`/`0`).
+///
+/// When enabled, RPCs carry `probe-enabled: true` and the SDK writes a
+/// tree-shaped timing report (Java `goosefs fs probe` format) to
+/// [`ENV_PROBE_OUTPUT`] or stderr.
+pub const ENV_PROBE_ENABLED: &str = "GOOSEFS_PROBE_ENABLED";
+
+/// Environment variable: probe report output path. Empty / unset → stderr.
+pub const ENV_PROBE_OUTPUT: &str = "GOOSEFS_PROBE_OUTPUT";
+
+/// Storage option key for [`GoosefsConfig::probe_enabled`].
+pub const STORAGE_OPT_PROBE_ENABLED: &str = "goosefs_probe_enabled";
+
+/// Storage option key for [`GoosefsConfig::probe_output`].
+pub const STORAGE_OPT_PROBE_OUTPUT: &str = "goosefs_probe_output";
 
 // ── WriteType: ergonomic Rust enum wrapping WritePType ───────
 
@@ -2208,6 +2243,19 @@ pub struct GoosefsConfig {
     /// Only consulted when `range_coalesce_enabled`.
     #[serde(default = "default_range_coalesce_max_bytes")]
     pub range_coalesce_max_bytes: u64,
+    // ── Client probe trace ──
+    /// Enable client-side probe trace (`goosefs.user.client.probe.enabled`).
+    ///
+    /// Off by default. When on, Master/Worker RPCs inject `probe-enabled`
+    /// and the SDK records trailer timings into a Java-compatible report.
+    #[serde(default)]
+    pub probe_enabled: bool,
+
+    /// Probe report output path (`goosefs.user.client.probe.output`).
+    ///
+    /// `None` prints to stderr. Relative paths are created on demand.
+    #[serde(default)]
+    pub probe_output: Option<String>,
 }
 
 fn default_master_inquire_max_duration() -> Duration {
@@ -2503,6 +2551,8 @@ impl Default for GoosefsConfig {
             range_coalesce_enabled: false,
             range_coalesce_gap_bytes: default_range_coalesce_gap_bytes(),
             range_coalesce_max_bytes: default_range_coalesce_max_bytes(),
+            probe_enabled: false,
+            probe_output: None,
         }
     }
 }
@@ -2894,6 +2944,17 @@ impl GoosefsConfig {
         self
     }
 
+    /// Enable client probe trace (Java `goosefs fs probe` compatible reports).
+    pub fn with_probe_enabled(mut self, enabled: bool) -> Self {
+        self.probe_enabled = enabled;
+        self
+    }
+
+    /// Set the probe report output path. `None` prints to stderr.
+    pub fn with_probe_output(mut self, path: impl Into<String>) -> Self {
+        self.probe_output = Some(path.into());
+        self
+    }
     /// Enable adjacent-range coalescing in
     /// [`GoosefsFileReader::read_ranges_with_context`]
     ///
@@ -3501,6 +3562,16 @@ impl GoosefsConfig {
             }
         }
 
+        if let Ok(val) = env::var(ENV_PROBE_ENABLED) {
+            if let Some(b) = parse_bool_loose(&val) {
+                self.probe_enabled = b;
+            }
+        }
+        if let Ok(val) = env::var(ENV_PROBE_OUTPUT) {
+            if !val.is_empty() {
+                self.probe_output = Some(val);
+            }
+        }
         self
     }
 
@@ -5685,6 +5756,26 @@ goosefs.user.client.cache.ttl.seconds=60
         assert_eq!(cfg.client_cache_uring_thread_count, 4);
         assert!(cfg.client_cache_sync_read_enabled);
         assert_eq!(cfg.client_cache_ttl_secs, 60);
+    }
+
+    #[test]
+    fn test_probe_config_constants_and_builder() {
+        assert_eq!(ENV_PROBE_ENABLED, "GOOSEFS_PROBE_ENABLED");
+        assert_eq!(ENV_PROBE_OUTPUT, "GOOSEFS_PROBE_OUTPUT");
+        assert_eq!(STORAGE_OPT_PROBE_ENABLED, "goosefs_probe_enabled");
+        assert_eq!(STORAGE_OPT_PROBE_OUTPUT, "goosefs_probe_output");
+        let cfg = GoosefsConfig::new("127.0.0.1:9200")
+            .with_probe_enabled(true)
+            .with_probe_output("/tmp/probe.log");
+        assert!(cfg.probe_enabled);
+        assert_eq!(cfg.probe_output.as_deref(), Some("/tmp/probe.log"));
+        let from_props = GoosefsConfig::from_properties_str(
+            "goosefs.user.client.probe.enabled=true\n\
+             goosefs.user.client.probe.output=/var/tmp/p.log\n",
+        );
+        assert!(from_props.probe_enabled);
+        assert_eq!(from_props.probe_output.as_deref(), Some("/var/tmp/p.log"));
+        assert!(!GoosefsConfig::default().probe_enabled);
     }
 
     #[test]

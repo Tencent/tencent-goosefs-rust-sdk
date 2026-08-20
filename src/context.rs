@@ -190,6 +190,9 @@ impl FileSystemContext {
         config
             .validate()
             .map_err(|message| Error::InvalidArgument { message })?;
+        // Overlay env / properties so OpenDAL's partial GoosefsConfig::new(addr)
+        // still honours GOOSEFS_PROBE_* and goosefs-site.properties.
+        crate::probe::apply_config(&config);
         let config = Arc::new(config);
 
         // Build a shared inquire client so Master + WorkerManager both use the
