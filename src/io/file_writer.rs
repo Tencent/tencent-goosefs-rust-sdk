@@ -501,6 +501,13 @@ impl GoosefsFileWriter {
     /// `ActiveBlockWriter::pending_chunk`. Aligned `chunk_size` slices are
     /// copied once from the caller's buffer — they are **not** appended onto
     /// `pending_chunk` and drained from the front (that was O(n²) memmove).
+    ///
+    /// TODO(java-parity): optional follow-up — Java `BlockOutStream` uses one
+    /// fixed-capacity `mCurrentChunk` (size = `chunkSize`) filled from the
+    /// caller slice until full. This path is already O(n) and equivalent for
+    /// aligned writes; a current-chunk refactor would mainly unify cache/UFS
+    /// coalescing, not cut another copy. Revisit if UFS also needs to hold
+    /// sub-`chunk_size` tails across `write()` calls (see `write_all`).
     async fn write_to_cache_stream(&mut self, data: &[u8]) -> Result<()> {
         let block_size = self
             .file_info
@@ -1394,6 +1401,12 @@ async fn emit_aligned_chunks(
 /// further chunks follow on this stream, or the stream is about to be torn
 /// down — so the server-side `mLocalFileChannel.size()` and accumulated
 /// `mPosition` cannot drift any further before `commitBlock`.
+///
+/// TODO(java-parity): `pending_chunk` only stores the unaligned tail
+/// (`len < chunk_size`). Java keeps a pooled `ByteBuf` of capacity
+/// `chunkSize` (`mCurrentChunk`) and copies caller slices into
+/// `writableBytes()`. Same send-when-full / flush-on-close semantics;
+/// defer unless we want one buffer for both cache and UFS streams.
 struct ActiveBlockWriter {
     /// The underlying gRPC streaming writer.
     writer: GrpcBlockWriter,

@@ -147,6 +147,13 @@ impl GrpcBlockWriter {
     }
 
     /// Write all data from a byte slice, splitting into chunks of `chunk_size`.
+    ///
+    /// A leftover shorter than `chunk_size` is sent immediately (no pending
+    /// buffer). Java's UFS path goes through `BlockOutStream` and holds that
+    /// tail in `mCurrentChunk` until the next `write()` / flush / close.
+    ///
+    /// TODO(java-parity): if cache and UFS share a Java-style current chunk,
+    /// this helper should stop emitting the unaligned tail itself.
     pub async fn write_all(&mut self, data: &[u8], chunk_size: usize) -> Result<()> {
         let mut offset = 0;
 
