@@ -356,6 +356,7 @@ impl GoosefsFileReader {
                     no_cache: Some(!file_info.cacheable.unwrap_or(true)),
                     user: None,
                     caller_type: None,
+                    file_length: file_info.length,
                 })
             }
         };

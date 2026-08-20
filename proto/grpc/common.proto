@@ -154,9 +154,15 @@ message ErrorInfo {
 }
 
 enum WorkerStatus {
+  // NOTE: numeric tags below are part of the wire format and the Raft Journal.
+  // Never re-order or re-number existing values; new values MUST be appended.
   INIT = 0;
   ACTIVE = 1;
   INACTIVE = 2;
+  // WARMING_UP is a transient in-memory state for migration targets.
+  // It is intentionally NOT persisted into Raft Journal (see DefaultWorkerManagerMaster
+  // checkpoint/journal logic), so older versions will never read this value.
+  WARMING_UP = 3;
 }
 
 enum ManageWorkerAction {

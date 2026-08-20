@@ -16,7 +16,7 @@
 //!
 //! Wraps `FileSystemMasterClientService` (Master:9200) providing:
 //! - `get_status` — stat / head
-//! - `list_status` — list directory (server-side streaming)
+//! - `list_status` — list directory (client-side recursion when requested)
 //! - `create_file` — create a new file
 //! - `complete_file` — mark file write complete (with idempotency operation-ID)
 //! - `remove_blocks` — clean up block metadata for in-flight or failed writes
@@ -32,6 +32,7 @@
 //! (`Unavailable`, `DeadlineExceeded`), the client will re-discover the
 //! Primary and rebuild the channel automatically.
 
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -109,6 +110,38 @@ pub fn default_file_mode() -> PMode {
         group_bits: Bits::Read as i32,      // r--
         other_bits: Bits::Read as i32,      // r--
     }
+}
+
+/// Strip a trailing slash except for the filesystem root (`"/"`).
+///
+/// GooseFS listings generally omit trailing slashes, but treating `/foo` and
+/// `/foo/` as distinct nodes would re-queue the same directory during BFS.
+fn list_status_path_key(path: &str) -> &str {
+    if path.len() > 1 {
+        path.strip_suffix('/').unwrap_or(path)
+    } else {
+        path
+    }
+}
+
+/// Child directory a recursive `list_status` BFS should visit next.
+///
+/// GooseFS `listStatus` normally returns children only. If a server echoes
+/// the listed directory itself (`child == cur`, including `/foo` vs `/foo/`),
+/// re-queueing it would loop forever. Empty paths are skipped.
+fn list_status_bfs_child_dir<'a>(
+    cur: &str,
+    child_path: Option<&'a str>,
+    is_folder: bool,
+) -> Option<&'a str> {
+    if !is_folder {
+        return None;
+    }
+    let child = child_path.filter(|p| !p.is_empty())?;
+    if list_status_path_key(child) == list_status_path_key(cur) {
+        return None;
+    }
+    Some(child)
 }
 
 /// Client for Goosefs `FileSystemMasterClientService` (Master:9200).
@@ -477,25 +510,87 @@ impl MasterClient {
 
     /// List the contents of a directory. Returns all FileInfo entries.
     ///
-    /// When `recursive` is `true`, the master is asked to load metadata for
-    /// every descendant (`load_metadata_type = Always`) — mirroring the Java
-    /// `listStatusOptions.setRecursive(true)` default and the `goosefs fs ls -R`
-    /// shell behaviour. Without this, the server only returns entries whose
-    /// metadata is already loaded, which collapses a deep tree to its first
-    /// level.
+    /// GooseFS 2.0 dropped `ListStatusPOptions.recursive`; each Master RPC
+    /// returns a single directory level. When `recursive` is `true`, this
+    /// method walks descendants **client-side** (BFS), matching Java
+    /// `BaseFileSystem.iterateStatusInternal` and the historical SDK contract
+    /// that `list_status(path, true)` returns the full subtree.
     ///
-    /// This wraps a **server-side streaming** RPC — the server sends
+    /// Recursive walks default to `load_metadata_type = Once` on each level,
+    /// matching Java `FileSystemOptions.listStatusDefaults` /
+    /// `goosefs.user.file.metadata.load.type` (default `ONCE`). Recursion does
+    /// not switch the load type to `Always`; callers that need `Never` /
+    /// `Always` should use [`Self::list_status_with_load_type`]. The BFS skips
+    /// a child whose path is the directory currently being listed (`/foo` and
+    /// `/foo/` are the same node), so a server that echoes `self` cannot loop
+    /// forever.
+    ///
+    /// Each level wraps a **server-side streaming** RPC — the server sends
     /// multiple `ListStatusPResponse` messages, each containing a batch
     /// of `FileInfo`.
-    #[instrument(skip(self), fields(path = %path))]
+    #[instrument(skip(self), fields(path = %path, recursive))]
     pub async fn list_status(&self, path: &str, recursive: bool) -> Result<Vec<FileInfo>> {
-        let start = std::time::Instant::now();
-        let path = path.to_string();
-        let load_metadata_type = if recursive {
-            Some(LoadMetadataPType::Always as i32)
+        let load = if recursive {
+            Some(LoadMetadataPType::Once)
         } else {
             None
         };
+        self.list_status_with_load_type(path, recursive, load).await
+    }
+
+    /// List a directory, applying `load_metadata_type` on every Master RPC.
+    ///
+    /// When `recursive` is `true` and `load_metadata_type` is `None`, each BFS
+    /// level uses [`LoadMetadataPType::Once`] (same as [`Self::list_status`]
+    /// and Java `listStatusDefaults`).
+    #[instrument(skip(self), fields(path = %path, recursive, ?load_metadata_type))]
+    pub async fn list_status_with_load_type(
+        &self,
+        path: &str,
+        recursive: bool,
+        load_metadata_type: Option<LoadMetadataPType>,
+    ) -> Result<Vec<FileInfo>> {
+        let load_rpc = match load_metadata_type {
+            Some(t) => Some(t as i32),
+            None if recursive => Some(LoadMetadataPType::Once as i32),
+            None => None,
+        };
+        if !recursive {
+            return self.list_status_one_level(path, load_rpc).await;
+        }
+
+        // Client-side BFS: Master no longer accepts a recursive ListStatus option.
+        let mut out: Vec<FileInfo> = Vec::new();
+        let mut queue: VecDeque<String> = VecDeque::new();
+        let mut visited: HashSet<String> = HashSet::new();
+        let start = list_status_path_key(path).to_string();
+        visited.insert(start.clone());
+        queue.push_back(start);
+        while let Some(cur) = queue.pop_front() {
+            let items = self.list_status_one_level(&cur, load_rpc).await?;
+            for fi in items {
+                if let Some(child) =
+                    list_status_bfs_child_dir(&cur, fi.path.as_deref(), fi.folder.unwrap_or(false))
+                {
+                    let key = list_status_path_key(child).to_string();
+                    if visited.insert(key.clone()) {
+                        queue.push_back(key);
+                    }
+                }
+                out.push(fi);
+            }
+        }
+        Ok(out)
+    }
+
+    /// One-level `ListStatus` RPC (no client-side descent).
+    async fn list_status_one_level(
+        &self,
+        path: &str,
+        load_metadata_type: Option<i32>,
+    ) -> Result<Vec<FileInfo>> {
+        let start = std::time::Instant::now();
+        let path = path.to_string();
         let result = self
             .with_retry("list_status", |mut client| {
                 let path = path.clone();
@@ -503,7 +598,6 @@ impl MasterClient {
                     let req = ListStatusPRequest {
                         path: Some(path),
                         options: Some(ListStatusPOptions {
-                            recursive: Some(recursive),
                             load_metadata_type,
                             ..Default::default()
                         }),
@@ -518,7 +612,6 @@ impl MasterClient {
                 }
             })
             .await;
-        // Instrument: ops count and latency (cached counter handles).
         self.counter_list_status_ops.inc(1);
         self.counter_list_status_latency_us
             .inc(start.elapsed().as_micros() as i64);
@@ -980,6 +1073,54 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use arc_swap::ArcSwap;
+
+    #[test]
+    fn list_status_bfs_skips_non_folders_and_empty_paths() {
+        assert_eq!(
+            super::list_status_bfs_child_dir("/a", Some("/a/b.bin"), false),
+            None
+        );
+        assert_eq!(super::list_status_bfs_child_dir("/a", Some(""), true), None);
+        assert_eq!(super::list_status_bfs_child_dir("/a", None, true), None);
+    }
+
+    #[test]
+    fn list_status_bfs_skips_self_entry_to_avoid_infinite_loop() {
+        assert_eq!(
+            super::list_status_bfs_child_dir("/data", Some("/data"), true),
+            None,
+            "re-queueing the listed directory would loop forever"
+        );
+        assert_eq!(
+            super::list_status_bfs_child_dir("/data", Some("/data/nested"), true),
+            Some("/data/nested")
+        );
+    }
+
+    #[test]
+    fn list_status_path_key_strips_trailing_slash_except_root() {
+        assert_eq!(super::list_status_path_key("/"), "/");
+        assert_eq!(super::list_status_path_key(""), "");
+        assert_eq!(super::list_status_path_key("/data"), "/data");
+        assert_eq!(super::list_status_path_key("/data/"), "/data");
+        assert_eq!(super::list_status_path_key("/data/nested/"), "/data/nested");
+    }
+
+    #[test]
+    fn list_status_bfs_treats_trailing_slash_as_same_node() {
+        assert_eq!(
+            super::list_status_bfs_child_dir("/data", Some("/data/"), true),
+            None
+        );
+        assert_eq!(
+            super::list_status_bfs_child_dir("/data/", Some("/data"), true),
+            None
+        );
+        assert_eq!(
+            super::list_status_bfs_child_dir("/data/", Some("/data/nested/"), true),
+            Some("/data/nested/")
+        );
+    }
 
     /// Stand-in for `AuthedState`.  The exact field types do not matter for
     /// the property we are testing — what matters is that:

@@ -20,7 +20,7 @@ import "proto/dataserver/status.proto";
 import "proto/shared/acl.proto";
 
 // Options to open a UFS block.
-// next available id: 7
+// next available id: 10
 message OpenUfsBlockOptions {
   enum CallerType {
     CLIENT = 0;
@@ -39,6 +39,9 @@ message OpenUfsBlockOptions {
   // The client does not need to set this. This is set by the worker.
   optional string user = 7;
   optional CallerType caller_type = 8 [default = CLIENT];
+  // Total file length. When set (> 0), the worker uses withFileStatus() to skip
+  // an extra HEAD request when opening the UFS stream.
+  optional int64 file_length = 9;
 }
 
 // Options to create a UFS file.

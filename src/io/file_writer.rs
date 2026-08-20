@@ -1055,10 +1055,9 @@ impl GoosefsFileWriter {
                      manual cleanup may be required"
                 );
             }
-            // TODO (Wave 2): call list_status(ALWAYS) to force the Master to reload
-            // UFS metadata so a subsequent open() of this path returns the UFS file.
-            // This requires adding a new list_status_with_load_metadata() variant to
-            // MasterClient.
+            // TODO (Wave 2): call list_status_with_load_type(..., Always) to force
+            // the Master to reload UFS metadata so a subsequent open() of this
+            // path returns the UFS file.
         }
         err
     }

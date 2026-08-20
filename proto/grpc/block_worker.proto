@@ -48,6 +48,9 @@ service BlockWorker {
 
   rpc SyncCache (SyncCacheRequest) returns (SyncCacheResponse);
   rpc CheckBlocks(CheckBlocksRequest) returns (CheckBlocksResponse);
+
+  // Block migration: source worker pushes block data to target worker via client streaming
+  rpc MigrateBlock (stream MigrateBlockRequest) returns (MigrateBlockResponse);
 }
 
 message AvoidBlockDeadLockRequest {
@@ -226,14 +229,14 @@ message CheckBlocksRequest {
   repeated int64 block_ids = 1;
 }
 
-// GooseFS 2.0 / branch-2.0 wire format (also accepts 2.1.0 on the wire).
-// Field 1 is a map with varint values: 2.0 sends cached bytes; 2.1.0 sends
-// bool as 0/1. Clients treat `cached_bytes > 0` as present.
-//
 // Response carries the actual cached bytes for each block on the worker.
 // - FILE/Tiered mode: equals block size when the block is committed, 0 otherwise
 // - PAGE mode: sum of all cached pages for the block (may be < blockSize)
 message CheckBlocksResponse {
+  // Cached bytes per block on this worker (GooseFS 2.0).
+  //
+  // Wire-compatible with GooseFS 2.1.0 `block_exists` (same field number;
+  // bool encodes as varint 0/1). Treat `cached_bytes > 0` as present.
   map<int64, int64> block_cached_bytes = 1;
 }
 
@@ -264,4 +267,31 @@ message UfsReadOptions {
   required bool position_short = 2;
   optional int64 bandwidth = 3;
   optional string user = 4;
+}
+
+// Block migration messages
+message MigrateBlockRequest {
+  oneof value {
+    MigrateBlockCommand command = 1;
+    Chunk chunk = 2;
+  }
+}
+
+message MigrateBlockCommand {
+  // The block ID to migrate
+  optional int64 block_id = 1;
+  // The block size in bytes
+  optional int64 block_length = 2;
+  // The source worker ID
+  optional int64 source_worker_id = 3;
+  // The migration task ID
+  optional string task_id = 4;
+}
+
+message MigrateBlockResponse {
+  optional bool success = 1;
+  optional string error_message = 2;
+  // True when the target worker has no space left; the source worker should stop migrating
+  // to this target and treat remaining blocks as skipped (migration considered complete).
+  optional bool out_of_space = 3;
 }

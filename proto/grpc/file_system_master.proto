@@ -106,6 +106,10 @@ message OpenFilePOptions {
   optional int32 maxUfsReadConcurrency = 2;
   optional FileSystemMasterCommonPOptions commonOptions = 3;
   optional bool updateLastAccessTime = 4 [default = true];
+  // Disable UFS fallback reads; for persistence jobs that only need local blocks.
+  optional bool noUfsFallback = 5 [default = false];
+  // Prefer a local worker when reading.
+  optional bool localFirst = 6 [default = false];
 }
 
 message CommitLocationPOptions {
@@ -160,6 +164,8 @@ message DeletePOptions {
   optional bool unchecked = 3;
   optional FileSystemMasterCommonPOptions commonOptions = 4;
   optional bool ttl = 5 [default = false];
+  // For TTL deletes: when non-zero, require inode mtime to match this value.
+  optional int64 ttlExpectMtime = 6 [default = 0];
 }
 message DeletePRequest {
   /** the path of the file or directory */
@@ -172,6 +178,7 @@ message FreePOptions {
   optional bool recursive = 1;
   optional bool forced = 2;
   optional FileSystemMasterCommonPOptions commonOptions = 3;
+  optional int32 replication = 4;
 }
 message FreePRequest {
   /** the path of the file or directory */
@@ -196,6 +203,18 @@ message GetStatusPRequest {
   optional string path = 1;
   optional GetStatusPOptions options = 2;
   optional string request_id = 3;
+}
+
+message GetStatusBatchPRequest {
+  /** the paths of the files or directories */
+  repeated string paths = 1;
+  optional GetStatusPOptions options = 2;
+  optional string request_id = 3;
+}
+
+message GetStatusBatchPResponse {
+  repeated FileInfo fileInfos = 1;
+  repeated string failedPaths = 2;
 }
 
 message ExistsPOptions {
@@ -225,16 +244,13 @@ message ListStatusPResponse {
   repeated FileInfo fileInfos = 1;
 }
 message ListStatusPOptions {
-  // This is deprecated since 1.1.1 and will be removed in 2.0. Use loadMetadataType.
-  optional bool loadDirectChildren = 1;
-  optional LoadMetadataPType loadMetadataType = 2;
-  optional FileSystemMasterCommonPOptions commonOptions = 3;
-  optional bool recursive = 4;
+  optional LoadMetadataPType loadMetadataType = 1;
+  optional FileSystemMasterCommonPOptions commonOptions = 2;
   // No data will be transferred.
-  optional bool loadMetadataOnly = 5;
-  optional LoadMetadataPType defaultLoadMetadataType = 6;
-  optional bool isLoadMetadata = 7 [default = false];
-  optional int32 checkBlockReplicas = 8 [default = 0];
+  optional bool loadMetadataOnly = 3 [default = false];
+  optional LoadMetadataPType defaultLoadMetadataType = 4;
+  optional bool isLoadMetadata = 5 [default = false];
+  optional int32 checkBlockReplicas = 6 [default = 0];
 }
 message ListStatusPRequest {
   /** the path of the file or directory */
@@ -757,6 +773,11 @@ service FileSystemMasterClientService {
   rpc GetStatus (GetStatusPRequest) returns (GetStatusPResponse);
 
   /**
+   * Returns the statuses of multiple files or directories in batch.
+   */
+  rpc GetStatusBatch (GetStatusBatchPRequest) returns (GetStatusBatchPResponse);
+
+  /**
    * If the path points to a file, the method returns a singleton with its file information.
    * If the path points to a directory, the method returns a list with file information for the
    * directory contents.
@@ -900,6 +921,32 @@ message GetFileInfoPRequest {
   optional GetFileInfoPOptions options = 2;
 }
 
+/** Request for batch persistence-state query. */
+message GetPersistenceStateBatchPRequest {
+  /** the list of file ids to query */
+  repeated int64 fileIds = 1;
+}
+
+/** Per-entry result in a batch persistence-state response. */
+message PersistenceStateBatchEntry {
+  /** the file id */
+  optional int64 fileId = 1;
+  /**
+   * the persistence state string (e.g. "PERSISTED", "NOT_PERSISTED");
+   * absent if the file does not exist on master (treated as orphan by the worker).
+   */
+  optional string persistenceState = 2;
+  /**
+   * whether the file has been completed (i.e. the write has been finalized);
+   */
+  optional bool completed = 3;
+}
+
+/** Response for batch persistence-state query. */
+message GetPersistenceStateBatchPResponse {
+  repeated PersistenceStateBatchEntry entries = 1;
+}
+
 message GetUfsInfoPResponse {
   optional UfsInfo ufsInfo = 1;
 }
@@ -927,6 +974,13 @@ service FileSystemMasterWorkerService {
    * Returns the file information for a file or directory identified by the given file id.
    */
   rpc GetFileInfo(GetFileInfoPRequest) returns (GetFileInfoPResponse);
+
+  /**
+   * Returns only the persistence state for a batch of file ids in a single RPC.
+   * Entries for files that do not exist on master are included with persistenceState absent.
+   */
+  rpc GetPersistenceStateBatch(GetPersistenceStateBatchPRequest)
+      returns (GetPersistenceStateBatchPResponse);
 
   /**
    * Returns the UFS information for the given mount point identified by its id.

@@ -62,8 +62,8 @@ message WorkerInfo {
   optional WorkerStatus state = 4;
   optional int64 capacityBytes = 5;
   optional int64 usedBytes = 6;
-  optional int64 readCacheUsedBytes = 7;
-  optional int64 writeCacheUsedBytes = 8;
+  optional int64 cacheUsedBytes = 7;
+  optional int64 persistUsedBytes = 8;
   optional int64 startTimeMs = 9;
   optional int32 virtualNodeNum = 10;
   optional bool alive = 11;
@@ -87,8 +87,8 @@ enum WorkerInfoField {
   WORKER_USED_BYTES = 5;
   WORKER_SYNC_CACHE_RATE_LIMIT = 6;
   WORKER_FORBID_WRITE = 7;
-  WORKER_READ_CACHE_USED_BYTES = 8;
-  WORKER_WRITE_CACHE_USED_BYTES = 9;
+  WORKER_CACHE_USED_BYTES = 8;
+  WORKER_PERSIST_USED_BYTES = 9;
 }
 
 message GetWorkerReportPOptions {
@@ -205,6 +205,15 @@ service WorkerManagerMasterClientService {
     * Periodic block worker report and apply data rate.
     */
   rpc BlockApplyRate(BlockApplyRatePRequest) returns (BlockApplyRatePResponse);
+
+  /**
+   * Migration management RPCs.
+   */
+  rpc StartMigration(StartMigrationPRequest) returns (StartMigrationPResponse);
+  rpc PauseMigration(PauseMigrationPRequest) returns (PauseMigrationPResponse);
+  rpc CancelMigration(CancelMigrationPRequest) returns (CancelMigrationPResponse);
+  rpc GetMigrationProgress(GetMigrationProgressPRequest) returns (GetMigrationProgressPResponse);
+  rpc ActivateWarmingUpWorkers(ActivateWarmingUpWorkersPRequest) returns (ActivateWarmingUpWorkersPResponse);
 }
 
 message TierList {
@@ -239,17 +248,23 @@ message BlockHeartbeatPRequest {
   optional int64 usedBytes = 2;
   /** the map of added blocks on all tiers (deprecated since 2.0, replaced by addedBlocks) */
   optional BlockHeartbeatPOptions options = 3;
-  /** the space used by read cache directories in bytes */
-  optional int64 readCacheUsedBytes = 4;
-  /** the space used by write cache directories in bytes */
-  optional int64 writeCacheUsedBytes = 5;
+  /** the space used by evictable cache (e.g. read cache, sync write) in bytes */
+  optional int64 cacheUsedBytes = 4;
+  /** the space used by persistent cache (e.g. async write) in bytes */
+  optional int64 persistUsedBytes = 5;
   /** the lost storage paths */
   optional StorageList lostStorage = 6;
+  /** migration progress report (aggregated numbers only, no block ID lists) */
+  optional MigrationProgressReport migrationProgress = 7;
 }
 
 message BlockHeartbeatPResponse {
   optional grpc.Command command = 1;
   optional grpc.WorkerRateLimit syncCacheRateLimit = 2;
+  /** migration command from master to worker */
+  optional MigrationCommand migrationCommand = 3;
+  /** block ids to move from persist cache to evictable cache on this worker (cross-tier move) */
+  repeated int64 persistedMoveBlocks = 5;
 }
 
 message GetWorkerIdPOptions {}
@@ -267,10 +282,10 @@ message RegisterWorkerPRequest {
   optional int64 workerId = 1;
   optional int64 capacityBytes = 2;
   optional int64 usedBytes = 3;
-  /** the space used by read cache directories in bytes */
-  optional int64 readCacheUsedBytes = 4;
-  /** the space used by write cache directories in bytes */
-  optional int64 writeCacheUsedBytes = 5;
+  /** the space used by evictable cache (e.g. read cache, sync write) in bytes */
+  optional int64 cacheUsedBytes = 4;
+  /** the space used by persistent cache (e.g. async write) in bytes */
+  optional int64 persistUsedBytes = 5;
   optional StorageList lostStorage = 6;
 }
 message RegisterWorkerPResponse {}
@@ -299,4 +314,85 @@ service WorkerManagerMasterWorkerService {
    * Periodic block worker report and apply data rate.
    */
   rpc BlockApplyRate(BlockApplyRatePRequest) returns (BlockApplyRatePResponse);
+}
+
+// Migration progress report from worker to master (aggregated numbers only)
+message MigrationProgressReport {
+  optional string taskId = 1;
+  optional int64 totalBlocks = 2;
+  optional int64 migratedBlocks = 3;
+  optional int64 failedBlocks = 4;
+  optional int64 skippedBlocks = 5;
+  optional int64 totalBytes = 6;
+  optional int64 migratedBytes = 7;
+  optional bool completed = 8;
+}
+
+// Migration command from master to worker via heartbeat response
+message MigrationCommand {
+  optional MigrationCommandType type = 1;
+  optional StartMigrationInfo startInfo = 2;
+}
+
+enum MigrationCommandType {
+  MIGRATION_NOOP = 0;
+  MIGRATION_START = 1;
+  MIGRATION_PAUSE = 2;
+  MIGRATION_RESUME = 3;
+  MIGRATION_CANCEL = 4;
+}
+
+message StartMigrationInfo {
+  optional string taskId = 1;
+  // Old hash ring: current serving hash ring (ACTIVE workers only).
+  repeated WorkerInfo oldHashRingWorkers = 2;
+  // New hash ring: ACTIVE + WARMING_UP workers.
+  repeated WorkerInfo newHashRingWorkers = 3;
+}
+
+// Migration management request/response messages
+message StartMigrationPRequest {
+  optional string taskId = 1;
+}
+message StartMigrationPResponse {
+  optional bool success = 1;
+  optional string errorMessage = 2;
+  optional string taskId = 3;
+}
+
+message PauseMigrationPRequest {
+  optional string taskId = 1;
+}
+message PauseMigrationPResponse {}
+
+message CancelMigrationPRequest {
+  optional string taskId = 1;
+}
+message CancelMigrationPResponse {}
+
+message ActivateWarmingUpWorkersPRequest {}
+message ActivateWarmingUpWorkersPResponse {
+  optional int32 activatedCount = 1;
+}
+
+message GetMigrationProgressPRequest {
+  optional string taskId = 1;
+}
+
+message WorkerMigrationProgress {
+  optional int64 workerId = 1;
+  optional MigrationProgressReport progress = 2;
+  optional string workerAddress = 3;
+}
+
+message GetMigrationProgressPResponse {
+  optional string taskId = 1;
+  optional string status = 2;
+  repeated WorkerMigrationProgress workerProgress = 3;
+  optional int64 totalBlocks = 4;
+  optional int64 migratedBlocks = 5;
+  optional int64 failedBlocks = 6;
+  optional int64 skippedBlocks = 7;
+  optional int64 totalBytes = 8;
+  optional int64 migratedBytes = 9;
 }

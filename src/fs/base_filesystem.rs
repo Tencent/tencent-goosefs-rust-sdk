@@ -314,22 +314,16 @@ impl FileSystem for BaseFileSystem {
             .unwrap_or(self.config.file_metadata_load_type);
 
         if opts.recursive {
-            // Recursive listings never use the cache (Java listStatus recursive
-            // + INV-MC-S5). Walk client-side so deep trees match `goosefs fs ls -R`.
-            let mut out: Vec<URIStatus> = Vec::new();
-            let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-            queue.push_back(path.to_string());
-            while let Some(cur) = queue.pop_front() {
-                let items = master.list_status(&cur, false).await?;
-                for fi in items {
-                    let status = URIStatus::from_proto(fi);
-                    if status.is_folder() {
-                        queue.push_back(status.path.clone());
-                    }
-                    out.push(status);
-                }
-            }
-            return Ok(out);
+            // Recursive listings never use the cache (Java MetadataCachingBaseFileSystem
+            // + INV-MC-S5). MasterClient owns client-side BFS (GooseFS 2.0
+            // dropped ListStatusPOptions.recursive). Pass the resolved load
+            // type so Never / Once / Always on options (or config) take effect
+            // at every BFS level — Java recursive listStatus does not force Always;
+            // the default is goosefs.user.file.metadata.load.type (ONCE).
+            let items = master
+                .list_status_with_load_type(path, true, Some(load))
+                .await?;
+            return Ok(items.into_iter().map(URIStatus::from_proto).collect());
         }
 
         let skip = crate::metadata_cache::should_skip_listing_cache(
@@ -341,7 +335,9 @@ impl FileSystem for BaseFileSystem {
         let cache = self.ctx.acquire_metadata_cache();
         let items =
             crate::metadata_cache::list_status_through_cache(cache.as_deref(), path, skip, || {
-                master.list_status(path, false)
+                // Java `listStatusDefaults()` always sets loadMetadataType
+                // (default ONCE), including non-recursive listings.
+                master.list_status_with_load_type(path, false, Some(load))
             })
             .await?;
         Ok(items.into_iter().map(URIStatus::from_proto).collect())

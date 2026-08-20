@@ -34,6 +34,12 @@ cargo test --test page_cache_consistency -- --ignored --nocapture --test-threads
 echo "==> integration: master_rename_no_replace"
 cargo test --test master_rename_no_replace -- --ignored --nocapture --test-threads=1
 
+echo "==> integration: opendal_sdk_api (OpenDAL GooseFS v2.1.0.1 SDK surface)"
+cargo test --test opendal_sdk_api -- --ignored --nocapture --test-threads=1
+
+echo "==> integration: metadata_cache_e2e (recursive list_status BFS + cache)"
+cargo test --test metadata_cache_e2e -- --ignored --nocapture --test-threads=1
+
 echo "==> integration: auth_retry (ignored)"
 cargo test --test auth_retry -- --ignored --nocapture
 
