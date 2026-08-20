@@ -655,6 +655,24 @@ impl PropertiesMap {
             cfg.short_circuit_thp = enabled;
         }
 
+        // ── Client probe trace ───────────────────────────────────
+        if let Some(enabled) = self.get_bool("goosefs.user.client.probe.enabled") {
+            cfg.probe_enabled = enabled;
+        }
+        if let Some(s) = self.get("goosefs.user.client.probe.output") {
+            if !s.is_empty() {
+                cfg.probe_output = Some(s.to_string());
+            }
+        }
+        if let Some(enabled) = self.get_bool(STORAGE_OPT_PROBE_ENABLED) {
+            cfg.probe_enabled = enabled;
+        }
+        if let Some(s) = self.get(STORAGE_OPT_PROBE_OUTPUT) {
+            if !s.is_empty() {
+                cfg.probe_output = Some(s.to_string());
+            }
+        }
+
         cfg
     }
 }
@@ -1356,6 +1374,23 @@ pub const STORAGE_OPT_SHORT_CIRCUIT_MIN_BLOCK_SIZE: &str = "goosefs_short_circui
 pub const STORAGE_OPT_SHORT_CIRCUIT_SIGBUS_HANDLER: &str = "goosefs_short_circuit_sigbus_handler";
 /// Storage option key for the Transparent Huge Pages hint (experimental).
 pub const STORAGE_OPT_SHORT_CIRCUIT_THP: &str = "goosefs_short_circuit_thp";
+
+// ── Client probe trace ───────────────────────────────────────
+/// Environment variable: enable client probe trace (`true`/`false`/`1`/`0`).
+///
+/// When enabled, RPCs carry `probe-enabled: true` and the SDK writes a
+/// tree-shaped timing report (Java `goosefs fs probe` format) to
+/// [`ENV_PROBE_OUTPUT`] or stderr.
+pub const ENV_PROBE_ENABLED: &str = "GOOSEFS_PROBE_ENABLED";
+
+/// Environment variable: probe report output path. Empty / unset → stderr.
+pub const ENV_PROBE_OUTPUT: &str = "GOOSEFS_PROBE_OUTPUT";
+
+/// Storage option key for [`GoosefsConfig::probe_enabled`].
+pub const STORAGE_OPT_PROBE_ENABLED: &str = "goosefs_probe_enabled";
+
+/// Storage option key for [`GoosefsConfig::probe_output`].
+pub const STORAGE_OPT_PROBE_OUTPUT: &str = "goosefs_probe_output";
 
 // ── WriteType: ergonomic Rust enum wrapping WritePType ───────
 
@@ -2098,6 +2133,20 @@ pub struct GoosefsConfig {
     /// elsewhere. `goosefs.client.short.circuit.thp`.
     #[serde(default)]
     pub short_circuit_thp: bool,
+
+    // ── Client probe trace ──
+    /// Enable client-side probe trace (`goosefs.user.client.probe.enabled`).
+    ///
+    /// Off by default. When on, Master/Worker RPCs inject `probe-enabled`
+    /// and the SDK records trailer timings into a Java-compatible report.
+    #[serde(default)]
+    pub probe_enabled: bool,
+
+    /// Probe report output path (`goosefs.user.client.probe.output`).
+    ///
+    /// `None` prints to stderr. Relative paths are created on demand.
+    #[serde(default)]
+    pub probe_output: Option<String>,
 }
 
 fn default_master_inquire_max_duration() -> Duration {
@@ -2379,6 +2428,8 @@ impl Default for GoosefsConfig {
             short_circuit_min_block_size: 0,
             short_circuit_sigbus_handler: true,
             short_circuit_thp: false,
+            probe_enabled: false,
+            probe_output: None,
         }
     }
 }
@@ -2770,6 +2821,18 @@ impl GoosefsConfig {
     /// `madvise(MADV_HUGEPAGE)`. Linux only, **experimental**.
     pub fn with_short_circuit_thp(mut self, enabled: bool) -> Self {
         self.short_circuit_thp = enabled;
+        self
+    }
+
+    /// Enable client probe trace (Java `goosefs fs probe` compatible reports).
+    pub fn with_probe_enabled(mut self, enabled: bool) -> Self {
+        self.probe_enabled = enabled;
+        self
+    }
+
+    /// Set the probe report output path. `None` prints to stderr.
+    pub fn with_probe_output(mut self, path: impl Into<String>) -> Self {
+        self.probe_output = Some(path.into());
         self
     }
 
@@ -3370,6 +3433,17 @@ impl GoosefsConfig {
         if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_THP) {
             if let Ok(b) = val.to_lowercase().parse::<bool>() {
                 self.short_circuit_thp = b;
+            }
+        }
+
+        if let Ok(val) = env::var(ENV_PROBE_ENABLED) {
+            if let Some(b) = parse_bool_loose(&val) {
+                self.probe_enabled = b;
+            }
+        }
+        if let Ok(val) = env::var(ENV_PROBE_OUTPUT) {
+            if !val.is_empty() {
+                self.probe_output = Some(val);
             }
         }
 
@@ -5204,6 +5278,26 @@ goosefs.client.short.circuit.thp=true
         assert_eq!(cfg.short_circuit_min_block_size, 1_048_576);
         assert!(!cfg.short_circuit_sigbus_handler);
         assert!(cfg.short_circuit_thp);
+    }
+
+    #[test]
+    fn test_probe_config_constants_and_builder() {
+        assert_eq!(ENV_PROBE_ENABLED, "GOOSEFS_PROBE_ENABLED");
+        assert_eq!(ENV_PROBE_OUTPUT, "GOOSEFS_PROBE_OUTPUT");
+        assert_eq!(STORAGE_OPT_PROBE_ENABLED, "goosefs_probe_enabled");
+        assert_eq!(STORAGE_OPT_PROBE_OUTPUT, "goosefs_probe_output");
+        let cfg = GoosefsConfig::new("127.0.0.1:9200")
+            .with_probe_enabled(true)
+            .with_probe_output("/tmp/probe.log");
+        assert!(cfg.probe_enabled);
+        assert_eq!(cfg.probe_output.as_deref(), Some("/tmp/probe.log"));
+        let from_props = GoosefsConfig::from_properties_str(
+            "goosefs.user.client.probe.enabled=true\n\
+             goosefs.user.client.probe.output=/var/tmp/p.log\n",
+        );
+        assert!(from_props.probe_enabled);
+        assert_eq!(from_props.probe_output.as_deref(), Some("/var/tmp/p.log"));
+        assert!(!GoosefsConfig::default().probe_enabled);
     }
 
     /// Regression guard: the short-circuit local-mmap read path must stay

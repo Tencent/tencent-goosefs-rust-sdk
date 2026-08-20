@@ -40,7 +40,6 @@
 //! [`WriteBlockHandle`] that manages
 //! a background task.
 
-use bytes::Bytes;
 use tracing::{debug, trace};
 
 use crate::client::worker::{WriteBlockHandle, WriteBlockOptions};
@@ -85,6 +84,7 @@ impl GrpcBlockWriter {
         space_to_reserve: i64,
         options: WriteBlockOptions,
     ) -> Result<Self> {
+        let _probe = crate::probe::phase(crate::probe::phase::client::OPEN_STREAM_US);
         let handle = worker
             .write_block(block_id, space_to_reserve, options)
             .await?;
@@ -108,32 +108,36 @@ impl GrpcBlockWriter {
 
     /// Write a data chunk to the block.
     ///
+    /// `data` is moved into the protobuf `Chunk` (copied once at the call
+    /// site, or moved out of the pending-chunk coalescer).
+    ///
     /// Note: byte-level metrics are NOT recorded here; the caller
     /// (`GoosefsFileWriter`) is responsible for incrementing the appropriate
     /// counter (`BytesWrittenLocal` or `BytesWrittenUfs`).
-    pub async fn write_chunk(&mut self, data: Bytes) -> Result<()> {
+    pub async fn write_chunk(&mut self, data: Vec<u8>) -> Result<()> {
         let chunk_len = data.len() as i64;
 
         let req = WriteRequest {
-            value: Some(write_request::Value::Chunk(Chunk {
-                data: Some(data.to_vec()),
-            })),
+            value: Some(write_request::Value::Chunk(Chunk { data: Some(data) })),
         };
 
-        self.handle
-            .request_tx
-            .as_ref()
-            .ok_or_else(|| Error::BlockIoError {
-                message: format!(
-                    "write channel already closed for block_id={}",
-                    self.block_id
-                ),
-            })?
-            .send(req)
-            .await
-            .map_err(|_| Error::BlockIoError {
-                message: format!("write channel closed for block_id={}", self.block_id),
-            })?;
+        {
+            let _probe = crate::probe::phase(crate::probe::phase::client::CHUNK_SEND_US);
+            self.handle
+                .request_tx
+                .as_ref()
+                .ok_or_else(|| Error::BlockIoError {
+                    message: format!(
+                        "write channel already closed for block_id={}",
+                        self.block_id
+                    ),
+                })?
+                .send(req)
+                .await
+                .map_err(|_| Error::BlockIoError {
+                    message: format!("write channel closed for block_id={}", self.block_id),
+                })?;
+        }
 
         self.bytes_written += chunk_len;
         trace!(
@@ -152,8 +156,7 @@ impl GrpcBlockWriter {
 
         while offset < data.len() {
             let end = std::cmp::min(offset + chunk_size, data.len());
-            let chunk = Bytes::copy_from_slice(&data[offset..end]);
-            self.write_chunk(chunk).await?;
+            self.write_chunk(owned_chunk(&data[offset..end])).await?;
             offset = end;
         }
 
@@ -166,6 +169,7 @@ impl GrpcBlockWriter {
     /// This triggers the server to send its first response (including
     /// HTTP/2 headers), which unblocks the background gRPC task.
     pub async fn flush(&mut self) -> Result<i64> {
+        let _probe = crate::probe::phase(crate::probe::phase::client::FLUSH_ACK_US);
         // Send flush command
         let flush_req = WriteRequest {
             value: Some(write_request::Value::Command(WriteRequestCommand {
@@ -215,6 +219,7 @@ impl GrpcBlockWriter {
         let block_id = self.block_id;
         let bytes_written = self.bytes_written;
 
+        let _probe = crate::probe::phase(crate::probe::phase::client::BLOCK_CLOSE_US);
         // Dropping the handle's request_tx closes the client→server half
         // of the stream, triggering server-side onCompleted → commitBlock.
         self.handle.close().await?;
@@ -252,6 +257,12 @@ impl GrpcBlockWriter {
     pub fn bytes_written(&self) -> i64 {
         self.bytes_written
     }
+}
+
+/// Copy `src` into a gRPC `Chunk.data` buffer. Timed as `chunk_copy_us`.
+pub(crate) fn owned_chunk(src: &[u8]) -> Vec<u8> {
+    let _probe = crate::probe::phase(crate::probe::phase::client::CHUNK_COPY_US);
+    src.to_vec()
 }
 
 #[cfg(test)]

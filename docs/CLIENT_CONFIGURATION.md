@@ -20,7 +20,8 @@ supported by the Goosefs Rust Client (`goosefs-sdk`).
    - [Authorization Settings](#27-authorization-settings)
    - [Client Local Page Cache Settings](#28-client-local-page-cache-settings)
    - [Short-Circuit (Local mmap) Read Settings](#29-short-circuit-local-mmap-read-settings)
-   - [Miscellaneous Settings](#210-miscellaneous-settings)
+   - [Client Probe Trace Settings](#210-client-probe-trace-settings)
+   - [Miscellaneous Settings](#211-miscellaneous-settings)
 3. [Environment Variables](#3-environment-variables)
 4. [Storage Option Keys](#4-storage-option-keys)
 5. [Properties File Keys](#5-properties-file-keys)
@@ -421,7 +422,52 @@ config.short_circuit_cache_ttl = Duration::from_secs(60);
 config.short_circuit_min_block_size = 4 * 1024 * 1024;    // skip SC below 4 MiB
 ```
 
-### 2.10 Miscellaneous Settings
+### 2.10 Client Probe Trace Settings
+
+When probe is on, every Master/Worker RPC carries the ASCII header
+`probe-enabled: true`. A Java GooseFS server with
+`ProbeTimingServerInterceptor` records sub-phase timings and returns them in
+the binary trailer `probe-timing-bin` (`ProbeTimingInfo`). The SDK collects
+those trailers, adds client-local phases (connect / pool acquire / write-read
+wall time), and prints a tree report matching `goosefs fs probe` /
+`copyFromLocal --probe`.
+
+**Off by default.** The interceptor hot path is one `AtomicBool` load; the
+client never sends `probe-enabled` unless the process-level flag is on.
+
+Lance / OpenDAL / DuckDB pick this up with **no upstream code changes**: set
+env vars or `goosefs-site.properties` in the same process. Must use the
+`gfs://` gRPC path (not a Hadoop filesystem shim).
+
+> **OR with env / properties at connect time.**
+> `FileSystemContext::connect()` calls `probe::apply_config()`, which **ORs**
+> `config.probe_enabled` with `GOOSEFS_PROBE_ENABLED` and
+> `goosefs.user.client.probe.enabled`. An integrator that builds a bare
+> `GoosefsConfig::new(addr)` therefore cannot mask an env/file enable.
+> `probe_output` uses the first non-empty of: struct field, env, properties.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `probe_enabled` | `bool` | `false` | Enable client-side probe trace. Also `with_probe_enabled(true)`. |
+| `probe_output` | `Option<String>` | `None` (print to stderr) | Report file path. Relative paths are created on demand. The writer is **append-only**; truncate or delete the file between runs if you only want the latest report. Also `with_probe_output(path)`. |
+
+**Programmatic example.**
+
+```rust
+use goosefs_sdk::config::GoosefsConfig;
+
+let config = GoosefsConfig::new("127.0.0.1:9200")
+    .with_probe_enabled(true)
+    .with_probe_output("/tmp/goosefs-probe.log");
+```
+
+See [`examples/probe.rs`](../examples/probe.rs) for a CACHE_THROUGH write +
+read that prints the report. If CreateFile **Client Total** is non-zero but
+the tree still says `(Server timing info not available)`, the cluster image
+does not run `ProbeTimingServerInterceptor`; client-local timings are still
+valid.
+
+### 2.11 Miscellaneous Settings
 
 | Constant | Value | Description |
 |----------|-------|-------------|
@@ -491,6 +537,8 @@ properties file values and built-in defaults.
 | `GOOSEFS_SHORT_CIRCUIT_MIN_BLOCK_SIZE` | `short_circuit_min_block_size` | `0` (no minimum) | Minimum block size (bytes) required to attempt SC. Blocks smaller than this skip SC. |
 | `GOOSEFS_SHORT_CIRCUIT_SIGBUS_HANDLER` | `short_circuit_sigbus_handler` | `true` | Install a process-global SIGBUS diagnostic handler (`true`/`false`). Linux/macOS only. |
 | `GOOSEFS_SHORT_CIRCUIT_THP` | `short_circuit_thp` | `false` | Request Transparent Huge Pages via `madvise(MADV_HUGEPAGE)` (`true`/`false`). Linux only, **experimental**. |
+| `GOOSEFS_PROBE_ENABLED` | `probe_enabled` | `false` | Enable client probe trace (`true`/`false`/`1`/`0`). Injects `probe-enabled: true` on Master/Worker RPCs. See §2.10. |
+| `GOOSEFS_PROBE_OUTPUT` | `probe_output` | unset (stderr) | Probe report file path. Empty / unset → print to stderr. Append-only. |
 
 ---
 
@@ -540,6 +588,8 @@ These constants are used in `storage_options` maps (e.g. Lance's
 | `STORAGE_OPT_SHORT_CIRCUIT_MIN_BLOCK_SIZE` | `goosefs_short_circuit_min_block_size` | `0` (no minimum) | Minimum block size (bytes) required to attempt SC. |
 | `STORAGE_OPT_SHORT_CIRCUIT_SIGBUS_HANDLER` | `goosefs_short_circuit_sigbus_handler` | `true` | Install a process-global SIGBUS diagnostic handler. Linux/macOS only. |
 | `STORAGE_OPT_SHORT_CIRCUIT_THP` | `goosefs_short_circuit_thp` | `false` | Request Transparent Huge Pages via `madvise(MADV_HUGEPAGE)`. Linux only, **experimental**. |
+| `STORAGE_OPT_PROBE_ENABLED` | `goosefs_probe_enabled` | `false` | Enable client probe trace. See §2.10. |
+| `STORAGE_OPT_PROBE_OUTPUT` | `goosefs_probe_output` | unset (stderr) | Probe report file path. Empty / unset → stderr. |
 
 > **Note**: `STORAGE_OPT_*` keys are string constants exposed by the SDK for
 > external consumers such as `opendal_service_goosefs` or Lance's
@@ -611,6 +661,8 @@ These keys are used in `goosefs-site.properties` files (Java-style `key=value` f
 | `goosefs.client.short.circuit.min.block.size` | `short_circuit_min_block_size` | integer (bytes) | `0` (no minimum) | Minimum block size required to attempt SC. |
 | `goosefs.client.short.circuit.sigbus.handler` | `short_circuit_sigbus_handler` | `true` / `false` | `true` | Install a process-global SIGBUS diagnostic handler. Linux/macOS only. |
 | `goosefs.client.short.circuit.thp` | `short_circuit_thp` | `true` / `false` | `false` | Request Transparent Huge Pages. Linux only, **experimental**. |
+| `goosefs.user.client.probe.enabled` | `probe_enabled` | `true` / `false` | `false` | Enable client probe trace. See §2.10. |
+| `goosefs.user.client.probe.output` | `probe_output` | path | unset (stderr) | Probe report file path. Empty / unset → stderr. Append-only. |
 
 ---
 
@@ -1152,6 +1204,8 @@ ds = lance.dataset(
 | `prefetch_window` | Sequential (SR) read throughput | `8` | `16` | *(programmatic only)* | *(programmatic only)* | *(programmatic only)* |
 | `ack_interval_bytes` | SR throughput, **only** on workers honouring prefetch | `0` (ACK every chunk) | `4MB`–`8MB` | *(programmatic only)* | *(programmatic only)* | *(programmatic only)* |
 | `short_circuit_enabled` | Kill switch for the local mmap read path (see §2.9) | `false` | `false` (default; safe for Lance/DuckDB); `true` to opt into the local mmap fast path on co-located workloads that benefit | `GOOSEFS_SHORT_CIRCUIT_ENABLED` | `goosefs.user.short.circuit.enabled` | `goosefs_short_circuit_enabled` |
+| `probe_enabled` | Client probe trace (see §2.10) | `false` | `true` only while diagnosing latency | `GOOSEFS_PROBE_ENABLED` | `goosefs.user.client.probe.enabled` | `goosefs_probe_enabled` |
+| `probe_output` | Probe report path; unset prints to stderr | `None` | `/tmp/goosefs-probe.log` (truncate between runs) | `GOOSEFS_PROBE_OUTPUT` | `goosefs.user.client.probe.output` | `goosefs_probe_output` |
 
 ### 9.7 Short-Circuit (Local mmap) Reads
 
@@ -1290,3 +1344,33 @@ for the interaction with the client-side page cache. The gating-grade
 regression suites [`tests/sc_consistency.rs`](../tests/sc_consistency.rs)
 and [`tests/short_circuit_e2e.rs`](../tests/short_circuit_e2e.rs) show how
 to assert on these counters programmatically.
+
+### 9.8 Client Probe Trace
+
+Off by default. Enable only while diagnosing latency (see §2.10).
+
+```bash
+export GOOSEFS_PROBE_ENABLED=true
+export GOOSEFS_PROBE_OUTPUT=/tmp/goosefs-probe.log
+# then: cargo run --example probe
+```
+
+```properties
+goosefs.user.client.probe.enabled=true
+goosefs.user.client.probe.output=/tmp/goosefs-probe.log
+```
+
+```python
+ds = lance.dataset(
+    "gfs://…",
+    storage_options={
+        "goosefs_probe_enabled": "true",
+        "goosefs_probe_output": "/tmp/goosefs-probe.log",
+    },
+)
+```
+
+The report file is append-only. Truncate it between runs, or omit
+`probe_output` to print to stderr. Cluster images without
+`ProbeTimingServerInterceptor` still produce client-local timings; the
+server sub-tree may say `(Server timing info not available)`.

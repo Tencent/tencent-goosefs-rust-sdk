@@ -195,6 +195,9 @@ impl FileSystemContext {
     /// This is the **only** call that performs network I/O.  All subsequent
     /// operations on the context are zero-cost Arc clones.
     pub async fn connect(config: GoosefsConfig) -> Result<Arc<Self>> {
+        // Overlay env / properties so OpenDAL's partial GoosefsConfig::new(addr)
+        // still honours GOOSEFS_PROBE_* and goosefs-site.properties.
+        crate::probe::apply_config(&config);
         let config = Arc::new(config);
 
         // Build a shared inquire client so Master + WorkerManager both use the

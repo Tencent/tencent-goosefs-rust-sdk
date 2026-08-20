@@ -108,6 +108,8 @@ enum ChunkSource {
         rx: mpsc::Receiver<StreamItem>,
         task: JoinHandle<()>,
     },
+    /// Placeholder after [`GrpcBlockReader::shutdown`] takes the real source.
+    Closed,
 }
 
 /// A streaming reader for a single Goosefs block.
@@ -136,6 +138,8 @@ pub struct GrpcBlockReader {
     ack_interval_bytes: i64,
     /// ACK coalescing threshold in chunks.
     ack_interval_chunks: u32,
+    probe_session: Option<std::sync::Arc<crate::probe::collector::ProbeCollector>>,
+    probe_start: Option<std::time::Instant>,
 }
 
 /// Decision of how the reader should treat a single `ReadResponse` (or its
@@ -228,6 +232,11 @@ impl GrpcBlockReader {
         chunk_size: i64,
         open_ufs_block_options: Option<OpenUfsBlockOptions>,
     ) -> Result<Self> {
+        // Instant must start before `read_block` waits for response headers;
+        // otherwise Client Total can be smaller than Worker Processing.
+        let probe_session = crate::probe::current_collector();
+        let probe_start = crate::probe::rpc_start();
+        let _probe = crate::probe::phase(crate::probe::phase::client::OPEN_STREAM_US);
         let (request_tx, response_rx) = worker
             .read_block(
                 block_id,
@@ -262,6 +271,8 @@ impl GrpcBlockReader {
             // Direct mode keeps the original ACK-per-chunk behaviour.
             ack_interval_bytes: 0,
             ack_interval_chunks: 1,
+            probe_session,
+            probe_start,
         })
     }
 
@@ -290,6 +301,9 @@ impl GrpcBlockReader {
         open_ufs_block_options: Option<OpenUfsBlockOptions>,
         tuning: ReadTuning,
     ) -> Result<Self> {
+        let probe_session = crate::probe::current_collector();
+        let probe_start = crate::probe::rpc_start();
+        let _probe = crate::probe::phase(crate::probe::phase::client::OPEN_STREAM_US);
         let (request_tx, response_rx) = worker
             .read_block(
                 block_id,
@@ -317,15 +331,34 @@ impl GrpcBlockReader {
                 match stream.message().await {
                     Ok(Some(resp)) => {
                         if chunk_tx.send(StreamItem::Data(resp)).await.is_err() {
-                            // Consumer dropped — stop draining.
                             break;
                         }
                     }
                     Ok(None) => {
+                        if let (Some(session), Some(started)) =
+                            (probe_session.as_ref(), probe_start)
+                        {
+                            if let Ok(Some(trailers)) = stream.trailers().await {
+                                session.record_rpc(crate::probe::collector::timing_from_trailers(
+                                    crate::probe::collector::METHOD_READ_BLOCK,
+                                    started,
+                                    &trailers,
+                                ));
+                            }
+                        }
                         let _ = chunk_tx.send(StreamItem::End).await;
                         break;
                     }
                     Err(status) => {
+                        if let (Some(session), Some(started)) =
+                            (probe_session.as_ref(), probe_start)
+                        {
+                            session.record_rpc(crate::probe::collector::timing_from_trailers(
+                                crate::probe::collector::METHOD_READ_BLOCK,
+                                started,
+                                status.metadata(),
+                            ));
+                        }
                         let _ = chunk_tx.send(StreamItem::Error(Error::from(status))).await;
                         break;
                     }
@@ -353,6 +386,8 @@ impl GrpcBlockReader {
             chunks_since_last_ack: 0,
             ack_interval_bytes: tuning.ack_interval_bytes,
             ack_interval_chunks: tuning.ack_interval_chunks,
+            probe_session: None,
+            probe_start: None,
         })
     }
 
@@ -363,6 +398,7 @@ impl GrpcBlockReader {
     /// or once per coalescing window (Buffered).
     pub async fn read_chunk(&mut self) -> Result<Option<Bytes>> {
         if self.bytes_received >= self.length {
+            self.capture_direct_trailers().await;
             return Ok(None);
         }
 
@@ -370,44 +406,58 @@ impl GrpcBlockReader {
         // keep-alive / header-only frames in a row, and `Box::pin`-ing the
         // recursive call would otherwise heap-allocate per empty frame.
         loop {
-            let resp = match &mut self.source {
+            enum Frame {
+                Msg(ReadResponse),
+                DirectEof,
+                BufferedEof,
+                BufferedErr(Error),
+                DrainAborted,
+            }
+
+            let frame = match &mut self.source {
                 ChunkSource::Direct(stream) => match stream.message().await? {
-                    None => {
-                        debug!(
-                            block_id = self.block_id,
-                            bytes_received = self.bytes_received,
-                            "stream ended before all expected data received"
-                        );
-                        return Ok(None);
-                    }
-                    Some(r) => r,
+                    None => Frame::DirectEof,
+                    Some(r) => Frame::Msg(r),
                 },
                 ChunkSource::Buffered { rx, .. } => match rx.recv().await {
-                    Some(StreamItem::Data(r)) => r,
-                    Some(StreamItem::End) => {
-                        debug!(
-                            block_id = self.block_id,
-                            bytes_received = self.bytes_received,
-                            "buffered stream reached clean EOF"
-                        );
-                        return Ok(None);
-                    }
-                    Some(StreamItem::Error(e)) => return Err(e),
-                    None => {
-                        // C2: the drain task closed the channel WITHOUT an
-                        // `End` sentinel. This means it panicked or was
-                        // aborted mid-stream — NOT a clean EOF. Surface an
-                        // error rather than silently truncating user data.
-                        return Err(Error::Internal {
-                            message: format!(
-                                "read stream drain task ended unexpectedly on block {} \
-                                 ({} of {} bytes received)",
-                                self.block_id, self.bytes_received, self.length
-                            ),
-                            source: None,
-                        });
-                    }
+                    Some(StreamItem::Data(r)) => Frame::Msg(r),
+                    Some(StreamItem::End) => Frame::BufferedEof,
+                    Some(StreamItem::Error(e)) => Frame::BufferedErr(e),
+                    None => Frame::DrainAborted,
                 },
+                ChunkSource::Closed => Frame::DrainAborted,
+            };
+
+            let resp = match frame {
+                Frame::DirectEof => {
+                    self.capture_direct_trailers().await;
+                    debug!(
+                        block_id = self.block_id,
+                        bytes_received = self.bytes_received,
+                        "stream ended before all expected data received"
+                    );
+                    return Ok(None);
+                }
+                Frame::BufferedEof => {
+                    debug!(
+                        block_id = self.block_id,
+                        bytes_received = self.bytes_received,
+                        "buffered stream reached clean EOF"
+                    );
+                    return Ok(None);
+                }
+                Frame::BufferedErr(e) => return Err(e),
+                Frame::DrainAborted => {
+                    return Err(Error::Internal {
+                        message: format!(
+                            "read stream drain task ended unexpectedly on block {} \
+                             ({} of {} bytes received)",
+                            self.block_id, self.bytes_received, self.length
+                        ),
+                        source: None,
+                    });
+                }
+                Frame::Msg(r) => r,
             };
 
             match classify_response(Some(resp)) {
@@ -490,6 +540,26 @@ impl GrpcBlockReader {
                 );
             }
         }
+    }
+
+    /// Pull `probe-timing-bin` trailers from a Direct stream after the body
+    /// is fully consumed. Buffered streams record trailers in the drain task.
+    async fn capture_direct_trailers(&mut self) {
+        let (Some(session), Some(started)) = (self.probe_session.take(), self.probe_start.take())
+        else {
+            return;
+        };
+        let trailers = if let ChunkSource::Direct(stream) = &mut self.source {
+            stream.trailers().await.ok().flatten()
+        } else {
+            None
+        };
+        let meta = trailers.unwrap_or_default();
+        session.record_rpc(crate::probe::collector::timing_from_trailers(
+            crate::probe::collector::METHOD_READ_BLOCK,
+            started,
+            &meta,
+        ));
     }
 
     /// Read all remaining data from this block and return it as a single `Bytes`.
@@ -576,9 +646,14 @@ impl GrpcBlockReader {
         chunk_size: i64,
         open_ufs_block_options: Option<OpenUfsBlockOptions>,
     ) -> Result<Bytes> {
-        let (request_tx, response_rx) = worker
-            .read_block_positioned(block_id, offset, length, chunk_size, open_ufs_block_options)
-            .await?;
+        let probe_session = crate::probe::current_collector();
+        let probe_start = crate::probe::rpc_start();
+        let (request_tx, response_rx) = {
+            let _probe = crate::probe::phase(crate::probe::phase::client::OPEN_STREAM_US);
+            worker
+                .read_block_positioned(block_id, offset, length, chunk_size, open_ufs_block_options)
+                .await?
+        };
 
         debug!(
             block_id = block_id,
@@ -599,9 +674,68 @@ impl GrpcBlockReader {
             // Positioned reads ACK every chunk (one-shot, low overhead).
             ack_interval_bytes: 0,
             ack_interval_chunks: 1,
+            probe_session,
+            probe_start,
         };
 
         reader.read_all().await
+    }
+
+    /// Half-close the client stream and wait for probe trailers.
+    ///
+    /// Sequential reads keep the worker stream open until the request
+    /// channel is dropped. Aborting the drain task (the `Drop` path) would
+    /// lose `probe-timing-bin`. Call this instead of dropping the reader
+    /// when the block is fully consumed.
+    pub async fn shutdown(mut self) {
+        let (dummy_tx, _dummy_rx) = mpsc::channel(1);
+        drop(std::mem::replace(&mut self.request_tx, dummy_tx));
+        let source = std::mem::replace(&mut self.source, ChunkSource::Closed);
+        let probe_session = self.probe_session.take();
+        let probe_start = self.probe_start.take();
+        let capture = probe_session.is_some() && probe_start.is_some();
+        match source {
+            ChunkSource::Buffered { mut rx, task } => {
+                if capture {
+                    let drain = async {
+                        while let Some(item) = rx.recv().await {
+                            match item {
+                                StreamItem::End | StreamItem::Error(_) => break,
+                                StreamItem::Data(_) => {}
+                            }
+                        }
+                    };
+                    if tokio::time::timeout(std::time::Duration::from_millis(500), drain)
+                        .await
+                        .is_err()
+                    {
+                        task.abort();
+                    }
+                    let _ = task.await;
+                } else {
+                    task.abort();
+                }
+            }
+            ChunkSource::Direct(mut stream) => {
+                if let (Some(session), Some(started)) = (probe_session, probe_start) {
+                    let meta = match tokio::time::timeout(
+                        std::time::Duration::from_millis(500),
+                        stream.trailers(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(Some(t))) => t,
+                        _ => tonic::metadata::MetadataMap::new(),
+                    };
+                    session.record_rpc(crate::probe::collector::timing_from_trailers(
+                        crate::probe::collector::METHOD_READ_BLOCK,
+                        started,
+                        &meta,
+                    ));
+                }
+            }
+            ChunkSource::Closed => {}
+        }
     }
 }
 
