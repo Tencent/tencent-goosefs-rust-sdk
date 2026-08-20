@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
         let addr = w.address.as_ref();
         let host = addr.and_then(|a| a.host.as_deref()).unwrap_or("");
         let port = addr.and_then(|a| a.rpc_port).unwrap_or(0);
-        let vn = w.virtual_node_num.unwrap_or(200);
+        let vn = w.virtual_node_num.unwrap_or(5000);
         let id = w.id.unwrap_or(0);
         println!("  id={id} host={host} rpc_port={port} virtual_node_num={vn}");
         if i > 0 {

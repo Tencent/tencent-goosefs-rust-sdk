@@ -49,8 +49,8 @@ const DEFAULT_FAILURE_TTL: Duration = Duration::from_secs(60);
 const DEFAULT_WORKER_REFRESH_TTL: Duration = Duration::from_secs(30);
 
 /// Default virtual nodes per worker when `WorkerInfo.virtual_node_num` is unset.
-/// Matches Java `goosefs.master.consistent.hash.virtual.node.num.per.worker` (200).
-const VIRTUAL_NODES_PER_WORKER: u32 = 200;
+/// Matches Java `goosefs.master.consistent.hash.virtual.node.num.per.worker` (5000).
+const VIRTUAL_NODES_PER_WORKER: u32 = 5000;
 
 /// Matches Java `goosefs.user.client.hash.policy.max.attempt` (default 100).
 const DEFAULT_HASH_POLICY_MAX_ATTEMPTS: usize = 100;
@@ -1773,7 +1773,16 @@ fn hash_block_id(block_id: i64) -> i64 {
 mod tests {
     use super::*;
 
+    /// Historical Java default used by hash-parity golden vectors recorded
+    /// against GooseFS 2.0 clusters before the virtual-node default was
+    /// raised from 200 to 5000.
+    const HASH_PARITY_VIRTUAL_NODES: i32 = 200;
+
     fn make_worker(id: i64, host: &str, port: i32) -> WorkerInfo {
+        make_worker_with_vn(id, host, port, VIRTUAL_NODES_PER_WORKER as i32)
+    }
+
+    fn make_worker_with_vn(id: i64, host: &str, port: i32, vn: i32) -> WorkerInfo {
         WorkerInfo {
             id: Some(id),
             address: Some(WorkerNetAddress {
@@ -1781,7 +1790,7 @@ mod tests {
                 rpc_port: Some(port),
                 ..Default::default()
             }),
-            virtual_node_num: Some(VIRTUAL_NODES_PER_WORKER as i32),
+            virtual_node_num: Some(vn),
             ..Default::default()
         }
     }
@@ -2670,11 +2679,36 @@ mod tests {
         let router = WorkerRouter::new();
         router
             .update_workers(vec![
-                make_worker(8769479697893324776, "172.16.16.42", 9203),
-                make_worker(8349952073724719185, "172.16.16.14", 9203),
-                make_worker(144281688392029313, "172.16.16.35", 9203),
-                make_worker(6124739522353643542, "172.16.16.46", 9203),
-                make_worker(8816614835528527236, "172.16.16.18", 9203),
+                make_worker_with_vn(
+                    8769479697893324776,
+                    "172.16.16.42",
+                    9203,
+                    HASH_PARITY_VIRTUAL_NODES,
+                ),
+                make_worker_with_vn(
+                    8349952073724719185,
+                    "172.16.16.14",
+                    9203,
+                    HASH_PARITY_VIRTUAL_NODES,
+                ),
+                make_worker_with_vn(
+                    144281688392029313,
+                    "172.16.16.35",
+                    9203,
+                    HASH_PARITY_VIRTUAL_NODES,
+                ),
+                make_worker_with_vn(
+                    6124739522353643542,
+                    "172.16.16.46",
+                    9203,
+                    HASH_PARITY_VIRTUAL_NODES,
+                ),
+                make_worker_with_vn(
+                    8816614835528527236,
+                    "172.16.16.18",
+                    9203,
+                    HASH_PARITY_VIRTUAL_NODES,
+                ),
             ])
             .await;
 
@@ -2702,10 +2736,10 @@ mod tests {
         let router = WorkerRouter::new();
         router
             .update_workers(vec![
-                make_worker(1, "w1", 9203),
-                make_worker(2, "w1", 9204),
-                make_worker(3, "w2", 9203),
-                make_worker(4, "w3", 9203),
+                make_worker_with_vn(1, "w1", 9203, HASH_PARITY_VIRTUAL_NODES),
+                make_worker_with_vn(2, "w1", 9204, HASH_PARITY_VIRTUAL_NODES),
+                make_worker_with_vn(3, "w2", 9203, HASH_PARITY_VIRTUAL_NODES),
+                make_worker_with_vn(4, "w3", 9203, HASH_PARITY_VIRTUAL_NODES),
             ])
             .await;
 
@@ -2936,6 +2970,25 @@ mod tests {
             None,
             "from_workers must NOT run detect_local_worker (blocking syscall on legacy path)"
         );
+    }
+
+    /// Unset `WorkerInfo.virtual_node_num` must fall back to the Java default
+    /// `goosefs.master.consistent.hash.virtual.node.num.per.worker` (5000).
+    #[test]
+    fn test_unset_virtual_node_num_falls_back_to_java_default() {
+        assert_eq!(VIRTUAL_NODES_PER_WORKER, 5000);
+        let worker = WorkerInfo {
+            id: Some(1),
+            address: Some(WorkerNetAddress {
+                host: Some("w1".to_string()),
+                rpc_port: Some(9203),
+                ..Default::default()
+            }),
+            virtual_node_num: None,
+            ..Default::default()
+        };
+        let ring = build_hash_ring(&[worker]);
+        assert_eq!(ring.len(), VIRTUAL_NODES_PER_WORKER as usize);
     }
 
     ///  (the key A/B parity test): for a wide spread of block ids,
