@@ -116,6 +116,7 @@ pub struct GoosefsFileReader {
     /// Optional shared context (non-`None` when created via `*_with_context`).
     /// Kept alive to prevent context GC while the reader is in use.
     _context: Option<Arc<FileSystemContext>>,
+    probe: Option<Arc<crate::probe::ProbeSession>>,
     /// Block-level read plans (populated on open).
     plans: Vec<BlockReadPlan>,
     /// Index of the next block to read.
@@ -198,7 +199,19 @@ impl GoosefsFileReader {
     /// to Master or Worker Manager is performed. This is the recommended
     /// constructor for long-running clients (OpenDAL, Lance, etc.).
     pub async fn open_with_context(ctx: Arc<FileSystemContext>, path: &str) -> Result<Self> {
-        let (file_info, router) = Self::init_with_context(&ctx, path).await?;
+        let probe = crate::probe::ProbeSession::begin_read_if(
+            crate::probe::is_enabled() || ctx.config().probe_enabled,
+            path,
+            ctx.config().master_addr.clone(),
+            ctx.config().block_size,
+            Some("CACHE".into()),
+        );
+        let open_start = std::time::Instant::now();
+        let (file_info, router) = crate::probe::scoped(
+            probe.as_ref().map(|s| s.collector()),
+            Self::init_with_context(&ctx, path),
+        )
+        .await?;
         let file_length = file_info.length.unwrap_or(0) as u64;
         let config = ctx.config().clone();
         let pool = Some(ctx.acquire_worker_pool());
@@ -212,7 +225,15 @@ impl GoosefsFileReader {
             0,
             file_length,
         )?;
-        reader.attach_cache(&ctx).await;
+        reader.probe = probe.clone();
+        crate::probe::scoped(
+            probe.as_ref().map(|s| s.collector()),
+            reader.attach_cache(&ctx),
+        )
+        .await;
+        if let Some(s) = &probe {
+            s.record_create_or_open(open_start.elapsed().as_micros() as u64);
+        }
         Ok(reader)
     }
 
@@ -226,7 +247,19 @@ impl GoosefsFileReader {
         offset: u64,
         length: u64,
     ) -> Result<Self> {
-        let (file_info, router) = Self::init_with_context(&ctx, path).await?;
+        let probe = crate::probe::ProbeSession::begin_read_if(
+            crate::probe::is_enabled() || ctx.config().probe_enabled,
+            path,
+            ctx.config().master_addr.clone(),
+            ctx.config().block_size,
+            Some("CACHE".into()),
+        );
+        let open_start = std::time::Instant::now();
+        let (file_info, router) = crate::probe::scoped(
+            probe.as_ref().map(|s| s.collector()),
+            Self::init_with_context(&ctx, path),
+        )
+        .await?;
         let config = ctx.config().clone();
         let pool = Some(ctx.acquire_worker_pool());
         let mut reader = Self::build(
@@ -239,7 +272,15 @@ impl GoosefsFileReader {
             offset,
             length,
         )?;
-        reader.attach_cache(&ctx).await;
+        reader.probe = probe.clone();
+        crate::probe::scoped(
+            probe.as_ref().map(|s| s.collector()),
+            reader.attach_cache(&ctx),
+        )
+        .await;
+        if let Some(s) = &probe {
+            s.record_create_or_open(open_start.elapsed().as_micros() as u64);
+        }
         Ok(reader)
     }
 
@@ -381,6 +422,7 @@ impl GoosefsFileReader {
             cache_async_write: false,
             short_circuit: None,
             ufs_read_options,
+            probe: None,
         })
     }
 
@@ -393,6 +435,7 @@ impl GoosefsFileReader {
     /// `URIStatus::from_proto` (all `unwrap_or(0)`), so this reader hits exactly
     /// the same on-disk pages as `GoosefsFileInStream`.
     async fn attach_cache(&mut self, ctx: &Arc<FileSystemContext>) {
+        let _probe = crate::probe::phase(crate::probe::phase::client::PAGE_CACHE_OPEN_US);
         // Short-circuit is independent of the page cache: it can accelerate the
         // worker read even when the page cache is disabled.
         self.short_circuit = ctx.acquire_short_circuit();
@@ -556,6 +599,17 @@ impl GoosefsFileReader {
     /// Uses only `&self` — it never touches iterator state, so it is safe to be
     /// re-entered as the cache-miss source.
     async fn read_segment(&self, block_id: i64, plan: &BlockReadPlan) -> Result<Bytes> {
+        let Some(session) = self.probe.clone() else {
+            return self.read_segment_ungated(block_id, plan).await;
+        };
+        crate::probe::scoped(
+            Some(session.collector()),
+            self.read_segment_ungated(block_id, plan),
+        )
+        .await
+    }
+
+    async fn read_segment_ungated(&self, block_id: i64, plan: &BlockReadPlan) -> Result<Bytes> {
         // Try the short-circuit (local mmap) path first; a recoverable failure
         // returns `None` and we fall through to the gRPC path below().
         if let Some(sc_result) = self.try_short_circuit_read(block_id, plan).await {
@@ -708,6 +762,7 @@ impl GoosefsFileReader {
                 return None;
             }
         };
+        let _probe = crate::probe::phase(crate::probe::phase::client::SHORT_CIRCUIT_US);
         let block_size = self.block_logical_size(plan.block_index);
 
         if !factory.should_use(block_id, block_size).await {
@@ -809,6 +864,19 @@ impl GoosefsFileReader {
     ///
     /// This reads all block segments sequentially and concatenates the results.
     pub async fn read_all(&mut self) -> Result<Bytes> {
+        let Some(session) = self.probe.clone() else {
+            return self.read_all_inner().await;
+        };
+        let t0 = std::time::Instant::now();
+        let result = crate::probe::scoped(Some(session.collector()), self.read_all_inner()).await;
+        session.add_data(t0.elapsed().as_micros() as u64);
+        session.add_bytes(self.total_bytes_read);
+        session.record_close(0);
+        session.finish(self.total_bytes_read, self.plans.len().max(1));
+        result
+    }
+
+    async fn read_all_inner(&mut self) -> Result<Bytes> {
         let expected_len = self.plans.iter().map(|p| p.length).sum::<u64>();
         let mut buf = BytesMut::with_capacity(expected_len as usize);
 
@@ -1166,6 +1234,16 @@ impl GoosefsFileReader {
     /// Get the requested read length.
     pub fn length(&self) -> u64 {
         self.length
+    }
+}
+
+impl Drop for GoosefsFileReader {
+    fn drop(&mut self) {
+        // `read_all()` already publishes. Streaming users who never call
+        // `read_all()` still get a report here; vacuous sessions are skipped.
+        if let Some(s) = &self.probe {
+            s.finish(self.total_bytes_read, self.plans.len().max(1));
+        }
     }
 }
 

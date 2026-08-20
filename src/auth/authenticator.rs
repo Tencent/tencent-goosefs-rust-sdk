@@ -139,6 +139,14 @@ impl tonic::service::Interceptor for ChannelIdInterceptor {
                 .parse()
                 .map_err(|_| Status::internal("invalid channel-id"))?,
         );
+        // Disabled probe: one Relaxed atomic after first init. Must not send
+        // `probe-enabled` unless on — that would activate server-side timing.
+        if crate::probe::is_enabled() {
+            request.metadata_mut().insert(
+                crate::probe::PROBE_ENABLED,
+                crate::probe::probe_enabled_header_value(),
+            );
+        }
         Ok(request)
     }
 }

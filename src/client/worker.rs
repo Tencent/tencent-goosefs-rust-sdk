@@ -363,7 +363,10 @@ impl WorkerClient {
             // request_timeout.
             .timeout(config.request_timeout);
 
-        let channel = endpoint.connect().await?;
+        let channel = {
+            let _probe = crate::probe::phase(crate::probe::phase::client::WORKER_CONNECT_US);
+            endpoint.connect().await?
+        };
 
         // Perform SASL authentication based on the configured auth type
         let authenticator =
@@ -664,6 +667,8 @@ impl WorkerClient {
 
         let mut client = self.inner.clone();
         let addr = self.addr.clone();
+        let probe_session = crate::probe::current_collector();
+        let probe_start = crate::probe::rpc_start();
 
         let task_handle = tokio::spawn(async move {
             debug!(block_id = block_id, addr = %addr, "WriteBlock gRPC task started");
@@ -686,10 +691,34 @@ impl WorkerClient {
                             }
                             Ok(None) => {
                                 debug!(block_id = block_id, "server closed response stream");
+                                if let (Some(session), Some(started)) =
+                                    (probe_session.as_ref(), probe_start)
+                                {
+                                    if let Ok(Some(trailers)) = stream.trailers().await {
+                                        session.record_rpc(
+                                            crate::probe::collector::timing_from_trailers(
+                                                crate::probe::collector::METHOD_WRITE_BLOCK,
+                                                started,
+                                                &trailers,
+                                            ),
+                                        );
+                                    }
+                                }
                                 break;
                             }
                             Err(status) => {
                                 warn!(block_id = block_id, %status, "server response error");
+                                if let (Some(session), Some(started)) =
+                                    (probe_session.as_ref(), probe_start)
+                                {
+                                    session.record_rpc(
+                                        crate::probe::collector::timing_from_trailers(
+                                            crate::probe::collector::METHOD_WRITE_BLOCK,
+                                            started,
+                                            status.metadata(),
+                                        ),
+                                    );
+                                }
                                 let _ = resp_tx.send(Err(status)).await;
                                 break;
                             }
@@ -698,6 +727,13 @@ impl WorkerClient {
                 }
                 Err(status) => {
                     warn!(block_id = block_id, %status, "WriteBlock RPC failed");
+                    if let (Some(session), Some(started)) = (probe_session.as_ref(), probe_start) {
+                        session.record_rpc(crate::probe::collector::timing_from_trailers(
+                            crate::probe::collector::METHOD_WRITE_BLOCK,
+                            started,
+                            status.metadata(),
+                        ));
+                    }
                     let _ = resp_tx.send(Err(status)).await;
                 }
             }
@@ -873,6 +909,7 @@ impl WorkerClientPool {
     /// tonic `Channel` itself also multiplexes, so each channel handles many
     /// concurrent RPCs.
     pub async fn acquire(&self, addr: &str) -> Result<WorkerClient> {
+        let _probe = crate::probe::phase(crate::probe::phase::client::POOL_ACQUIRE_US);
         let slot = self.next_slot(addr).await;
         let key = self.slot_key(addr, slot);
         self.acquire_by_key(&key, addr).await

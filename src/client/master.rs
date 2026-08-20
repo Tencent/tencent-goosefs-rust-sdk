@@ -67,6 +67,32 @@ const MAX_RPC_RETRIES: u32 = 2;
 type AuthenticatedFsClient =
     FileSystemMasterClientServiceClient<InterceptedService<Channel, ChannelIdInterceptor>>;
 
+fn probe_take<T>(
+    method: &'static str,
+    started: Option<std::time::Instant>,
+    resp: tonic::Response<T>,
+) -> tonic::Response<T> {
+    // tonic 0.14 merges unary trailers into `metadata()` (no `trailing_metadata()`).
+    crate::probe::record_unary(method, started, resp.metadata());
+    resp
+}
+
+/// Like [`probe_take`], but also records timings when the RPC fails
+/// (e.g. OpenDAL put prep `GetStatus` / `Remove` returning NotFound).
+fn probe_result<T>(
+    method: &'static str,
+    started: Option<std::time::Instant>,
+    result: std::result::Result<tonic::Response<T>, tonic::Status>,
+) -> std::result::Result<tonic::Response<T>, tonic::Status> {
+    match result {
+        Ok(resp) => Ok(probe_take(method, started, resp)),
+        Err(status) => {
+            crate::probe::record_unary(method, started, status.metadata());
+            Err(status)
+        }
+    }
+}
+
 /// Immutable snapshot of the authenticated channel state.
 ///
 /// `client` (which holds the tonic `Channel` + `channel-id` interceptor) and
@@ -299,6 +325,7 @@ impl MasterClient {
 
     /// Build a raw gRPC channel to a specific master address (without authentication).
     async fn build_raw_channel(config: &GoosefsConfig, addr: &str) -> Result<Channel> {
+        let _probe = crate::probe::phase(crate::probe::phase::client::MASTER_CONNECT_US);
         let endpoint_uri = format!("http://{}", addr);
         let endpoint = Channel::from_shared(endpoint_uri)
             .map_err(|e| Error::ConfigError {
@@ -460,7 +487,11 @@ impl MasterClient {
                         options: Some(GetStatusPOptions::default()),
                         request_id: None,
                     };
-                    let resp = client.get_status(req).await?;
+                    let resp = probe_result(
+                        crate::probe::collector::METHOD_GET_STATUS,
+                        crate::probe::rpc_start(),
+                        client.get_status(req).await,
+                    )?;
                     resp.into_inner()
                         .file_info
                         .ok_or_else(|| Error::missing_field("file_info"))
@@ -538,7 +569,11 @@ impl MasterClient {
                         path: Some(path),
                         options: Some(options),
                     };
-                    let resp = client.create_file(req).await?;
+                    let resp = probe_result(
+                        crate::probe::collector::METHOD_CREATE_FILE,
+                        crate::probe::rpc_start(),
+                        client.create_file(req).await,
+                    )?;
                     resp.into_inner()
                         .file_info
                         .ok_or_else(|| Error::missing_field("file_info"))
@@ -600,7 +635,12 @@ impl MasterClient {
                     }),
                     inode_id: None,
                 };
-                client.complete_file(req).await?;
+                let resp = probe_result(
+                    crate::probe::collector::METHOD_COMPLETE_FILE,
+                    crate::probe::rpc_start(),
+                    client.complete_file(req).await,
+                )?;
+                let _ = resp.into_inner();
                 Ok(())
             }
         })
@@ -666,7 +706,12 @@ impl MasterClient {
                         ..Default::default()
                     }),
                 };
-                client.remove(req).await?;
+                let resp = probe_result(
+                    crate::probe::collector::METHOD_REMOVE,
+                    crate::probe::rpc_start(),
+                    client.remove(req).await,
+                )?;
+                let _ = resp.into_inner();
                 Ok(())
             }
         })
@@ -693,6 +738,11 @@ impl MasterClient {
     }
 
     /// Rename (move) a file or directory.
+    ///
+    /// When probe mode is on, records client wall-clock and parses the Master
+    /// `probe-timing-bin` trailer (same path as CreateFile / CompleteFile).
+    /// OpenDAL finalize renames typically run outside a write `ProbeSession`,
+    /// so the SDK also emits a standalone Rename probe report in that case.
     #[instrument(skip(self), fields(src = %src, dst = %dst))]
     pub async fn rename(&self, src: &str, dst: &str) -> Result<()> {
         let src = src.to_string();
@@ -707,7 +757,12 @@ impl MasterClient {
                         dst_path: Some(dst),
                         options: Some(RenamePOptions::default()),
                     };
-                    client.rename(req).await?;
+                    let resp = probe_result(
+                        crate::probe::collector::METHOD_RENAME,
+                        crate::probe::rpc_start(),
+                        client.rename(req).await,
+                    )?;
+                    let _ = resp.into_inner();
                     Ok(())
                 }
             })
@@ -736,7 +791,12 @@ impl MasterClient {
                             ..Default::default()
                         }),
                     };
-                    client.create_directory(req).await?;
+                    let resp = probe_result(
+                        crate::probe::collector::METHOD_CREATE_DIRECTORY,
+                        crate::probe::rpc_start(),
+                        client.create_directory(req).await,
+                    )?;
+                    let _ = resp.into_inner();
                     Ok(())
                 }
             })
@@ -889,6 +949,7 @@ impl MasterClientPool {
     /// works regardless of whether the caller holds the `Arc` directly or
     /// clones the inner `MasterClient`.
     pub fn pick(&self) -> Arc<MasterClient> {
+        let _probe = crate::probe::phase(crate::probe::phase::client::POOL_ACQUIRE_US);
         let n = self.clients.len();
         if n == 1 {
             return self.clients[0].clone();

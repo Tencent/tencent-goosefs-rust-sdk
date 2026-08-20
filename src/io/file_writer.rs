@@ -54,7 +54,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use bytes::Bytes;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -66,7 +65,7 @@ use crate::config::GoosefsConfig;
 use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
 use crate::fs::options::DeleteOptions;
-use crate::io::writer::GrpcBlockWriter;
+use crate::io::writer::{owned_chunk, GrpcBlockWriter};
 use crate::proto::grpc::block::RequestType;
 use crate::proto::grpc::file::{CreateFilePOptions, FileInfo, FsOpPId};
 use crate::proto::proto::dataserver::CreateUfsFileOptions;
@@ -266,6 +265,8 @@ pub struct GoosefsFileWriter {
     /// test constructors (where the router starts empty). Once initialized via
     /// `ensure_router_init()`, this is set to `false` and subsequent calls are no-ops.
     _router_needs_init: AtomicBool,
+    /// Active probe session when `GOOSEFS_PROBE_ENABLED` (or config) is on.
+    probe: Option<std::sync::Arc<crate::probe::ProbeSession>>,
 }
 
 impl GoosefsFileWriter {
@@ -317,7 +318,22 @@ impl GoosefsFileWriter {
             create_options.mode = Some(default_file_mode());
         }
 
-        let file_info = master_arc.create_file(path, create_options).await?;
+        let probe = crate::probe::ProbeSession::begin_write_if(
+            crate::probe::is_enabled() || config.probe_enabled,
+            path,
+            config.master_addr.clone(),
+            config.block_size,
+            probe_write_type_label(create_options.write_type.or(config.write_type)),
+        );
+        let create_start = std::time::Instant::now();
+        let file_info = crate::probe::scoped(
+            probe.as_ref().map(|s| s.collector()),
+            master_arc.create_file(path, create_options.clone()),
+        )
+        .await?;
+        if let Some(s) = &probe {
+            s.record_create_or_open(create_start.elapsed().as_micros() as u64);
+        }
         debug!(
             path = %path,
             file_id = ?file_info.file_id,
@@ -368,6 +384,7 @@ impl GoosefsFileWriter {
             ufs_worker_addr: None,
             ufs_stream_completed: AtomicBool::new(false),
             _router_needs_init: AtomicBool::new(true),
+            probe,
         })
     }
 
@@ -425,6 +442,17 @@ impl GoosefsFileWriter {
     ///
     /// Can be called multiple times for streaming writes.
     pub async fn write(&mut self, data: &[u8]) -> Result<()> {
+        let Some(session) = self.probe.clone() else {
+            return self.write_inner(data).await;
+        };
+        let t0 = std::time::Instant::now();
+        let result = crate::probe::scoped(Some(session.collector()), self.write_inner(data)).await;
+        session.add_data(t0.elapsed().as_micros() as u64);
+        session.add_bytes(data.len() as u64);
+        result
+    }
+
+    async fn write_inner(&mut self, data: &[u8]) -> Result<()> {
         if self.cancelled.load(Ordering::SeqCst) || self.closed.load(Ordering::SeqCst) {
             return Err(Error::BlockIoError {
                 message: "cannot write to a completed or cancelled file".to_string(),
@@ -479,9 +507,8 @@ impl GoosefsFileWriter {
         if let Some(active) = self.current_block_writer.as_mut() {
             if active.bytes_written > 0 {
                 // Drain any held-back trailing partial chunk before flushing.
-                if !active.pending_chunk.is_empty() {
-                    let tail = Bytes::copy_from_slice(&active.pending_chunk);
-                    active.pending_chunk.clear();
+                let tail = std::mem::take(&mut active.pending_chunk);
+                if !tail.is_empty() {
                     if let Err(e) = active.writer.write_chunk(tail).await {
                         return self.handle_cache_write_exception(e).await;
                     }
@@ -499,8 +526,10 @@ impl GoosefsFileWriter {
     /// pushed onto the gRPC stream is **exactly `chunk_size` bytes**, except
     /// at safe boundaries (block end / explicit flush / block close), where a
     /// trailing partial chunk is allowed because no further chunks follow on
-    /// the same stream. Sub-`chunk_size` tails are buffered in
-    /// `ActiveBlockWriter::pending_chunk` and merged with subsequent writes.
+    /// the same stream. Sub-`chunk_size` tails stay in
+    /// `ActiveBlockWriter::pending_chunk`. Aligned `chunk_size` slices are
+    /// copied once from the caller's buffer — they are **not** appended onto
+    /// `pending_chunk` and drained from the front (that was O(n²) memmove).
     async fn write_to_cache_stream(&mut self, data: &[u8]) -> Result<()> {
         let block_size = self
             .file_info
@@ -521,41 +550,29 @@ impl GoosefsFileWriter {
                 self.open_next_block(block_size).await?;
             }
 
-            let writer = self.current_block_writer.as_mut().unwrap();
-            let remaining_in_block = writer.remaining() as usize;
-            let remaining_data = data.len() - offset;
-            let to_accept = std::cmp::min(remaining_in_block, remaining_data);
-            let end = offset + to_accept;
-
-            // Append the new bytes to the pending buffer first, then peel off
-            // as many full `chunk_size` chunks as possible. Anything left
-            // over (strictly < chunk_size) stays in `pending_chunk`.
-            writer.pending_chunk.extend_from_slice(&data[offset..end]);
-            writer.bytes_written += to_accept as u64;
-            offset = end;
-
-            let block_full = writer.remaining() == 0;
-
-            // Drain full chunks from the pending buffer.
-            while writer.pending_chunk.len() >= chunk_size {
-                let chunk = Bytes::copy_from_slice(&writer.pending_chunk[..chunk_size]);
-                writer.pending_chunk.drain(..chunk_size);
-                if let Err(e) = writer.writer.write_chunk(chunk).await {
-                    return self.handle_cache_write_exception(e).await;
-                }
+            let block_full;
+            let emit_result;
+            {
+                let writer = self.current_block_writer.as_mut().unwrap();
+                let remaining_in_block = writer.remaining() as usize;
+                let remaining_data = data.len() - offset;
+                let to_accept = remaining_in_block.min(remaining_data);
+                let slice = &data[offset..offset + to_accept];
+                writer.bytes_written += to_accept as u64;
+                offset += to_accept;
+                block_full = writer.remaining() == 0;
+                emit_result = emit_aligned_chunks(
+                    &mut writer.writer,
+                    &mut writer.pending_chunk,
+                    slice,
+                    chunk_size,
+                )
+                .await;
             }
-
-            // If this fills the block, also flush any trailing partial chunk
-            // (block boundary is a safe place for a partial chunk because the
-            // stream is about to be closed).
+            if let Err(e) = emit_result {
+                return self.handle_cache_write_exception(e).await;
+            }
             if block_full {
-                if !writer.pending_chunk.is_empty() {
-                    let tail = Bytes::copy_from_slice(&writer.pending_chunk);
-                    writer.pending_chunk.clear();
-                    if let Err(e) = writer.writer.write_chunk(tail).await {
-                        return self.handle_cache_write_exception(e).await;
-                    }
-                }
                 self.close_current_block().await?;
             }
         }
@@ -606,6 +623,10 @@ impl GoosefsFileWriter {
             self.close_current_block().await?;
         }
 
+        if let Some(s) = &self.probe {
+            s.begin_block();
+        }
+
         let file_id = self.file_info.file_id.unwrap_or(0);
         let block_index = self.committed_block_ids.len() as u64;
         let block_id = compute_block_id(file_id, block_index);
@@ -623,10 +644,12 @@ impl GoosefsFileWriter {
         //   - when replicas > 1 open N DataWriters (currently always write 1)
         // Deferred to a later phase; this path still uses file_replication_number
         // only and a single writer.
-        let worker_info = self
-            .router
-            .select_worker_with_replication(block_id, self.config.file_replication_number)
-            .await?;
+        let worker_info = {
+            let _probe = crate::probe::phase(crate::probe::phase::client::SELECT_WORKER_US);
+            self.router
+                .select_worker_with_replication(block_id, self.config.file_replication_number)
+                .await?
+        };
         let addr = worker_info
             .address
             .as_ref()
@@ -694,7 +717,7 @@ impl GoosefsFileWriter {
         if let Some(active) = self.current_block_writer.take() {
             let block_id = active.block_id;
             let bytes_written = active.bytes_written;
-            let mut pending_chunk = active.pending_chunk;
+            let pending_chunk = active.pending_chunk;
             let mut writer = active.writer;
 
             if bytes_written > 0 {
@@ -702,11 +725,13 @@ impl GoosefsFileWriter {
                 // block is a safe boundary because no further chunks follow
                 // on this stream.
                 if !pending_chunk.is_empty() {
-                    let tail = Bytes::copy_from_slice(&pending_chunk);
-                    pending_chunk.clear();
+                    let tail = pending_chunk;
                     if let Err(e) = writer.write_chunk(tail).await {
                         // Best-effort cancel: tear the stream down and bubble up.
                         writer.cancel().await;
+                        if let Some(s) = &self.probe {
+                            s.capture_block_local();
+                        }
                         return Err(e);
                     }
                 }
@@ -726,6 +751,9 @@ impl GoosefsFileWriter {
                             "flush failed during close_current_block; cancelling block stream"
                         );
                         writer.cancel().await;
+                        if let Some(s) = &self.probe {
+                            s.capture_block_local();
+                        }
                         return Err(e);
                     }
                 };
@@ -752,6 +780,9 @@ impl GoosefsFileWriter {
                          recording block_id for cancel-cleanup remove_blocks"
                     );
                     self.committed_block_ids.push(block_id);
+                    if let Some(s) = &self.probe {
+                        s.capture_block_local();
+                    }
                     return Err(e);
                 }
 
@@ -765,6 +796,9 @@ impl GoosefsFileWriter {
             } else {
                 // No data written, just cancel the empty block
                 writer.cancel().await;
+            }
+            if let Some(s) = &self.probe {
+                s.capture_block_local();
             }
         }
         Ok(())
@@ -1080,6 +1114,21 @@ impl GoosefsFileWriter {
     /// `closed` is set via `compare_exchange(false, true)` so only the first
     /// concurrent `close()` call proceeds; subsequent calls are no-ops.
     pub async fn close(&mut self) -> Result<()> {
+        let Some(session) = self.probe.clone() else {
+            return self.close_inner().await;
+        };
+        let t0 = std::time::Instant::now();
+        let result = crate::probe::scoped(Some(session.collector()), self.close_inner()).await;
+        let total = t0.elapsed().as_micros() as u64;
+        session.record_close(total.saturating_sub(session.complete_micros()));
+        session.finish(
+            self.total_bytes_written,
+            self.committed_block_ids.len().max(1),
+        );
+        result
+    }
+
+    async fn close_inner(&mut self) -> Result<()> {
         // CAS: only the first close() wins.
         if self
             .closed
@@ -1098,32 +1147,60 @@ impl GoosefsFileWriter {
         //    Dropping the request channel signals Worker-side onCompleted,
         //    which in turn flushes and closes the UFS OutputStream.
         if let Some(mut ufs) = self.ufs_stream.take() {
+            let flush_start = std::time::Instant::now();
             if let Err(e) = ufs.flush().await {
                 warn!(
                     path = %self.path,
                     error = %e,
                     "failed to flush UFS stream during close, cancelling"
                 );
+                add_close_phase(
+                    &self.probe,
+                    crate::probe::phase::client::UFS_FLUSH_US,
+                    flush_start,
+                );
                 ufs.cancel().await;
                 self.do_cancel_cleanup().await;
                 return Err(e);
             }
+            add_close_phase(
+                &self.probe,
+                crate::probe::phase::client::UFS_FLUSH_US,
+                flush_start,
+            );
+            let close_start = std::time::Instant::now();
             if let Err(e) = ufs.close().await {
                 warn!(
                     path = %self.path,
                     error = %e,
                     "failed to close UFS stream during close, cancelling"
                 );
+                add_close_phase(
+                    &self.probe,
+                    crate::probe::phase::client::UFS_CLOSE_US,
+                    close_start,
+                );
                 self.do_cancel_cleanup().await;
                 return Err(e);
             }
+            add_close_phase(
+                &self.probe,
+                crate::probe::phase::client::UFS_CLOSE_US,
+                close_start,
+            );
             // UFS stream closed successfully — record this for error recovery.
             self.ufs_stream_completed.store(true, Ordering::SeqCst);
             self.ufs_worker_addr = None;
         }
 
         // 2) Close the current in-progress cache block (flush + commitBlock)
+        let last_block_start = std::time::Instant::now();
         if let Err(e) = self.close_current_block().await {
+            add_close_phase(
+                &self.probe,
+                crate::probe::phase::client::LAST_BLOCK_CLOSE_US,
+                last_block_start,
+            );
             warn!(
                 path = %self.path,
                 error = %e,
@@ -1131,6 +1208,16 @@ impl GoosefsFileWriter {
             );
             self.do_cancel_cleanup().await;
             return Err(e);
+        }
+        add_close_phase(
+            &self.probe,
+            crate::probe::phase::client::LAST_BLOCK_CLOSE_US,
+            last_block_start,
+        );
+
+        if let Some(s) = &self.probe {
+            // THROUGH / leftover UFS locals that were not tied to a cache block close.
+            s.capture_data_local();
         }
 
         // 3) Complete the file on Master with the idempotency operation ID.
@@ -1143,6 +1230,7 @@ impl GoosefsFileWriter {
         };
 
         let op_id = uuid_to_fs_op_pid(self.operation_id);
+        let complete_start = std::time::Instant::now();
         if let Err(e) = self
             .master
             .complete_file(&self.path, ufs_length, Some(op_id))
@@ -1152,15 +1240,24 @@ impl GoosefsFileWriter {
             let e = self.handle_complete_file_error(e).await;
             return Err(e);
         }
+        if let Some(s) = &self.probe {
+            s.record_complete(complete_start.elapsed().as_micros() as u64);
+        }
 
         // 4) ASYNC_THROUGH: schedule asynchronous persistence to UFS after file is complete.
         if self.write_strategy.need_async_persist {
             debug!(path = %self.path, "scheduling async persistence for ASYNC_THROUGH");
-            if let Err(e) = self
+            let persist_start = std::time::Instant::now();
+            let persist_result = self
                 .master
                 .schedule_async_persistence(&self.path, None)
-                .await
-            {
+                .await;
+            add_close_phase(
+                &self.probe,
+                crate::probe::phase::client::ASYNC_PERSIST_US,
+                persist_start,
+            );
+            if let Err(e) = persist_result {
                 warn!(
                     path = %self.path,
                     error = %e,
@@ -1183,7 +1280,13 @@ impl GoosefsFileWriter {
         // FileInfo so subsequent readers observe the fresh metadata. No-op
         // when the opt-in cache is disabled.
         if let Some(ctx) = &self._context {
+            let inv_start = std::time::Instant::now();
             ctx.invalidate_file_info(&self.path);
+            add_close_phase(
+                &self.probe,
+                crate::probe::phase::client::INVALIDATE_META_US,
+                inv_start,
+            );
         }
 
         Ok(())
@@ -1272,17 +1375,30 @@ impl GoosefsFileWriter {
     }
 }
 
-/// Compute a deterministic block ID from file ID (inode ID) and block index.
-///
-/// Goosefs uses a scheme where block IDs are derived from the file's inode ID:
-///
-/// ```text
-/// Block ID layout (64 bits):
-///   [container ID: 40 bits][sequence number: 24 bits]
-///
-/// container ID = inode_id >> 24   (extract upper 40 bits)
-/// block ID     = (container_id << 24) | block_index
-/// ```
+/// Map a `WritePType` proto integer to the Java probe-report label.
+fn probe_write_type_label(write_type: Option<i32>) -> Option<String> {
+    match write_type {
+        Some(1) => Some("MUST_CACHE".into()),
+        Some(2) => Some("TRY_CACHE".into()),
+        Some(3) => Some("CACHE_THROUGH".into()),
+        Some(4) => Some("THROUGH".into()),
+        Some(5) => Some("ASYNC_THROUGH".into()),
+        _ => None,
+    }
+}
+
+/// Record a Close-section client-local phase (bypasses WriteBlock attribution).
+fn add_close_phase(
+    probe: &Option<std::sync::Arc<crate::probe::ProbeSession>>,
+    name: &'static str,
+    start: std::time::Instant,
+) {
+    if let Some(s) = probe {
+        s.add_close_local(name, start.elapsed().as_micros() as i64);
+    }
+}
+
+/// Compute the Goosefs block ID from a file ID (inode ID) and block index.
 ///
 /// This matches the Java implementation in `com.qcloud.cos.goosefs.master.block.BlockId`:
 ///   - `CONTAINER_ID_BITS = 40`
@@ -1301,6 +1417,93 @@ fn compute_block_id(file_id: i64, block_index: u64) -> i64 {
     (container_id << SEQUENCE_NUMBER_BITS) | seq
 }
 
+/// If `pending` plus a prefix of `incoming` fills `chunk_size`, move that
+/// coalesced buffer out. Otherwise append all of `incoming` into `pending`.
+///
+/// `pending.len()` is always `< chunk_size` on entry and on exit.
+fn take_completed_pending<'a>(
+    pending: &mut Vec<u8>,
+    incoming: &mut &'a [u8],
+    chunk_size: usize,
+) -> Option<Vec<u8>> {
+    debug_assert!(chunk_size > 0);
+    debug_assert!(pending.len() < chunk_size);
+    if pending.is_empty() {
+        return None;
+    }
+    let need = chunk_size - pending.len();
+    if incoming.len() < need {
+        let _probe = crate::probe::phase(crate::probe::phase::client::PENDING_CHUNK_US);
+        pending.extend_from_slice(incoming);
+        *incoming = &[];
+        return None;
+    }
+    {
+        let _probe = crate::probe::phase(crate::probe::phase::client::PENDING_CHUNK_US);
+        pending.extend_from_slice(&incoming[..need]);
+    }
+    *incoming = &incoming[need..];
+    let full = std::mem::take(pending);
+    pending.reserve(chunk_size);
+    debug_assert!(pending.is_empty());
+    Some(full)
+}
+
+/// Peel exact `chunk_size` payloads from `incoming` without growing `pending`
+/// past `chunk_size - 1`. Used by tests; the write path streams via
+/// [`emit_aligned_chunks`] so a 512MB `write()` does not hold every chunk.
+#[cfg(test)]
+fn take_full_chunks(pending: &mut Vec<u8>, incoming: &[u8], chunk_size: usize) -> Vec<Vec<u8>> {
+    let mut chunks = Vec::new();
+    let mut src = incoming;
+    if let Some(full) = take_completed_pending(pending, &mut src, chunk_size) {
+        chunks.push(full);
+    }
+    let n_full = src.len() / chunk_size;
+    for i in 0..n_full {
+        chunks.push(owned_chunk(&src[i * chunk_size..(i + 1) * chunk_size]));
+    }
+    let rem = src.len() % chunk_size;
+    if rem > 0 {
+        let _probe = crate::probe::phase(crate::probe::phase::client::PENDING_CHUNK_US);
+        pending.extend_from_slice(&src[src.len() - rem..]);
+    }
+    debug_assert!(pending.len() < chunk_size);
+    chunks
+}
+
+/// Send aligned `chunk_size` payloads as they are produced (no extra buffer
+/// of the whole `write()`). Leftover `< chunk_size` stays in `pending`.
+async fn emit_aligned_chunks(
+    writer: &mut GrpcBlockWriter,
+    pending: &mut Vec<u8>,
+    incoming: &[u8],
+    chunk_size: usize,
+) -> Result<()> {
+    if chunk_size == 0 {
+        return Err(Error::InvalidArgument {
+            message: "chunk_size must be > 0".into(),
+        });
+    }
+    let mut src = incoming;
+    if let Some(full) = take_completed_pending(pending, &mut src, chunk_size) {
+        writer.write_chunk(full).await?;
+    }
+    let mut offset = 0usize;
+    while offset + chunk_size <= src.len() {
+        writer
+            .write_chunk(owned_chunk(&src[offset..offset + chunk_size]))
+            .await?;
+        offset += chunk_size;
+    }
+    if offset < src.len() {
+        let _probe = crate::probe::phase(crate::probe::phase::client::PENDING_CHUNK_US);
+        pending.extend_from_slice(&src[offset..]);
+    }
+    debug_assert!(pending.len() < chunk_size);
+    Ok(())
+}
+
 /// State for the currently active block being written.
 ///
 /// Holds the `GrpcBlockWriter` and tracks how many bytes have been
@@ -1312,12 +1515,12 @@ fn compute_block_id(file_id: i64, block_index: u64) -> i64 {
 /// To work around a GooseFS Worker race in
 /// `LocalFileBlockWriter.appendComposite(CompositeByteBuf)` (which uses a
 /// position-relative gathering write on a shared `FileChannel` and is unsafe
-/// under concurrent stream pressure when chunks are not `chunk_size`-aligned;
-/// this struct
-/// keeps a `pending_chunk` buffer. Bytes are accumulated until exactly one
-/// `chunk_size`-aligned chunk can be sent; any trailing remainder is held
-/// back and merged with subsequent writes. The buffer is force-flushed only
-/// at safe boundaries:
+/// under concurrent stream pressure when chunks are not `chunk_size`-aligned),
+/// this struct keeps a `pending_chunk` buffer whose length is **always
+/// strictly less than `chunk_size`**. Full chunks are sliced from the
+/// caller's `&[u8]` and copied once onto the wire; only an unaligned tail
+/// is held and merged with the next `write()`. The buffer is force-flushed
+/// only at safe boundaries:
 ///
 /// 1. an explicit user `flush()` call;
 /// 2. the block becomes full (`remaining == 0`);
@@ -1336,7 +1539,7 @@ struct ActiveBlockWriter {
     block_size: u64,
     /// Bytes accepted into this writer (sent + still pending). This is the
     /// authoritative byte counter for block-fullness checks; it advances as
-    /// soon as bytes enter `pending_chunk`.
+    /// soon as bytes are accepted, including a trailing `pending_chunk`.
     bytes_written: u64,
     /// Worker address (for failure tracking).
     worker_addr: String,
@@ -1447,6 +1650,10 @@ impl GoosefsFileWriter {
 
 impl Drop for GoosefsFileWriter {
     fn drop(&mut self) {
+        // Do not emit from Drop: a vacuous finish() used to occupy the
+        // report slot before close() recorded CreateFile/Data/CompleteFile.
+        // close() is the only publisher; unfinished writers are cleaned up
+        // below without a probe report.
         self.perform_drop_cleanup();
     }
 }
@@ -1631,6 +1838,7 @@ mod tests {
             ufs_worker_addr: None,
             ufs_stream_completed: AtomicBool::new(false),
             _router_needs_init: AtomicBool::new(false),
+            probe: None,
         }
     }
 
@@ -1727,5 +1935,62 @@ mod tests {
             writer._context.is_none(),
             "perform_drop_cleanup must take() _context (N2 regression)"
         );
+    }
+
+    fn assert_pending_invariant(pending: &[u8], chunk_size: usize) {
+        assert!(
+            pending.len() < chunk_size,
+            "pending_chunk must stay strictly below chunk_size, got {} >= {}",
+            pending.len(),
+            chunk_size
+        );
+    }
+
+    #[test]
+    fn take_full_chunks_slices_aligned_payload_without_growing_pending() {
+        let chunk_size = 1024;
+        let mut pending = Vec::with_capacity(chunk_size);
+        // 17 full chunks + 100-byte tail — the old drain-from-front path
+        // memmoved ~136 MiB for a similar 17 MiB write().
+        let n = 17 * chunk_size + 100;
+        let incoming: Vec<u8> = (0u8..=255).cycle().take(n).collect();
+        let chunks = take_full_chunks(&mut pending, &incoming, chunk_size);
+        assert_eq!(chunks.len(), 17);
+        assert!(chunks.iter().all(|c| c.len() == chunk_size));
+        assert_eq!(&chunks[0], &incoming[..chunk_size]);
+        assert_eq!(pending.len(), 100);
+        assert_eq!(&pending[..], &incoming[incoming.len() - 100..]);
+        assert_pending_invariant(&pending, chunk_size);
+        assert!(
+            pending.capacity() <= chunk_size * 2,
+            "pending must not hold the whole write(); capacity={}",
+            pending.capacity()
+        );
+    }
+
+    #[test]
+    fn take_full_chunks_completes_existing_tail() {
+        let chunk_size = 1000;
+        let mut pending = vec![0u8; 400];
+        let incoming = vec![1u8; 700];
+        let chunks = take_full_chunks(&mut pending, &incoming, chunk_size);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 1000);
+        assert_eq!(&chunks[0][..400], &[0u8; 400]);
+        assert_eq!(&chunks[0][400..], &[1u8; 600]);
+        assert_eq!(pending.len(), 100);
+        assert_eq!(&pending[..], &[1u8; 100]);
+        assert_pending_invariant(&pending, chunk_size);
+    }
+
+    #[test]
+    fn take_full_chunks_holds_short_write_in_pending() {
+        let chunk_size = 1000;
+        let mut pending = vec![0u8; 400];
+        let incoming = vec![1u8; 200];
+        let chunks = take_full_chunks(&mut pending, &incoming, chunk_size);
+        assert!(chunks.is_empty());
+        assert_eq!(pending.len(), 600);
+        assert_pending_invariant(&pending, chunk_size);
     }
 }

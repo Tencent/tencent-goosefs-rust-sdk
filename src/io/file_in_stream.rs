@@ -210,6 +210,8 @@ pub struct GoosefsFileInStream {
     /// re-running `should_use` each chunk. Reset to `-1` when the block falls
     /// back to gRPC.
     sc_seq_block: i64,
+    /// Active probe session when `GOOSEFS_PROBE_ENABLED` (or config) is on.
+    probe: Option<std::sync::Arc<crate::probe::ProbeSession>>,
 }
 
 impl GoosefsFileInStream {
@@ -234,13 +236,32 @@ impl GoosefsFileInStream {
             .validate()
             .map_err(|e| Error::ConfigError { message: e })?;
 
-        let master = MasterClient::connect(config).await?;
-        let mut file_info = master.get_status(path).await?;
+        let probe = crate::probe::ProbeSession::begin_read_if(
+            crate::probe::is_enabled() || config.probe_enabled,
+            path,
+            config.master_addr.clone(),
+            config.block_size,
+            Some("CACHE".into()),
+        );
+        let open_start = std::time::Instant::now();
+        let master = crate::probe::scoped(
+            probe.as_ref().map(|s| s.collector()),
+            MasterClient::connect(config),
+        )
+        .await?;
+        let mut file_info = crate::probe::scoped(
+            probe.as_ref().map(|s| s.collector()),
+            master.get_status(path),
+        )
+        .await?;
 
         // Discover workers before CheckBlocks enrichment (needs the router).
         let inquire_client = master.inquire_client().clone();
-        let wm = WorkerManagerClient::connect_with_inquire(config, inquire_client).await?;
-        let workers = wm.get_worker_info_list().await?;
+        let workers = crate::probe::scoped(probe.as_ref().map(|s| s.collector()), async {
+            let wm = WorkerManagerClient::connect_with_inquire(config, inquire_client).await?;
+            wm.get_worker_info_list().await
+        })
+        .await?;
         if workers.is_empty() {
             return Err(Error::NoWorkerAvailable {
                 message: "no workers available for reading".to_string(),
@@ -262,12 +283,15 @@ impl GoosefsFileInStream {
 
         // Java populateFilePercentage / fs stat --check_replicas: probe workers
         // so empty Master locations become usable for select_worker_for_read.
-        crate::block::maybe_enrich_file_block_locations(
-            &mut file_info,
-            &router,
-            None,
-            config,
-            config.check_block_replicas,
+        crate::probe::scoped(
+            probe.as_ref().map(|s| s.collector()),
+            crate::block::maybe_enrich_file_block_locations(
+                &mut file_info,
+                &router,
+                None,
+                config,
+                config.check_block_replicas,
+            ),
         )
         .await;
 
@@ -294,6 +318,10 @@ impl GoosefsFileInStream {
             "GoosefsFileInStream opened"
         );
 
+        if let Some(s) = &probe {
+            s.record_create_or_open(open_start.elapsed().as_micros() as u64);
+        }
+
         Ok(Self {
             file_length,
             status,
@@ -316,6 +344,7 @@ impl GoosefsFileInStream {
             // legacy `open()` path has neither, so SC is disabled here.
             short_circuit: None,
             sc_seq_block: -1,
+            probe,
         })
     }
 
@@ -341,8 +370,23 @@ impl GoosefsFileInStream {
             .validate()
             .map_err(|e| Error::ConfigError { message: e })?;
 
+        let probe = crate::probe::ProbeSession::begin_read_if(
+            crate::probe::is_enabled() || config.probe_enabled,
+            path,
+            config.master_addr.clone(),
+            config.block_size,
+            Some(match options.in_stream_options.read_type {
+                crate::fs::options::ReadType::NoCache => "NO_CACHE".into(),
+                crate::fs::options::ReadType::Cache => "CACHE".into(),
+            }),
+        );
+        let open_start = std::time::Instant::now();
         // Shared Master + metadata cache (status / NotFound / incomplete fall-through).
-        let mut file_info = ctx.get_file_info_cached(path).await?;
+        let mut file_info = crate::probe::scoped(
+            probe.as_ref().map(|s| s.collector()),
+            ctx.get_file_info_cached(path),
+        )
+        .await?;
 
         // Reuse shared router — already populated and TTL-refreshed.
         // A1: clone the workers +
@@ -357,12 +401,15 @@ impl GoosefsFileInStream {
         // so empty Master locations become usable for select_worker_for_read.
         // Enrich a local clone only — never write probed locations back into
         // the FileInfo cache.
-        crate::block::maybe_enrich_file_block_locations(
-            &mut file_info,
-            &router,
-            Some(&worker_pool),
-            &config,
-            config.check_block_replicas,
+        crate::probe::scoped(
+            probe.as_ref().map(|s| s.collector()),
+            crate::block::maybe_enrich_file_block_locations(
+                &mut file_info,
+                &router,
+                Some(&worker_pool),
+                &config,
+                config.check_block_replicas,
+            ),
         )
         .await;
 
@@ -410,13 +457,17 @@ impl GoosefsFileInStream {
         // changed), the cache invalidates its stale pages so this stream never
         // serves stale data. Best-effort and cheap when nothing changed.
         if let Some(cache) = &cache {
-            cache
-                .on_file_open(
-                    &cache_file_id,
-                    status.length,
-                    status.last_modification_time_ms,
-                )
-                .await;
+            crate::probe::scoped(probe.as_ref().map(|s| s.collector()), async {
+                let _probe = crate::probe::phase(crate::probe::phase::client::PAGE_CACHE_OPEN_US);
+                cache
+                    .on_file_open(
+                        &cache_file_id,
+                        status.length,
+                        status.last_modification_time_ms,
+                    )
+                    .await;
+            })
+            .await;
         }
 
         debug!(
@@ -426,6 +477,10 @@ impl GoosefsFileInStream {
             cache_enabled = cache.is_some(),
             "GoosefsFileInStream opened (context mode)"
         );
+
+        if let Some(s) = &probe {
+            s.record_create_or_open(open_start.elapsed().as_micros() as u64);
+        }
 
         Ok(Self {
             file_length,
@@ -447,6 +502,7 @@ impl GoosefsFileInStream {
             cache_sequential_read: config.client_cache_sequential_read_enabled,
             short_circuit,
             sc_seq_block: -1,
+            probe,
         })
     }
 
@@ -534,14 +590,12 @@ impl GoosefsFileInStream {
                 } else {
                     // Backward seek within threshold but same block — still
                     // need to close and re-open (can't seek backwards in gRPC stream)
-                    self.block_in_stream = None;
-                    self.block_in_stream_block_id = -1;
+                    self.release_block_stream().await;
                 }
             }
         } else {
             // Large seek or cross-block seek — switch to positioned-read path
-            self.block_in_stream = None;
-            self.block_in_stream_block_id = -1;
+            self.release_block_stream().await;
         }
 
         self.pos = target;
@@ -583,6 +637,19 @@ impl GoosefsFileInStream {
     /// connection is invalidated and a fresh authenticated connection is used
     /// for one retry.
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let Some(session) = self.probe.clone() else {
+            return self.read_ungated(buf).await;
+        };
+        let t0 = std::time::Instant::now();
+        let result = crate::probe::scoped(Some(session.collector()), self.read_ungated(buf)).await;
+        session.add_data(t0.elapsed().as_micros() as u64);
+        if let Ok(n) = result {
+            session.add_bytes(n as u64);
+        }
+        result
+    }
+
+    async fn read_ungated(&mut self, buf: &mut [u8]) -> Result<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
@@ -657,6 +724,7 @@ impl GoosefsFileInStream {
 
         // Does the sequential stream match the current block?
         if self.block_in_stream_block_id != block_id {
+            self.release_block_stream().await;
             // Open a new sequential stream for this block
             let offset_in_block = self.offset_in_block(self.pos);
             let remaining_in_block = self.remaining_in_block(self.pos);
@@ -752,6 +820,17 @@ impl GoosefsFileInStream {
     /// If a positioned read fails with `AuthenticationFailed`, the stale
     /// connection is invalidated and a fresh one is used for one retry.
     pub async fn read_at(&mut self, offset: i64, n: usize) -> Result<Bytes> {
+        let Some(session) = self.probe.clone() else {
+            return self.read_at_ungated(offset, n).await;
+        };
+        let t0 = std::time::Instant::now();
+        let result =
+            crate::probe::scoped(Some(session.collector()), self.read_at_ungated(offset, n)).await;
+        session.add_data(t0.elapsed().as_micros() as u64);
+        result
+    }
+
+    async fn read_at_ungated(&mut self, offset: i64, n: usize) -> Result<Bytes> {
         if offset >= self.file_length || n == 0 {
             return Ok(Bytes::new());
         }
@@ -1014,6 +1093,7 @@ impl GoosefsFileInStream {
                 return None;
             }
         };
+        let _probe = crate::probe::phase(crate::probe::phase::client::SHORT_CIRCUIT_US);
         let block_size = self.block_logical_size(block_idx);
 
         if !factory.should_use(block_id, block_size).await {
@@ -1135,8 +1215,7 @@ impl GoosefsFileInStream {
                 buf[..n].copy_from_slice(slice);
                 // SC is now the source for this block — drop any stale gRPC
                 // stream and remember the decision for subsequent chunks.
-                self.block_in_stream = None;
-                self.block_in_stream_block_id = -1;
+                self.release_block_stream().await;
                 self.sc_seq_block = block_id;
                 self.pos += n as i64;
                 Some(Ok(n))
@@ -1460,6 +1539,15 @@ impl GoosefsFileInStream {
         Ok(())
     }
 
+    /// Half-close the sequential block stream so ReadBlock trailers are
+    /// recorded before the drain task is aborted on `Drop`.
+    async fn release_block_stream(&mut self) {
+        if let Some(reader) = self.block_in_stream.take() {
+            reader.shutdown().await;
+        }
+        self.block_in_stream_block_id = -1;
+    }
+
     /// Read one chunk from the existing sequential block stream and copy
     /// at most `buf.len()` bytes into `buf`. Any chunk overflow is parked
     /// in `self.carry_over` so it is delivered on the next `read()` call.
@@ -1471,50 +1559,72 @@ impl GoosefsFileInStream {
             "carry_over must be drained before pulling a fresh chunk"
         );
 
-        let stream = match self.block_in_stream.as_mut() {
-            Some(s) => s,
-            None => return Ok(0),
+        let (n, done) = {
+            let stream = match self.block_in_stream.as_mut() {
+                Some(s) => s,
+                None => return Ok(0),
+            };
+
+            match stream.read_chunk().await? {
+                Some(data) => {
+                    let n = data.len().min(buf.len());
+                    buf[..n].copy_from_slice(&data[..n]);
+
+                    // Park any chunk overflow so the next `read()` can deliver
+                    // it without losing bytes — this is what gives us the
+                    // `std::io::Read`-style "short reads never lose data"
+                    // contract that callers expect.
+                    if data.len() > n {
+                        self.carry_over.extend_from_slice(&data[n..]);
+                        debug!(
+                            chunk_len = data.len(),
+                            copied = n,
+                            carried = self.carry_over.len(),
+                            "chunk larger than caller buffer — overflow parked in carry_over"
+                        );
+                    }
+
+                    // Advance `self.pos` by the *full* chunk length — every byte
+                    // delivered by the chunk reader has been consumed from the
+                    // worker's perspective, even those parked in `carry_over`.
+                    // The caller-visible position (`pos()`) compensates by
+                    // subtracting `carry_over.len()`.
+                    self.pos += data.len() as i64;
+                    (n, stream.is_complete())
+                }
+                None => (0, true),
+            }
         };
+        if done {
+            self.release_block_stream().await;
+        }
+        Ok(n)
+    }
 
-        match stream.read_chunk().await? {
-            Some(data) => {
-                let n = data.len().min(buf.len());
-                buf[..n].copy_from_slice(&data[..n]);
+    /// Half-close the block stream and emit the probe report (when enabled).
+    ///
+    /// Safe to call more than once. `Drop` still publishes if this is skipped.
+    pub async fn close(&mut self) -> Result<()> {
+        let t0 = std::time::Instant::now();
+        self.release_block_stream().await;
+        if let Some(session) = &self.probe {
+            session.record_close(t0.elapsed().as_micros() as u64);
+            session.finish(
+                self.file_length.max(0) as u64,
+                self.status.block_ids.len().max(1),
+            );
+        }
+        Ok(())
+    }
+}
 
-                // Park any chunk overflow so the next `read()` can deliver
-                // it without losing bytes — this is what gives us the
-                // `std::io::Read`-style "short reads never lose data"
-                // contract that callers expect.
-                if data.len() > n {
-                    self.carry_over.extend_from_slice(&data[n..]);
-                    debug!(
-                        chunk_len = data.len(),
-                        copied = n,
-                        carried = self.carry_over.len(),
-                        "chunk larger than caller buffer — overflow parked in carry_over"
-                    );
-                }
-
-                // Advance `self.pos` by the *full* chunk length — every byte
-                // delivered by the chunk reader has been consumed from the
-                // worker's perspective, even those parked in `carry_over`.
-                // The caller-visible position (`pos()`) compensates by
-                // subtracting `carry_over.len()`.
-                self.pos += data.len() as i64;
-
-                // If stream is complete after this chunk, drop it.
-                if stream.is_complete() {
-                    self.block_in_stream = None;
-                    self.block_in_stream_block_id = -1;
-                }
-                Ok(n)
-            }
-            None => {
-                // Block stream exhausted — move to next block on next call.
-                self.block_in_stream = None;
-                self.block_in_stream_block_id = -1;
-                Ok(0)
-            }
+impl Drop for GoosefsFileInStream {
+    fn drop(&mut self) {
+        if let Some(s) = &self.probe {
+            s.finish(
+                self.file_length.max(0) as u64,
+                self.status.block_ids.len().max(1),
+            );
         }
     }
 }
@@ -1574,6 +1684,7 @@ mod tests {
             cache_sequential_read: false,
             short_circuit: None,
             sc_seq_block: -1,
+            probe: None,
         }
     }
 

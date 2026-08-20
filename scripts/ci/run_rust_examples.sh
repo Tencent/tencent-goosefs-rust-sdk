@@ -27,6 +27,7 @@ EXAMPLES=(
   context_file_rw
   metadata_crud
   write_types
+  probe
   streaming_file_read
   seekable_file_read
   async_read_trait
