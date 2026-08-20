@@ -54,7 +54,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use bytes::Bytes;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -66,7 +65,7 @@ use crate::config::GoosefsConfig;
 use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
 use crate::fs::options::DeleteOptions;
-use crate::io::writer::GrpcBlockWriter;
+use crate::io::writer::{owned_chunk, GrpcBlockWriter};
 use crate::proto::grpc::block::RequestType;
 use crate::proto::grpc::file::{CreateFilePOptions, FileInfo, FsOpPId};
 use crate::proto::proto::dataserver::CreateUfsFileOptions;
@@ -479,9 +478,8 @@ impl GoosefsFileWriter {
         if let Some(active) = self.current_block_writer.as_mut() {
             if active.bytes_written > 0 {
                 // Drain any held-back trailing partial chunk before flushing.
-                if !active.pending_chunk.is_empty() {
-                    let tail = Bytes::copy_from_slice(&active.pending_chunk);
-                    active.pending_chunk.clear();
+                let tail = std::mem::take(&mut active.pending_chunk);
+                if !tail.is_empty() {
                     if let Err(e) = active.writer.write_chunk(tail).await {
                         return self.handle_cache_write_exception(e).await;
                     }
@@ -499,8 +497,10 @@ impl GoosefsFileWriter {
     /// pushed onto the gRPC stream is **exactly `chunk_size` bytes**, except
     /// at safe boundaries (block end / explicit flush / block close), where a
     /// trailing partial chunk is allowed because no further chunks follow on
-    /// the same stream. Sub-`chunk_size` tails are buffered in
-    /// `ActiveBlockWriter::pending_chunk` and merged with subsequent writes.
+    /// the same stream. Sub-`chunk_size` tails stay in
+    /// `ActiveBlockWriter::pending_chunk`. Aligned `chunk_size` slices are
+    /// copied once from the caller's buffer — they are **not** appended onto
+    /// `pending_chunk` and drained from the front (that was O(n²) memmove).
     async fn write_to_cache_stream(&mut self, data: &[u8]) -> Result<()> {
         let block_size = self
             .file_info
@@ -521,41 +521,29 @@ impl GoosefsFileWriter {
                 self.open_next_block(block_size).await?;
             }
 
-            let writer = self.current_block_writer.as_mut().unwrap();
-            let remaining_in_block = writer.remaining() as usize;
-            let remaining_data = data.len() - offset;
-            let to_accept = std::cmp::min(remaining_in_block, remaining_data);
-            let end = offset + to_accept;
-
-            // Append the new bytes to the pending buffer first, then peel off
-            // as many full `chunk_size` chunks as possible. Anything left
-            // over (strictly < chunk_size) stays in `pending_chunk`.
-            writer.pending_chunk.extend_from_slice(&data[offset..end]);
-            writer.bytes_written += to_accept as u64;
-            offset = end;
-
-            let block_full = writer.remaining() == 0;
-
-            // Drain full chunks from the pending buffer.
-            while writer.pending_chunk.len() >= chunk_size {
-                let chunk = Bytes::copy_from_slice(&writer.pending_chunk[..chunk_size]);
-                writer.pending_chunk.drain(..chunk_size);
-                if let Err(e) = writer.writer.write_chunk(chunk).await {
-                    return self.handle_cache_write_exception(e).await;
-                }
+            let block_full;
+            let emit_result;
+            {
+                let writer = self.current_block_writer.as_mut().unwrap();
+                let remaining_in_block = writer.remaining() as usize;
+                let remaining_data = data.len() - offset;
+                let to_accept = remaining_in_block.min(remaining_data);
+                let slice = &data[offset..offset + to_accept];
+                writer.bytes_written += to_accept as u64;
+                offset += to_accept;
+                block_full = writer.remaining() == 0;
+                emit_result = emit_aligned_chunks(
+                    &mut writer.writer,
+                    &mut writer.pending_chunk,
+                    slice,
+                    chunk_size,
+                )
+                .await;
             }
-
-            // If this fills the block, also flush any trailing partial chunk
-            // (block boundary is a safe place for a partial chunk because the
-            // stream is about to be closed).
+            if let Err(e) = emit_result {
+                return self.handle_cache_write_exception(e).await;
+            }
             if block_full {
-                if !writer.pending_chunk.is_empty() {
-                    let tail = Bytes::copy_from_slice(&writer.pending_chunk);
-                    writer.pending_chunk.clear();
-                    if let Err(e) = writer.writer.write_chunk(tail).await {
-                        return self.handle_cache_write_exception(e).await;
-                    }
-                }
                 self.close_current_block().await?;
             }
         }
@@ -694,7 +682,7 @@ impl GoosefsFileWriter {
         if let Some(active) = self.current_block_writer.take() {
             let block_id = active.block_id;
             let bytes_written = active.bytes_written;
-            let mut pending_chunk = active.pending_chunk;
+            let pending_chunk = active.pending_chunk;
             let mut writer = active.writer;
 
             if bytes_written > 0 {
@@ -702,8 +690,7 @@ impl GoosefsFileWriter {
                 // block is a safe boundary because no further chunks follow
                 // on this stream.
                 if !pending_chunk.is_empty() {
-                    let tail = Bytes::copy_from_slice(&pending_chunk);
-                    pending_chunk.clear();
+                    let tail = pending_chunk;
                     if let Err(e) = writer.write_chunk(tail).await {
                         // Best-effort cancel: tear the stream down and bubble up.
                         writer.cancel().await;
@@ -1300,6 +1287,87 @@ fn compute_block_id(file_id: i64, block_index: u64) -> i64 {
     (container_id << SEQUENCE_NUMBER_BITS) | seq
 }
 
+/// If `pending` plus a prefix of `incoming` fills `chunk_size`, move that
+/// coalesced buffer out. Otherwise append all of `incoming` into `pending`.
+///
+/// `pending.len()` is always `< chunk_size` on entry and on exit.
+fn take_completed_pending<'a>(
+    pending: &mut Vec<u8>,
+    incoming: &mut &'a [u8],
+    chunk_size: usize,
+) -> Option<Vec<u8>> {
+    debug_assert!(chunk_size > 0);
+    debug_assert!(pending.len() < chunk_size);
+    if pending.is_empty() {
+        return None;
+    }
+    let need = chunk_size - pending.len();
+    if incoming.len() < need {
+        pending.extend_from_slice(incoming);
+        *incoming = &[];
+        return None;
+    }
+    pending.extend_from_slice(&incoming[..need]);
+    *incoming = &incoming[need..];
+    let full = std::mem::take(pending);
+    pending.reserve(chunk_size);
+    debug_assert!(pending.is_empty());
+    Some(full)
+}
+
+/// Peel exact `chunk_size` payloads from `incoming` without growing `pending`
+/// past `chunk_size - 1`. Used by tests; the write path streams via
+/// [`emit_aligned_chunks`] so a 512MB `write()` does not hold every chunk.
+#[cfg(test)]
+fn take_full_chunks(pending: &mut Vec<u8>, incoming: &[u8], chunk_size: usize) -> Vec<Vec<u8>> {
+    let mut chunks = Vec::new();
+    let mut src = incoming;
+    if let Some(full) = take_completed_pending(pending, &mut src, chunk_size) {
+        chunks.push(full);
+    }
+    let n_full = src.len() / chunk_size;
+    for i in 0..n_full {
+        chunks.push(owned_chunk(&src[i * chunk_size..(i + 1) * chunk_size]));
+    }
+    let rem = src.len() % chunk_size;
+    if rem > 0 {
+        pending.extend_from_slice(&src[src.len() - rem..]);
+    }
+    debug_assert!(pending.len() < chunk_size);
+    chunks
+}
+
+/// Send aligned `chunk_size` payloads as they are produced (no extra buffer
+/// of the whole `write()`). Leftover `< chunk_size` stays in `pending`.
+async fn emit_aligned_chunks(
+    writer: &mut GrpcBlockWriter,
+    pending: &mut Vec<u8>,
+    incoming: &[u8],
+    chunk_size: usize,
+) -> Result<()> {
+    if chunk_size == 0 {
+        return Err(Error::InvalidArgument {
+            message: "chunk_size must be > 0".into(),
+        });
+    }
+    let mut src = incoming;
+    if let Some(full) = take_completed_pending(pending, &mut src, chunk_size) {
+        writer.write_chunk(full).await?;
+    }
+    let mut offset = 0usize;
+    while offset + chunk_size <= src.len() {
+        writer
+            .write_chunk(owned_chunk(&src[offset..offset + chunk_size]))
+            .await?;
+        offset += chunk_size;
+    }
+    if offset < src.len() {
+        pending.extend_from_slice(&src[offset..]);
+    }
+    debug_assert!(pending.len() < chunk_size);
+    Ok(())
+}
+
 /// State for the currently active block being written.
 ///
 /// Holds the `GrpcBlockWriter` and tracks how many bytes have been
@@ -1311,12 +1379,12 @@ fn compute_block_id(file_id: i64, block_index: u64) -> i64 {
 /// To work around a GooseFS Worker race in
 /// `LocalFileBlockWriter.appendComposite(CompositeByteBuf)` (which uses a
 /// position-relative gathering write on a shared `FileChannel` and is unsafe
-/// under concurrent stream pressure when chunks are not `chunk_size`-aligned;
-/// this struct
-/// keeps a `pending_chunk` buffer. Bytes are accumulated until exactly one
-/// `chunk_size`-aligned chunk can be sent; any trailing remainder is held
-/// back and merged with subsequent writes. The buffer is force-flushed only
-/// at safe boundaries:
+/// under concurrent stream pressure when chunks are not `chunk_size`-aligned),
+/// this struct keeps a `pending_chunk` buffer whose length is **always
+/// strictly less than `chunk_size`**. Full chunks are sliced from the
+/// caller's `&[u8]` and copied once onto the wire; only an unaligned tail
+/// is held and merged with the next `write()`. The buffer is force-flushed
+/// only at safe boundaries:
 ///
 /// 1. an explicit user `flush()` call;
 /// 2. the block becomes full (`remaining == 0`);
@@ -1335,7 +1403,7 @@ struct ActiveBlockWriter {
     block_size: u64,
     /// Bytes accepted into this writer (sent + still pending). This is the
     /// authoritative byte counter for block-fullness checks; it advances as
-    /// soon as bytes enter `pending_chunk`.
+    /// soon as bytes are accepted, including a trailing `pending_chunk`.
     bytes_written: u64,
     /// Worker address (for failure tracking).
     worker_addr: String,
@@ -1726,5 +1794,62 @@ mod tests {
             writer._context.is_none(),
             "perform_drop_cleanup must take() _context (N2 regression)"
         );
+    }
+
+    fn assert_pending_invariant(pending: &[u8], chunk_size: usize) {
+        assert!(
+            pending.len() < chunk_size,
+            "pending_chunk must stay strictly below chunk_size, got {} >= {}",
+            pending.len(),
+            chunk_size
+        );
+    }
+
+    #[test]
+    fn take_full_chunks_slices_aligned_payload_without_growing_pending() {
+        let chunk_size = 1024;
+        let mut pending = Vec::with_capacity(chunk_size);
+        // 17 full chunks + 100-byte tail — the old drain-from-front path
+        // memmoved ~136 MiB for a similar 17 MiB write().
+        let n = 17 * chunk_size + 100;
+        let incoming: Vec<u8> = (0u8..=255).cycle().take(n).collect();
+        let chunks = take_full_chunks(&mut pending, &incoming, chunk_size);
+        assert_eq!(chunks.len(), 17);
+        assert!(chunks.iter().all(|c| c.len() == chunk_size));
+        assert_eq!(&chunks[0], &incoming[..chunk_size]);
+        assert_eq!(pending.len(), 100);
+        assert_eq!(&pending[..], &incoming[incoming.len() - 100..]);
+        assert_pending_invariant(&pending, chunk_size);
+        assert!(
+            pending.capacity() <= chunk_size * 2,
+            "pending must not hold the whole write(); capacity={}",
+            pending.capacity()
+        );
+    }
+
+    #[test]
+    fn take_full_chunks_completes_existing_tail() {
+        let chunk_size = 1000;
+        let mut pending = vec![0u8; 400];
+        let incoming = vec![1u8; 700];
+        let chunks = take_full_chunks(&mut pending, &incoming, chunk_size);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 1000);
+        assert_eq!(&chunks[0][..400], &[0u8; 400]);
+        assert_eq!(&chunks[0][400..], &[1u8; 600]);
+        assert_eq!(pending.len(), 100);
+        assert_eq!(&pending[..], &[1u8; 100]);
+        assert_pending_invariant(&pending, chunk_size);
+    }
+
+    #[test]
+    fn take_full_chunks_holds_short_write_in_pending() {
+        let chunk_size = 1000;
+        let mut pending = vec![0u8; 400];
+        let incoming = vec![1u8; 200];
+        let chunks = take_full_chunks(&mut pending, &incoming, chunk_size);
+        assert!(chunks.is_empty());
+        assert_eq!(pending.len(), 600);
+        assert_pending_invariant(&pending, chunk_size);
     }
 }
