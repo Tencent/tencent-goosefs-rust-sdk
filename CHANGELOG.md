@@ -11,6 +11,26 @@ kept aligned. Python-specific notes also appear in
 
 ## [Unreleased]
 
+### Added
+
+- **Inode fencing on `complete_file`** — `MasterClient::complete_file` now takes
+  an `inode_id`, which `GoosefsFileWriter` fills from the `create_file`
+  response. The Master feeds it to `checkClientMismatch`, so a completion whose
+  path no longer resolves to that inode fails with `NotFound` instead of
+  landing on a different writer's file. The Java client has always sent this
+  field; passing `None` reproduces the old unfenced behaviour.
+- **Stale INCOMPLETE inode reclamation** — `MasterClient::try_reclaim_stale_incomplete`
+  removes the inode a writer leaves behind when it dies between `createFile`
+  and `completeFile`, which otherwise occupies the path indefinitely (GooseFS
+  puts no lease on those inodes). The removal is a compare-and-swap on the
+  inode's mtime via the new `DeleteOptions::ttl` / `ttl_expect_mtime` fields, so
+  a writer that finishes inside the race window keeps its file and the caller
+  gets `ReclaimOutcome::Contended`. Since the Master stamps mtime only in
+  `createFile` and `completeFileInternal`, age is the only staleness signal
+  available — pick `stale_after` above the slowest legitimate write.
+- `Error::TtlExpectMtimeMismatch` for the refused compare-and-swap, mapped from
+  the bare gRPC `UNKNOWN` that `TtlExpectMtimeNotMatchException` arrives as.
+
 ### Changed
 
 - Align consistent-hash fallback virtual nodes per worker with GooseFS 2.0

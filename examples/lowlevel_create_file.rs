@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
     println!("\nCreating world.txt...");
     let mut create_options = CreateFilePOptions::default();
     create_options.block_size_bytes = Some(64 * 1024 * 1024); // 64MB block size
-    master
+    let file_info = master
         .create_file("/test-demo/world.txt", create_options)
         .await?;
     println!("File /test-demo/world.txt created");
@@ -78,7 +78,15 @@ async fn main() -> Result<()> {
     // Mark file as complete (only sets completed=true + length on Master side)
     println!("\nMarking file as complete (metadata only)...");
     master
-        .complete_file("/test-demo/world.txt", Some(fake_length), None)
+        // Passing the created inode id fences the completion: if the path were
+        // replaced by another writer's file in the meantime, the Master rejects
+        // this call instead of completing over it.
+        .complete_file(
+            "/test-demo/world.txt",
+            Some(fake_length),
+            None,
+            file_info.file_id,
+        )
         .await?;
     println!(
         "File metadata marked complete, length set to {} bytes",

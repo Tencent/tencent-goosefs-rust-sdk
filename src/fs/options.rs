@@ -233,9 +233,11 @@ impl CreateFileOptions {
 /// # Proto mapping
 ///
 /// Maps to `DeletePOptions` in `file_system_master.proto`:
-/// - `recursive`    → `DeletePOptions.recursive`
-/// - `unchecked`    → `DeletePOptions.unchecked`
-/// - `goosefs_only` → `DeletePOptions.goosefs_only`
+/// - `recursive`         → `DeletePOptions.recursive`
+/// - `unchecked`         → `DeletePOptions.unchecked`
+/// - `goosefs_only`      → `DeletePOptions.goosefs_only`
+/// - `ttl`               → `DeletePOptions.ttl`
+/// - `ttl_expect_mtime`  → `DeletePOptions.ttl_expect_mtime`
 ///
 /// # Java authority
 ///
@@ -268,6 +270,25 @@ pub struct DeleteOptions {
     /// Restrict deletion to the Goosefs namespace only; do not propagate to
     /// the underlying storage (UFS).  Used during CACHE_THROUGH error recovery.
     pub goosefs_only: bool,
+
+    /// Mark this delete as originating from a reclamation / TTL flow.
+    ///
+    /// Two server-side effects, both in `DefaultFileSystemMaster.delete()`:
+    /// 1. it enables the [`ttl_expect_mtime`](Self::ttl_expect_mtime) check;
+    /// 2. it **skips** `mMountTable.checkUnderWritableMountPoint(path)`, so a
+    ///    read-only mount point no longer rejects the delete.
+    ///
+    /// Because of (2), set this only when you genuinely intend a reclaim.
+    pub ttl: bool,
+
+    /// Compare-and-swap guard: when this is `Some(mtime)` and [`ttl`](Self::ttl)
+    /// is set, the Master refuses the delete unless the inode's
+    /// `lastModificationTimeMs` still equals `mtime`, raising
+    /// [`Error::TtlExpectMtimeMismatch`](crate::Error::TtlExpectMtimeMismatch).
+    ///
+    /// `None` (or `Some(0)`) disables the check and makes the delete
+    /// unconditional — never do that on a path another writer may own.
+    pub ttl_expect_mtime: Option<i64>,
 }
 
 impl DeleteOptions {
@@ -288,6 +309,29 @@ impl DeleteOptions {
             recursive: false,
             unchecked: true,
             goosefs_only: false,
+            ..Default::default()
+        }
+    }
+
+    /// Create options for reclaiming a stale INCOMPLETE inode left behind by a
+    /// writer that died without calling `close()` or `cancel()`.
+    ///
+    /// `expect_mtime` must be the `last_modification_time_ms` observed on the
+    /// very `get_status` that classified the inode as stale.  The Master then
+    /// only removes the inode if nothing touched it in between, so a writer
+    /// that finished inside the race window keeps its file.
+    ///
+    /// `goosefs_only` stays `false` on purpose: an INCOMPLETE inode can coexist
+    /// with a fully written UFS object (the `completeFile`-failed-after-UFS-close
+    /// case), and leaving that object behind would make a subsequent create
+    /// diverge from the namespace.
+    pub fn for_reclaim_stale_incomplete(expect_mtime: i64) -> Self {
+        Self {
+            recursive: false,
+            unchecked: true,
+            goosefs_only: false,
+            ttl: true,
+            ttl_expect_mtime: Some(expect_mtime),
         }
     }
 
@@ -301,6 +345,7 @@ impl DeleteOptions {
             recursive: false,
             unchecked: true,
             goosefs_only: true,
+            ..Default::default()
         }
     }
 }

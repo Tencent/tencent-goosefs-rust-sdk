@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
     println!("\n2. Creating test file...");
     let mut create_options = CreateFilePOptions::default();
     create_options.block_size_bytes = Some(64 * 1024 * 1024); // 64MB block size
-    master
+    let file_info = master
         .create_file("/test-demo/hello.txt", create_options)
         .await?;
     println!("File /test-demo/hello.txt created");
@@ -84,7 +84,12 @@ async fn main() -> Result<()> {
     // Mark file as complete (simulating write completion)
     println!("\n4. Marking file as complete...");
     master
-        .complete_file("/test-demo/hello.txt", Some(content.len() as i64), None)
+        .complete_file(
+            "/test-demo/hello.txt",
+            Some(content.len() as i64),
+            None,
+            file_info.file_id,
+        )
         .await?;
     println!(
         "File marked complete, content length: {} bytes",

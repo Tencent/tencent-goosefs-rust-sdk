@@ -371,6 +371,7 @@ impl PyGoosefs {
             recursive,
             unchecked,
             goosefs_only,
+            ..Default::default()
         };
         Self::guarded_block_on(py, async move {
             use futures::stream::{self, StreamExt};
@@ -487,6 +488,7 @@ impl PyGoosefs {
             recursive,
             unchecked,
             goosefs_only,
+            ..Default::default()
         };
         Self::guarded_block_on(py, async move {
             h.fs.delete(&path, opts).await.map_err(map_err)

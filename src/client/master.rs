@@ -35,6 +35,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use tonic::service::interceptor::InterceptedService;
@@ -92,6 +93,103 @@ struct AuthedState {
     /// because the test-only `from_channel` constructor and NOSASL mode do
     /// not need a SASL session.
     _sasl_guard: Option<SaslStreamGuard>,
+}
+
+/// Result of [`MasterClient::try_reclaim_stale_incomplete`].
+///
+/// Only [`Reclaimed`](Self::Reclaimed) and [`Vanished`](Self::Vanished) leave the
+/// path free; every other variant means the caller must treat the original
+/// create conflict as real.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReclaimOutcome {
+    /// The stale INCOMPLETE inode was removed.
+    Reclaimed,
+    /// Nothing occupied the path any more by the time we looked.
+    Vanished,
+    /// A completed file occupies the path — an ordinary "already exists".
+    Completed,
+    /// A directory occupies the path.
+    NotAFile,
+    /// The inode is INCOMPLETE but younger than `stale_after`, so a writer is
+    /// most likely still streaming into it. Nothing was removed.
+    WriteInProgress {
+        /// How long ago the Master last stamped the inode.
+        age: Duration,
+    },
+    /// Either the inode's mtime moved between the probe and the delete, or the
+    /// Master reported no usable mtime to compare against. Nothing was removed.
+    Contended,
+}
+
+impl ReclaimOutcome {
+    /// Whether the path is now free, so retrying `create_file` makes sense.
+    pub fn is_path_free(&self) -> bool {
+        matches!(self, Self::Reclaimed | Self::Vanished)
+    }
+}
+
+/// Translate [`DeleteOptions`] into the wire `DeletePOptions`.
+///
+/// Every field is sent explicitly rather than left to proto defaults, so a
+/// Master-side default change cannot silently alter delete semantics.
+fn build_delete_options(opts: &DeleteOptions) -> DeletePOptions {
+    DeletePOptions {
+        recursive: Some(opts.recursive),
+        unchecked: Some(opts.unchecked),
+        goosefs_only: Some(opts.goosefs_only),
+        ttl: Some(opts.ttl),
+        ttl_expect_mtime: opts.ttl_expect_mtime,
+        ..Default::default()
+    }
+}
+
+/// What the local probe concluded, before any delete is attempted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StaleDecision {
+    /// Worth reclaiming; use `expect_mtime` as the compare-and-swap token.
+    Reclaim { expect_mtime: i64 },
+    /// Decided locally; no delete needed.
+    Settled(ReclaimOutcome),
+}
+
+/// Decide whether the inode described by `info` is an abandoned INCOMPLETE
+/// leftover that may be reclaimed.
+///
+/// Split out from [`MasterClient::try_reclaim_stale_incomplete`] so the age
+/// arithmetic and the missing-mtime guard can be tested without a Master.
+fn classify_stale_incomplete(info: &FileInfo, now_ms: i64, stale_after: Duration) -> StaleDecision {
+    if info.folder.unwrap_or(false) {
+        return StaleDecision::Settled(ReclaimOutcome::NotAFile);
+    }
+    if info.completed.unwrap_or(false) {
+        return StaleDecision::Settled(ReclaimOutcome::Completed);
+    }
+
+    // Mirrors `InodeMetadataCleaner.maxTime(atime, ctime, mtime)`: take the
+    // freshest stamp so a writer that touched the inode most recently gets the
+    // benefit of the doubt.
+    let newest_stamp_ms = [
+        info.creation_time_ms,
+        info.last_modification_time_ms,
+        info.last_access_time_ms,
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(0);
+
+    let age = Duration::from_millis(now_ms.saturating_sub(newest_stamp_ms).max(0) as u64);
+    if age < stale_after {
+        return StaleDecision::Settled(ReclaimOutcome::WriteInProgress { age });
+    }
+
+    // Without a real mtime there is nothing to compare against, and
+    // `ttl_expect_mtime = 0` tells the Master to skip the check entirely — an
+    // unconditional delete on a path we do not own. Refuse instead.
+    match info.last_modification_time_ms.filter(|ms| *ms > 0) {
+        Some(expect_mtime) => StaleDecision::Reclaim { expect_mtime },
+        None => StaleDecision::Settled(ReclaimOutcome::Contended),
+    }
 }
 
 /// Default mode for directories: 0755 (rwxr-xr-x)
@@ -669,12 +767,25 @@ impl MasterClient {
     /// The Go SDK `base_filesystem.go:394-400` accepts an `operationID` parameter
     /// but **never writes it to the proto request**.  The Rust implementation
     /// fixes this: `operation_id` is always wired into `CompleteFilePOptions`.
+    ///
+    /// # Inode fencing
+    ///
+    /// `inode_id` should carry `FileInfo::file_id` from the `create_file` that
+    /// opened this write session.  The Master feeds it to `checkClientMismatch`,
+    /// which fails the call with `FileDoesNotExistException` (surfacing here as
+    /// [`Error::NotFound`]) when the path no longer resolves to that inode.
+    ///
+    /// Passing `None` maps to `Constants.UNKNOWN_INODE_ID` and makes the Master
+    /// **skip** the check, so a completion could land on an inode created by a
+    /// different writer after ours was removed. Prefer `Some(file_id)`; `None`
+    /// exists only for callers that never held a `create_file` response.
     #[instrument(skip(self), fields(path = %path))]
     pub async fn complete_file(
         &self,
         path: &str,
         ufs_length: Option<i64>,
         operation_id: Option<FsOpPId>,
+        inode_id: Option<i64>,
     ) -> Result<()> {
         let path = path.to_string();
         self.with_retry("complete_file", |mut client| {
@@ -691,7 +802,7 @@ impl MasterClient {
                         common_options,
                         ..Default::default()
                     }),
-                    inode_id: None,
+                    inode_id,
                 };
                 client.complete_file(req).await?;
                 Ok(())
@@ -752,12 +863,7 @@ impl MasterClient {
             async move {
                 let req = DeletePRequest {
                     path: Some(path),
-                    options: Some(DeletePOptions {
-                        recursive: Some(opts.recursive),
-                        unchecked: Some(opts.unchecked),
-                        goosefs_only: Some(opts.goosefs_only),
-                        ..Default::default()
-                    }),
+                    options: Some(build_delete_options(&opts)),
                 };
                 client.remove(req).await?;
                 Ok(())
@@ -783,6 +889,84 @@ impl MasterClient {
             .await;
         self.counter_delete_ops.inc(1);
         result
+    }
+
+    /// Try to reclaim a stale INCOMPLETE inode so an exclusive create can
+    /// proceed at `path`.
+    ///
+    /// A writer that dies between `create_file` and `complete_file` leaves an
+    /// INCOMPLETE inode behind. GooseFS has no lease on those inodes: the Master
+    /// stamps `lastModificationTimeMs` only in `createFile` and
+    /// `completeFileInternal` — `commitLocation` deliberately does not — so a
+    /// long-running healthy write and an abandoned one are metadata-identical
+    /// apart from their age. Age is therefore the only discriminator available,
+    /// and `stale_after` is the knob that decides.
+    ///
+    /// The removal is a compare-and-swap, not a blind delete: the mtime observed
+    /// during the probe is sent back as `ttl_expect_mtime`, so a writer that
+    /// completed inside the race window keeps its file and this call reports
+    /// [`ReclaimOutcome::Contended`].
+    ///
+    /// # Choosing `stale_after`
+    ///
+    /// Pick a value comfortably above the slowest legitimate write, because a
+    /// writer that exceeds it loses its inode mid-flight. That writer does not
+    /// corrupt anything — its `complete_file` fails the Master's
+    /// `checkClientMismatch` provided it passes `inode_id` — but it does fail.
+    /// The comparison also spans two clocks: the timestamps are stamped by the
+    /// Master while `now` is read locally, so leave room for skew.
+    ///
+    /// # Errors
+    ///
+    /// Propagates unexpected `get_status` / delete failures. A refused CAS or a
+    /// path that disappeared are outcomes, not errors.
+    #[instrument(skip(self), fields(path = %path))]
+    pub async fn try_reclaim_stale_incomplete(
+        &self,
+        path: &str,
+        stale_after: Duration,
+    ) -> Result<ReclaimOutcome> {
+        let info = match self.get_status(path).await {
+            Ok(info) => info,
+            Err(e) if e.is_not_found() => return Ok(ReclaimOutcome::Vanished),
+            Err(e) => return Err(e),
+        };
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        let expect_mtime = match classify_stale_incomplete(&info, now_ms, stale_after) {
+            StaleDecision::Reclaim { expect_mtime } => expect_mtime,
+            StaleDecision::Settled(ReclaimOutcome::Contended) => {
+                warn!(
+                    path = %path,
+                    "refusing to reclaim stale incomplete inode: Master reported no usable mtime"
+                );
+                return Ok(ReclaimOutcome::Contended);
+            }
+            StaleDecision::Settled(outcome) => return Ok(outcome),
+        };
+
+        debug!(
+            path = %path,
+            expect_mtime,
+            "reclaiming stale incomplete inode"
+        );
+
+        match self
+            .delete_with_options(
+                path,
+                DeleteOptions::for_reclaim_stale_incomplete(expect_mtime),
+            )
+            .await
+        {
+            Ok(()) => Ok(ReclaimOutcome::Reclaimed),
+            Err(e) if e.is_ttl_expect_mtime_mismatch() => Ok(ReclaimOutcome::Contended),
+            Err(e) if e.is_not_found() => Ok(ReclaimOutcome::Vanished),
+            Err(e) => Err(e),
+        }
     }
 
     /// Rename (move) a file or directory.
@@ -1073,6 +1257,11 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use arc_swap::ArcSwap;
+
+    use super::{
+        build_delete_options, classify_stale_incomplete, DeleteOptions, FileInfo, ReclaimOutcome,
+        StaleDecision,
+    };
 
     #[test]
     fn list_status_bfs_skips_non_folders_and_empty_paths() {
@@ -1504,5 +1693,178 @@ mod tests {
             Arc::ptr_eq(&picked, &cloned),
             "Arc::clone must share the same MasterClient"
         );
+    }
+
+    // ── Stale INCOMPLETE inode reclamation ──────────────────────────────
+    //
+    // `classify_stale_incomplete` is the whole safety argument of the reclaim
+    // path: it decides when an inode is abandoned rather than merely slow, and
+    // it produces the compare-and-swap token used for the delete. These tests
+    // pin that logic down without needing a Master.
+
+    const HOUR: Duration = Duration::from_secs(3600);
+
+    /// An INCOMPLETE file whose timestamps are all `stamp_ms`.
+    fn incomplete_at(stamp_ms: i64) -> FileInfo {
+        FileInfo {
+            completed: Some(false),
+            folder: Some(false),
+            creation_time_ms: Some(stamp_ms),
+            last_modification_time_ms: Some(stamp_ms),
+            last_access_time_ms: Some(stamp_ms),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn stale_incomplete_is_reclaimable_with_its_mtime_as_cas_token() {
+        let now = 10 * 3_600_000;
+        let info = incomplete_at(now - 2 * 3_600_000);
+        assert_eq!(
+            classify_stale_incomplete(&info, now, HOUR),
+            StaleDecision::Reclaim {
+                expect_mtime: now - 2 * 3_600_000
+            }
+        );
+    }
+
+    #[test]
+    fn young_incomplete_is_left_alone() {
+        let now = 10 * 3_600_000;
+        let info = incomplete_at(now - 60_000);
+        assert_eq!(
+            classify_stale_incomplete(&info, now, HOUR),
+            StaleDecision::Settled(ReclaimOutcome::WriteInProgress {
+                age: Duration::from_secs(60)
+            })
+        );
+    }
+
+    /// The freshest of the three stamps decides, matching the Java cleaner's
+    /// `maxTime(atime, ctime, mtime)`. An old ctime must not condemn an inode
+    /// that was touched recently.
+    #[test]
+    fn newest_timestamp_wins_over_older_ones() {
+        let now = 10 * 3_600_000;
+        let info = FileInfo {
+            completed: Some(false),
+            folder: Some(false),
+            creation_time_ms: Some(now - 5 * 3_600_000),
+            last_modification_time_ms: Some(now - 5 * 3_600_000),
+            last_access_time_ms: Some(now - 1_000),
+            ..Default::default()
+        };
+        assert!(matches!(
+            classify_stale_incomplete(&info, now, HOUR),
+            StaleDecision::Settled(ReclaimOutcome::WriteInProgress { .. })
+        ));
+    }
+
+    #[test]
+    fn completed_file_is_a_real_conflict() {
+        let now = 10 * 3_600_000;
+        let mut info = incomplete_at(now - 5 * 3_600_000);
+        info.completed = Some(true);
+        assert_eq!(
+            classify_stale_incomplete(&info, now, HOUR),
+            StaleDecision::Settled(ReclaimOutcome::Completed)
+        );
+    }
+
+    #[test]
+    fn directory_is_never_reclaimed() {
+        let now = 10 * 3_600_000;
+        let mut info = incomplete_at(now - 5 * 3_600_000);
+        info.folder = Some(true);
+        assert_eq!(
+            classify_stale_incomplete(&info, now, HOUR),
+            StaleDecision::Settled(ReclaimOutcome::NotAFile)
+        );
+    }
+
+    /// Without a usable mtime the delete would degrade into an unconditional
+    /// one (`ttl_expect_mtime = 0` disables the Master-side check), so the
+    /// classifier must refuse rather than reclaim.
+    #[test]
+    fn missing_mtime_refuses_to_reclaim() {
+        let now = 10 * 3_600_000;
+        for absent in [None, Some(0)] {
+            let mut info = incomplete_at(now - 5 * 3_600_000);
+            info.last_modification_time_ms = absent;
+            info.creation_time_ms = Some(now - 5 * 3_600_000);
+            info.last_access_time_ms = Some(now - 5 * 3_600_000);
+            assert_eq!(
+                classify_stale_incomplete(&info, now, HOUR),
+                StaleDecision::Settled(ReclaimOutcome::Contended),
+                "mtime = {absent:?} must not be reclaimed"
+            );
+        }
+    }
+
+    /// Master clocks can run ahead of ours; a future timestamp must read as
+    /// age zero rather than underflow into a huge age.
+    #[test]
+    fn future_timestamp_does_not_underflow_into_staleness() {
+        let now = 10 * 3_600_000;
+        let info = incomplete_at(now + 5 * 3_600_000);
+        assert_eq!(
+            classify_stale_incomplete(&info, now, HOUR),
+            StaleDecision::Settled(ReclaimOutcome::WriteInProgress {
+                age: Duration::ZERO
+            })
+        );
+    }
+
+    #[test]
+    fn only_reclaimed_and_vanished_free_the_path() {
+        assert!(ReclaimOutcome::Reclaimed.is_path_free());
+        assert!(ReclaimOutcome::Vanished.is_path_free());
+        assert!(!ReclaimOutcome::Completed.is_path_free());
+        assert!(!ReclaimOutcome::NotAFile.is_path_free());
+        assert!(!ReclaimOutcome::Contended.is_path_free());
+        assert!(!ReclaimOutcome::WriteInProgress {
+            age: Duration::ZERO
+        }
+        .is_path_free());
+    }
+
+    // ── DeleteOptions → wire mapping ────────────────────────────────────
+
+    #[test]
+    fn reclaim_delete_carries_ttl_flag_and_cas_token() {
+        let wire = build_delete_options(&DeleteOptions::for_reclaim_stale_incomplete(1234));
+        assert_eq!(
+            wire.ttl,
+            Some(true),
+            "ttl gates the mtime check server-side"
+        );
+        assert_eq!(wire.ttl_expect_mtime, Some(1234));
+        assert_eq!(
+            wire.unchecked,
+            Some(true),
+            "an INCOMPLETE inode needs unchecked to be deletable"
+        );
+        assert_eq!(
+            wire.goosefs_only,
+            Some(false),
+            "a UFS object may coexist with the incomplete inode and must go too"
+        );
+        assert_eq!(wire.recursive, Some(false));
+    }
+
+    /// Ordinary deletes must not set `ttl`: besides enabling the mtime check it
+    /// also makes the Master skip `checkUnderWritableMountPoint`.
+    #[test]
+    fn ordinary_deletes_do_not_set_ttl() {
+        for opts in [
+            DeleteOptions::default(),
+            DeleteOptions::recursive(),
+            DeleteOptions::for_cancel(),
+            DeleteOptions::goosefs_only_unchecked(),
+        ] {
+            let wire = build_delete_options(&opts);
+            assert_eq!(wire.ttl, Some(false), "unexpected ttl for {opts:?}");
+            assert_eq!(wire.ttl_expect_mtime, None, "unexpected CAS for {opts:?}");
+        }
     }
 }
