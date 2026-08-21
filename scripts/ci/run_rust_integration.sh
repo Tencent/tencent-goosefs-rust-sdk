@@ -34,6 +34,13 @@ cargo test --test page_cache_consistency -- --ignored --nocapture --test-threads
 echo "==> integration: master_rename_no_replace"
 cargo test --test master_rename_no_replace -- --ignored --nocapture --test-threads=1
 
+# Exclusive-create support: completeFile inode fencing + reclamation of the
+# INCOMPLETE inodes a dead writer leaves behind. The conditional-delete
+# assertion self-skips (with a loud log line) on a Master that predates the
+# ttlExpectMtime guard; everything else is asserted unconditionally.
+echo "==> integration: stale_incomplete_reclaim (inode fencing + reclaim)"
+cargo test --test stale_incomplete_reclaim -- --ignored --nocapture --test-threads=1
+
 echo "==> integration: opendal_sdk_api (OpenDAL GooseFS v2.1.0.1 SDK surface)"
 cargo test --test opendal_sdk_api -- --ignored --nocapture --test-threads=1
 

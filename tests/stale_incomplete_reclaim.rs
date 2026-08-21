@@ -111,6 +111,45 @@ async fn leave_incomplete_inode(master: &MasterClient, path: &str) -> Result<i64
     Ok(inode_id)
 }
 
+/// Whether this Master honours `DeleteOptions::ttl_expect_mtime`.
+///
+/// The guard landed on GooseFS `branch-2.0` on 2026-07-13 and is not in any
+/// release tag yet, so a fixture pinned to an older image ignores the field —
+/// which turns every conditional delete into an unconditional one. Probe the
+/// behaviour instead of guessing from a version string: issue a conditional
+/// delete carrying a deliberately wrong mtime against a throwaway inode. A
+/// Master that honours the field refuses; one that ignores it deletes the inode.
+async fn honours_mtime_guard(master: &MasterClient) -> Result<bool> {
+    let probe = unique_path("probe-mtime-guard");
+    leave_incomplete_inode(master, &probe).await?;
+    let mtime = master
+        .get_status(&probe)
+        .await?
+        .last_modification_time_ms
+        .expect("Master must report an mtime");
+
+    let refused = match master
+        .delete_with_options(
+            &probe,
+            // Deliberately not the observed mtime.
+            DeleteOptions::for_reclaim_stale_incomplete(mtime + 1_000_000),
+        )
+        .await
+    {
+        Err(e) if e.is_ttl_expect_mtime_mismatch() => true,
+        Err(e) => return Err(e),
+        Ok(()) => false,
+    };
+
+    // The inode survives only if the guard refused the delete.
+    if refused {
+        let _ = master
+            .delete_with_options(&probe, DeleteOptions::for_cancel())
+            .await;
+    }
+    Ok(refused)
+}
+
 async fn write_blob(ctx: &Arc<FileSystemContext>, path: &str, payload: &[u8]) -> Result<()> {
     let master = ctx.acquire_master();
     let _ = master.create_directory(TEST_DIR, true).await;
@@ -232,13 +271,28 @@ async fn missing_path_reports_vanished() -> Result<()> {
 /// End-to-end proof of the compare-and-swap: the writer completes inside the
 /// race window, so its mtime moves and the delete built from the stale mtime is
 /// refused. Without this guard the reclaim would destroy a finished file.
+///
+/// Skipped — loudly, so the CI log always states which mode it ran in — against
+/// a Master that predates the `ttlExpectMtime` guard. Point the fixture at a
+/// newer build via `GOOSEFS_IMAGE` to exercise it.
 #[tokio::test]
 #[ignore = "Requires GooseFS master"]
 async fn conditional_delete_is_refused_once_mtime_moves() -> Result<()> {
     let ctx = FileSystemContext::connect(base_config()).await?;
     let master = ctx.acquire_master();
-    let path = unique_path("cas");
 
+    if !honours_mtime_guard(&master).await? {
+        eprintln!(
+            "[reclaim] SKIP conditional-delete assertion: this Master ignores \
+             DeletePOptions.ttlExpectMtime, so every conditional delete is \
+             unconditional. Reclamation is NOT race-safe here — use a GooseFS \
+             build that contains the 2026-07-13 mtime-guard change."
+        );
+        return Ok(());
+    }
+    eprintln!("[reclaim] Master honours ttlExpectMtime — asserting the CAS");
+
+    let path = unique_path("cas");
     let inode_id = leave_incomplete_inode(&master, &path).await?;
     let stale_mtime = master
         .get_status(&path)
