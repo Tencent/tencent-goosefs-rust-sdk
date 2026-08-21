@@ -121,6 +121,12 @@ pub fn map_err(e: goosefs_sdk::error::Error) -> PyErr {
         }
         E::BlockIoError { message } => IoError::new_err(format!("block IO error: {message}")),
         E::Internal { message, .. } => GoosefsError::new_err(format!("internal error: {message}")),
+        // Unreachable through the Python surface today: `PyDeleteOptions` never
+        // sets `ttl`, so Python never issues a conditional delete. Mapped
+        // explicitly anyway to keep this match exhaustive.
+        E::TtlExpectMtimeMismatch { message } => {
+            GoosefsError::new_err(format!("conditional delete aborted: {message}"))
+        }
     }
 }
 
@@ -176,6 +182,9 @@ mod tests {
             E::Internal {
                 message: "boom".into(),
                 source: None,
+            },
+            E::TtlExpectMtimeMismatch {
+                message: "TTL delete aborted: expected mtime 1, but actual mtime is 2".into(),
             },
         ];
         for e in cases {

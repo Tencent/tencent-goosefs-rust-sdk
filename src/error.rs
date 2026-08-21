@@ -22,6 +22,10 @@ use thiserror::Error;
 /// Convenience type alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Leading text of `ExceptionMessage.TTL_EXPECT_MTIME_NOT_MATCH`, which reads
+/// `"TTL delete aborted: expected mtime {0}, but actual mtime is {1}"`.
+const TTL_MTIME_MISMATCH_MARKER: &str = "TTL delete aborted";
+
 /// Top-level error type for goosefs-sdk.
 #[derive(Debug, Error)]
 pub enum Error {
@@ -129,6 +133,21 @@ pub enum Error {
     #[error("invalid path: {path}")]
     InvalidPath { path: String },
 
+    /// A conditional delete (`DeleteOptions::ttl_expect_mtime`) was rejected
+    /// because the inode's `lastModificationTimeMs` no longer matches the value
+    /// the caller observed.
+    ///
+    /// This is the compare-and-swap failure of the reclaim path: somebody else
+    /// mutated the inode between our `get_status` probe and the delete, so the
+    /// delete was correctly refused.
+    ///
+    /// Java: `TtlExpectMtimeNotMatchException` extends the bare `GooseFSException`,
+    /// which `GooseFSStatusException.fromGooseFSException` funnels into
+    /// `UnknownException` → gRPC `UNKNOWN`.  The message text is therefore the
+    /// only available discriminator.
+    #[error("conditional delete aborted, mtime moved: {message}")]
+    TtlExpectMtimeMismatch { message: String },
+
     // -----------------------------------------------------------------------
     // Authentication errors — must NOT trigger worker blacklisting.
     //
@@ -199,6 +218,16 @@ impl From<tonic::Status> for Error {
                     }
                 }
             }
+            // `TtlExpectMtimeNotMatchException` has no dedicated status mapping
+            // in `GooseFSStatusException.fromGooseFSException` — it falls through
+            // the catch chain to `UnknownException`, so UNKNOWN + the message
+            // prefix from `ExceptionMessage.TTL_EXPECT_MTIME_NOT_MATCH` is all we
+            // have to go on.
+            tonic::Code::Unknown if status.message().contains(TTL_MTIME_MISMATCH_MARKER) => {
+                Error::TtlExpectMtimeMismatch {
+                    message: status.message().to_string(),
+                }
+            }
             _ => Error::GrpcError {
                 message: format!("[{}] {}", status.code(), status.message()),
                 source: Box::new(status),
@@ -255,6 +284,12 @@ impl Error {
     /// Returns `true` if the directory is not empty.
     pub fn is_directory_not_empty(&self) -> bool {
         matches!(self, Error::DirectoryNotEmpty { .. })
+    }
+
+    /// Returns `true` if a conditional delete was refused because the inode's
+    /// mtime moved since the caller observed it.
+    pub fn is_ttl_expect_mtime_mismatch(&self) -> bool {
+        matches!(self, Error::TtlExpectMtimeMismatch { .. })
     }
 
     /// Returns `true` if the authentication credentials were rejected.
@@ -356,6 +391,38 @@ mod tests {
     #[test]
     fn test_failed_precondition_unknown_falls_through_to_grpc_error() {
         let status = tonic::Status::failed_precondition("some other precondition failure");
+        let err = Error::from(status);
+        assert!(
+            matches!(err, Error::GrpcError { .. }),
+            "expected GrpcError fallthrough, got {:?}",
+            err
+        );
+    }
+
+    /// `TtlExpectMtimeNotMatchException` reaches us as a bare UNKNOWN because
+    /// `GooseFSStatusException.fromGooseFSException` has no case for it, so the
+    /// message text is the only discriminator we can key on.
+    #[test]
+    fn test_unknown_ttl_mtime_mismatch_is_recognised() {
+        let status = tonic::Status::unknown(
+            "TTL delete aborted: expected mtime 1700000000000, \
+             but actual mtime is 1700000009999",
+        );
+        let err = Error::from(status);
+        assert!(
+            err.is_ttl_expect_mtime_mismatch(),
+            "expected TtlExpectMtimeMismatch, got {:?}",
+            err
+        );
+        assert!(
+            !err.is_retriable(),
+            "a refused compare-and-swap is a decision, not a transient failure"
+        );
+    }
+
+    #[test]
+    fn test_other_unknown_still_falls_through_to_grpc_error() {
+        let status = tonic::Status::unknown("something else entirely");
         let err = Error::from(status);
         assert!(
             matches!(err, Error::GrpcError { .. }),

@@ -544,6 +544,7 @@ impl PyAsyncGoosefs {
             recursive,
             unchecked,
             goosefs_only,
+            ..Default::default()
         };
         future_into_py(py, async move {
             use futures::stream::{self, StreamExt};
@@ -676,6 +677,7 @@ impl PyAsyncGoosefs {
             recursive,
             unchecked,
             goosefs_only,
+            ..Default::default()
         };
         future_into_py(py, async move {
             h.fs.delete(&path, opts).await.map_err(map_err)?;

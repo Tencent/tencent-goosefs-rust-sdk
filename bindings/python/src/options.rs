@@ -235,10 +235,15 @@ impl PyDeleteOptions {
 
 impl PyDeleteOptions {
     pub(crate) fn into_sdk(self) -> SdkDeleteOptions {
+        // The reclaim-only `ttl` / `ttl_expect_mtime` fields stay at their
+        // defaults: a conditional delete is a low-level primitive that needs the
+        // caller to have just observed the inode's mtime, so it is not something
+        // to hand out through the Python options object.
         SdkDeleteOptions {
             recursive: self.recursive,
             unchecked: self.unchecked,
             goosefs_only: self.goosefs_only,
+            ..Default::default()
         }
     }
 }

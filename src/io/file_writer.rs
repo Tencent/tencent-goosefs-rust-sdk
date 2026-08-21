@@ -1138,7 +1138,7 @@ impl GoosefsFileWriter {
         let op_id = uuid_to_fs_op_pid(self.operation_id);
         if let Err(e) = self
             .master
-            .complete_file(&self.path, ufs_length, Some(op_id))
+            .complete_file(&self.path, ufs_length, Some(op_id), self.file_info.file_id)
             .await
         {
             // T2-C: CACHE_THROUGH error recovery — clean up Goosefs-only if UFS succeeded.
