@@ -40,7 +40,6 @@
 //! [`WriteBlockHandle`] that manages
 //! a background task.
 
-use bytes::Bytes;
 use tracing::{debug, trace};
 
 use crate::client::worker::{WriteBlockHandle, WriteBlockOptions};
@@ -108,16 +107,17 @@ impl GrpcBlockWriter {
 
     /// Write a data chunk to the block.
     ///
+    /// `data` is moved into the protobuf `Chunk` (copied once at the call
+    /// site, or moved out of the pending-chunk coalescer).
+    ///
     /// Note: byte-level metrics are NOT recorded here; the caller
     /// (`GoosefsFileWriter`) is responsible for incrementing the appropriate
     /// counter (`BytesWrittenLocal` or `BytesWrittenUfs`).
-    pub async fn write_chunk(&mut self, data: Bytes) -> Result<()> {
+    pub async fn write_chunk(&mut self, data: Vec<u8>) -> Result<()> {
         let chunk_len = data.len() as i64;
 
         let req = WriteRequest {
-            value: Some(write_request::Value::Chunk(Chunk {
-                data: Some(data.to_vec()),
-            })),
+            value: Some(write_request::Value::Chunk(Chunk { data: Some(data) })),
         };
 
         self.handle
@@ -147,13 +147,19 @@ impl GrpcBlockWriter {
     }
 
     /// Write all data from a byte slice, splitting into chunks of `chunk_size`.
+    ///
+    /// A leftover shorter than `chunk_size` is sent immediately (no pending
+    /// buffer). Java's UFS path goes through `BlockOutStream` and holds that
+    /// tail in `mCurrentChunk` until the next `write()` / flush / close.
+    ///
+    /// TODO(java-parity): if cache and UFS share a Java-style current chunk,
+    /// this helper should stop emitting the unaligned tail itself.
     pub async fn write_all(&mut self, data: &[u8], chunk_size: usize) -> Result<()> {
         let mut offset = 0;
 
         while offset < data.len() {
             let end = std::cmp::min(offset + chunk_size, data.len());
-            let chunk = Bytes::copy_from_slice(&data[offset..end]);
-            self.write_chunk(chunk).await?;
+            self.write_chunk(owned_chunk(&data[offset..end])).await?;
             offset = end;
         }
 
@@ -252,6 +258,11 @@ impl GrpcBlockWriter {
     pub fn bytes_written(&self) -> i64 {
         self.bytes_written
     }
+}
+
+/// Copy `src` into a gRPC `Chunk.data` buffer.
+pub(crate) fn owned_chunk(src: &[u8]) -> Vec<u8> {
+    src.to_vec()
 }
 
 #[cfg(test)]
