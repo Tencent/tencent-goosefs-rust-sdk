@@ -712,7 +712,13 @@ impl GoosefsFileWriter {
             for r in opened {
                 r.writer.cancel().await;
             }
-            if initial == 1 {
+            // Java single-writer loop rethrows the last open IOException when
+            // no writer could be opened. A replica-count shortfall after
+            // degrade (ASYNC_THROUGH `durable.min`) is ResourceExhausted —
+            // not NoWorkerAvailable. `initial == 1` after degrade must not
+            // hide that (1 worker + durable.min=2 used to look like
+            // "no worker").
+            if worker_count == 0 {
                 return Err(last_open_err.unwrap_or_else(|| Error::NoWorkerAvailable {
                     message: format!("no available GooseFS worker for block_id={block_id}"),
                 }));
