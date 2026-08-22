@@ -1225,7 +1225,13 @@ impl GoosefsFileWriter {
         };
 
         let op_id = uuid_to_fs_op_pid(self.operation_id);
-        let locations = last_location.into_iter().collect::<Vec<_>>();
+        // Java `GoosefsFileOutStream.close()` only attaches last-block
+        // `locations` (+ `asyncPersistOptions`) when
+        // `mUnderStorageType.isAsyncPersist()`. Sending locations on
+        // MUST_CACHE / CACHE_THROUGH makes Master treat the file as
+        // persist-scheduled and multi-block reads can miss the last block.
+        let locations =
+            complete_file_locations(self.write_strategy.need_async_persist, last_location);
         let async_persist_options = if self.write_strategy.need_async_persist {
             Some(crate::proto::grpc::file::ScheduleAsyncPersistencePOptions {
                 common_options: None,
@@ -1702,6 +1708,19 @@ async fn fanout_parallel(
     Ok(())
 }
 
+/// Last-block locations for `CompleteFile`, matching Java
+/// `GoosefsFileOutStream.close()`: only ASYNC_THROUGH attaches them.
+fn complete_file_locations(
+    async_through: bool,
+    last_location: Option<FileLocation>,
+) -> Vec<FileLocation> {
+    if async_through {
+        last_location.into_iter().collect()
+    } else {
+        Vec::new()
+    }
+}
+
 /// Lower 24 bits of a GooseFS block ID (Java `BlockId.getSequenceNumber`).
 fn block_sequence_number(block_id: i64) -> u64 {
     const SEQUENCE_NUMBER_BITS: u32 = 24;
@@ -1895,6 +1914,21 @@ mod tests {
         assert!(!s.ufs_stream);
         assert!(s.create_ufs_file_options.is_none());
         assert!(s.need_async_persist);
+    }
+
+    #[test]
+    fn complete_file_locations_only_for_async_through() {
+        let loc = FileLocation {
+            block_id: Some(1),
+            offset: Some(0),
+            length: Some(64),
+            worker_id: vec![7],
+        };
+        assert!(complete_file_locations(false, Some(loc.clone())).is_empty());
+        assert!(complete_file_locations(false, None).is_empty());
+        let got = complete_file_locations(true, Some(loc.clone()));
+        assert_eq!(got, vec![loc]);
+        assert!(complete_file_locations(true, None).is_empty());
     }
 
     #[test]
