@@ -374,6 +374,46 @@ impl PropertiesMap {
             }
         }
 
+        if let Some(n) = self.get_parsed::<i32>("goosefs.user.file.replication.durable") {
+            if n > 0 {
+                cfg.file_replication_durable = n;
+            }
+        }
+
+        if let Some(n) = self.get_parsed::<i32>("goosefs.user.file.replication.durable.min") {
+            if n > 0 {
+                cfg.file_replication_durable_min = n;
+            }
+        }
+
+        if let Some(n) = self.get_parsed::<i32>("goosefs.user.file.write.max.node.retry") {
+            if n > 0 {
+                cfg.file_write_max_node_retry = n;
+            }
+        }
+
+        if let Some(bs_str) = self.get("goosefs.user.block.worker.available.min.remain.bytes") {
+            if let Ok(bs) = parse_byte_size(bs_str) {
+                cfg.block_worker_available_min_remain_bytes = bs;
+            }
+        }
+
+        if let Some(r) =
+            self.get_parsed::<f32>("goosefs.user.block.worker.available.min.remain.ratio")
+        {
+            if r >= 0.0 {
+                cfg.block_worker_available_min_remain_ratio = r;
+            }
+        }
+
+        if let Some(r) = self.get_parsed::<f64>("goosefs.worker.read.cache.min.ratio") {
+            cfg.worker_read_cache_min_ratio = r;
+        }
+
+        if let Some(enabled) = self.get_bool("goosefs.user.file.async.persist.flush.enabled") {
+            cfg.file_async_persist_flush_enabled = enabled;
+        }
+
         // CheckBlocks probe width (Java GetStatusPOptions.checkBlockReplicas).
         if let Some(n) = self.get_parsed::<i32>("goosefs.user.file.check.block.replicas") {
             if n >= 0 {
@@ -1001,6 +1041,30 @@ pub const ENV_WRITE_TYPE: &str = "GOOSEFS_WRITE_TYPE";
 /// Example: `export GOOSEFS_USER_FILE_REPLICATION_NUMBER=2`.
 pub const ENV_FILE_REPLICATION_NUMBER: &str = "GOOSEFS_USER_FILE_REPLICATION_NUMBER";
 
+/// Environment variable: `goosefs.user.file.replication.durable`.
+///
+/// Mirrors [`GoosefsConfig::file_replication_durable`]. Default is `2`.
+/// Values `<= 0` or non-numeric input are ignored.
+pub const ENV_FILE_REPLICATION_DURABLE: &str = "GOOSEFS_USER_FILE_REPLICATION_DURABLE";
+
+/// Environment variable: `goosefs.user.file.replication.durable.min`.
+///
+/// Mirrors [`GoosefsConfig::file_replication_durable_min`]. Default is `2`.
+/// Values `<= 0` or non-numeric input are ignored.
+pub const ENV_FILE_REPLICATION_DURABLE_MIN: &str = "GOOSEFS_USER_FILE_REPLICATION_DURABLE_MIN";
+
+/// Environment variable: `goosefs.user.file.write.max.node.retry`.
+///
+/// Mirrors [`GoosefsConfig::file_write_max_node_retry`]. Default is `3`.
+/// Values `<= 0` or non-numeric input are ignored.
+pub const ENV_FILE_WRITE_MAX_NODE_RETRY: &str = "GOOSEFS_USER_FILE_WRITE_MAX_NODE_RETRY";
+
+/// Environment variable: `goosefs.user.file.async.persist.flush.enabled`.
+///
+/// Mirrors [`GoosefsConfig::file_async_persist_flush_enabled`]. Default is `true`.
+pub const ENV_FILE_ASYNC_PERSIST_FLUSH_ENABLED: &str =
+    "GOOSEFS_USER_FILE_ASYNC_PERSIST_FLUSH_ENABLED";
+
 /// Environment variable: `goosefs.user.file.check.block.replicas`.
 ///
 /// Mirrors [`GoosefsConfig::check_block_replicas`]. Default is `0`.
@@ -1580,12 +1644,61 @@ pub struct GoosefsConfig {
     /// client returns up to that many host-deduped workers (Java
     /// `getBlockWorkers(blockId, count, …)` semantics).
     ///
-    /// TODO(java-parity): add `file_replication_durable` /
-    /// `file_replication_durable_min` and block-worker watermark configs
-    /// (`min_remain_bytes` / `min_remain_ratio` / cache-min-ratio) to match
-    /// Java ASYNC_THROUGH `getOutStream` + `filterNoSpaceWorkers`. Deferred.
+    /// When [`write_type`](Self::write_type) is `ASYNC_THROUGH` (`5`), writes
+    /// use [`file_replication_durable`](Self::file_replication_durable) /
+    /// [`file_replication_durable_min`](Self::file_replication_durable_min)
+    /// instead of this field as the replica contract (Java
+    /// `GooseFSBlockStore.getOutStream`).
     #[serde(default = "default_file_replication_number")]
     pub file_replication_number: i32,
+
+    /// Target replica count for ASYNC_THROUGH writes before the file is
+    /// persisted (`goosefs.user.file.replication.durable`, Java default `2`).
+    ///
+    /// Used as `initialReplicas` when greater than
+    /// [`file_replication_number`](Self::file_replication_number).
+    #[serde(default = "default_file_replication_durable")]
+    pub file_replication_durable: i32,
+
+    /// Minimum successful replica writes required for ASYNC_THROUGH
+    /// (`goosefs.user.file.replication.durable.min`, Java default `2`).
+    ///
+    /// Hard constraint: if fewer than this many writers open (or succeed
+    /// a chunk/flush), the write fails with [`Error::ResourceExhausted`].
+    #[serde(default = "default_file_replication_durable_min")]
+    pub file_replication_durable_min: i32,
+
+    /// Write-path candidate pool width (`goosefs.user.file.write.max.node.retry`,
+    /// Java `OutStreamOptions.maxRetryNode`, default `3`).
+    ///
+    /// Combined with `initialReplicas` as `max(writeMaxNodeRetry, initialReplicas)`
+    /// when hashing workers for a block write.
+    #[serde(default = "default_file_write_max_node_retry")]
+    pub file_write_max_node_retry: i32,
+
+    /// Min remaining persist bytes for a worker to be eligible for
+    /// ASYNC_THROUGH (`goosefs.user.block.worker.available.min.remain.bytes`,
+    /// Java default `128MB`).
+    #[serde(default = "default_block_worker_min_remain_bytes")]
+    pub block_worker_available_min_remain_bytes: u64,
+
+    /// Min remaining persist ratio for a worker to be eligible for
+    /// ASYNC_THROUGH (`goosefs.user.block.worker.available.min.remain.ratio`,
+    /// Java default `0.015`).
+    #[serde(default = "default_block_worker_min_remain_ratio")]
+    pub block_worker_available_min_remain_ratio: f32,
+
+    /// Cache reserve ratio used to derive persist capacity
+    /// (`goosefs.worker.read.cache.min.ratio`, Java default `0.1`).
+    /// Values outside `[0, 1)` fall back to `0.1` at use time.
+    #[serde(default = "default_worker_read_cache_min_ratio")]
+    pub worker_read_cache_min_ratio: f64,
+
+    /// Whether `GoosefsFileWriter::flush` pushes the current cache block
+    /// under ASYNC_THROUGH (`goosefs.user.file.async.persist.flush.enabled`,
+    /// Java default `true`).
+    #[serde(default = "default_file_async_persist_flush_enabled")]
+    pub file_async_persist_flush_enabled: bool,
 
     /// How many hash-selected workers to probe per block via `CheckBlocks`
     /// when enriching `FileInfo.locations` (Java `checkBlockReplicas` /
@@ -2247,6 +2360,41 @@ fn default_file_replication_number() -> i32 {
     1
 }
 
+fn default_file_replication_durable() -> i32 {
+    // Matches Java ClientPropertyKey.USER_FILE_REPLICATION_DURABLE default.
+    2
+}
+
+fn default_file_replication_durable_min() -> i32 {
+    // Matches Java ClientPropertyKey.USER_FILE_REPLICATION_DURABLE_MIN default.
+    2
+}
+
+fn default_file_write_max_node_retry() -> i32 {
+    // Matches Java ClientPropertyKey.USER_CLIENT_FILE_WRITE_MAX_NODE_RETRY default.
+    3
+}
+
+fn default_block_worker_min_remain_bytes() -> u64 {
+    // Matches Java USER_BLOCK_WORKER_AVAILABLE_MIN_REMAIN_BYTES default (128MB).
+    128 * 1024 * 1024
+}
+
+fn default_block_worker_min_remain_ratio() -> f32 {
+    // Matches Java USER_BLOCK_WORKER_AVAILABLE_MIN_REMAIN_RATIO default.
+    0.015
+}
+
+fn default_worker_read_cache_min_ratio() -> f64 {
+    // Matches Java WorkerPropertyKey.WORKER_READ_CACHE_MIN_RATIO default.
+    0.1
+}
+
+fn default_file_async_persist_flush_enabled() -> bool {
+    // Matches Java USER_FILE_ASYNC_PERSIST_FLUSH_ENABLED default.
+    true
+}
+
 fn default_check_block_replicas() -> i32 {
     // Match Java openFile / getStatusDefaults: checkBlockReplicas unset → 0.
     // Probing is opt-in (fs stat --check_replicas), not the read hot path.
@@ -2302,6 +2450,13 @@ impl Default for GoosefsConfig {
             root: String::new(),
             write_type: None,
             file_replication_number: default_file_replication_number(),
+            file_replication_durable: default_file_replication_durable(),
+            file_replication_durable_min: default_file_replication_durable_min(),
+            file_write_max_node_retry: default_file_write_max_node_retry(),
+            block_worker_available_min_remain_bytes: default_block_worker_min_remain_bytes(),
+            block_worker_available_min_remain_ratio: default_block_worker_min_remain_ratio(),
+            worker_read_cache_min_ratio: default_worker_read_cache_min_ratio(),
+            file_async_persist_flush_enabled: default_file_async_persist_flush_enabled(),
             check_block_replicas: default_check_block_replicas(),
             file_read_max_node_retry: default_file_read_max_node_retry(),
             prefetch_window: default_prefetch_window(),
@@ -2563,6 +2718,36 @@ impl GoosefsConfig {
     pub fn with_file_replication_number(mut self, n: i32) -> Self {
         if n > 0 {
             self.file_replication_number = n;
+        }
+        self
+    }
+
+    /// Set [`file_replication_durable`](Self::file_replication_durable).
+    ///
+    /// Values `<= 0` are ignored. Default is `2`.
+    pub fn with_file_replication_durable(mut self, n: i32) -> Self {
+        if n > 0 {
+            self.file_replication_durable = n;
+        }
+        self
+    }
+
+    /// Set [`file_replication_durable_min`](Self::file_replication_durable_min).
+    ///
+    /// Values `<= 0` are ignored. Default is `2`.
+    pub fn with_file_replication_durable_min(mut self, n: i32) -> Self {
+        if n > 0 {
+            self.file_replication_durable_min = n;
+        }
+        self
+    }
+
+    /// Set [`file_write_max_node_retry`](Self::file_write_max_node_retry).
+    ///
+    /// Values `<= 0` are ignored. Default is `3`.
+    pub fn with_file_write_max_node_retry(mut self, n: i32) -> Self {
+        if n > 0 {
+            self.file_write_max_node_retry = n;
         }
         self
     }
@@ -3009,6 +3194,36 @@ impl GoosefsConfig {
                 if n > 0 {
                     self.file_replication_number = n;
                 }
+            }
+        }
+
+        if let Ok(val) = env::var(ENV_FILE_REPLICATION_DURABLE) {
+            if let Ok(n) = val.parse::<i32>() {
+                if n > 0 {
+                    self.file_replication_durable = n;
+                }
+            }
+        }
+
+        if let Ok(val) = env::var(ENV_FILE_REPLICATION_DURABLE_MIN) {
+            if let Ok(n) = val.parse::<i32>() {
+                if n > 0 {
+                    self.file_replication_durable_min = n;
+                }
+            }
+        }
+
+        if let Ok(val) = env::var(ENV_FILE_WRITE_MAX_NODE_RETRY) {
+            if let Ok(n) = val.parse::<i32>() {
+                if n > 0 {
+                    self.file_write_max_node_retry = n;
+                }
+            }
+        }
+
+        if let Ok(val) = env::var(ENV_FILE_ASYNC_PERSIST_FLUSH_ENABLED) {
+            if let Some(b) = parse_bool_loose(&val) {
+                self.file_async_persist_flush_enabled = b;
             }
         }
 
@@ -3715,6 +3930,16 @@ mod tests {
         assert_eq!(config.block_size, 64 * 1024 * 1024);
         assert_eq!(config.chunk_size, 1024 * 1024);
         assert_eq!(config.file_replication_number, 1);
+        assert_eq!(config.file_replication_durable, 2);
+        assert_eq!(config.file_replication_durable_min, 2);
+        assert_eq!(config.file_write_max_node_retry, 3);
+        assert_eq!(
+            config.block_worker_available_min_remain_bytes,
+            128 * 1024 * 1024
+        );
+        assert_eq!(config.block_worker_available_min_remain_ratio, 0.015);
+        assert_eq!(config.worker_read_cache_min_ratio, 0.1);
+        assert!(config.file_async_persist_flush_enabled);
         assert_eq!(config.check_block_replicas, 0);
         assert_eq!(config.file_read_max_node_retry, 3);
         assert!(!config.is_multi_master());
@@ -4032,9 +4257,26 @@ mod tests {
 
         let cfg = GoosefsConfig::from_properties_str(
             "goosefs.user.file.replication.number=2\n\
+             goosefs.user.file.replication.durable=3\n\
+             goosefs.user.file.replication.durable.min=2\n\
+             goosefs.user.file.write.max.node.retry=4\n\
+             goosefs.user.block.worker.available.min.remain.bytes=64MB\n\
+             goosefs.user.block.worker.available.min.remain.ratio=0.02\n\
+             goosefs.worker.read.cache.min.ratio=0.2\n\
+             goosefs.user.file.async.persist.flush.enabled=false\n\
              goosefs.master.rpc.addresses=127.0.0.1:9200\n",
         );
         assert_eq!(cfg.file_replication_number, 2);
+        assert_eq!(cfg.file_replication_durable, 3);
+        assert_eq!(cfg.file_replication_durable_min, 2);
+        assert_eq!(cfg.file_write_max_node_retry, 4);
+        assert_eq!(
+            cfg.block_worker_available_min_remain_bytes,
+            64 * 1024 * 1024
+        );
+        assert_eq!(cfg.block_worker_available_min_remain_ratio, 0.02);
+        assert_eq!(cfg.worker_read_cache_min_ratio, 0.2);
+        assert!(!cfg.file_async_persist_flush_enabled);
     }
 
     #[test]
@@ -4240,6 +4482,22 @@ mod tests {
         assert_eq!(
             ENV_FILE_REPLICATION_NUMBER,
             "GOOSEFS_USER_FILE_REPLICATION_NUMBER"
+        );
+        assert_eq!(
+            ENV_FILE_REPLICATION_DURABLE,
+            "GOOSEFS_USER_FILE_REPLICATION_DURABLE"
+        );
+        assert_eq!(
+            ENV_FILE_REPLICATION_DURABLE_MIN,
+            "GOOSEFS_USER_FILE_REPLICATION_DURABLE_MIN"
+        );
+        assert_eq!(
+            ENV_FILE_WRITE_MAX_NODE_RETRY,
+            "GOOSEFS_USER_FILE_WRITE_MAX_NODE_RETRY"
+        );
+        assert_eq!(
+            ENV_FILE_ASYNC_PERSIST_FLUSH_ENABLED,
+            "GOOSEFS_USER_FILE_ASYNC_PERSIST_FLUSH_ENABLED"
         );
         assert_eq!(
             ENV_FILE_READ_MAX_NODE_RETRY,

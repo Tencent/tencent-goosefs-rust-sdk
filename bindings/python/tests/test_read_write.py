@@ -21,7 +21,9 @@ Test matrix
 * **WriteType**: ``MustCache``, ``CacheThrough``, ``Through``,
   ``AsyncThrough``. ``TryCache`` is functionally equivalent to
   ``MustCache`` for a healthy worker, so we skip it to keep the matrix
-  short.
+  short. The shared :func:`config` fixture pins
+  ``replication.durable`` / ``durable.min`` to ``1`` because the Docker
+  cluster has a single worker.
 * **Payload size**: 64 B (well below the gRPC chunk size), 64 KiB
   (multiple chunks but one block), 1 MiB (still one block but spans many
   chunks and exercises the prefetch window).

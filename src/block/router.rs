@@ -611,9 +611,8 @@ impl WorkerRouter {
     ///
     /// See [`WorkerRouterView::select_worker_with_replication`].
     ///
-    /// TODO(java-parity): ASYNC_THROUGH durable count + `filterNoSpaceWorkers`
-    /// watermark (and multi-replica writers). Deferred — see
-    /// `GoosefsFileWriter::open_next_block`.
+    /// Single-worker convenience over [`Self::select_workers`]. Multi-replica
+    /// ASYNC_THROUGH writes are handled in `GoosefsFileWriter::open_next_block`.
     pub async fn select_worker_with_replication(
         &self,
         block_id: i64,
@@ -1253,6 +1252,29 @@ impl WorkerRouterView {
         }
     }
 
+    /// Snapshot of every known worker (hash-ring members), including failed.
+    ///
+    /// Used by the write path when hash-picked workers fail to open and Java
+    /// `getNextBlock` retries with `ClientWorkerManager.getAllWorkers()`.
+    pub fn all_workers(&self) -> Arc<Vec<WorkerInfo>> {
+        Arc::clone(&self.workers)
+    }
+
+    /// Drop workers whose net address is currently in this view's failed set.
+    ///
+    /// Mirrors Java `GooseFSBlockStore.filterFailedWorkers`.
+    pub fn filter_not_failed(&self, workers: &[WorkerInfo]) -> Vec<WorkerInfo> {
+        self.cleanup_expired_failures();
+        workers
+            .iter()
+            .filter(|w| match &w.address {
+                Some(addr) => !self.is_failed(&worker_addr_key(addr)),
+                None => false,
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Default failure TTL used by [`Self::empty`] and by the legacy
     /// `from_workers` call sites that want to match the `WorkerRouter`
     /// defaults without depending on the `router` module's private
@@ -1378,10 +1400,10 @@ impl WorkerRouterView {
     /// the first entry. Read and write must both use this (with the same
     /// `GoosefsConfig::file_replication_number`) so they agree on the worker.
     ///
-    /// TODO(java-parity): write ASYNC_THROUGH should pass durable replica
-    /// count and apply capacity watermark filtering before taking the first
-    /// worker (Java `filterNoSpaceWorkers`). Multi-replica N writers also
-    /// deferred. See `GoosefsFileWriter::open_next_block`.
+    /// Single-worker convenience over [`Self::select_workers`]. Multi-replica
+    /// ASYNC_THROUGH writes use `GoosefsFileWriter::open_next_block` which
+    /// applies durable counts + `filterNoSpaceWorkers` before opening N
+    /// DataWriters.
     pub async fn select_worker_with_replication(
         &self,
         block_id: i64,

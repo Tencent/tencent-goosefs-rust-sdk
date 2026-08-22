@@ -173,7 +173,14 @@ properties-file, and env-var callers keep working unchanged.
 | `block_size` | `u64` | `67108864` (64 MiB) | Default block size in bytes for new files. Matches Goosefs server default. |
 | `chunk_size` | `u64` | `1048576` (1 MiB) | Chunk size for streaming read/write RPCs. Each gRPC message carries one chunk. |
 | `write_type` | `Option<i32>` | `None` | Default write type for newly created files. `None` = use server default (typically `MustCache`). See [WriteType](#71-writetype) for values. |
-| `file_replication_number` | `i32` | `1` | Target replication for block-worker selection (`goosefs.user.file.replication.number`). Writes use this as the selection count; reads use it as the lower bound for their candidate width (`max` with `file_read_max_node_retry`). |
+| `file_replication_number` | `i32` | `1` | Target replication for block-worker selection (`goosefs.user.file.replication.number`). Writes use this as the selection count (MUST_CACHE / CACHE_THROUGH); reads use it as the lower bound for their candidate width (`max` with `file_read_max_node_retry`). |
+| `file_replication_durable` | `i32` | `2` | ASYNC_THROUGH replica target before persist (`goosefs.user.file.replication.durable`). Used as `initialReplicas` when greater than `file_replication_number`. |
+| `file_replication_durable_min` | `i32` | `2` | ASYNC_THROUGH minimum successful replica writes (`goosefs.user.file.replication.durable.min`). Hard floor: fewer successes fail the write. On a 1-worker cluster set this (and `durable`) to `1`. |
+| `file_write_max_node_retry` | `i32` | `3` | Write-path hash candidate width (`goosefs.user.file.write.max.node.retry`). Combined as `max(writeMaxNodeRetry, initialReplicas)`. |
+| `block_worker_available_min_remain_bytes` | `u64` | `134217728` (128 MiB) | ASYNC_THROUGH persist-capacity watermark in bytes (`goosefs.user.block.worker.available.min.remain.bytes`). |
+| `block_worker_available_min_remain_ratio` | `f32` | `0.015` | ASYNC_THROUGH persist-capacity watermark ratio (`goosefs.user.block.worker.available.min.remain.ratio`). |
+| `worker_read_cache_min_ratio` | `f64` | `0.1` | Cache reserve ratio used to derive persist capacity (`goosefs.worker.read.cache.min.ratio`). Values outside `[0, 1)` fall back to `0.1`. |
+| `file_async_persist_flush_enabled` | `bool` | `true` | Whether `flush()` pushes the current cache block under ASYNC_THROUGH (`goosefs.user.file.async.persist.flush.enabled`). |
 | `file_read_max_node_retry` | `i32` | `3` | Read-path candidate pool width (`goosefs.user.file.read.max.node.retry` / Java `InStreamOptions.maxRetryNode`). Empty-location reads use `max(file_read_max_node_retry, file_replication_number)` then pick the first non-failed worker. Values `<= 0` ignored. |
 | `check_block_replicas` | `i32` | `0` | How many hash-selected workers to probe via `CheckBlocks` when enriching `FileInfo` locations (`goosefs.user.file.check.block.replicas`). `0` disables enrichment (Java `openFile` / default `getStatus` parity). |
 | `prefetch_window` | `i32` | `8` | Sequential-read prefetch window in chunks (sent in the first `ReadRequest`); lets the worker keep up to `(1 + prefetch_window)` chunks in flight. Mirrors Java `goosefs.user.streaming.reader.max.prefetch.window`. **Set programmatically** via `with_prefetch_window()`. (Optimization doc Part V R1-B-a.) **Note**: distinct from the per-open `InStreamOptions.prefetch_window` (default `1`, see §6.4). |
@@ -443,6 +450,10 @@ properties file values and built-in defaults.
 | `GOOSEFS_MASTER_ADDR` | `master_addr` / `master_addrs` | `"127.0.0.1:9200"` (single) / `[]` (HA list) | Master address(es). Three accepted forms: single `host:port`; comma-separated list `addr1:port,addr2:port` for HA; or a Hadoop-style URI `gfs://addr1:port,addr2:port/root-path` (URI form also seeds `root`). |
 | `GOOSEFS_WRITE_TYPE` | `write_type` | `None` (server default, typically `MustCache`) | Default write type. Accepted: `must_cache`, `try_cache`, `cache_through`, `through`, `async_through` (case-insensitive). |
 | `GOOSEFS_USER_FILE_REPLICATION_NUMBER` | `file_replication_number` | `1` | Write selection count / read candidate lower bound (`goosefs.user.file.replication.number`). Values `<= 0` ignored. |
+| `GOOSEFS_USER_FILE_REPLICATION_DURABLE` | `file_replication_durable` | `2` | ASYNC_THROUGH replica target before persist. Values `<= 0` ignored. |
+| `GOOSEFS_USER_FILE_REPLICATION_DURABLE_MIN` | `file_replication_durable_min` | `2` | ASYNC_THROUGH minimum successful replicas. Values `<= 0` ignored. |
+| `GOOSEFS_USER_FILE_WRITE_MAX_NODE_RETRY` | `file_write_max_node_retry` | `3` | Write hash candidate width. Values `<= 0` ignored. |
+| `GOOSEFS_USER_FILE_ASYNC_PERSIST_FLUSH_ENABLED` | `file_async_persist_flush_enabled` | `true` | Flush current cache block on `flush()` under ASYNC_THROUGH. |
 | `GOOSEFS_USER_FILE_READ_MAX_NODE_RETRY` | `file_read_max_node_retry` | `3` | Read worker pool width (`goosefs.user.file.read.max.node.retry` / Java `maxRetryNode`). Values `<= 0` ignored. |
 | `GOOSEFS_USER_FILE_CHECK_BLOCK_REPLICAS` | `check_block_replicas` | `0` | CheckBlocks probe count when enriching locations (`goosefs.user.file.check.block.replicas`). `0` disables. |
 | `GOOSEFS_BLOCK_SIZE` | `block_size` | `67108864` (64 MiB) | Block size in bytes (plain integer). |
@@ -572,6 +583,13 @@ These keys are used in `goosefs-site.properties` files (Java-style `key=value` f
 | `goosefs.security.login.impersonation.username` | `login_impersonation_username` | string | `"_HDFS_USER_"` | Impersonation username. |
 | `goosefs.user.file.writetype.default` | `write_type` | `MUST_CACHE` / `TRY_CACHE` / `CACHE_THROUGH` / `THROUGH` / `ASYNC_THROUGH` | unset (server default, typically `MUST_CACHE`) | Default write type. |
 | `goosefs.user.file.replication.number` | `file_replication_number` | integer `>= 1` | `1` | Write-path worker selection count (`getBlockWorkers(blockId, count)`). On reads, used as the lower bound of the candidate pool width (`max` with `goosefs.user.file.read.max.node.retry`). Values `<= 0` are ignored. |
+| `goosefs.user.file.replication.durable` | `file_replication_durable` | integer `>= 1` | `2` | ASYNC_THROUGH replica target before persist. Used as `initialReplicas` when greater than `replication.number`. |
+| `goosefs.user.file.replication.durable.min` | `file_replication_durable_min` | integer `>= 1` | `2` | ASYNC_THROUGH minimum successful replica writes. Hard floor after `min(replication, alive)` degrade. |
+| `goosefs.user.file.write.max.node.retry` | `file_write_max_node_retry` | integer `>= 1` | `3` | Write-path hash candidate width (`max` with `initialReplicas`). |
+| `goosefs.user.block.worker.available.min.remain.bytes` | `block_worker_available_min_remain_bytes` | byte size (e.g. `128MB`) | `128MB` | ASYNC_THROUGH persist-capacity watermark. |
+| `goosefs.user.block.worker.available.min.remain.ratio` | `block_worker_available_min_remain_ratio` | float | `0.015` | ASYNC_THROUGH persist-capacity watermark ratio. |
+| `goosefs.worker.read.cache.min.ratio` | `worker_read_cache_min_ratio` | float in `[0, 1)` | `0.1` | Cache reserve ratio used to derive persist capacity. Out of range falls back to `0.1`. |
+| `goosefs.user.file.async.persist.flush.enabled` | `file_async_persist_flush_enabled` | `true` / `false` | `true` | Flush the current cache block on `FileOutStream.flush()` under ASYNC_THROUGH. |
 | `goosefs.user.file.read.max.node.retry` | `file_read_max_node_retry` | integer `>= 1` | `3` | Read-path candidate pool width (Java `InStreamOptions.maxRetryNode`). Empty-location reads select from `max(maxRetryNode, replication)` hash/location candidates. Values `<= 0` are ignored. |
 | `goosefs.user.file.check.block.replicas` | `check_block_replicas` | integer `>= 0` | `0` | Workers to probe via `CheckBlocks` when enriching file locations. `0` disables (matches Java open/default getStatus). |
 | `goosefs.user.block.size.bytes.default` | `block_size` | byte size (e.g. `64MB`, `512KB`, `134217728`) | `67108864` (64 MiB) | Default block size. Supports `KB`/`MB`/`GB` suffixes. |

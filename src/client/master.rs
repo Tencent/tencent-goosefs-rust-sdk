@@ -49,14 +49,15 @@ use crate::fs::options::DeleteOptions;
 use crate::metrics::registry::Counter;
 use crate::proto::grpc::file::{
     file_system_master_client_service_client::FileSystemMasterClientServiceClient,
-    CompleteFilePOptions, CompleteFilePRequest, CreateDirectoryPOptions, CreateDirectoryPRequest,
-    CreateFilePOptions, CreateFilePRequest, DeletePOptions, DeletePRequest, FileInfo,
-    FileSystemMasterCommonPOptions, FsOpPId, GetStatusPOptions, GetStatusPRequest,
-    ListStatusPOptions, ListStatusPRequest, LoadMetadataPType, RemoveBlocksPRequest,
-    RenamePOptions, RenamePRequest, ScheduleAsyncPersistencePOptions,
-    ScheduleAsyncPersistencePRequest,
+    CommitLocationPOptions, CommitLocationPRequest, CompleteFilePOptions, CompleteFilePRequest,
+    CreateDirectoryPOptions, CreateDirectoryPRequest, CreateFilePOptions, CreateFilePRequest,
+    DeletePOptions, DeletePRequest, FileInfo, FileSystemMasterCommonPOptions, FsOpPId,
+    GetStatusPOptions, GetStatusPRequest, ListStatusPOptions, ListStatusPRequest,
+    LoadMetadataPType, RemoveBlocksPRequest, RenamePOptions, RenamePRequest,
+    ScheduleAsyncPersistencePOptions, ScheduleAsyncPersistencePRequest,
 };
 use crate::proto::grpc::{Bits, PMode};
+use crate::proto::proto::shared::FileLocation;
 
 /// Maximum number of RPC-level retries on retriable errors before giving up.
 const MAX_RPC_RETRIES: u32 = 2;
@@ -676,9 +677,31 @@ impl MasterClient {
         ufs_length: Option<i64>,
         operation_id: Option<FsOpPId>,
     ) -> Result<()> {
+        self.complete_file_with_options(path, ufs_length, operation_id, Vec::new(), None)
+            .await
+    }
+
+    /// `CompleteFile` with ASYNC_THROUGH location metadata and persist options.
+    ///
+    /// # Java authority
+    ///
+    /// Matches `GoosefsFileOutStream.close()` which puts the last block's
+    /// `writeSucceedWorkers` into `CompleteFilePOptions.locations` and, for
+    /// ASYNC_THROUGH, embeds `asyncPersistOptions` rather than issuing a
+    /// separate `ScheduleAsyncPersistence` RPC.
+    #[instrument(skip(self, locations, async_persist_options), fields(path = %path, location_count = locations.len()))]
+    pub async fn complete_file_with_options(
+        &self,
+        path: &str,
+        ufs_length: Option<i64>,
+        operation_id: Option<FsOpPId>,
+        locations: Vec<FileLocation>,
+        async_persist_options: Option<ScheduleAsyncPersistencePOptions>,
+    ) -> Result<()> {
         let path = path.to_string();
         self.with_retry("complete_file", |mut client| {
             let path = path.clone();
+            let locations = locations.clone();
             async move {
                 let common_options = operation_id.map(|op_id| FileSystemMasterCommonPOptions {
                     operation_id: Some(op_id),
@@ -689,11 +712,49 @@ impl MasterClient {
                     options: Some(CompleteFilePOptions {
                         ufs_length,
                         common_options,
+                        locations,
+                        async_persist_options,
                         ..Default::default()
                     }),
                     inode_id: None,
                 };
                 client.complete_file(req).await?;
+                Ok(())
+            }
+        })
+        .await
+    }
+
+    /// Commit a completed block's replica locations to Master.
+    ///
+    /// # Java authority
+    ///
+    /// Matches `GoosefsFileOutStream.commitCurrentBlock()` →
+    /// `FileSystemMasterClient.commitLocation`. Called after every block
+    /// except the last (the last block's locations travel with `completeFile`).
+    #[instrument(skip(self, locations), fields(path = %path, block_id = block_id, location_count = locations.len()))]
+    pub async fn commit_location(
+        &self,
+        path: &str,
+        inode_id: Option<i64>,
+        block_id: i64,
+        locations: Vec<FileLocation>,
+    ) -> Result<()> {
+        if locations.is_empty() {
+            return Ok(());
+        }
+        let path = path.to_string();
+        self.with_retry("commit_location", |mut client| {
+            let path = path.clone();
+            let locations = locations.clone();
+            async move {
+                let req = CommitLocationPRequest {
+                    path: Some(path),
+                    inode_id,
+                    block_id: Some(block_id),
+                    options: Some(CommitLocationPOptions { locations }),
+                };
+                client.commit_location(req).await?;
                 Ok(())
             }
         })

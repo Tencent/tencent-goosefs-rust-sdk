@@ -50,7 +50,11 @@ async fn main() -> Result<()> {
     println!("Goosefs Async Persistence Demo");
     println!("===============================");
 
-    let config = GoosefsConfig::new("127.0.0.1:9200");
+    // Single-worker clusters cannot satisfy Java's ASYNC_THROUGH defaults
+    // (`replication.durable` / `durable.min` = 2).
+    let config = GoosefsConfig::new("127.0.0.1:9200")
+        .with_file_replication_durable(1)
+        .with_file_replication_durable_min(1);
     let ctx: Arc<FileSystemContext> = FileSystemContext::connect(config).await?;
 
     // ── Step 0: Cleanup & create directory ────────────────────────
