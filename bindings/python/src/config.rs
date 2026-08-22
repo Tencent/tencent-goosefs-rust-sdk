@@ -279,6 +279,20 @@ impl PyConfig {
         self.inner.file_replication_number
     }
 
+    /// ASYNC_THROUGH replica target before persist
+    /// (`goosefs.user.file.replication.durable`, default `2`).
+    #[getter]
+    fn file_replication_durable(&self) -> i32 {
+        self.inner.file_replication_durable
+    }
+
+    /// ASYNC_THROUGH minimum successful replicas
+    /// (`goosefs.user.file.replication.durable.min`, default `2`).
+    #[getter]
+    fn file_replication_durable_min(&self) -> i32 {
+        self.inner.file_replication_durable_min
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "Config(master_addr={:?}, block_size={}, auth_type={:?})",

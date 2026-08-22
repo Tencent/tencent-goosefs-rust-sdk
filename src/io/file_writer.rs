@@ -65,10 +65,16 @@ use crate::config::GoosefsConfig;
 use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
 use crate::fs::options::DeleteOptions;
+use crate::io::replica_write::{
+    cache_min_ratio, degrade_replicas, enough_replicas, filter_no_space_workers,
+    replica_write_plan, should_abort_remaining, ReplicaWritePlan,
+};
 use crate::io::writer::{owned_chunk, GrpcBlockWriter};
-use crate::proto::grpc::block::RequestType;
+use crate::proto::grpc::block::{RequestType, WorkerInfo};
 use crate::proto::grpc::file::{CreateFilePOptions, FileInfo, FsOpPId};
+use crate::proto::grpc::WorkerNetAddress;
 use crate::proto::proto::dataserver::CreateUfsFileOptions;
+use crate::proto::proto::shared::FileLocation;
 
 /// Write strategy derived from the effective `WritePType`.
 ///
@@ -129,10 +135,9 @@ fn resolve_write_strategy(write_type: Option<i32>, file_info: &FileInfo) -> Writ
             create_ufs_file_options: Some(build_ufs_opts()),
             need_async_persist: false,
         },
-        // ASYNC_THROUGH: cache only, schedule async persist after close
-        // TODO(java-parity): worker pick should use replication.durable /
-        // durable.min + capacity watermark filtering (see open_next_block).
-        // Deferred to a later phase.
+        // ASYNC_THROUGH: cache only, schedule async persist after close.
+        // Replica count / watermark filtering live in `open_next_block`
+        // (Java `GooseFSBlockStore.getOutStream` + `filterNoSpaceWorkers`).
         Some(5) => WriteStrategy {
             cache_stream: true,
             ufs_stream: false,
@@ -477,14 +482,17 @@ impl GoosefsFileWriter {
 
         if let Some(active) = self.current_block_writer.as_mut() {
             if active.bytes_written > 0 {
-                // Drain any held-back trailing partial chunk before flushing.
                 let tail = std::mem::take(&mut active.pending_chunk);
                 if !tail.is_empty() {
-                    if let Err(e) = active.writer.write_chunk(tail).await {
+                    if let Err(e) = active.write_chunk(tail).await {
                         return self.handle_cache_write_exception(e).await;
                     }
                 }
-                active.writer.flush().await?;
+                if !self.write_strategy.need_async_persist
+                    || self.config.file_async_persist_flush_enabled
+                {
+                    active.flush_replicas().await?;
+                }
             }
         }
         Ok(())
@@ -539,19 +547,13 @@ impl GoosefsFileWriter {
                 writer.bytes_written += to_accept as u64;
                 offset += to_accept;
                 block_full = writer.remaining() == 0;
-                emit_result = emit_aligned_chunks(
-                    &mut writer.writer,
-                    &mut writer.pending_chunk,
-                    slice,
-                    chunk_size,
-                )
-                .await;
+                emit_result = emit_aligned_chunks(writer, slice, chunk_size).await;
             }
             if let Err(e) = emit_result {
                 return self.handle_cache_write_exception(e).await;
             }
             if block_full {
-                self.close_current_block().await?;
+                self.close_current_block(true).await?;
             }
         }
 
@@ -588,40 +590,166 @@ impl GoosefsFileWriter {
     /// Open the next **cache** block writer.
     ///
     /// Matches Java's `GoosefsFileOutStream.getNextBlock()`:
-    /// - Close the current block if any
+    /// - Close the current block if any (and `commitLocation` for ASYNC_THROUGH)
     /// - Compute the next block ID
-    /// - Select a worker via consistent hashing (excluding failed workers)
-    /// - Open a new `GrpcBlockWriter` with `RequestType::GoosefsBlock`
-    ///
-    /// UFS persistence is handled by a separate long-lived stream
-    /// (`open_ufs_stream`), not by this per-block RPC.
+    /// - Select workers via consistent hashing (durable replica count +
+    ///   persist-capacity watermark for ASYNC_THROUGH)
+    /// - Open N `GrpcBlockWriter`s (`RequestType::GoosefsBlock`)
+    /// - On hash-pick failure, retry with the full worker list
     async fn open_next_block(&mut self, block_size: u64) -> Result<()> {
-        // Close current block if it exists
         if self.current_block_writer.is_some() {
-            self.close_current_block().await?;
+            self.close_current_block(true).await?;
         }
 
         let file_id = self.file_info.file_id.unwrap_or(0);
         let block_index = self.committed_block_ids.len() as u64;
         let block_id = compute_block_id(file_id, block_index);
+        let async_through = self.write_strategy.need_async_persist;
+        let plan = replica_write_plan(
+            async_through,
+            self.config.file_replication_number,
+            self.config.file_replication_durable,
+            self.config.file_replication_durable_min,
+            self.config.file_write_max_node_retry,
+        )?;
 
-        // Select a worker for this block using the same replication.number
-        // count as the read path (Java getBlockWorkers(blockId, count, true)).
-        //
-        // TODO(java-parity): ASYNC_THROUGH write selection — align with Java
-        // `GooseFSBlockStore.getOutStream`:
-        //   - initialReplicas = replication.durable when > replication.number
-        //   - filterNoSpaceWorkers (forbidWrite + persist capacity watermark:
-        //     persistCapacity = capacity*(1-cacheMinRatio), remain vs
-        //     minRemainBytes/minRemainRatio; first block strict, later blocks
-        //     may fall back)
-        //   - when replicas > 1 open N DataWriters (currently always write 1)
-        // Deferred to a later phase; this path still uses file_replication_number
-        // only and a single writer.
-        let worker_info = self
-            .router
-            .select_worker_with_replication(block_id, self.config.file_replication_number)
-            .await?;
+        match self
+            .open_replica_writers(block_id, block_size, &plan, false)
+            .await
+        {
+            Ok(active) => {
+                self.current_block_writer = Some(active);
+                Ok(())
+            }
+            Err(e) => {
+                warn!(
+                    block_id = block_id,
+                    error = %e,
+                    "failed to open block with hash-picked workers, retrying with all workers"
+                );
+                let active = self
+                    .open_replica_writers(block_id, block_size, &plan, true)
+                    .await?;
+                self.current_block_writer = Some(active);
+                Ok(())
+            }
+        }
+    }
+
+    /// Open up to `plan.initial_replicas` DataWriters, matching Java
+    /// `GooseFSBlockStore.getOutStream`.
+    async fn open_replica_writers(
+        &mut self,
+        block_id: i64,
+        block_size: u64,
+        plan: &ReplicaWritePlan,
+        use_all_workers: bool,
+    ) -> Result<ActiveBlockWriter> {
+        let async_through = self.write_strategy.need_async_persist;
+        let mut pool = if use_all_workers {
+            (*self.router.all_workers()).clone()
+        } else {
+            self.router
+                .select_workers(block_id, plan.max_retry_node)
+                .await?
+        };
+        pool = self.router.filter_not_failed(&pool);
+        if async_through {
+            let allow_fallback = block_sequence_number(block_id) > 0;
+            pool = filter_no_space_workers(
+                &pool,
+                allow_fallback,
+                plan.min_needed_replicas,
+                self.config.block_worker_available_min_remain_bytes as i64,
+                self.config.block_worker_available_min_remain_ratio,
+                cache_min_ratio(self.config.worker_read_cache_min_ratio),
+            );
+        }
+        if pool.is_empty() {
+            return Err(Error::NoWorkerAvailable {
+                message: format!("no available GooseFS worker for block_id={block_id}"),
+            });
+        }
+
+        let (initial, min_needed) = degrade_replicas(
+            async_through,
+            plan.initial_replicas,
+            plan.min_needed_replicas,
+            pool.len(),
+        );
+
+        let mut opened: Vec<ReplicaWriter> = Vec::new();
+        let mut last_open_err: Option<Error> = None;
+        for worker_info in pool {
+            if opened.len() >= initial {
+                break;
+            }
+            match self
+                .try_open_replica(block_id, block_size, &worker_info, opened.len())
+                .await
+            {
+                Ok(r) => opened.push(r),
+                Err(e) => {
+                    warn!(
+                        block_id = block_id,
+                        error = %e,
+                        "meet block worker exception while opening replica"
+                    );
+                    if let Some(addr) = &worker_info.address {
+                        self.router.mark_failed(addr);
+                        self.worker_pool.invalidate(&rpc_endpoint(addr)).await;
+                    }
+                    last_open_err = Some(e);
+                    if initial == 1 && opened.is_empty() {
+                        continue;
+                    }
+                }
+            }
+        }
+
+        let worker_count = opened.len();
+        if worker_count == 0 || worker_count < min_needed {
+            for r in opened {
+                r.writer.cancel().await;
+            }
+            if initial == 1 {
+                return Err(last_open_err.unwrap_or_else(|| Error::NoWorkerAvailable {
+                    message: format!("no available GooseFS worker for block_id={block_id}"),
+                }));
+            }
+            return Err(Error::ResourceExhausted {
+                message: format!(
+                    "Not enough workers for replications of block {block_id}, {worker_count} workers selected but {min_needed} required"
+                ),
+            });
+        }
+
+        debug!(
+            block_id = block_id,
+            replicas = worker_count,
+            min_needed = min_needed,
+            parallel = async_through && worker_count > 1,
+            "opened cache block replica writers"
+        );
+
+        Ok(ActiveBlockWriter {
+            replicas: opened,
+            block_id,
+            block_size,
+            bytes_written: 0,
+            pending_chunk: Vec::with_capacity(self.config.chunk_size as usize),
+            parallel: async_through && worker_count > 1,
+            min_needed,
+        })
+    }
+
+    async fn try_open_replica(
+        &self,
+        block_id: i64,
+        block_size: u64,
+        worker_info: &WorkerInfo,
+        ordinal: usize,
+    ) -> Result<ReplicaWriter> {
         let addr = worker_info
             .address
             .as_ref()
@@ -629,139 +757,105 @@ impl GoosefsFileWriter {
                 message: "worker has no address".to_string(),
                 source: None,
             })?;
-
         let worker_addr = rpc_endpoint(addr);
-
-        debug!(
-            block_id = block_id,
-            block_index = block_index,
-            worker = %worker_addr,
-            "opening new cache block writer"
-        );
-
-        // Acquire worker client from connection pool (reuses existing channel)
-        let worker = match self.worker_pool.acquire(&worker_addr).await {
-            Ok(w) => w,
-            Err(e) => {
-                // Mark worker as failed for future exclusion
-                self.router.mark_failed(addr);
-                self.worker_pool.invalidate(&worker_addr).await;
-                return Err(e);
-            }
-        };
-
-        // Cache blocks always use GoosefsBlock — UFS persistence is on a
-        // separate long-lived stream opened by `open_ufs_stream()`.
+        let worker = self.worker_pool.acquire(&worker_addr).await?;
         let write_opts = WriteBlockOptions {
             request_type: RequestType::GoosefsBlock,
             create_ufs_file_options: None,
             async_write: self.write_strategy.need_async_persist,
         };
-
-        // Open block writer with space reservation = block size
-        let block_writer =
-            match GrpcBlockWriter::open(&worker, block_id, block_size as i64, write_opts).await {
-                Ok(w) => w,
-                Err(e) => {
-                    // Mark worker as failed on open failure
-                    self.router.mark_failed(addr);
-                    self.worker_pool.invalidate(&worker_addr).await;
-                    return Err(e);
-                }
-            };
-
-        self.current_block_writer = Some(ActiveBlockWriter {
-            writer: block_writer,
-            block_id,
-            block_size,
-            bytes_written: 0,
+        let writer =
+            GrpcBlockWriter::open(&worker, block_id, block_size as i64, write_opts).await?;
+        Ok(ReplicaWriter {
+            ordinal,
+            writer,
+            worker_id: worker_info.id.unwrap_or(0),
             worker_addr,
-            pending_chunk: Vec::with_capacity(self.config.chunk_size as usize),
-        });
-
-        Ok(())
+            net_address: addr.clone(),
+        })
     }
 
     /// Close the current block writer: flush, close, and record the committed block ID.
     ///
-    /// Matches Java's block close in `getNextBlock()` and `close()`.
-    async fn close_current_block(&mut self) -> Result<()> {
-        if let Some(active) = self.current_block_writer.take() {
-            let block_id = active.block_id;
-            let bytes_written = active.bytes_written;
-            let pending_chunk = active.pending_chunk;
-            let mut writer = active.writer;
+    /// When `commit_location` is true (next-block transition), ASYNC_THROUGH
+    /// reports succeed-worker IDs via `CommitLocation`. The last block of the
+    /// file is reported on `completeFile` instead (`commit_location = false`).
+    async fn close_current_block(&mut self, commit_location: bool) -> Result<Option<FileLocation>> {
+        let Some(mut active) = self.current_block_writer.take() else {
+            return Ok(None);
+        };
+        let block_id = active.block_id;
+        let bytes_written = active.bytes_written;
+        let pending_chunk = std::mem::take(&mut active.pending_chunk);
+        let block_offset = (self.committed_block_ids.len() as i64) * (active.block_size as i64);
 
-            if bytes_written > 0 {
-                // Drain any held-back trailing partial chunk: closing the
-                // block is a safe boundary because no further chunks follow
-                // on this stream.
-                if !pending_chunk.is_empty() {
-                    let tail = pending_chunk;
-                    if let Err(e) = writer.write_chunk(tail).await {
-                        // Best-effort cancel: tear the stream down and bubble up.
-                        writer.cancel().await;
-                        return Err(e);
-                    }
+        if bytes_written > 0 {
+            if !pending_chunk.is_empty() {
+                if let Err(e) = active.write_chunk(pending_chunk).await {
+                    active.cancel_replicas().await;
+                    return Err(e);
                 }
+            }
 
-                // Flush to ensure data is persisted on the worker.
-                //
-                // N3 fix: on flush failure the worker has already received
-                // (part of) the chunk stream, so we must `cancel()` the
-                // stream explicitly. Otherwise the temp block lingers on
-                // the worker until the lease TTL expires.
-                let ack_offset = match writer.flush().await {
-                    Ok(off) => off,
-                    Err(e) => {
+            if let Err(e) = active.flush_replicas().await {
+                warn!(
+                    block_id = block_id,
+                    error = %e,
+                    "flush failed during close_current_block; cancelling replica streams"
+                );
+                active.cancel_replicas().await;
+                return Err(e);
+            }
+            debug!(
+                block_id = block_id,
+                bytes_written = bytes_written,
+                replicas = active.replicas.len(),
+                "cache block flushed"
+            );
+
+            let loc = active.file_location(block_offset);
+            if let Err(e) = active.close_replicas().await {
+                warn!(
+                    block_id = block_id,
+                    error = %e,
+                    "close failed during close_current_block; \
+                     recording block_id for cancel-cleanup remove_blocks"
+                );
+                self.committed_block_ids.push(block_id);
+                return Err(e);
+            }
+
+            if commit_location && self.write_strategy.need_async_persist {
+                if let Some(ref loc) = loc {
+                    if let Err(e) = self
+                        .master
+                        .commit_location(
+                            &self.path,
+                            self.file_info.file_id,
+                            block_id,
+                            vec![loc.clone()],
+                        )
+                        .await
+                    {
                         warn!(
                             block_id = block_id,
                             error = %e,
-                            "flush failed during close_current_block; cancelling block stream"
+                            "commitLocation failed after block close"
                         );
-                        writer.cancel().await;
                         return Err(e);
                     }
-                };
-                debug!(
-                    block_id = block_id,
-                    ack_offset = ack_offset,
-                    bytes_written = bytes_written,
-                    "cache block flushed"
-                );
-
-                // Close the writer (triggers server-side commitBlock).
-                //
-                // N3 fix: on close failure we cannot `cancel()` (close()
-                // consumes the writer). The worker may have committed the
-                // block before responding the error, so record `block_id`
-                // into `committed_block_ids` so that `do_cancel_cleanup`
-                // can issue `remove_blocks` (idempotent) on the rollback
-                // path. Without this, the partial inode would survive.
-                if let Err(e) = writer.close().await {
-                    warn!(
-                        block_id = block_id,
-                        error = %e,
-                        "close failed during close_current_block; \
-                         recording block_id for cancel-cleanup remove_blocks"
-                    );
-                    self.committed_block_ids.push(block_id);
-                    return Err(e);
                 }
-
-                // Track committed block for cancel/rollback
-                self.committed_block_ids.push(block_id);
-                // Only accumulate here when there is no UFS stream; otherwise the UFS
-                // stream is the authoritative byte counter (see `write_to_ufs_stream`).
-                if !self.write_strategy.ufs_stream {
-                    self.total_bytes_written += bytes_written;
-                }
-            } else {
-                // No data written, just cancel the empty block
-                writer.cancel().await;
             }
+
+            self.committed_block_ids.push(block_id);
+            if !self.write_strategy.ufs_stream {
+                self.total_bytes_written += bytes_written;
+            }
+            Ok(loc)
+        } else {
+            active.cancel_replicas().await;
+            Ok(None)
         }
-        Ok(())
     }
 
     /// Open the single long-lived UFS stream used by CACHE_THROUGH / THROUGH.
@@ -837,28 +931,13 @@ impl GoosefsFileWriter {
             "failed to write to Goosefs cache, cancelling block"
         );
 
-        // Cancel the current block writer
+        // Cancel every replica of the current block writer
         if let Some(active) = self.current_block_writer.take() {
-            // Mark the worker as failed for future exclusion
-            self.router
-                .mark_failed(&crate::proto::grpc::WorkerNetAddress {
-                    host: Some(
-                        active
-                            .worker_addr
-                            .split(':')
-                            .next()
-                            .unwrap_or("unknown")
-                            .to_string(),
-                    ),
-                    rpc_port: active
-                        .worker_addr
-                        .split(':')
-                        .nth(1)
-                        .and_then(|p| p.parse().ok()),
-                    ..Default::default()
-                });
-            self.worker_pool.invalidate(&active.worker_addr).await;
-            active.writer.cancel().await;
+            for r in &active.replicas {
+                self.router.mark_failed(&r.net_address);
+                self.worker_pool.invalidate(&r.worker_addr).await;
+            }
+            active.cancel_replicas().await;
         }
 
         Err(err)
@@ -924,9 +1003,9 @@ impl GoosefsFileWriter {
         }
         self.ufs_worker_addr = None;
 
-        // 2. Cancel current in-progress cache block writer.
+        // 2. Cancel current in-progress cache block writer (all replicas).
         if let Some(active) = self.current_block_writer.take() {
-            active.writer.cancel().await;
+            active.cancel_replicas().await;
         }
 
         // 3. Clean up committed blocks on Master.
@@ -1065,8 +1144,8 @@ impl GoosefsFileWriter {
     /// Matches Java's `GoosefsFileOutStream.close()` — note the order:
     /// 1. close UFS stream (flush + close, triggers Worker-side `OutputStream.close()`);
     /// 2. close current cache block (flush + commitBlock);
-    /// 3. `completeFile(path, ufsLength, operationId)` on Master;
-    /// 4. ASYNC_THROUGH → `scheduleAsyncPersistence`.
+    /// 3. `completeFile` on Master, including last-block locations and
+    ///    (for ASYNC_THROUGH) `asyncPersistOptions`.
     ///
     /// ## Idempotency
     ///
@@ -1115,16 +1194,20 @@ impl GoosefsFileWriter {
             self.ufs_worker_addr = None;
         }
 
-        // 2) Close the current in-progress cache block (flush + commitBlock)
-        if let Err(e) = self.close_current_block().await {
-            warn!(
-                path = %self.path,
-                error = %e,
-                "failed to close current block during file close, cancelling"
-            );
-            self.do_cancel_cleanup().await;
-            return Err(e);
-        }
+        // 2) Close the current in-progress cache block (flush + commitBlock).
+        //    Last-block locations travel with completeFile (Java close()).
+        let last_location = match self.close_current_block(false).await {
+            Ok(loc) => loc,
+            Err(e) => {
+                warn!(
+                    path = %self.path,
+                    error = %e,
+                    "failed to close current block during file close, cancelling"
+                );
+                self.do_cancel_cleanup().await;
+                return Err(e);
+            }
+        };
 
         // 3) Complete the file on Master with the idempotency operation ID.
         //    Always pass ufs_length for CACHE_THROUGH/THROUGH so Master knows
@@ -1136,30 +1219,29 @@ impl GoosefsFileWriter {
         };
 
         let op_id = uuid_to_fs_op_pid(self.operation_id);
+        let locations = last_location.into_iter().collect::<Vec<_>>();
+        let async_persist_options = if self.write_strategy.need_async_persist {
+            Some(crate::proto::grpc::file::ScheduleAsyncPersistencePOptions {
+                common_options: None,
+                persistence_wait_time: None,
+            })
+        } else {
+            None
+        };
         if let Err(e) = self
             .master
-            .complete_file(&self.path, ufs_length, Some(op_id))
+            .complete_file_with_options(
+                &self.path,
+                ufs_length,
+                Some(op_id),
+                locations,
+                async_persist_options,
+            )
             .await
         {
             // T2-C: CACHE_THROUGH error recovery — clean up Goosefs-only if UFS succeeded.
             let e = self.handle_complete_file_error(e).await;
             return Err(e);
-        }
-
-        // 4) ASYNC_THROUGH: schedule asynchronous persistence to UFS after file is complete.
-        if self.write_strategy.need_async_persist {
-            debug!(path = %self.path, "scheduling async persistence for ASYNC_THROUGH");
-            if let Err(e) = self
-                .master
-                .schedule_async_persistence(&self.path, None)
-                .await
-            {
-                warn!(
-                    path = %self.path,
-                    error = %e,
-                    "failed to schedule async persistence — file is complete but may not persist to UFS"
-                );
-            }
         }
 
         info!(
@@ -1347,8 +1429,7 @@ fn take_full_chunks(pending: &mut Vec<u8>, incoming: &[u8], chunk_size: usize) -
 /// Send aligned `chunk_size` payloads as they are produced (no extra buffer
 /// of the whole `write()`). Leftover `< chunk_size` stays in `pending`.
 async fn emit_aligned_chunks(
-    writer: &mut GrpcBlockWriter,
-    pending: &mut Vec<u8>,
+    active: &mut ActiveBlockWriter,
     incoming: &[u8],
     chunk_size: usize,
 ) -> Result<()> {
@@ -1358,28 +1439,40 @@ async fn emit_aligned_chunks(
         });
     }
     let mut src = incoming;
-    if let Some(full) = take_completed_pending(pending, &mut src, chunk_size) {
-        writer.write_chunk(full).await?;
+    if let Some(full) = take_completed_pending(&mut active.pending_chunk, &mut src, chunk_size) {
+        active.write_chunk(full).await?;
     }
     let mut offset = 0usize;
     while offset + chunk_size <= src.len() {
-        writer
+        active
             .write_chunk(owned_chunk(&src[offset..offset + chunk_size]))
             .await?;
         offset += chunk_size;
     }
     if offset < src.len() {
-        pending.extend_from_slice(&src[offset..]);
+        active.pending_chunk.extend_from_slice(&src[offset..]);
     }
-    debug_assert!(pending.len() < chunk_size);
+    debug_assert!(active.pending_chunk.len() < chunk_size);
     Ok(())
+}
+
+/// One DataWriter targeting a single worker replica of the current block.
+struct ReplicaWriter {
+    /// Hash-pick order (0 = primary). Preserved when reporting commitLocation.
+    ordinal: usize,
+    writer: GrpcBlockWriter,
+    worker_id: i64,
+    worker_addr: String,
+    net_address: WorkerNetAddress,
 }
 
 /// State for the currently active block being written.
 ///
-/// Holds the `GrpcBlockWriter` and tracks how many bytes have been
-/// streamed to it. This enables chunk-level streaming (matching Java's
-/// `BlockOutStream` pattern) instead of whole-block buffering.
+/// Holds one or more [`ReplicaWriter`]s (Java `BlockOutStream.mDataWriters`)
+/// and tracks how many bytes have been streamed. ASYNC_THROUGH with more
+/// than one replica fans each chunk out in parallel
+/// (`BlockOutStream.executeWithReplication`); other write types write
+/// replicas sequentially.
 ///
 /// # Trailing partial-chunk coalescing (workaround for server-side BUG)
 ///
@@ -1396,35 +1489,19 @@ async fn emit_aligned_chunks(
 /// 1. an explicit user `flush()` call;
 /// 2. the block becomes full (`remaining == 0`);
 /// 3. `close_current_block()` (end of block / file close).
-///
-/// At these boundaries the trailing partial chunk is fine because either no
-/// further chunks follow on this stream, or the stream is about to be torn
-/// down — so the server-side `mLocalFileChannel.size()` and accumulated
-/// `mPosition` cannot drift any further before `commitBlock`.
-///
-/// TODO(java-parity): `pending_chunk` only stores the unaligned tail
-/// (`len < chunk_size`). Java keeps a pooled `ByteBuf` of capacity
-/// `chunkSize` (`mCurrentChunk`) and copies caller slices into
-/// `writableBytes()`. Same send-when-full / flush-on-close semantics;
-/// defer unless we want one buffer for both cache and UFS streams.
 struct ActiveBlockWriter {
-    /// The underlying gRPC streaming writer.
-    writer: GrpcBlockWriter,
-    /// Block ID being written.
+    replicas: Vec<ReplicaWriter>,
     block_id: i64,
-    /// Total block capacity.
     block_size: u64,
     /// Bytes accepted into this writer (sent + still pending). This is the
     /// authoritative byte counter for block-fullness checks; it advances as
     /// soon as bytes are accepted, including a trailing `pending_chunk`.
     bytes_written: u64,
-    /// Worker address (for failure tracking).
-    worker_addr: String,
-    /// Trailing partial chunk buffer — at all times its length is strictly
-    /// less than `chunk_size`. Holds the unaligned tail of the most recent
-    /// write so it can be merged with subsequent data. Drained only at safe
-    /// boundaries (see struct-level docs).
     pending_chunk: Vec<u8>,
+    /// `true` when ASYNC_THROUGH and more than one replica (Java parallel path).
+    parallel: bool,
+    /// Minimum successful replicas required (Java `replicationDurableMin`).
+    min_needed: usize,
 }
 
 impl ActiveBlockWriter {
@@ -1432,6 +1509,197 @@ impl ActiveBlockWriter {
     fn remaining(&self) -> u64 {
         self.block_size - self.bytes_written
     }
+
+    fn file_location(&self, block_offset: i64) -> Option<FileLocation> {
+        if self.replicas.is_empty() {
+            return None;
+        }
+        Some(FileLocation {
+            block_id: Some(self.block_id),
+            offset: Some(block_offset),
+            length: Some(self.bytes_written as i64),
+            worker_id: self.replicas.iter().map(|r| r.worker_id).collect(),
+        })
+    }
+
+    async fn write_chunk(&mut self, data: Vec<u8>) -> Result<()> {
+        if self.replicas.is_empty() {
+            return Err(Error::BlockIoError {
+                message: format!("no replica writers left for block_id={}", self.block_id),
+            });
+        }
+        if self.parallel && self.replicas.len() > 1 {
+            self.write_chunk_parallel(data).await
+        } else {
+            self.write_chunk_sequential(data).await
+        }
+    }
+
+    async fn write_chunk_sequential(&mut self, mut data: Vec<u8>) -> Result<()> {
+        let replicas = std::mem::take(&mut self.replicas);
+        let last = replicas.len().saturating_sub(1);
+        let mut kept = Vec::with_capacity(replicas.len());
+        for (i, mut r) in replicas.into_iter().enumerate() {
+            let payload = if i == last {
+                std::mem::take(&mut data)
+            } else {
+                data.clone()
+            };
+            match r.writer.write_chunk(payload).await {
+                Ok(()) => kept.push(r),
+                Err(e) => {
+                    r.writer.cancel().await;
+                    for k in kept {
+                        k.writer.cancel().await;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        self.replicas = kept;
+        Ok(())
+    }
+
+    async fn write_chunk_parallel(&mut self, data: Vec<u8>) -> Result<()> {
+        fanout_parallel(
+            &mut self.replicas,
+            self.min_needed,
+            self.block_id,
+            ReplicaOp::Write(data),
+        )
+        .await
+    }
+
+    async fn flush_replicas(&mut self) -> Result<i64> {
+        if self.replicas.is_empty() {
+            return Ok(self.bytes_written as i64);
+        }
+        if self.parallel && self.replicas.len() > 1 {
+            fanout_parallel(
+                &mut self.replicas,
+                self.min_needed,
+                self.block_id,
+                ReplicaOp::Flush,
+            )
+            .await?;
+        } else {
+            for r in &mut self.replicas {
+                r.writer.flush().await?;
+            }
+        }
+        Ok(self.bytes_written as i64)
+    }
+
+    async fn close_replicas(self) -> Result<()> {
+        let mut first_err = None;
+        for r in self.replicas {
+            if let Err(e) = r.writer.close().await {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    async fn cancel_replicas(self) {
+        for r in self.replicas {
+            r.writer.cancel().await;
+        }
+    }
+}
+
+enum ReplicaOp {
+    Write(Vec<u8>),
+    Flush,
+}
+
+/// Parallel replica action matching Java `BlockOutStream.executeWithReplication`.
+async fn fanout_parallel(
+    replicas: &mut Vec<ReplicaWriter>,
+    min_needed: usize,
+    block_id: i64,
+    op: ReplicaOp,
+) -> Result<()> {
+    let writer_size = replicas.len();
+    if writer_size < min_needed {
+        return Err(Error::ResourceExhausted {
+            message: format!(
+                "Failed to write enough replicas. dataWriters size: {}, Required: {}",
+                writer_size, min_needed
+            ),
+        });
+    }
+
+    let taken = std::mem::take(replicas);
+    let mut join_set = tokio::task::JoinSet::new();
+    for r in taken {
+        let op = match &op {
+            ReplicaOp::Write(data) => ReplicaOp::Write(data.clone()),
+            ReplicaOp::Flush => ReplicaOp::Flush,
+        };
+        join_set.spawn(async move {
+            let mut r = r;
+            let result = match op {
+                ReplicaOp::Write(payload) => r.writer.write_chunk(payload).await,
+                ReplicaOp::Flush => r.writer.flush().await.map(|_| ()),
+            };
+            match result {
+                Ok(()) => Ok(r),
+                Err(e) => {
+                    r.writer.cancel().await;
+                    Err(e)
+                }
+            }
+        });
+    }
+
+    let mut kept = Vec::new();
+    let mut failures = 0usize;
+    while let Some(joined) = join_set.join_next().await {
+        match joined {
+            Ok(Ok(r)) => kept.push(r),
+            Ok(Err(e)) => {
+                failures += 1;
+                tracing::warn!(error = %e, "DataWriter write failed");
+                if should_abort_remaining(failures, writer_size, min_needed) {
+                    join_set.abort_all();
+                }
+            }
+            Err(_) => {
+                failures += 1;
+                if should_abort_remaining(failures, writer_size, min_needed) {
+                    join_set.abort_all();
+                }
+            }
+        }
+    }
+
+    kept.sort_by_key(|r| r.ordinal);
+    if !enough_replicas(kept.len(), min_needed) {
+        for r in kept {
+            r.writer.cancel().await;
+        }
+        return Err(Error::ResourceExhausted {
+            message: format!(
+                "Failed to write enough replicas. Success: {}, Required: {} (block_id={})",
+                writer_size.saturating_sub(failures),
+                min_needed,
+                block_id
+            ),
+        });
+    }
+    *replicas = kept;
+    Ok(())
+}
+
+/// Lower 24 bits of a GooseFS block ID (Java `BlockId.getSequenceNumber`).
+fn block_sequence_number(block_id: i64) -> u64 {
+    const SEQUENCE_NUMBER_BITS: u32 = 24;
+    (block_id as u64) & ((1u64 << SEQUENCE_NUMBER_BITS) - 1)
 }
 
 impl GoosefsFileWriter {
@@ -1489,9 +1757,9 @@ impl GoosefsFileWriter {
                 if let Some(writer) = ufs_stream {
                     writer.cancel().await;
                 }
-                // 2. Cancel in-progress cache block writer.
+                // 2. Cancel in-progress cache block writer (all replicas).
                 if let Some(active) = current_block_writer {
-                    active.writer.cancel().await;
+                    active.cancel_replicas().await;
                 }
                 // 3. Clean up committed blocks on Master so the partial
                 //    inode does not become a permanent ghost entry.

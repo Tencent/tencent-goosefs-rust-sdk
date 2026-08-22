@@ -110,6 +110,7 @@ pub fn map_err(e: goosefs_sdk::error::Error) -> PyErr {
         E::OpenDirectory { .. } => IsADirectory::new_err(msg),
         E::AuthenticationFailed { .. } => AuthenticationFailed::new_err(msg),
         E::NoWorkerAvailable { .. } => NoWorkerAvailable::new_err(msg),
+        E::ResourceExhausted { .. } => IoError::new_err(msg),
         E::MasterUnavailable { .. } => MasterUnavailable::new_err(msg),
         E::ConfigError { .. } => ConfigError::new_err(msg),
         E::GrpcError { .. } | E::TransportError { .. } => RpcError::new_err(msg),
@@ -160,6 +161,9 @@ mod tests {
             },
             E::NoWorkerAvailable {
                 message: "w".into(),
+            },
+            E::ResourceExhausted {
+                message: "replicas".into(),
             },
             E::MasterUnavailable {
                 message: "m".into(),
