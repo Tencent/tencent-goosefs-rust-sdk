@@ -21,6 +21,11 @@ cd "$ROOT"
 
 export GOOSEFS_MASTER_ADDR="${GOOSEFS_MASTER_ADDR:-127.0.0.1:9200}"
 export GOOSEFS_AUTH_TYPE="${GOOSEFS_AUTH_TYPE:-simple}"
+# Docker fixture is one worker; Java ASYNC_THROUGH defaults require 2 replicas.
+# Examples that call `GoosefsConfig::new` (no apply_env) still pin this in
+# source; export here for any path that does overlay env.
+export GOOSEFS_USER_FILE_REPLICATION_DURABLE="${GOOSEFS_USER_FILE_REPLICATION_DURABLE:-1}"
+export GOOSEFS_USER_FILE_REPLICATION_DURABLE_MIN="${GOOSEFS_USER_FILE_REPLICATION_DURABLE_MIN:-1}"
 
 EXAMPLES=(
   highlevel_file_rw
