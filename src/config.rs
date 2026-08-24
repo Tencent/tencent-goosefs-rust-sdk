@@ -493,6 +493,11 @@ impl PropertiesMap {
                 cfg.client_cache_evictor = e;
             }
         }
+        if let Some(backend) = self.get("goosefs.user.client.cache.eviction.backend") {
+            if let Ok(b) = backend.parse::<CacheEvictorBackend>() {
+                cfg.client_cache_evictor_backend = b;
+            }
+        }
         if let Some(enabled) = self.get_bool("goosefs.user.client.cache.async.write.enabled") {
             cfg.client_cache_async_write_enabled = enabled;
         }
@@ -926,6 +931,40 @@ impl std::str::FromStr for CacheEvictorType {
     }
 }
 
+/// Which implementation backs the page-cache eviction policy.
+///
+/// This selects the *implementation*, not the policy: `LRU` and `LFU` behave
+/// the same way regardless. It exists as an escape hatch and to let
+/// `benchmarks/cache_evictor_bench.rs` compare the two, and has no Java
+/// counterpart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheEvictorBackend {
+    /// `foyer-memory`'s sharded intrusive eviction containers (default).
+    ///
+    /// Victim selection is O(1).
+    #[default]
+    Foyer,
+    /// The previous `moka`-backed implementation.
+    ///
+    /// Victim selection is O(page count) — roughly 1-2 ms per eviction for a
+    /// 100 GB directory of 1 MiB pages. Benchmark baseline only; see
+    /// `docs/FOYER_SSD_CACHE_MIGRATION.md`.
+    Moka,
+}
+
+impl std::str::FromStr for CacheEvictorBackend {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "foyer" => Ok(CacheEvictorBackend::Foyer),
+            "moka" => Ok(CacheEvictorBackend::Moka),
+            other => Err(format!("unknown cache evictor backend: {other}")),
+        }
+    }
+}
+
 // ── Storage option key constants ─────────────────────────────
 //
 // These are the canonical key names used in `storage_options` maps
@@ -1108,6 +1147,8 @@ pub const ENV_CLIENT_CACHE_SIZE: &str = "GOOSEFS_USER_CLIENT_CACHE_SIZE";
 pub const ENV_CLIENT_CACHE_DIRS: &str = "GOOSEFS_USER_CLIENT_CACHE_DIRS";
 /// Eviction policy (`LRU`/`LFU`).
 pub const ENV_CLIENT_CACHE_EVICTOR: &str = "GOOSEFS_USER_CLIENT_CACHE_EVICTION_POLICY";
+/// Eviction policy implementation (`foyer`/`moka`).
+pub const ENV_CLIENT_CACHE_EVICTOR_BACKEND: &str = "GOOSEFS_USER_CLIENT_CACHE_EVICTION_BACKEND";
 /// Whether async write-back (cache fill) is enabled (`true`/`false`).
 pub const ENV_CLIENT_CACHE_ASYNC_WRITE_ENABLED: &str =
     "GOOSEFS_USER_CLIENT_CACHE_ASYNC_WRITE_ENABLED";
@@ -1896,6 +1937,13 @@ pub struct GoosefsConfig {
     #[serde(default)]
     pub client_cache_evictor: CacheEvictorType,
 
+    /// Implementation backing the eviction policy (default: `foyer`).
+    ///
+    /// Escape hatch and benchmark knob only — it does not change the policy.
+    /// No Java counterpart.
+    #[serde(default)]
+    pub client_cache_evictor_backend: CacheEvictorBackend,
+
     /// Whether async write-back (cache fill) is enabled (default: `true`).
     ///
     /// Mirrors Java `goosefs.user.client.cache.async.write.enabled`.
@@ -2339,6 +2387,7 @@ impl Default for GoosefsConfig {
             client_cache_size: default_client_cache_size(),
             client_cache_dirs: default_client_cache_dirs(),
             client_cache_evictor: CacheEvictorType::default(),
+            client_cache_evictor_backend: CacheEvictorBackend::default(),
             client_cache_async_write_enabled: default_true_bool(),
             client_cache_async_write_threads: default_client_cache_async_write_threads(),
             client_cache_quota_enabled: false,
@@ -3208,6 +3257,11 @@ impl GoosefsConfig {
         if let Ok(val) = env::var(ENV_CLIENT_CACHE_EVICTOR) {
             if let Ok(e) = val.parse::<CacheEvictorType>() {
                 self.client_cache_evictor = e;
+            }
+        }
+        if let Ok(val) = env::var(ENV_CLIENT_CACHE_EVICTOR_BACKEND) {
+            if let Ok(b) = val.parse::<CacheEvictorBackend>() {
+                self.client_cache_evictor_backend = b;
             }
         }
         if let Ok(val) = env::var(ENV_CLIENT_CACHE_ASYNC_WRITE_ENABLED) {
@@ -5097,6 +5151,7 @@ goosefs.user.file.metadata.load.type=ALWAYS
         std::env::set_var(ENV_CLIENT_CACHE_SIZE, "1048576");
         std::env::set_var(ENV_CLIENT_CACHE_DIRS, "/tmp/a,/tmp/b");
         std::env::set_var(ENV_CLIENT_CACHE_EVICTOR, "lfu");
+        std::env::set_var(ENV_CLIENT_CACHE_EVICTOR_BACKEND, "moka");
         std::env::set_var(ENV_CLIENT_CACHE_URING_ENABLED, "false");
         std::env::set_var(ENV_CLIENT_CACHE_URING_QUEUE_DEPTH, "4096");
         std::env::set_var(ENV_CLIENT_CACHE_URING_THREAD_COUNT, "8");
@@ -5108,6 +5163,7 @@ goosefs.user.file.metadata.load.type=ALWAYS
         std::env::remove_var(ENV_CLIENT_CACHE_SIZE);
         std::env::remove_var(ENV_CLIENT_CACHE_DIRS);
         std::env::remove_var(ENV_CLIENT_CACHE_EVICTOR);
+        std::env::remove_var(ENV_CLIENT_CACHE_EVICTOR_BACKEND);
         std::env::remove_var(ENV_CLIENT_CACHE_URING_ENABLED);
         std::env::remove_var(ENV_CLIENT_CACHE_URING_QUEUE_DEPTH);
         std::env::remove_var(ENV_CLIENT_CACHE_URING_THREAD_COUNT);
@@ -5122,6 +5178,11 @@ goosefs.user.file.metadata.load.type=ALWAYS
             vec!["/tmp/a".to_string(), "/tmp/b".to_string()]
         );
         assert_eq!(cfg.client_cache_evictor, CacheEvictorType::Lfu);
+        assert_eq!(
+            cfg.client_cache_evictor_backend,
+            CacheEvictorBackend::Moka,
+            "the backend escape hatch must be settable from the environment"
+        );
         assert!(!cfg.client_cache_uring_enabled);
         assert_eq!(cfg.client_cache_uring_queue_depth, 4096);
         assert_eq!(cfg.client_cache_uring_thread_count, 8);
@@ -5137,6 +5198,7 @@ goosefs.user.client.cache.page.size=32768
 goosefs.user.client.cache.size=2097152
 goosefs.user.client.cache.dirs=/var/cache/a,/var/cache/b
 goosefs.user.client.cache.eviction.policy=lru
+goosefs.user.client.cache.eviction.backend=moka
 goosefs.user.client.cache.uring.enabled=true
 goosefs.user.client.cache.uring.queue.depth=8192
 goosefs.user.client.cache.uring.thread.count=4
@@ -5152,6 +5214,7 @@ goosefs.user.client.cache.ttl.seconds=60
             vec!["/var/cache/a".to_string(), "/var/cache/b".to_string()]
         );
         assert_eq!(cfg.client_cache_evictor, CacheEvictorType::Lru);
+        assert_eq!(cfg.client_cache_evictor_backend, CacheEvictorBackend::Moka);
         assert!(cfg.client_cache_uring_enabled);
         assert_eq!(cfg.client_cache_uring_queue_depth, 8192);
         assert_eq!(cfg.client_cache_uring_thread_count, 4);

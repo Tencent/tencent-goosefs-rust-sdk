@@ -583,6 +583,7 @@ These keys are used in `goosefs-site.properties` files (Java-style `key=value` f
 | `goosefs.user.client.cache.size` | `client_cache_size` | byte size (e.g. `20GB`) | `21474836480` (20 GiB) | Per-directory capacity. Supports `KB`/`MB`/`GB` suffixes. |
 | `goosefs.user.client.cache.dirs` | `client_cache_dirs` | comma-separated paths | `/tmp/goosefs_cache` | Cache directories. |
 | `goosefs.user.client.cache.eviction.policy` | `client_cache_evictor` | `LRU` / `LFU` | `LFU` | Eviction policy. |
+| `goosefs.user.client.cache.eviction.backend` | `client_cache_evictor_backend` | `foyer` / `moka` | `foyer` | Implementation backing the policy. Escape hatch / benchmark knob; no Java counterpart. See [§7.5](#75-cacheevictortype). |
 | `goosefs.user.client.cache.async.write.enabled` | `client_cache_async_write_enabled` | `true` / `false` | `true` | Async back-fill. |
 | `goosefs.user.client.cache.async.write.threads` | `client_cache_async_write_threads` | integer | `16` | Async write-back concurrency. |
 | `goosefs.user.client.cache.quota.enabled` | `client_cache_quota_enabled` | `true` / `false` | `false` | Quota accounting. |
@@ -772,6 +773,21 @@ Eviction policy for the client local page cache (`client_cache_evictor`).
 
 **String parsing** is case-insensitive. Mirrors Java's
 `goosefs.user.client.cache.eviction.policy`.
+
+#### CacheEvictorBackend
+
+Which implementation backs the policy above (`client_cache_evictor_backend`).
+This selects the *implementation*, not the policy — `LRU` and `LFU` behave the
+same either way. It has no Java counterpart and exists as an escape hatch and
+for `benchmarks/cache_evictor_bench.rs`; leave it at the default.
+
+| Variant | String Representation | Description |
+|---------|----------------------|-------------|
+| `Foyer` (default) | `foyer` | `foyer-memory`'s sharded intrusive eviction containers. Victim selection is O(1). |
+| `Moka` | `moka` | The previous `moka`-backed implementation. Victim selection is O(page count) — roughly 23 ms per eviction for a directory holding 100k pages. Benchmark baseline only. |
+
+**String parsing** is case-insensitive. See
+`docs/FOYER_SSD_CACHE_MIGRATION.md` for the migration and its measurements.
 
 ### 7.6 MasterPoolSchedule
 

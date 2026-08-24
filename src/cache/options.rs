@@ -21,7 +21,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::config::{CacheEvictorType, GoosefsConfig};
+use crate::config::{CacheEvictorBackend, CacheEvictorType, GoosefsConfig};
 
 /// Fraction of a directory's raw capacity reserved for filesystem/metadata
 /// overhead, matching Java `PageStoreType.LOCAL` (5%).
@@ -38,6 +38,8 @@ pub struct CacheManagerOptions {
     pub dirs: Vec<PathBuf>,
     /// Eviction policy.
     pub evictor: CacheEvictorType,
+    /// Implementation backing the eviction policy.
+    pub evictor_backend: CacheEvictorBackend,
     /// Whether async write-back is enabled.
     pub async_write_enabled: bool,
     /// Async write-back concurrency (always ≥ 1).
@@ -90,6 +92,7 @@ impl CacheManagerOptions {
             dir_capacity,
             dirs,
             evictor: config.client_cache_evictor,
+            evictor_backend: config.client_cache_evictor_backend,
             async_write_enabled: config.client_cache_async_write_enabled,
             async_write_threads: config.client_cache_async_write_threads.max(1),
             quota_enabled: config.client_cache_quota_enabled,

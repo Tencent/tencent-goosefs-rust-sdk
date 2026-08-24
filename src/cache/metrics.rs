@@ -66,6 +66,20 @@ pub mod name {
     pub const CLIENT_CACHE_BYTES_DISCARDED: &str = "Client.CacheBytesDiscarded";
     /// Pages discarded.
     pub const CLIENT_CACHE_PAGES_DISCARDED: &str = "Client.CachePagesDiscarded";
+    /// Cumulative nanoseconds spent inside the eviction policy admitting pages
+    /// and choosing victims.
+    ///
+    /// Diagnostic, with no Java counterpart. Measures the evictor's `on_add`
+    /// only: page IO, the index update and the victim page deletes all happen
+    /// outside it, so disk latency cannot mask a regression in the policy.
+    ///
+    /// Divide by the number of fills to get the per-put cost. That figure must
+    /// stay **flat as the cache grows** — the previous moka-backed evictor
+    /// picked victims by scanning every resident page, so it rose linearly with
+    /// the page count (~23 ms per eviction at 100k pages). Once a directory is
+    /// full every fill evicts, so in steady state this is the cost of choosing
+    /// one victim. See `docs/FOYER_SSD_CACHE_MIGRATION.md`.
+    pub const CLIENT_CACHE_EVICT_CANDIDATE_NANOS: &str = "Client.CacheEvictCandidateNanos";
 
     // ── State ────────────────────────────────────────────────
     /// Cache state (see [`crate::cache::CacheState::as_i64`]).

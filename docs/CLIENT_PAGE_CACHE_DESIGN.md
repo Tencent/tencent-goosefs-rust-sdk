@@ -185,7 +185,7 @@ The complete metrics list given by the user is in Appendix A; the core categorie
 - Hit/penetration bytes: `CacheBytesReadCache`, `CacheBytesReadExternal`, `CacheBytesRequestedExternal`, `CacheBytesReadInStreamBuffer`;
 - Hit rate: `CacheHitRate`;
 - Capacity: `CacheSpaceAvailable`, `CacheSpaceUsed`, `CacheSpaceUsedCount`, `CachePages`;
-- Eviction: `CacheBytesEvicted`, `CachePagesEvicted`, `CacheBytesDiscarded`, `CachePagesDiscarded`;
+- Eviction: `CacheBytesEvicted`, `CachePagesEvicted`, `CacheBytesDiscarded`, `CachePagesDiscarded`，以及诊断用的 `CacheEvictCandidateNanos`（驱逐策略自身的耗时，除以填充次数后应不随页数增长）;
 - Write: `CacheBytesWrittenCache`;
 - Latency: `CachePageReadCacheTimeNanos`, `CachePageReadExternalTimeNanos`;
 - Various error counters: `CacheGetErrors`, `CachePutErrors`, `CacheDeleteErrors`, `CachePut*Errors`, `CacheStore*Timeout`, etc.;
@@ -504,20 +504,33 @@ struct Inner {
 ```rust
 // src/cache/evictor/mod.rs
 pub trait CacheEvictor: Send + Sync {
-    fn on_add(&self, id: &PageId);
+    /// Admit a page; evicts to stay within the directory's byte quota.
+    fn on_add(&self, id: &PageId, size: u64);
     fn on_access(&self, id: &PageId);     // touch on get hit
     fn on_remove(&self, id: &PageId);
-    /// Return the next page to be evicted.
-    fn evict_candidate(&self) -> Option<PageId>;
+    /// Take the pages evicted since the last call.
+    fn drain_victims(&self) -> Vec<PageId>;
+    fn len(&self) -> usize;
 }
 
-pub fn build_evictor(kind: CacheEvictorType) -> Box<dyn CacheEvictor>;
+pub fn build_evictor(
+    backend: CacheEvictorBackend,
+    policy: CacheEvictorType,
+    capacity: u64,
+    page_size: u64,
+) -> Box<dyn CacheEvictor>;
 ```
 
-> **Implementation note (landed, self-implemented)**: no `moka`/`lru` introduced. Each cache directory holds an independent `Box<dyn CacheEvictor>`
-> (stored in `DirState.evictor`), whose internal state changes all happen within the `Inner` lock critical section, so the evictor needs no lock of its own.
-> - `LruCacheEvictor` (`evictor/lru.rs`): access-order queue, `on_access` moves to tail, `evict_candidate` takes head.
-> - `LfuCacheEvictor` (`evictor/lfu.rs`): frequency counter, evicts the least-frequent page.
+> **Implementation note (landed)**: each cache directory holds an independent `Box<dyn CacheEvictor>` (stored in `DirState.evictor`) which
+> **owns that directory's byte quota**. `LocalCacheManager::put` writes the page, calls `on_add`, then reclaims whatever `drain_victims`
+> reports — index entry, byte accounting, reverse index, and the page file. The directory can therefore sit over quota between the two,
+> bounded by the 5% `LOCAL_STORE_OVERHEAD` the usable capacity already reserves.
+> - `FoyerCacheEvictor` (`evictor/foyer_evictor.rs`, default): `foyer-memory`'s sharded intrusive LRU / w-TinyLFU. Victim selection is O(1).
+> - `MokaCacheEvictor` (`evictor/moka_evictor.rs`): the previous implementation, kept as the A/B baseline behind `CacheEvictorBackend::Moka`.
+>   Victim selection is O(page count).
+>
+> The earlier `evict_candidate() -> Option<PageId>` contract ("name one page to drop") was replaced because it cannot be answered in O(1) on
+> a sharded cache: the quota is global to the directory while the eviction order is per shard. See `docs/FOYER_SSD_CACHE_MIGRATION.md`.
 
 ### 5.7 `Allocator` (multi-directory)
 
@@ -677,6 +690,7 @@ Add cache metrics constants in the `name` module of `src/metrics/registry.rs` (a
 | `CLIENT_CACHE_BYTES_EVICTED` | `Client.CacheBytesEvicted` | counter |
 | `CLIENT_CACHE_PAGES` | `Client.CachePages` | gauge |
 | `CLIENT_CACHE_PAGES_EVICTED` | `Client.CachePagesEvicted` | counter |
+| `CLIENT_CACHE_EVICT_CANDIDATE_NANOS` | `Client.CacheEvictCandidateNanos` | counter（诊断，无 Java 对应） |
 | `CLIENT_CACHE_SPACE_USED` | `Client.CacheSpaceUsed` | gauge |
 | `CLIENT_CACHE_SPACE_AVAILABLE` | `Client.CacheSpaceAvailable` | gauge |
 | `CLIENT_CACHE_HIT_RATE` | `Client.CacheHitRate` | gauge |

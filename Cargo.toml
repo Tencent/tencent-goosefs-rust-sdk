@@ -137,6 +137,18 @@ futures = "0.3"
 # selection — the theoretical P2C bound only requires uniform sampling,
 # not cryptographic strength.
 fastrand = "2"
+# Hybrid-cache library used for the page-cache eviction policy (see
+# `docs/FOYER_SSD_CACHE_MIGRATION.md`). Only the in-memory half is pulled in:
+# `foyer-memory` provides the sharded, intrusive LRU / w-TinyLFU containers with
+# O(1) victim selection, replacing the O(page-count) `iter().min_by_key()` scan
+# in the moka-backed evictor. Depending on `foyer-memory` rather than the
+# umbrella `foyer` crate keeps `foyer-storage` (and its io_uring / device stack)
+# out of the tree — the SSD data plane stays on the in-tree `PageStore`.
+# MSRV: declares 1.85.0, below this crate's 1.88, so no toolchain bump.
+foyer-memory = "0.22"
+# `Event` / `EventListener` (the eviction callback) live in foyer-common; they
+# are not re-exported by `foyer-memory`'s prelude.
+foyer-common = "0.22"
 
 # Unix-only: raw `sigaction` for the short-circuit SIGBUS diagnostic handler
 # (SHORT_CIRCUIT_DESIGN  / ). Already in the dependency graph
@@ -193,6 +205,13 @@ path = "benchmarks/repro_concurrent_write.rs"
 [[example]]
 name = "cache_evictor_bench"
 path = "benchmarks/cache_evictor_bench.rs"
+
+# Resident memory the evictor holds per tracked page. Page data lives on SSD,
+# so the evictor's footprint scales with page *count*, not cache size; this
+# measures the constant. See docs/FOYER_SSD_CACHE_MIGRATION.md .
+[[example]]
+name = "evictor_memory"
+path = "benchmarks/evictor_memory.rs"
 
 # P3 benchmark: io_uring vs tokio::fs page-cache backend comparison.
 # Local-only (no GooseFS cluster needed). Runs on any platform; io_uring path

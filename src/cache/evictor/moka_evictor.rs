@@ -12,101 +12,82 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Moka-based concurrent cache evictor — backs both LRU and LFU policies.
+//! Moka-based cache evictor — **A/B baseline only, not for production**.
 //!
-//! Replaces the old `Mutex<LruState>` / `Mutex<LfuState>` with
-//! `moka::sync::Cache<PageId, u64>`, using moka's per-segment write locks
-//! (~64 segments) instead of a single global mutex.
+//! Retained behind [`CacheEvictorBackend::Moka`](crate::config::CacheEvictorBackend)
+//! so `benchmarks/cache_evictor_bench.rs` can measure the foyer replacement
+//! against the implementation it replaced, under an identical manager flow.
+//! [`FoyerCacheEvictor`](super::FoyerCacheEvictor) is the default.
 //!
-//! ## Why
+//! ## Why it is not the default
 //!
-//! Under 32 concurrent reads, the global `Mutex` in the old evictors caused
-//! 38x latency degradation (20µs → 772µs) and extreme tail latency
-//! (P95/P50 = 204x). See
-//! the Moka LRU optimisation analysis.
+//! `moka::sync::Cache` is used here as a concurrent map, not as an eviction
+//! engine: `max_capacity` is `u64::MAX` so moka's own O(1) eviction never runs,
+//! and the victim is instead found with `iter().min_by_key()`. That scan is
+//! O(page count) — about 1-2 ms for the 100 GB / 100k-page working point, paid
+//! on every fill once the directory is full. Because page *data* lives on SSD
+//! and only page *identity* is held here, moka's capacity/eviction machinery
+//! could not be used directly to manage the on-disk lifecycle. See
+//! `docs/FOYER_SSD_CACHE_MIGRATION.md` §1.3.
 //!
 //! ## Design
 //!
-//! A single struct [`MokaCacheEvictor`] handles both policies via a
-//! [`EvictMode`] flag:
+//! | Mode | Value semantics | Victim |
+//! |------|-----------------|--------|
+//! | LRU  | monotonic access tick | min tick = least recently used |
+//! | LFU  | access frequency count | min count = least frequently used |
 //!
-//! | Mode | moka `EvictionPolicy` | Value semantics | `evict_candidate` |
-//! |------|-----------------------|-----------------|-------------------|
-//! | LRU  | `EvictionPolicy::lru()` | monotonic access tick | min tick = oldest |
-//! | LFU  | `EvictionPolicy::tiny_lfu()` | access frequency count | min count = least frequent |
-//!
-//! - **`max_capacity`**: `u64::MAX` — no auto-eviction; eviction is driven
-//!   manually by [`LocalCacheManager::pop_victim`](crate::cache::manager::LocalCacheManager).
-//! - **`on_access`** (LRU): `insert(id, next_tick())` — O(1), per-segment lock.
-//! - **`on_access`** (LFU): `get(id)` → increment → `insert(id, count+1)` —
-//!   read-modify-write, not atomic but acceptable for best-effort eviction
-//!   (same race tolerance as the old `LfuCacheEvictor`).
-//! - **`evict_candidate`**: `iter().min_by_key(value)` — O(n) scan, cold path
-//!   (only on `put` when cache is full).
-//!
-//! ## Reference
-//!
-//! Lance uses `moka::future::Cache` as its entire cache backend
-//! (`lance-core/src/cache/moka.rs`), replacing hand-written LRU entirely.
+//! The admit-then-evict contract of [`CacheEvictor`] is emulated: `on_add`
+//! accounts the page and, while over quota, runs the scan to pick and queue
+//! victims for `drain_victims`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
-use moka::policy::EvictionPolicy;
 use moka::sync::Cache as MokaCache;
 
 use crate::cache::evictor::CacheEvictor;
 use crate::cache::page_id::PageId;
+use crate::config::CacheEvictorType;
 
-/// Which eviction semantics to use.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EvictMode {
-    /// Track access recency via a monotonic tick; evict the smallest tick.
-    Lru,
-    /// Track access frequency via a counter; evict the smallest count.
-    Lfu,
+/// Per-page eviction state.
+#[derive(Clone, Copy, Debug)]
+struct EvictMeta {
+    /// Access tick (LRU) or access count (LFU). Smallest value is the victim.
+    order: u64,
+    /// Page size in bytes, for quota accounting.
+    size: u64,
 }
 
-/// Moka-backed evictor supporting both LRU and LFU (W-TinyLFU) policies.
+/// Moka-backed evictor supporting both the LRU and LFU policies.
 ///
-/// Uses `moka::sync::Cache<PageId, u64>` for per-segment concurrent access.
-/// All operations are O(1) except `evict_candidate` which is O(n) (cold path).
+/// All operations are O(1) except victim selection, which is O(page count).
 pub struct MokaCacheEvictor {
-    /// `PageId → access_tick` (LRU) or `PageId → frequency_count` (LFU).
-    /// `max_capacity = u64::MAX` disables moka's auto-eviction; we evict
-    /// manually via `evict_candidate`.
-    cache: MokaCache<PageId, u64>,
-    /// Monotonic counter for LRU ticks. `Relaxed` ordering is sufficient —
-    /// ticks only need to be unique, not strictly ordered across threads.
+    /// `PageId → EvictMeta`. `max_capacity = u64::MAX` disables moka's own
+    /// eviction; the quota below is enforced by hand.
+    cache: MokaCache<PageId, EvictMeta>,
+    /// Monotonic counter for LRU ticks. `Relaxed` is sufficient — ticks only
+    /// need to be unique, not strictly ordered across threads.
     counter: AtomicU64,
-    /// LRU (tick-based) or LFU (frequency-based) semantics.
-    mode: EvictMode,
+    mode: CacheEvictorType,
+    /// Directory byte quota.
+    capacity: u64,
+    /// Bytes currently admitted.
+    used: AtomicU64,
+    /// Pages evicted since the last `drain_victims`.
+    victims: Mutex<Vec<PageId>>,
 }
 
 impl MokaCacheEvictor {
-    /// Create an LRU evictor backed by moka with `EvictionPolicy::lru()`.
-    pub fn new_lru() -> Self {
+    /// Build an evictor for `policy` holding at most `capacity` bytes.
+    pub fn new(policy: CacheEvictorType, capacity: u64) -> Self {
         Self {
-            cache: MokaCache::builder()
-                .max_capacity(u64::MAX)
-                .eviction_policy(EvictionPolicy::lru())
-                .build(),
+            cache: MokaCache::builder().max_capacity(u64::MAX).build(),
             counter: AtomicU64::new(0),
-            mode: EvictMode::Lru,
-        }
-    }
-
-    /// Create an LFU evictor backed by moka with `EvictionPolicy::tiny_lfu()`.
-    ///
-    /// moka's TinyLFU combines LRU eviction with an LFU admission filter
-    /// (FrequencySketch), providing better scan-resistance than pure LFU.
-    pub fn new_lfu() -> Self {
-        Self {
-            cache: MokaCache::builder()
-                .max_capacity(u64::MAX)
-                .eviction_policy(EvictionPolicy::tiny_lfu())
-                .build(),
-            counter: AtomicU64::new(0),
-            mode: EvictMode::Lfu,
+            mode: policy,
+            capacity: capacity.max(1),
+            used: AtomicU64::new(0),
+            victims: Mutex::new(Vec::new()),
         }
     }
 
@@ -115,54 +96,80 @@ impl MokaCacheEvictor {
     fn next_tick(&self) -> u64 {
         self.counter.fetch_add(1, Ordering::Relaxed) + 1
     }
+
+    /// The O(page count) scan this backend exists to demonstrate.
+    ///
+    /// `run_pending_tasks` first so the iterator does not yield entries that
+    /// have already been invalidated.
+    fn scan_for_victim(&self) -> Option<(PageId, u64)> {
+        self.cache.run_pending_tasks();
+        self.cache
+            .iter()
+            .min_by_key(|(_, meta)| meta.order)
+            .map(|(k, meta)| (k.as_ref().clone(), meta.size))
+    }
 }
 
 impl CacheEvictor for MokaCacheEvictor {
-    fn on_add(&self, id: &PageId) {
-        let value = match self.mode {
-            EvictMode::Lru => self.next_tick(),
-            EvictMode::Lfu => 1, // new page starts with frequency 1
+    fn on_add(&self, id: &PageId, size: u64) {
+        let order = match self.mode {
+            CacheEvictorType::Lru => self.next_tick(),
+            CacheEvictorType::Lfu => 1, // new page starts with frequency 1
         };
-        self.cache.insert(id.clone(), value);
+        let size = size.max(1);
+        self.cache.insert(id.clone(), EvictMeta { order, size });
+        self.used.fetch_add(size, Ordering::Relaxed);
+
+        // Admit-then-evict: scan until the quota is satisfied again.
+        while self.used.load(Ordering::Relaxed) > self.capacity {
+            let Some((victim, victim_size)) = self.scan_for_victim() else {
+                break;
+            };
+            self.cache.invalidate(&victim);
+            self.used.fetch_sub(victim_size, Ordering::Relaxed);
+            self.victims.lock().unwrap().push(victim);
+        }
     }
 
     fn on_access(&self, id: &PageId) {
         match self.mode {
-            EvictMode::Lru => {
-                // LRU: update the access tick. Per-segment write lock, O(1).
-                let tick = self.next_tick();
-                self.cache.insert(id.clone(), tick);
+            CacheEvictorType::Lru => {
+                // Refresh the access tick. Per-segment write lock, O(1).
+                if let Some(meta) = self.cache.get(id) {
+                    let order = self.next_tick();
+                    self.cache.insert(id.clone(), EvictMeta { order, ..meta });
+                }
             }
-            EvictMode::Lfu => {
-                // LFU: increment the frequency count. Read-modify-write —
-                // not atomic, but a racy undercount is harmless for eviction
-                // quality (same tolerance as the old LfuCacheEvictor).
-                let current = self.cache.get(id).unwrap_or(0);
-                self.cache.insert(id.clone(), current.saturating_add(1));
+            CacheEvictorType::Lfu => {
+                // Increment the frequency count. Read-modify-write — not
+                // atomic, but a racy undercount is harmless for eviction
+                // quality.
+                if let Some(meta) = self.cache.get(id) {
+                    self.cache.insert(
+                        id.clone(),
+                        EvictMeta {
+                            order: meta.order.saturating_add(1),
+                            ..meta
+                        },
+                    );
+                }
             }
         }
     }
 
     fn on_remove(&self, id: &PageId) {
-        self.cache.invalidate(id);
+        if let Some(meta) = self.cache.get(id) {
+            self.cache.invalidate(id);
+            self.used.fetch_sub(meta.size, Ordering::Relaxed);
+        }
     }
 
-    fn evict_candidate(&self) -> Option<PageId> {
-        // O(n) scan for the minimum value. This is the cold path — only called
-        // by `pop_victim` when the cache is full and a `put` needs to make
-        // room. For a 10k-entry cache this takes ~100-200µs, far less than the
-        // disk IO that follows.
-        //
-        // `run_pending_tasks` ensures pending invalidations are applied so the
-        // iterator does not yield already-removed entries.
-        self.cache.run_pending_tasks();
-        self.cache
-            .iter()
-            .min_by_key(|(_, v)| *v)
-            .map(|(k, _)| k.as_ref().clone())
+    fn drain_victims(&self) -> Vec<PageId> {
+        std::mem::take(&mut *self.victims.lock().unwrap())
     }
 
     fn len(&self) -> usize {
+        self.cache.run_pending_tasks();
         self.cache.entry_count() as usize
     }
 }
@@ -170,150 +177,120 @@ impl CacheEvictor for MokaCacheEvictor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    const PAGE: u64 = 1024;
 
     fn pid(i: u64) -> PageId {
         PageId::new("f", i)
     }
 
-    // ── LRU tests ──────────────────────────────────────────────
+    fn evictor(policy: CacheEvictorType, pages: u64) -> MokaCacheEvictor {
+        MokaCacheEvictor::new(policy, PAGE * pages)
+    }
 
     #[test]
     fn lru_evicts_least_recently_used() {
-        let e = MokaCacheEvictor::new_lru();
-        e.on_add(&pid(0));
-        e.on_add(&pid(1));
-        e.on_add(&pid(2));
+        let e = evictor(CacheEvictorType::Lru, 3);
+        e.on_add(&pid(0), PAGE);
+        e.on_add(&pid(1), PAGE);
+        e.on_add(&pid(2), PAGE);
+        assert!(e.drain_victims().is_empty());
 
-        // Access page 0 → page 1 becomes the LRU victim.
         e.on_access(&pid(0));
-        assert_eq!(e.evict_candidate(), Some(pid(1)));
-
-        e.on_remove(&pid(1));
-        assert_eq!(e.evict_candidate(), Some(pid(2)));
+        e.on_add(&pid(3), PAGE);
+        assert_eq!(e.drain_victims(), vec![pid(1)]);
     }
-
-    #[test]
-    fn lru_empty_has_no_candidate() {
-        let e = MokaCacheEvictor::new_lru();
-        assert!(e.is_empty());
-        assert_eq!(e.evict_candidate(), None);
-    }
-
-    #[test]
-    fn lru_access_updates_recency() {
-        let e = MokaCacheEvictor::new_lru();
-        e.on_add(&pid(0));
-        e.on_add(&pid(1));
-
-        // Without accessing p0, p0 should be the victim (older tick).
-        assert_eq!(e.evict_candidate(), Some(pid(0)));
-
-        // Access p0 → p1 becomes the victim.
-        e.on_access(&pid(0));
-        assert_eq!(e.evict_candidate(), Some(pid(1)));
-    }
-
-    // ── LFU tests ──────────────────────────────────────────────
 
     #[test]
     fn lfu_evicts_least_frequently_used() {
-        let e = MokaCacheEvictor::new_lfu();
-        e.on_add(&pid(0)); // freq=1
-        e.on_add(&pid(1)); // freq=1
-        e.on_add(&pid(2)); // freq=1
+        let e = evictor(CacheEvictorType::Lfu, 3);
+        e.on_add(&pid(0), PAGE);
+        e.on_add(&pid(1), PAGE);
+        e.on_add(&pid(2), PAGE);
+        let _ = e.drain_victims();
 
-        // Access p0 twice → p0 freq=3, p1/p2 freq=1.
         e.on_access(&pid(0));
         e.on_access(&pid(0));
+        e.on_access(&pid(2));
 
-        // Victim should be p1 or p2 (both freq=1), not p0 (freq=3).
-        let victim = e.evict_candidate().unwrap();
+        e.on_add(&pid(3), PAGE);
+        let victims = e.drain_victims();
+
+        // Pages enter at frequency 1, so the fresh page ties with the untouched
+        // one and either may be picked; the accessed pages must not be.
+        assert_eq!(victims.len(), 1);
         assert!(
-            victim == pid(1) || victim == pid(2),
-            "victim should be p1 or p2, got {victim:?}"
+            victims[0] == pid(1) || victims[0] == pid(3),
+            "expected a frequency-1 page, got {victims:?}"
         );
-        assert_ne!(victim, pid(0), "p0 (frequent) should not be evicted");
     }
 
     #[test]
-    fn lfu_empty_has_no_candidate() {
-        let e = MokaCacheEvictor::new_lfu();
-        assert!(e.is_empty());
-        assert_eq!(e.evict_candidate(), None);
+    fn under_quota_never_evicts() {
+        let e = evictor(CacheEvictorType::Lru, 10);
+        for i in 0..10 {
+            e.on_add(&pid(i), PAGE);
+        }
+        assert!(e.drain_victims().is_empty());
     }
 
     #[test]
-    fn lfu_frequency_increments_on_access() {
-        let e = MokaCacheEvictor::new_lfu();
-        e.on_add(&pid(0)); // freq=1
-        e.on_add(&pid(1)); // freq=1
-
-        // Access p0 three times → p0 freq=4, p1 freq=1.
-        e.on_access(&pid(0));
-        e.on_access(&pid(0));
-        e.on_access(&pid(0));
-
-        // p1 (freq=1) should be evicted before p0 (freq=4).
-        assert_eq!(e.evict_candidate(), Some(pid(1)));
-    }
-
-    // ── Shared tests ───────────────────────────────────────────
-
-    #[test]
-    fn lru_remove_updates_len() {
-        let e = MokaCacheEvictor::new_lru();
-        e.on_add(&pid(0));
-        e.on_add(&pid(1));
-        e.cache.run_pending_tasks();
-        assert_eq!(e.len(), 2);
+    fn on_remove_is_not_reported_as_a_victim() {
+        let e = evictor(CacheEvictorType::Lru, 4);
+        e.on_add(&pid(0), PAGE);
+        e.on_add(&pid(1), PAGE);
         e.on_remove(&pid(0));
-        e.cache.run_pending_tasks();
-        assert_eq!(e.len(), 1);
-        assert_eq!(e.evict_candidate(), Some(pid(1)));
+        assert!(e.drain_victims().is_empty());
     }
 
     #[test]
-    fn lfu_remove_updates_len() {
-        let e = MokaCacheEvictor::new_lfu();
-        e.on_add(&pid(0));
-        e.on_add(&pid(1));
-        e.cache.run_pending_tasks();
-        assert_eq!(e.len(), 2);
+    fn remove_frees_quota() {
+        let e = evictor(CacheEvictorType::Lru, 2);
+        e.on_add(&pid(0), PAGE);
+        e.on_add(&pid(1), PAGE);
         e.on_remove(&pid(0));
-        e.cache.run_pending_tasks();
-        assert_eq!(e.len(), 1);
-        assert_eq!(e.evict_candidate(), Some(pid(1)));
+
+        e.on_add(&pid(2), PAGE);
+        assert!(e.drain_victims().is_empty());
+    }
+
+    #[test]
+    fn quota_is_bytes_not_pages() {
+        let e = MokaCacheEvictor::new(CacheEvictorType::Lru, PAGE * 4);
+        for i in 0..8 {
+            e.on_add(&pid(i), PAGE / 2);
+        }
+        assert!(e.drain_victims().is_empty());
+
+        e.on_add(&pid(8), PAGE / 2);
+        assert_eq!(e.drain_victims().len(), 1);
     }
 
     #[test]
     fn concurrent_on_access_no_deadlock() {
-        // Verify that concurrent on_access calls don't deadlock — the primary
-        // motivation for replacing Mutex<LruState> with moka.
-        use std::sync::Arc;
         use std::thread;
 
-        for evictor in [MokaCacheEvictor::new_lru(), MokaCacheEvictor::new_lfu()] {
-            let e = Arc::new(evictor);
+        for policy in [CacheEvictorType::Lru, CacheEvictorType::Lfu] {
+            let e = Arc::new(evictor(policy, 100));
             for i in 0..100u64 {
-                e.on_add(&pid(i));
+                e.on_add(&pid(i), PAGE);
             }
+            let _ = e.drain_victims();
 
             let mut handles = Vec::new();
-            for t in 0..8 {
+            for t in 0..8u64 {
                 let e = Arc::clone(&e);
                 handles.push(thread::spawn(move || {
                     for i in 0..1000u64 {
-                        let id = pid((t * 1000 + i) % 100);
-                        e.on_access(&id);
+                        e.on_access(&pid((t * 1000 + i) % 100));
                     }
                 }));
             }
             for h in handles {
                 h.join().unwrap();
             }
-
-            e.cache.run_pending_tasks();
-            assert_eq!(e.len(), 100);
+            assert!(e.drain_victims().is_empty(), "reads must not evict");
         }
     }
 }

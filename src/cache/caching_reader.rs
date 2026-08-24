@@ -244,6 +244,7 @@ mod tests {
             dir_capacity: capacity,
             dirs: vec![base.clone()],
             evictor: CacheEvictorType::Lru,
+            evictor_backend: crate::config::CacheEvictorBackend::default(),
             async_write_enabled: false,
             async_write_threads: 1,
             quota_enabled: false,

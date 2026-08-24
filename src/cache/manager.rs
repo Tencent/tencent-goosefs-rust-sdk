@@ -85,13 +85,18 @@ const LOCK_SIZE: usize = 1024;
 /// Per-directory evictor + byte accounting.
 ///
 /// The evictor uses interior mutability for reads (`on_access` takes `&self`).
-/// For writes (`evict_candidate`, `on_add`, `on_remove`), the per-dir
+/// For writes (`on_add`, `on_remove`, `drain_victims`), the per-dir
 /// `dir_locks[i]` `StdMutex` serialises the operation — but only for the
 /// same directory. Different directories can mutate concurrently.
 struct DirState {
+    /// Owns the directory's byte quota: admitting a page may evict others,
+    /// which `reclaim_victims` then removes from the index and from disk.
     evictor: Box<dyn CacheEvictor>,
     /// Used bytes in this directory. `AtomicU64` for lock-free reads on the
     /// `get`/`put` hot path; updated via `fetch_add` / `fetch_sub`.
+    ///
+    /// Tracks what the evictor admitted rather than gating admission, so it can
+    /// briefly exceed `capacity` between a put and its `reclaim_victims`.
     used_bytes: AtomicU64,
     capacity: u64,
 }
@@ -118,7 +123,7 @@ pub struct LocalCacheManager {
     /// `dir_locks[i]`.
     dirs: Vec<DirState>,
     /// Per-directory `StdMutex` for serialising evictor write operations
-    /// (`evict_candidate`, `on_add`, `on_remove`) and `used_bytes` updates.
+    /// (`on_add`, `on_remove`, `drain_victims`) and `used_bytes` updates.
     /// Each dir has its own mutex — different dirs evict concurrently.
     dir_locks: Vec<StdMutex<()>>,
 
@@ -203,7 +208,12 @@ impl LocalCacheManager {
             };
             stores.push(store);
             dirs.push(DirState {
-                evictor: build_evictor(options.evictor),
+                evictor: build_evictor(
+                    options.evictor_backend,
+                    options.evictor,
+                    options.dir_capacity,
+                    options.page_size,
+                ),
                 used_bytes: AtomicU64::new(0),
                 capacity: options.dir_capacity,
             });
@@ -291,44 +301,78 @@ impl LocalCacheManager {
             .set(self.total_capacity().saturating_sub(used) as i64);
     }
 
-    /// Pop one eviction victim from directory `dir_index`'s evictor, updating
-    /// the index and accounting. Returns the victim id, its size, and whether
-    /// the victim's file now has no remaining cached pages (so the caller can
-    /// reclaim its identity sidecar). File deletion is the caller's
-    /// responsibility, performed outside the lock.
+    /// Reclaim the pages directory `dir_index`'s evictor has evicted.
     ///
-    /// Takes the per-dir `StdMutex` to serialise evictor write operations.
-    /// The Mutex is released before the `by_file.write().await` to keep the
-    /// guard `Send` across the await point.
-    async fn pop_victim(&self, dir_index: usize) -> Option<(PageId, u64, bool)> {
-        // Phase 1: under per-dir Mutex — evictor + meta + used_bytes.
-        let (victim, size) = {
+    /// The evictor owns the byte quota: admitting a page through
+    /// [`CacheEvictor::on_add`] evicts whatever no longer fits, and this drains
+    /// those victims and undoes everything the manager holds for them — index
+    /// entry, byte accounting, reverse index, and finally the page file itself.
+    ///
+    /// Returns the reclaimed page ids so the caller can tell whether a page it
+    /// just admitted was itself the victim.
+    ///
+    /// Cheap when nothing was evicted (the common case below quota): a single
+    /// uncontended lock and an empty vector, no allocation.
+    ///
+    /// **Lock discipline** mirrors the rest of the manager: the per-dir
+    /// `StdMutex` covers only the index and accounting updates and is released
+    /// before any `.await`, and the page files are deleted outside every lock.
+    /// The victims belong to page-lock stripes the caller does not hold, which
+    /// is the same exposure the previous evict-before-write path had.
+    async fn reclaim_victims(&self, dir_index: usize) -> Vec<PageId> {
+        let victims = self.dirs[dir_index].evictor.drain_victims();
+        if victims.is_empty() {
+            return victims;
+        }
+
+        // Phase 1 under per-dir Mutex: meta + used_bytes.
+        let mut sizes: Vec<u64> = Vec::with_capacity(victims.len());
+        {
             let _guard = self.dir_locks[dir_index].lock().unwrap();
-            let victim = self.dirs[dir_index].evictor.evict_candidate()?;
-            let size = self
-                .meta
-                .remove(&victim)
-                .map(|(_, v)| v.page_size)
-                .unwrap_or(0);
-            self.dirs[dir_index].evictor.on_remove(&victim);
-            self.dirs[dir_index]
-                .used_bytes
-                .fetch_sub(size, Ordering::Relaxed);
-            (victim, size)
-        };
+            for victim in &victims {
+                let size = self
+                    .meta
+                    .remove(victim)
+                    .map(|(_, v)| v.page_size)
+                    .unwrap_or(0);
+                self.dirs[dir_index]
+                    .used_bytes
+                    .fetch_sub(size, Ordering::Relaxed);
+                sizes.push(size);
+            }
+        }
+
         // Phase 2: by_file update (async, no Mutex held).
-        let mut file_empty = false;
+        let mut emptied_files: Vec<Arc<str>> = Vec::new();
         {
             let mut by_file = self.by_file.write().await;
-            if let Some(set) = by_file.get_mut(&victim.file_id) {
-                set.remove(&victim.page_index);
-                if set.is_empty() {
-                    by_file.remove(&victim.file_id);
-                    file_empty = true;
+            for victim in &victims {
+                if let Some(set) = by_file.get_mut(&victim.file_id) {
+                    set.remove(&victim.page_index);
+                    if set.is_empty() {
+                        by_file.remove(&victim.file_id);
+                        emptied_files.push(victim.file_id.clone());
+                    }
                 }
             }
         }
-        Some((victim, size, file_empty))
+
+        // Phase 3: disk deletes, outside every lock (best-effort).
+        for (victim, size) in victims.iter().zip(&sizes) {
+            counter(mn::CLIENT_CACHE_BYTES_EVICTED).inc(*size as i64);
+            counter(mn::CLIENT_CACHE_PAGES_EVICTED).inc(1);
+            if let Err(e) = self.stores[dir_index].delete(victim).await {
+                warn!(error = %e, "evict: failed to delete page from store");
+                counter(mn::CLIENT_CACHE_DELETE_FROM_STORE_ERRORS).inc(1);
+            }
+        }
+        // A file with no remaining pages no longer needs its identity sidecar.
+        for file_id in &emptied_files {
+            let _ = self.stores[dir_index].delete_identity(file_id).await;
+        }
+
+        self.publish_occupancy();
+        victims
     }
 
     /// Rebuild the in-memory index from pages persisted on disk by a previous
@@ -437,12 +481,12 @@ impl LocalCacheManager {
                         );
                         {
                             let _dir_guard = self.dir_locks[dir_index].lock().unwrap();
-                            self.dirs[dir_index].evictor.on_add(&page_id);
+                            self.dirs[dir_index]
+                                .used_bytes
+                                .fetch_add(size, Ordering::Relaxed);
+                            self.dirs[dir_index].evictor.on_add(&page_id, size);
                             drop(_dir_guard);
                         }
-                        self.dirs[dir_index]
-                            .used_bytes
-                            .fetch_add(size, Ordering::Relaxed);
                         {
                             let mut by_file = self.by_file.write().await;
                             by_file
@@ -468,6 +512,15 @@ impl LocalCacheManager {
                     }
                 }
             }
+        }
+
+        // The loop above keeps the directory under its global quota, but the
+        // evictor shards that quota, so a shard can still overflow and evict.
+        // Reclaim those now: leaving them behind would strand pages in `meta`
+        // that the policy no longer tracks, so they could never be evicted
+        // again and `used_bytes` would drift up permanently.
+        for dir_index in 0..self.stores.len() {
+            self.reclaim_victims(dir_index).await;
         }
 
         if restored_pages > 0 {
@@ -590,86 +643,32 @@ impl CacheManager for LocalCacheManager {
 
         let dir_index = self.allocator.allocate(page_id, self.stores.len());
 
-        // Reserve capacity (evicting as needed), collecting victims to delete
-        // outside the lock. Each victim carries whether its file became empty
-        // so the caller can also reclaim the file's identity sidecar.
-        //
-        // Phase C: `used_bytes` is an `AtomicU64`, so capacity checks are
-        // lock-free. The per-dir `StdMutex` is only acquired briefly inside
-        // `pop_victim` for evictor write operations, and is NEVER held across
-        // an `.await` point.
         if self.meta.contains_key(page_id) {
             counter(mn::CLIENT_CACHE_PUT_BENIGN_RACING_ERRORS).inc(1);
             return false;
         }
-        let mut victims: Vec<(PageId, bool)> = Vec::new();
-        loop {
-            let current = self.dirs[dir_index].used_bytes.load(Ordering::Relaxed);
-            if current + page_len <= self.dirs[dir_index].capacity {
-                // Try to reserve (CAS loop — concurrent puts may have consumed
-                // some of the freed space, so retry on contention).
-                if self.dirs[dir_index]
-                    .used_bytes
-                    .compare_exchange(
-                        current,
-                        current + page_len,
-                        Ordering::AcqRel,
-                        Ordering::Relaxed,
-                    )
-                    .is_ok()
-                {
-                    break;
-                }
-                // CAS failed → another put reserved; re-check capacity.
-                continue;
-            }
-            // Over capacity → evict one victim (pop_victim acquires/releases
-            // its own per-dir Mutex internally).
-            match self.pop_victim(dir_index).await {
-                Some((victim, size, file_empty)) => {
-                    counter(mn::CLIENT_CACHE_BYTES_EVICTED).inc(size as i64);
-                    counter(mn::CLIENT_CACHE_PAGES_EVICTED).inc(1);
-                    victims.push((victim, file_empty));
-                }
-                None => {
-                    counter(mn::CLIENT_CACHE_PUT_INSUFFICIENT_SPACE_ERRORS).inc(1);
-                    counter(mn::CLIENT_CACHE_PUT_ERRORS).inc(1);
-                    // Roll back any successful evictions? The evictions
-                    // already removed the page files; nothing to undo.
-                    return false;
-                }
-            }
-        }
 
-        // Delete evicted files outside the lock (best-effort).
-        for (victim, file_empty) in &victims {
-            if let Err(e) = self.stores[dir_index].delete(victim).await {
-                warn!(error = %e, "evict: failed to delete page from store");
-                counter(mn::CLIENT_CACHE_DELETE_FROM_STORE_ERRORS).inc(1);
-            }
-            if *file_empty {
-                let _ = self.stores[dir_index]
-                    .delete_identity(&victim.file_id)
-                    .await;
-            }
-        }
-
-        // Roll back the reservation on store write failure.
+        // Admit-then-evict: write the page, admit it into the policy, then
+        // reclaim whatever the policy evicted to make room. The previous
+        // evict-then-write order required naming a victim on demand, which is
+        // only answerable with an O(page count) scan — see
+        // `docs/FOYER_SSD_CACHE_MIGRATION.md` §5.7.
+        //
+        // The directory can therefore sit over quota between the write below
+        // and `reclaim_victims`, by at most one page per concurrent put. That
+        // is bounded well inside the 5% `LOCAL_STORE_OVERHEAD` the usable
+        // capacity already reserves, so it cannot fill the underlying disk.
         if let Err(e) = self.stores[dir_index].put(page_id, &page).await {
             warn!(error = %e, "put: failed to write page to store");
-            self.dirs[dir_index]
-                .used_bytes
-                .fetch_sub(page_len, Ordering::Relaxed);
-            self.publish_occupancy();
             counter(mn::CLIENT_CACHE_PUT_STORE_WRITE_ERRORS).inc(1);
             counter(mn::CLIENT_CACHE_PUT_ERRORS).inc(1);
             return false;
         }
 
-        // Commit metadata.
+        // Commit metadata and admit into the policy.
         {
-            // Per-dir Mutex: serialise evictor.on_add with any concurrent
-            // pop_victim for the same dir. Released before any await.
+            // Per-dir Mutex: serialise the evictor write with any concurrent
+            // reclaim for the same dir. Released before any await.
             let _dir_guard = self.dir_locks[dir_index].lock().unwrap();
             let info = PageInfo {
                 page_id: page_id.clone(),
@@ -679,7 +678,17 @@ impl CacheManager for LocalCacheManager {
                 scope: CacheScope::Global,
             };
             self.meta.insert(page_id.clone(), info);
-            self.dirs[dir_index].evictor.on_add(page_id);
+            self.dirs[dir_index]
+                .used_bytes
+                .fetch_add(page_len, Ordering::Relaxed);
+            // Timed on its own: this is where the policy admits the page and,
+            // once the directory is full, picks the victim. Isolating it from
+            // the surrounding IO is what makes the metric able to show whether
+            // victim selection scales with the page count.
+            let policy_start = Instant::now();
+            self.dirs[dir_index].evictor.on_add(page_id, page_len);
+            counter(mn::CLIENT_CACHE_EVICT_CANDIDATE_NANOS)
+                .inc(policy_start.elapsed().as_nanos() as i64);
             counter(mn::CLIENT_CACHE_BYTES_WRITTEN_CACHE).inc(page_len as i64);
             drop(_dir_guard);
         }
@@ -718,6 +727,19 @@ impl CacheManager for LocalCacheManager {
                 debug!(file_id = %page_id.file_id, error = %e,
                     "failed to persist cache identity");
             }
+        }
+
+        // Reclaim what admitting this page pushed out. Runs after the reverse
+        // index is updated so a victim's `by_file` entry is always found —
+        // including the case where the policy evicted the page just admitted.
+        let victims = self.reclaim_victims(dir_index).await;
+        if victims.contains(page_id) {
+            // Admitted and immediately evicted: the page is no longer cached,
+            // so report the fill as unsuccessful rather than let the caller
+            // believe a later `get` will hit.
+            counter(mn::CLIENT_CACHE_PUT_INSUFFICIENT_SPACE_ERRORS).inc(1);
+            counter(mn::CLIENT_CACHE_PUT_ERRORS).inc(1);
+            return false;
         }
         true
     }
@@ -940,7 +962,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use crate::config::CacheEvictorType;
+    use crate::config::{CacheEvictorBackend, CacheEvictorType};
 
     fn opts(
         page_size: u64,
@@ -958,6 +980,7 @@ mod tests {
                 dir_capacity: capacity,
                 dirs: dirs.clone(),
                 evictor,
+                evictor_backend: CacheEvictorBackend::default(),
                 async_write_enabled: async_threads > 0,
                 async_write_threads: async_threads.max(1),
                 quota_enabled: false,
@@ -1038,8 +1061,10 @@ mod tests {
 
     #[tokio::test]
     async fn eviction_per_dir_moka() {
-        // Same as eviction_per_dir_lru but explicitly using the moka-backed LRU evictor.
-        let (o, dirs) = opts(8, 16, 1, CacheEvictorType::Lru, 4);
+        // Same as eviction_per_dir_lru against the moka backend, so the escape
+        // hatch stays wired up and the two backends agree on LRU order.
+        let (mut o, dirs) = opts(8, 16, 1, CacheEvictorType::Lru, 4);
+        o.evictor_backend = CacheEvictorBackend::Moka;
         let mgr = Arc::new(LocalCacheManager::create(o).await.unwrap());
         let p0 = PageId::new("f", 0);
         let p1 = PageId::new("f", 1);
@@ -1055,10 +1080,79 @@ mod tests {
         cleanup(&dirs).await;
     }
 
+    /// Admit-then-evict must leave the byte accounting, the in-memory index and
+    /// the page files on disk agreeing with each other, however far past the
+    /// quota the workload pushes.
+    ///
+    /// This is the local stand-in for the cluster-gated INV-PC checks: the
+    /// quota is now enforced by the evictor rather than by a pre-write reserve
+    /// loop, so a drifting `used_bytes` or a leaked page file would show up
+    /// here first.
     #[tokio::test]
-    async fn moka_evictor_concurrent_gets_no_deadlock() {
-        // Verify that 32 concurrent gets on the same file don't deadlock
-        // with the moka-backed evictor (the primary motivation for the replacement).
+    async fn sustained_puts_past_quota_keep_accounting_and_disk_in_sync() {
+        for backend in [CacheEvictorBackend::Foyer, CacheEvictorBackend::Moka] {
+            // Capacity for 8 pages of 64 bytes; write 200.
+            let page_size = 64u64;
+            let pages = 8u64;
+            let (mut o, dirs) = opts(page_size, page_size * pages, 1, CacheEvictorType::Lru, 4);
+            o.evictor_backend = backend;
+            let mgr = Arc::new(LocalCacheManager::create(o).await.unwrap());
+
+            for i in 0..200u64 {
+                let id = PageId::new("f", i);
+                mgr.put(&id, Bytes::from(vec![(i % 251) as u8; page_size as usize]))
+                    .await;
+            }
+
+            let used = mgr.dirs[0].used_bytes.load(Ordering::Relaxed);
+            let resident = mgr.meta.len() as u64;
+
+            assert!(
+                used <= mgr.dirs[0].capacity,
+                "{backend:?}: used {used} exceeds capacity {}",
+                mgr.dirs[0].capacity
+            );
+            assert_eq!(
+                used,
+                resident * page_size,
+                "{backend:?}: byte accounting must match the index"
+            );
+
+            // Every page still indexed must be readable, and nothing else may
+            // be left behind on disk.
+            let mut dst = vec![0u8; page_size as usize];
+            for entry in mgr.meta.iter() {
+                let id = entry.key().clone();
+                assert_eq!(
+                    mgr.get(&id, 0, &mut dst).await,
+                    page_size as usize,
+                    "{backend:?}: indexed page {id:?} must be readable"
+                );
+            }
+            let on_disk = walk_files(&dirs[0])
+                .iter()
+                .filter(|p| {
+                    // Page files are named by page index; skip identity sidecars.
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.parse::<u64>().is_ok())
+                })
+                .count() as u64;
+            assert_eq!(
+                on_disk, resident,
+                "{backend:?}: evicted page files must be deleted, not leaked"
+            );
+
+            cleanup(&dirs).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn evictor_concurrent_gets_no_deadlock() {
+        // 32 concurrent gets of the same page must not deadlock or serialise on
+        // the evictor: contention here is what motivated replacing the original
+        // global-Mutex evictor, and `on_access` must stay a lock-light O(1)
+        // touch in every backend since.
         let (o, dirs) = opts(256, 1024 * 1024, 1, CacheEvictorType::Lru, 4);
         let mgr = Arc::new(LocalCacheManager::create(o).await.unwrap());
         // Pre-populate one page.
@@ -1307,6 +1401,7 @@ mod tests {
             dir_capacity: capacity,
             dirs,
             evictor: CacheEvictorType::Lru,
+            evictor_backend: CacheEvictorBackend::default(),
             async_write_enabled: false,
             async_write_threads: 1,
             quota_enabled: false,
