@@ -1,5 +1,5 @@
 ---
-sidebar_position: 12
+sidebar_position: 13
 ---
 
 # Metrics
@@ -42,6 +42,10 @@ export GOOSEFS_METRICS_PUSHGATEWAY_INSTANCE=$(hostname)
 ```
 
 The client pushes metrics to the Pushgateway at the configured interval. Use Prometheus to scrape the Pushgateway.
+
+## Metadata Cache Metrics
+
+When the [metadata cache](./metadata-cache) is enabled, the client also reports `Client.MetadataCacheHits` / `Misses` / `Expirations` / `Invalidations` / `NegativeHits` (counters) plus `Client.MetadataCacheSize` / `Client.MetadataCacheEnabled` (gauges). `Client.GetStatusOps` counts master RPCs only, so cache hits are **not** counted there.
 
 ## Observability Without Metrics
 

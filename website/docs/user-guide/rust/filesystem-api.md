@@ -35,6 +35,10 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 }
 ```
 
+:::note
+`list_status(path, true)` (recursive) is walked breadth-first by `MasterClient` — GooseFS 2.0 dropped `ListStatusPOptions.recursive` — and always bypasses the [metadata cache](./metadata-cache); non-recursive listings can be served from it. Both variants send the resolved `load_metadata_type` (default `ONCE`, override per call via `ListStatusOptions`) to the Master.
+:::
+
 ## High-Level Write
 
 ```rust

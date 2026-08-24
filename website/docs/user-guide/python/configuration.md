@@ -41,9 +41,10 @@ cfg = Config.from_uri("gfs://127.0.0.1:9200/data")
 | `GOOSEFS_USER_FILE_CHECK_BLOCK_REPLICAS` | CheckBlocks probe count; `0` disables (default) |
 | `GOOSEFS_MASTER_CONNECTION_POOL_SIZE` | Master gRPC channel pool size (default 1)     |
 | `GOOSEFS_MASTER_POOL_SCHEDULE`        | `roundrobin` / `p2c`                          |
-| `GOOSEFS_WORKER_CONNECTION_POOL_SIZE` | Per-worker gRPC channel pool size             |
-| `GOOSEFS_FILE_INFO_CACHE_TTL_MS`      | Client-side FileInfo cache TTL (0 = disabled) |
-| `GOOSEFS_FILE_INFO_CACHE_CAPACITY`    | FileInfo LRU cache capacity                   |
+| `GOOSEFS_WORKER_CONNECTION_POOL_SIZE` | Per-worker gRPC channel pool size              |
+| `GOOSEFS_METADATA_CACHE_ENABLED`      | Client metadata cache switch (default `false`) |
+| `GOOSEFS_METADATA_CACHE_EXPIRATION`   | Metadata cache TTL (`10min`, `30s`, raw ms)    |
+| `GOOSEFS_METADATA_CACHE_MAX_SIZE`     | Metadata cache LRU capacity (default `100000`) |
 
 ## Write / Read Types
 
@@ -93,6 +94,18 @@ Disabled by default. Enable via env or properties:
 | `goosefs.user.client.cache.sync.read.enabled` | `GOOSEFS_USER_CLIENT_CACHE_SYNC_READ_ENABLED`| `false` (Linux only; analytical workloads on local NVMe — see [Page Cache → Sync pread read mode](./page-cache#sync-pread-read-mode-linux-only)) |
 
 See [Page Cache](./page-cache) for a full walkthrough.
+
+## Client Metadata Cache (opt-in)
+
+Disabled by default. When enabled, `get_status` / `exists` / `open_file` / non-recursive `list_status` share one process-local TTL-bounded LRU (status + listing + negative cache); `mkdir` / `delete` / `rename` invalidate the path and its parent.
+
+| Property key                                  | Env var                             | Default  |
+| --------------------------------------------- | ----------------------------------- | -------- |
+| `goosefs.user.metadata.cache.enabled`         | `GOOSEFS_METADATA_CACHE_ENABLED`    | `false`  |
+| `goosefs.user.metadata.cache.max.size`        | `GOOSEFS_METADATA_CACHE_MAX_SIZE`   | `100000` |
+| `goosefs.user.metadata.cache.expiration.time` | `GOOSEFS_METADATA_CACHE_EXPIRATION` | `10min`  |
+
+This replaces the removed `GOOSEFS_FILE_INFO_CACHE_TTL_MS` / `GOOSEFS_FILE_INFO_CACHE_CAPACITY` knobs. See [Metadata Cache](./metadata-cache) for semantics and metrics.
 
 ## Full Parameter Reference
 

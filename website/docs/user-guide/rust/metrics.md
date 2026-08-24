@@ -1,5 +1,5 @@
 ---
-sidebar_position: 6
+sidebar_position: 7
 ---
 
 # Metrics
@@ -37,7 +37,11 @@ async fn main() -> goosefs_sdk::error::Result<()> {
 1. **Heartbeat** — cluster-aggregated metrics to Master (`isClusterAggregated=true`)
 2. **Pushgateway** — all metrics via HTTP POST for Prometheus/Grafana
 
-Java-compatible cluster-aggregated counters include `Client.BytesReadLocal`, `Client.BytesWrittenLocal`, and `Client.BytesWrittenUfs`. The Rust client also exports RPC op counts, error counters, latency cumulatives, and `Client.Cache*` page-cache metrics.
+Java-compatible cluster-aggregated counters include `Client.BytesReadLocal`, `Client.BytesWrittenLocal`, and `Client.BytesWrittenUfs`. The Rust client also exports RPC op counts, error counters, latency cumulatives, `Client.Cache*` page-cache metrics, and `Client.MetadataCache*` metadata-cache metrics (`MetadataCacheHits` / `Misses` / `Expirations` / `Invalidations` / `NegativeHits` / `Size` / `Enabled` — see [Metadata Cache](./metadata-cache)).
+
+:::note
+`Client.GetStatusOps` counts Master RPCs only; metadata-cache hits are **not** counted.
+:::
 
 Full catalogue: [`docs/METRICS.md`](https://github.com/Tencent/tencent-goosefs-rust-sdk/blob/main/docs/METRICS.md).
 

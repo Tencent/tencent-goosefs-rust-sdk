@@ -51,6 +51,10 @@ first = grouped[0]                    # materialises one URIStatus
 
 See [Batch APIs](./batch-api) for concurrent multi-path operations.
 
+:::note
+`recursive=True` listings are walked breadth-first by the client against the master (GooseFS 2.0 dropped server-side recursive listing) and always bypass the [metadata cache](./metadata-cache); non-recursive listings can be served from it. Both variants send `goosefs.user.file.metadata.load.type` (default `ONCE`) to the master.
+:::
+
 ## High-Level Read / Write
 
 ```python
