@@ -1,5 +1,5 @@
 ---
-sidebar_position: 9
+sidebar_position: 10
 ---
 
 # Worker Block Direct Read
@@ -47,6 +47,10 @@ use goosefs_sdk::block::WorkerRouter;
 let router = ctx.acquire_router();
 let worker_info = router.select_worker(block_ids[0]).await?;
 ```
+
+:::note
+`select_worker` mirrors the Java client's consistent-hash policy: `murmur3_128` over the block id with per-worker virtual nodes. Workers report their own `WorkerInfo.virtual_node_num`; when the field is unset the client falls back to the GooseFS 2.0 default `goosefs.master.consistent.hash.virtual.node.num.per.worker = 5000`, so Rust and Java clients pick the same worker for the same block. Candidate-pool width and replica count follow `GOOSEFS_USER_FILE_READ_MAX_NODE_RETRY` / `GOOSEFS_USER_FILE_REPLICATION_NUMBER` (see [Configuration](./configuration)).
+:::
 
 ### Step 3: Connect to the worker and open a block reader
 

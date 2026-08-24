@@ -11,11 +11,40 @@ kept aligned. Python-specific notes also appear in
 
 ## [Unreleased]
 
+### Added
+
+- **Client metadata cache** replacing the `FileInfo` open cache — one
+  process-local TTL-bounded LRU shared by `get_status` / `exists` / `open` /
+  non-recursive `list_status` (status + listing + negative entries), aligned
+  with Java `goosefs.user.metadata.cache.*`
+  (`metadata_cache_enabled` / `max_size` / `expiration`, default off, `10min`
+  TTL, `100000` entries). Write paths invalidate the path and its parent after
+  a successful RPC; new `Client.MetadataCache*` counters/gauges are reported
+  through the existing heartbeat / Pushgateway pipeline. The removed knobs
+  `goosefs.user.file.info.cache.ttl.ms` / `.capacity`
+  (`GOOSEFS_FILE_INFO_CACHE_TTL_MS` / `GOOSEFS_FILE_INFO_CACHE_CAPACITY`)
+  have no replacement other than the new keys.
+
 ### Changed
 
 - Align consistent-hash fallback virtual nodes per worker with GooseFS 2.0
   (`goosefs.master.consistent.hash.virtual.node.num.per.worker` default
   `200` → `5000`). Used only when `WorkerInfo.virtual_node_num` is unset.
+- **GooseFS 2.0 client protos synced** while keeping `CheckBlocks` bool wire
+  compatibility. Recursive `list_status` is now a client-side BFS owned by
+  `MasterClient` (GooseFS 2.0 dropped `ListStatusPOptions.recursive`), and the
+  resolved `load_metadata_type` (default `ONCE`) is sent for both recursive and
+  non-recursive listings, matching Java `listStatusDefaults()`.
+- Write path slices chunks directly from the caller buffer instead of draining
+  an intermediate `pending_chunk`, removing one copy per chunk on the
+  `GoosefsFileWriter` hot path.
+
+### Docs
+
+- Documentation site: new **Metadata Cache** pages for Rust and Python,
+  metadata-cache metrics in both Metrics pages, recursive-listing semantics on
+  the FileSystem API pages, and consistent-hash worker-selection notes on the
+  Rust Worker Block Direct Read page.
 
 ## [0.1.9] — 2026-08-04
 
