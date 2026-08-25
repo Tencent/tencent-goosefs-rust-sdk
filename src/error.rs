@@ -74,6 +74,14 @@ pub enum Error {
     #[error("no worker available: {message}")]
     NoWorkerAvailable { message: String },
 
+    /// Not enough workers (or successful replica writes) to satisfy the
+    /// requested replication contract.
+    ///
+    /// Mirrors Java `ResourceExhaustedException` from
+    /// `GooseFSBlockStore.getOutStream` / `BlockOutStream.executeWithReplication`.
+    #[error("resource exhausted: {message}")]
+    ResourceExhausted { message: String },
+
     /// No primary Master could be discovered (HA polling failed).
     #[error("master unavailable: {message}")]
     MasterUnavailable { message: String },

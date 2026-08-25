@@ -20,6 +20,7 @@ All GooseFS SDK operations return `Result<T, goosefs_sdk::error::Error>`. The `E
 | `OpenDirectory { path }` | Tried to read a directory as a file |
 | `AuthenticationFailed { message }` | SASL handshake failed |
 | `NoWorkerAvailable { message }` | No healthy worker for the block |
+| `ResourceExhausted { message }` | Not enough workers / successful replicas for the write contract |
 | `MasterUnavailable { message }` | All master replicas unreachable |
 | `ConfigError { message }` | Invalid configuration |
 | `GrpcError { message, source }` | gRPC protocol error (from `tonic::Status`) |

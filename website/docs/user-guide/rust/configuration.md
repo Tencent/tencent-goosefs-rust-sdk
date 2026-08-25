@@ -37,6 +37,9 @@ Common environment variables:
 | `GOOSEFS_USER`                   | Username for SIMPLE auth                      |
 | `GOOSEFS_CONF` / properties path | Location of `goosefs-site.properties`         |
 | `GOOSEFS_USER_FILE_REPLICATION_NUMBER` | Block-worker selection count (default `1`) |
+| `GOOSEFS_USER_FILE_REPLICATION_DURABLE` | ASYNC_THROUGH replica target before persist (default `2`) |
+| `GOOSEFS_USER_FILE_REPLICATION_DURABLE_MIN` | ASYNC_THROUGH minimum successful replicas (default `2`) |
+| `GOOSEFS_USER_FILE_READ_MAX_NODE_RETRY` | Read candidate pool width / Java `maxRetryNode` (default `3`) |
 | `GOOSEFS_USER_FILE_READ_MAX_NODE_RETRY` | Read candidate pool width / Java `maxRetryNode` (default `3`) |
 | `GOOSEFS_USER_FILE_CHECK_BLOCK_REPLICAS` | CheckBlocks probe count; `0` disables (default) |
 | `GOOSEFS_METADATA_CACHE_ENABLED` | Client metadata cache switch (default `false`) |

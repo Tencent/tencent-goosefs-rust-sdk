@@ -48,6 +48,7 @@ pub mod file_reader;
 pub mod file_writer;
 pub(crate) mod range_coalesce;
 pub mod reader;
+pub(crate) mod replica_write;
 pub mod writer;
 
 pub use async_reader::GoosefsAsyncReader;

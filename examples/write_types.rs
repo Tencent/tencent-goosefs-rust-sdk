@@ -40,7 +40,11 @@ async fn main() -> Result<()> {
     println!("Goosefs WriteType Demo");
     println!("=======================");
 
-    let config = GoosefsConfig::new("127.0.0.1:9200");
+    // The Docker / local single-worker fixture cannot satisfy Java's
+    // ASYNC_THROUGH defaults (`replication.durable` / `durable.min` = 2).
+    let config = GoosefsConfig::new("127.0.0.1:9200")
+        .with_file_replication_durable(1)
+        .with_file_replication_durable_min(1);
     let ctx: Arc<FileSystemContext> = FileSystemContext::connect(config).await?;
 
     // Initialize: cleanup & create test directory

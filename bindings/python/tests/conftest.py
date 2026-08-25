@@ -81,8 +81,20 @@ def master_addr() -> str:
 
 @pytest.fixture(scope="session")
 def config(master_addr: str) -> Config:
-    """A reusable, immutable :class:`Config` for the whole test session."""
-    return Config(master_addr)
+    """A reusable, immutable :class:`Config` for the whole test session.
+
+    The Docker fixture is a single-worker cluster. Java-aligned
+    ``ASYNC_THROUGH`` defaults (``replication.durable`` /
+    ``replication.durable.min`` = 2) cannot be satisfied with one
+    worker, so this suite pins both to 1.
+    """
+    return Config(
+        master_addr,
+        properties={
+            "goosefs.user.file.replication.durable": "1",
+            "goosefs.user.file.replication.durable.min": "1",
+        },
+    )
 
 
 @pytest_asyncio.fixture
