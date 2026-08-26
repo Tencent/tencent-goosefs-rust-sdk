@@ -11,6 +11,120 @@ kept aligned. Python-specific notes also appear in
 
 ## [Unreleased]
 
+### Changed
+
+- **Default page cache eviction policy is now `LRU`** (was `LFU`), matching the
+  Java client's `goosefs.user.client.cache.eviction.policy` default
+  (`LRUCacheEvictor`). `docs/CLIENT_PAGE_CACHE_DESIGN.md` had specified
+  `default LRU` all along — the implementation had diverged from it, so this
+  brings the two back in line.
+
+  Set `GOOSEFS_USER_CLIENT_CACHE_EVICTION_POLICY=LFU` to keep the previous
+  behaviour. Worth doing if the workload periodically scans data that must not
+  displace the hot set: `LFU` (W-TinyLFU) and `S3FIFO` are scan-resistant,
+  `LRU` is not — a full scan under `LRU` evicts everything.
+
+  Note `LRU` is the only policy where a live `CacheEntry` pins its record out
+  of the eviction order, so it is now the default path for that constraint.
+  Every hot path in `manager.rs` copies what it needs and drops the guard
+  before any `.await`; `reads_do_not_stall_eviction_under_lru` guards this and
+  is a P0 test.
+
+- **Page cache metadata and eviction moved from `moka` to
+  [`foyer`](https://crates.io/crates/foyer-memory).** Metadata, eviction order
+  and byte accounting now live in one sharded cache per directory instead of a
+  `DashMap` + a moka cache + an `AtomicU64`.
+
+  That split was the problem: with moka's own capacity disabled, choosing a
+  victim meant `iter().min_by_key()` over every resident page — measured at
+  ~7ms with 100k pages (100 GB of 1 MiB pages), and ~73µs amortised per request
+  even at a 99% hit rate, since the hit rate only changes how *often* the scan
+  runs. Eviction is now a shard-local pop off an intrusive list: ~300ns, and
+  flat as the cache grows (1.1–1.3x across a 100x range in page count, versus
+  74–187x before).
+
+  Read-hit metadata lookups improved as a side effect, because one shard
+  operation now does what previously took a `DashMap` read plus a moka insert:
+  p99 at 32 concurrent readers went from 151.58µs to 3.67µs, and the tail no
+  longer collapses under load (85x inflation from 1 to 64 threads, versus 5x
+  now). End-to-end read latency is dominated by disk IO and is unchanged.
+
+  The io_uring page fd cache moved to foyer as well, using S3-FIFO for its
+  scan resistance.
+
+- **Fixed**: `init_uring_config` treated a queue depth or thread count of `0` as
+  `1` rather than falling back to the default, contradicting its own
+  documentation. Since the depth sizes both the submission channel and the
+  io_uring SQ, and submission uses `try_send`, a depth of 1 made writes fail with
+  `WouldBlock` -- one `put` issues three ops. Any caller leaving the uring fields
+  at their zero value was affected.
+
+  Verified on a TencentOS NVMe host after the fix (1 KiB pages, average latency):
+
+  | Concurrency | tokio::fs | io_uring | speedup |
+  |---|---|---|---|
+  | 1 | 26.6µs | 17.6µs | 1.51x |
+  | 8 | 22.2µs | 16.4µs | 1.36x |
+  | 16 | 36.7µs | 20.9µs | 1.76x |
+  | 32 | 77.2µs | 32.7µs | 2.36x |
+
+  On the same host the three eviction policies land within 0.88-1.08x of each
+  other with no consistent winner, which is the expected result for a pure
+  cache-hit read path: it measures disk IO, and the metadata work the policy
+  governs is nanoseconds against tens of microseconds of it. Use
+  `BENCH_EVICTION_PRESSURE=1` to compare policies.
+
+- `CacheEvictorType` gains an `S3Fifo` variant
+  (`goosefs.user.client.cache.eviction.policy=S3FIFO`). The default remains
+  `LFU`: S3-FIFO measured ~0.3µs better at p99, which does not justify changing
+  established behaviour. It is worth selecting for scan-heavy workloads.
+
+- Page TTL is enforced on access only. foyer has no iteration, so the
+  background sweeper is gone. Expired pages were already never *served* — that
+  check was always on the read path — but the space held by an expired page
+  nobody touches again is now reclaimed by capacity eviction rather than on a
+  timer.
+
+- Disk capacity is now a soft bound. Evicted pages have their files deleted by
+  a background reaper, so usage can briefly exceed `dir_capacity` by the reaper
+  backlog: at most 1024 pages (1 GiB with 1 MiB pages), which fits inside the
+  5% overhead already reserved. Watch `Client.CacheReapQueueDepth`.
+
+### Added
+
+- `Client.CacheReapQueueDepth`, `Client.CacheReapDropped`,
+  `Client.CacheReapSkippedReadmitted` and `Client.CachePageFdTtlExpired`
+  metrics for the eviction reaper and the fd cache's lazy TTL.
+
+- `LocalCacheManager::close()`, which waits for queued evictions to be
+  processed. Optional — dropping the manager also stops the reaper, but then
+  queued victims are left as orphan files for the next `restore()` to reclaim.
+
+### Removed
+
+- **`moka` dependency.** Replaced by `foyer-memory` + `foyer-common`
+  (deliberately not the umbrella `foyer` crate, which would pull in a storage
+  engine that overlaps our own `PageStore`).
+
+- **`cache::evictor` module** (`CacheEvictor` trait, `MokaCacheEvictor`,
+  `build_evictor`). Eviction is internal to the metadata cache now. This is a
+  breaking change for anyone who imported these directly; the replacement is to
+  select a policy via `CacheEvictorType`.
+
+- `LocalCacheManager::sweep_expired()`, together with the background sweeper
+  task. See the TTL note above.
+
+### Breaking
+
+- `LocalCacheManager::create()` returns `Result<Arc<Self>>` rather than
+  `Result<Self>`, because the reaper task holds a `Weak<Self>`. Callers that
+  wrapped the result in `Arc::new` should drop that. `from_config()` already
+  returned `Arc<Self>` and is unaffected, so code going through it — which is
+  everything in this repository outside tests — needs no change.
+
+- MSRV is unchanged at 1.88. foyer's published MSRV is 1.85.0; the 1.91 in its
+  README is its own dev-workspace toolchain, not a constraint on consumers.
+
 ### Added
 
 - **Client metadata cache** replacing the `FileInfo` open cache — one

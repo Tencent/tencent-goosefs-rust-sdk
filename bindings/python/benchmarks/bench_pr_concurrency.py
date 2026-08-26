@@ -103,6 +103,24 @@ TEST_DIR = "/partv-bench"
 _U64 = (1 << 64) - 1
 
 
+def _exit_without_finalising(code: int) -> None:
+    """Exit with ``code``, skipping CPython's finalisation phase.
+
+    Returning normally after the async section lets the interpreter start
+    finalising while the binding's global Tokio runtime is still alive. A
+    worker thread dropping a `Py<PyAny>` then needs the GIL and CPython
+    aborts with ``PyGILState_Release: thread state ... must be current``,
+    turning a passing run into SIGABRT / exit 134.
+
+    The exit code is preserved, so a byte-mismatch failure still fails the
+    job. See the longer note in ``bench_perf_opt.py``; this hides the
+    shutdown bug rather than fixing it.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
+
+
 class XorShift:
     """Identical to the Rust example's PRNG so both harnesses visit the
     exact same offset sequence per task index (removes offset distribution
@@ -328,4 +346,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Not `raise SystemExit(main())`: that unwinds into interpreter shutdown,
+    # which is exactly the path that aborts. The exit code is kept.
+    _exit_without_finalising(main())

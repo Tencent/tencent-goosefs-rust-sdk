@@ -127,7 +127,7 @@ mod tests {
             (20.0 * 1024.0 * 1024.0 * 1024.0 * 0.95) as u64
         );
         assert_eq!(opts.dirs.len(), 1);
-        assert_eq!(opts.evictor, CacheEvictorType::Lfu);
+        assert_eq!(opts.evictor, CacheEvictorType::Lru);
         assert!(opts.async_write_enabled);
         assert_eq!(opts.async_write_threads, 16);
         assert!(!opts.quota_enabled);

@@ -6,12 +6,19 @@
 > Target repo: `tencent-goosefs-rust-sdk` (crate `goosefs-sdk`)
 
 > **Implementation status summary**: P0–P3 of this design have landed in `src/cache/` and passed unit tests.
-> Main differences vs the design: (1) the evictor and meta are **self-implemented** (no `moka`/`lru` introduced),
-> depending only on `async-trait`; (2) the concurrency model uses "a single `Mutex<Inner>` guarding
-> the index / reverse index / per-directory accounting + 1024 striped page locks", with disk IO always
-> executed outside the `Inner` lock (see §5.9 / the `manager.rs` module docs); (3) `file_id` directly takes
+> Main differences vs the design: (1) page metadata *and* eviction are owned by a
+> [`foyer_memory::Cache`](https://crates.io/crates/foyer-memory) per cache directory, not by the
+> self-implemented evictor this document originally described — see
+> the foyer migration design doc (in the `goosefs-lance-tests` repository, `docs/design/FOYER_MIGRATION_DESIGN.md`) for why and for the measurements;
+> (2) the concurrency model is "one sharded `foyer` cache per directory (metadata + eviction order +
+> byte capacity in one structure) + 1024 striped page locks", with disk IO always executed outside
+> any metadata lock — the single `Mutex<Inner>` described below is long gone; (3) `file_id` directly takes
 > the string form of `URIStatus.file_id` (server-side inode); overwriting is detected and invalidated by
 > `on_file_open` comparing `(length, last_modification_time_ms)`. Per-module implementation status is in §13.
+>
+> ⚠️ Sections below that describe a self-built evictor, `CacheEvictor` trait, `evict_candidate`, or
+> `pop_victim` are **historical**: they record the design as first implemented. The eviction path they
+> describe no longer exists.
 
 ---
 
@@ -514,10 +521,17 @@ pub trait CacheEvictor: Send + Sync {
 pub fn build_evictor(kind: CacheEvictorType) -> Box<dyn CacheEvictor>;
 ```
 
-> **Implementation note (landed, self-implemented)**: no `moka`/`lru` introduced. Each cache directory holds an independent `Box<dyn CacheEvictor>`
-> (stored in `DirState.evictor`), whose internal state changes all happen within the `Inner` lock critical section, so the evictor needs no lock of its own.
-> - `LruCacheEvictor` (`evictor/lru.rs`): access-order queue, `on_access` moves to tail, `evict_candidate` takes head.
-> - `LfuCacheEvictor` (`evictor/lfu.rs`): frequency counter, evicts the least-frequent page.
+> **Implementation note (superseded)**: this `CacheEvictor` trait and both of its implementations were
+> removed. `src/cache/evictor/` no longer exists, and there is no `DirState`.
+>
+> Eviction is now internal to the per-directory `foyer_memory::Cache` that also owns page metadata:
+> `Cache::insert` evicts from the affected shard synchronously, and a background reaper deletes the
+> victim's file. The policy is chosen with `CacheEvictorType` (`Lru` / `Lfu` / `S3Fifo`) and mapped onto
+> foyer's `LruConfig` / `LfuConfig` / `S3FifoConfig` in `build_page_cache`.
+>
+> The reason for the change was cost, not tidiness: picking a victim used to be an `iter().min_by_key()`
+> scan over every resident page — ~7ms at 100k pages, and a 99% hit rate does not help because the hit
+> rate only sets how *often* the scan runs. See the foyer migration design doc (in the `goosefs-lance-tests` repository, `docs/design/FOYER_MIGRATION_DESIGN.md`).
 
 ### 5.7 `Allocator` (multi-directory)
 
@@ -707,21 +721,33 @@ Instrumentation points (landed):
 
 ## 10. Key Trade-offs and Risks
 
-### 10.1 Self-built vs `moka`
+### 10.1 Self-built vs a cache library
 
 | Approach | Pros | Cons |
 |---|---|---|
 | Self-built evictor + meta (close to Java) | 1:1 aligned with Java behavior, controllable | More work, must ensure concurrency correctness yourself |
-| Reuse `moka` (value stores key metadata, listener deletes disk) | Mature TinyLFU/LRU, capacity/TTL eviction, async-friendly | Behavior slightly differs from Java; disk/memory metadata consistency needs careful eviction-callback handling |
+| Reuse a cache library (value stores key metadata, listener deletes disk) | Mature TinyLFU/LRU, capacity eviction, async-friendly | Behavior slightly differs from Java; disk/memory metadata consistency needs careful eviction-callback handling |
 
-**Suggestion**: P1 uses `moka` to manage key metadata + eviction listener to delete disk files, quickly usable; if strict alignment with Java is later needed, switch to self-built evictor. First confirm whether `Cargo.toml` already includes `moka`, otherwise add the dependency.
+**Original suggestion**: use a library to manage key metadata + an eviction listener to delete disk files.
 
-> **Final decision (landed)**: adopt the **self-built** evictor (`evictor/lru.rs`, `evictor/lfu.rs`) +
-> self-built in-memory index (`manager.rs::Inner`), with no `moka`/`lru` introduced. Reason: cache values are on disk and metadata is in
-> memory, requiring precise control over the order and consistency of "evict metadata → delete disk file outside lock"; self-building is easier to align with Java behavior,
-> and only adds one more `async-trait` dependency. The `PageMetaStore`/`DefaultPageMetaStore` abstraction was simplified into
-> a single `Mutex<Inner>` inside `manager.rs` (primary index + `file_id` reverse index + per-directory accounting), with disk IO
-> always executed outside that lock.
+> **Decision history**. Both of the earlier answers here are now superseded; the sequence is worth keeping
+> because each step was driven by a measurement.
+>
+> 1. **First: self-built** (`evictor/lru.rs`, `evictor/lfu.rs`) + a self-built index behind one
+>    `Mutex<Inner>`. Rationale at the time: cache values live on disk and metadata in memory, so the
+>    order of "evict metadata → delete file outside the lock" needed precise control.
+> 2. **Then: `moka`**, after the global `Mutex<LruState>` was measured at 38x latency degradation under
+>    32 concurrent reads.
+> 3. **Now: `foyer`** — see the foyer migration design doc (in the `goosefs-lance-tests` repository, `docs/design/FOYER_MIGRATION_DESIGN.md`).
+>
+> Step 2 kept metadata in a `DashMap` and used moka only for ordering. That split is what made eviction
+> expensive: with moka's own capacity disabled, choosing a victim meant `iter().min_by_key()` over every
+> resident page — measured at ~7ms with 100k pages, roughly ~73µs amortised per request even at a 99% hit
+> rate. A high hit rate does not help, because it only changes how *often* the scan runs.
+>
+> foyer resolves this by owning metadata, eviction order and byte capacity in one sharded structure, so a
+> victim is a shard-local pop off an intrusive list (~300ns, flat as the cache grows) and the byte
+> capacity is enforced by the cache itself rather than by hand.
 
 ### 10.2 `file_id` stability
 
@@ -875,9 +901,11 @@ Not covered by this suite (intentional, lower-tier coverage suffices):
    `on_file_open(file_id, length, last_modification_time_ms)`, which compares against the recorded version at open time:
    a change in length or mtime is judged an overwrite; after `invalidate`-ing all pages of that file, the version is updated. The call site is
    `GoosefsFileInStream::open_with_context`.
-2. **Does `Cargo.toml` already have `moka` / `lru` / `async-trait`?**
-   ✅ Finalized. Only `async-trait` is introduced; the evictor (LRU/LFU) and meta index are **self-built**, with no
-   `moka`/`lru` introduced, to align with Java behavior and precisely control "value on disk, metadata in memory" consistency.
+2. **Does `Cargo.toml` already have a cache library / `async-trait`?**
+   ✅ Finalized, after two revisions. The answer was originally "self-built, no library", then `moka`, and is now
+   **`foyer-memory` + `foyer-common`** (plus `async-trait`, which was there all along). Each change was driven by a
+   measurement rather than preference; the sequence and the numbers are in §10.1 and in
+   the foyer migration design doc (in the `goosefs-lance-tests` repository, `docs/design/FOYER_MIGRATION_DESIGN.md`). `moka` has been removed.
 3. **Default cache directory and permission policy?**
    ✅ Default `/tmp/goosefs_cache` (`DEFAULT_CLIENT_CACHE_DIR`), overridable via
    `goosefs.user.client.cache.dirs` / `GOOSEFS_USER_CLIENT_CACHE_DIRS` /
@@ -1043,7 +1071,7 @@ Lance implements mature io_uring file reading in `rust/lance-io/src/uring/`, wit
 
 **Lance's limitations** (we improve):
 - Lance only implements **read** (`get_range` / `get_all`), no write path. We need `put` (tmp + rename) and `delete`
-- Lance's fd cache uses `moka`; our first version simplifies to open per call (io_uring's `OP_OPENAT` is also async, with far less overhead than `spawn_blocking`)
+- Lance's fd cache uses `moka`; our first version simplified to open per call (io_uring's `OP_OPENAT` is also async, with far less overhead than `spawn_blocking`). An fd cache was added later, backed by `foyer` with `S3FifoConfig` — see §"Method E" below and `src/cache/store/uring/store.rs`
 - Lance uses `std::sync::mpsc::sync_channel` (single consumer); we need multi-thread round-robin selection
 
 ---
@@ -2837,11 +2865,12 @@ async fn get_bytes(&self, page_id: &PageId, offset: usize, len: usize) -> Result
     };
 
     // SAFETY: `fd` was just successfully opened by io_uring and ownership
-    // is transferred into `File`; moka closes it when the cache entry drops.
+    // is transferred into `File`; the fd is closed when the last `Arc<File>`
+    // goes away, i.e. once the cache entry is evicted and no reader holds it.
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    PAGE_FD_CACHE
-        .insert(page_id.clone(), Arc::new(PageFdEntry::new(file)))
-        .await;
+    // Drop the returned CacheEntry immediately: holding it would pin the
+    // record out of the eviction order.
+    drop(PAGE_FD_CACHE.insert(page_id.clone(), Arc::new(PageFdEntry::new(file))));
 
     Ok(read_bytes)
 }

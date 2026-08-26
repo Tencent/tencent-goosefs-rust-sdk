@@ -253,8 +253,7 @@ mod tests {
             uring_thread_count: 0,
             sync_read_enabled: false,
         };
-        let mgr: Arc<dyn CacheManager> =
-            Arc::new(LocalCacheManager::create(options).await.unwrap());
+        let mgr: Arc<dyn CacheManager> = LocalCacheManager::create(options).await.unwrap();
         (mgr, base)
     }
 

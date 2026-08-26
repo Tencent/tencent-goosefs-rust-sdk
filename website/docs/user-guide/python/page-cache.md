@@ -10,7 +10,7 @@ The client-side page cache stores recently read file pages on **local disk**, av
 
 - **Cache hit**: file data is served from local disk without a worker data RPC; opening the file may still require master metadata lookup.
 - **Cache miss**: data fetched from the worker, back-filled into the cache.
-- **Eviction**: LRU or LFU (configurable), evicts pages when the cache reaches its size limit.
+- **Eviction**: LRU (the default, matching the Java client), LFU or S3-FIFO — configurable; evicts pages when the cache reaches its size limit. `LFU` and `S3FIFO` are scan-resistant: a one-shot sequential read will not flush the hot working set, which `LRU` cannot promise.
 - **Consistency**: the cache is **not** invalidated on out-of-band writes by other clients. Use `ReadType.NoCache` for fresh reads if you suspect concurrent writers.
 
 ## Enabling the Cache
@@ -92,7 +92,7 @@ RUST_LOG=goosefs_sdk::cache=debug python your_script.py
 | `goosefs.user.client.cache.page.size`         | `GOOSEFS_USER_CLIENT_CACHE_PAGE_SIZE`        | `1048576` (1 MB)     |
 | `goosefs.user.client.cache.size`              | `GOOSEFS_USER_CLIENT_CACHE_SIZE`             | `21474836480` (20 GiB) |
 | `goosefs.user.client.cache.dirs`              | `GOOSEFS_USER_CLIENT_CACHE_DIRS`             | `/tmp/goosefs_cache` |
-| `goosefs.user.client.cache.eviction.policy`   | `GOOSEFS_USER_CLIENT_CACHE_EVICTION_POLICY`  | `LFU`                |
+| `goosefs.user.client.cache.eviction.policy`   | `GOOSEFS_USER_CLIENT_CACHE_EVICTION_POLICY`  | `LFU` (`LRU` / `S3FIFO`) |
 | `goosefs.user.client.cache.sync.read.enabled` | `GOOSEFS_USER_CLIENT_CACHE_SYNC_READ_ENABLED`| `false` (Linux only; see [Sync pread read mode](#sync-pread-read-mode-linux-only)) |
 
 ## Sync pread read mode (Linux only)

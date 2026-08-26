@@ -67,7 +67,7 @@ Disabled by default. Enable via fields, properties, or env:
 | `goosefs.user.client.cache.page.size`         | `client_cache_page_size`         | `1MB`                |
 | `goosefs.user.client.cache.size`              | `client_cache_size`              | `20 GiB`             |
 | `goosefs.user.client.cache.dirs`              | `client_cache_dirs`              | `/tmp/goosefs_cache` |
-| `goosefs.user.client.cache.eviction.policy`   | `client_cache_evictor`           | `LFU`                |
+| `goosefs.user.client.cache.eviction.policy`   | `client_cache_evictor`           | `LFU` (`LRU` / `S3FIFO`) |
 | `goosefs.user.client.cache.sync.read.enabled` | `client_cache_sync_read_enabled` | `false` (Linux only; analytical workloads on local NVMe — see [Page Cache → Sync pread read mode](./page-cache#sync-pread-read-mode-linux-only)) |
 
 See [Page Cache](./page-cache) for a full walkthrough.

@@ -255,11 +255,11 @@ never affect correctness). Mirrors Java's `goosefs.user.client.cache.*`.
 | `client_cache_page_size` | `u64` | `1048576` (1 MiB) | Page size in bytes. Reads are split into pages of this size. |
 | `client_cache_size` | `u64` | `21474836480` (20 GiB) | Per-directory capacity in bytes. ~5% is reserved for filesystem/metadata overhead. |
 | `client_cache_dirs` | `Vec<String>` | `["/tmp/goosefs_cache"]` | Cache directories. Multiple dirs spread pages by file affinity (`HashAllocator`). |
-| `client_cache_evictor` | `CacheEvictorType` | `Lfu` | Eviction policy when a directory is full. See [CacheEvictorType](#75-cacheevictortype). |
+| `client_cache_evictor` | `CacheEvictorType` | `Lru` | Eviction policy when a directory is full. See [CacheEvictorType](#75-cacheevictortype). |
 | `client_cache_async_write_enabled` | `bool` | `true` | Whether missed pages are back-filled asynchronously (bounded write-back pool). `false` = fill inline before the read returns. |
 | `client_cache_async_write_threads` | `usize` | `16` | Async write-back concurrency (permits). Excess fills are dropped (`CachePutAsyncRejectionErrors`). |
 | `client_cache_quota_enabled` | `bool` | `false` | Whether per-scope quota accounting is enabled (currently treated as Global). |
-| `client_cache_ttl_secs` | `u64` | `0` | Page time-to-live in seconds. `0` = no expiry. Expired pages are dropped lazily on `get` and by a background sweeper. |
+| `client_cache_ttl_secs` | `u64` | `0` | Page time-to-live in seconds. `0` = no expiry. Expiry is enforced **on access only**: an expired page is never served, and its slot is reclaimed when it is next read or when capacity eviction reaches it. There is no background sweeper — the eviction cache exposes no iteration, so nothing can walk the entries. The practical difference is that an expired page nobody touches again keeps occupying disk until it is evicted for capacity. Size the cache on `dir_capacity`, not on TTL. |
 | `client_cache_sequential_read_enabled` | `bool` | `false` | Whether **sequential** reads (`read`) are routed through the cache. Random reads (`read_at`) always consult the cache when enabled. Off by default: routing large sequential scans through fixed-size pages turns one streamed request into many per-page positioned reads (read amplification), and a `NoCache` sequential read would re-fetch a whole page per small buffer with no caching benefit. Enable only when sequential reads are expected to be re-read. |
 | `client_cache_uring_enabled` | `bool` | `true` on Linux / `false` on other platforms | **io_uring backend selector (P4, Linux 5.1+).** When `true` and io_uring is available at runtime, cache-hit reads use io_uring SQE/CQE instead of `tokio::fs` `spawn_blocking`, eliminating the per-hit thread-switch overhead (the dominant cost in the 300 QPS `clientcache_oncpu_3` profile). Falls back transparently to `LocalPageStore` (tokio::fs) when io_uring is unavailable, so the setting is safe to leave on by default. See [`docs/CLIENT_PAGE_CACHE_DESIGN.md`](CLIENT_PAGE_CACHE_DESIGN.md). |
 | `client_cache_uring_queue_depth` | `usize` | `32768` | **io_uring SQ/CQ depth.** Per-ring entry capacity. Raise further (e.g. `65536`) for high-concurrency workloads to avoid SQ-full back-pressure; lower to reduce per-process kernel memory. `0` falls back to the built-in default of 32768. |
@@ -473,7 +473,7 @@ properties file values and built-in defaults.
 | `GOOSEFS_USER_CLIENT_CACHE_PAGE_SIZE` | `client_cache_page_size` | `1048576` (1 MiB) | Page size in bytes (plain integer). |
 | `GOOSEFS_USER_CLIENT_CACHE_SIZE` | `client_cache_size` | `21474836480` (20 GiB) | Per-directory capacity in bytes (plain integer). |
 | `GOOSEFS_USER_CLIENT_CACHE_DIRS` | `client_cache_dirs` | `["/tmp/goosefs_cache"]` | Cache directories (comma-separated). |
-| `GOOSEFS_USER_CLIENT_CACHE_EVICTION_POLICY` | `client_cache_evictor` | `Lfu` | Eviction policy: `LRU` / `LFU` (case-insensitive). |
+| `GOOSEFS_USER_CLIENT_CACHE_EVICTION_POLICY` | `client_cache_evictor` | `Lru` | Eviction policy: `LRU` / `LFU` / `S3FIFO` (case-insensitive; `S3-FIFO` also accepted). Backed by `foyer`. `LRU` matches the Java client's default. `LFU` is W-TinyLFU and is scan-resistant. `S3FIFO` is also scan-resistant and takes only a shard read lock on a cache hit, making it the cheapest of the three on the read path. |
 | `GOOSEFS_USER_CLIENT_CACHE_ASYNC_WRITE_ENABLED` | `client_cache_async_write_enabled` | `true` | Async back-fill enabled (`true`/`false`). |
 | `GOOSEFS_USER_CLIENT_CACHE_ASYNC_WRITE_THREADS` | `client_cache_async_write_threads` | `16` | Async write-back concurrency (plain integer). |
 | `GOOSEFS_USER_CLIENT_CACHE_QUOTA_ENABLED` | `client_cache_quota_enabled` | `false` | Quota accounting enabled (`true`/`false`). |
@@ -503,6 +503,20 @@ properties file values and built-in defaults.
 | `GOOSEFS_SHORT_CIRCUIT_SIGBUS_HANDLER` | `short_circuit_sigbus_handler` | `true` | Install a process-global SIGBUS diagnostic handler (`true`/`false`). Linux/macOS only. |
 | `GOOSEFS_SHORT_CIRCUIT_THP` | `short_circuit_thp` | `false` | Request Transparent Huge Pages via `madvise(MADV_HUGEPAGE)` (`true`/`false`). Linux only, **experimental**. |
 
+> **Disk usage is a soft bound, not a hard cap.** When a page is evicted its
+> metadata is dropped immediately but the file is deleted by a background
+> reaper, so actual disk usage can briefly run above `dir_capacity` by whatever
+> the reaper has queued. The queue is bounded at 1024 pages, putting the worst
+> case at `1024 x page_size` per directory — 1 GiB with the default 1 MiB pages,
+> which fits inside the 5% overhead the cache already reserves.
+>
+> Under sustained eviction pressure the queue can fill; further evictions are
+> then dropped rather than blocking the write path, leaving orphan page files
+> that the next startup reclaims. Watch `Client.CacheReapQueueDepth` (should sit
+> near zero) and `Client.CacheReapDropped` (should stay at zero). If you need
+> disk usage strictly bounded, configure `dir_capacity` below the physical
+> volume size by that margin.
+
 ---
 
 ## 4. Storage Option Keys
@@ -528,7 +542,7 @@ These constants are used in `storage_options` maps (e.g. Lance's
 | `STORAGE_OPT_CLIENT_CACHE_PAGE_SIZE` | `goosefs_client_cache_page_size` | `1048576` (1 MiB) | Page size in bytes. |
 | `STORAGE_OPT_CLIENT_CACHE_SIZE` | `goosefs_client_cache_size` | `21474836480` (20 GiB) | Per-directory capacity in bytes. |
 | `STORAGE_OPT_CLIENT_CACHE_DIRS` | `goosefs_client_cache_dirs` | `["/tmp/goosefs_cache"]` | Cache directories (comma-separated). |
-| `STORAGE_OPT_CLIENT_CACHE_EVICTOR` | `goosefs_client_cache_eviction_policy` | `Lfu` | Eviction policy (`LRU`/`LFU`). |
+| `STORAGE_OPT_CLIENT_CACHE_EVICTOR` | `goosefs_client_cache_eviction_policy` | `Lfu` | Eviction policy (`LRU`/`LFU`/`S3FIFO`). |
 | `STORAGE_OPT_CLIENT_CACHE_URING_ENABLED` | `goosefs_client_cache_uring_enabled` | `true` on Linux / `false` on other platforms | Use the io_uring page-cache backend. |
 | `STORAGE_OPT_CLIENT_CACHE_URING_QUEUE_DEPTH` | `goosefs_client_cache_uring_queue_depth` | `32768` | io_uring SQ/CQ depth (integer as string). |
 | `STORAGE_OPT_CLIENT_CACHE_URING_THREAD_COUNT` | `goosefs_client_cache_uring_thread_count` | `2` | io_uring background thread count (integer as string). |
@@ -600,7 +614,7 @@ These keys are used in `goosefs-site.properties` files (Java-style `key=value` f
 | `goosefs.user.client.cache.page.size` | `client_cache_page_size` | byte size (e.g. `1MB`) | `1048576` (1 MiB) | Page size. Supports `KB`/`MB`/`GB` suffixes. |
 | `goosefs.user.client.cache.size` | `client_cache_size` | byte size (e.g. `20GB`) | `21474836480` (20 GiB) | Per-directory capacity. Supports `KB`/`MB`/`GB` suffixes. |
 | `goosefs.user.client.cache.dirs` | `client_cache_dirs` | comma-separated paths | `/tmp/goosefs_cache` | Cache directories. |
-| `goosefs.user.client.cache.eviction.policy` | `client_cache_evictor` | `LRU` / `LFU` | `LFU` | Eviction policy. |
+| `goosefs.user.client.cache.eviction.policy` | `client_cache_evictor` | `LRU` / `LFU` / `S3FIFO` | `LRU` | Eviction policy. |
 | `goosefs.user.client.cache.async.write.enabled` | `client_cache_async_write_enabled` | `true` / `false` | `true` | Async back-fill. |
 | `goosefs.user.client.cache.async.write.threads` | `client_cache_async_write_threads` | integer | `16` | Async write-back concurrency. |
 | `goosefs.user.client.cache.quota.enabled` | `client_cache_quota_enabled` | `true` / `false` | `false` | Quota accounting. |
@@ -785,8 +799,13 @@ Eviction policy for the client local page cache (`client_cache_evictor`).
 
 | Variant | String Representation | Description |
 |---------|----------------------|-------------|
-| `Lfu` (default) | `LFU` | Least-Frequently-Used — evicts the page with the lowest access count. |
-| `Lru` | `LRU` | Least-Recently-Used — evicts the page untouched for the longest time. |
+| `Lru` (default) | `LRU` | Least-Recently-Used — evicts the page untouched for the longest time. Matches the Java client's default (`LRUCacheEvictor`). |
+| `Lfu` | `LFU` | W-TinyLFU — a windowed LRU admission filter in front of a segmented LRU main space. Scan-resistant: a one-off sweep cannot evict a stable hot set. |
+| `S3Fifo` | `S3FIFO` (`S3-FIFO` also accepted) | Small / main / ghost queues. Scan-resistant like `LFU`, and the cheapest of the three on the read path — a cache hit takes only a shard *read* lock, whereas `LRU` and `LFU` take a write lock. Measured against `LFU`: ~0.3µs better at p99 (3.38µs vs 3.67µs at 32 threads). |
+
+**Choosing one**: `LRU` is the default for parity with the Java client. Prefer
+`LFU` or `S3FIFO` when the workload periodically scans data that should not
+displace the hot set — a full-table scan under `LRU` evicts everything.
 
 **String parsing** is case-insensitive. Mirrors Java's
 `goosefs.user.client.cache.eviction.policy`.

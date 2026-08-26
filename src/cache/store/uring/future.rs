@@ -42,6 +42,14 @@ pub struct UringOpFuture {
     pub request: Arc<IoRequest>,
 }
 
+/// Errno reported when a request failed without an OS error of its own —
+/// submission channel full, or the ring thread is gone.
+const FALLBACK_ERRNO: i32 = 5; // EIO
+
+/// Errno reported when a future is polled again after its result was already
+/// taken. Any non-zero value works; `EIO` keeps the surface small.
+const CONSUMED_ERRNO: i32 = 5; // EIO
+
 impl Future for UringOpFuture {
     type Output = (i32, Bytes);
 
@@ -49,19 +57,40 @@ impl Future for UringOpFuture {
         let mut state = self.request.state.lock().unwrap();
 
         if state.completed {
-            // Guard against double-poll: if the future was already consumed
-            // (e.g. by a spurious wake or executor re-poll after Ready),
-            // return a harmless empty result instead of a stale result_code
-            // paired with an empty buffer (which would cause a length mismatch
-            // panic in the caller).
+            // Guard against double-poll (spurious wake, or an executor that
+            // re-polls after `Ready`). The result was already handed to the
+            // first poll and the buffer moved out, so there is nothing left to
+            // return.
+            //
+            // This MUST be negative. Returning `0` let an `OP_OPENAT` caller
+            // read it as "success, fd 0" and take ownership of stdin — the
+            // same class of bug as the positive errno handled below.
             if state.consumed {
-                return Poll::Ready((0, Bytes::new()));
+                return Poll::Ready((-CONSUMED_ERRNO, Bytes::new()));
             }
             state.consumed = true;
             match state.err.take() {
                 Some(err) => {
-                    let raw_err = err.raw_os_error().unwrap_or(-1);
-                    Poll::Ready((raw_err, Bytes::new()))
+                    // Every caller detects failure with `result < 0` and then
+                    // negates the value back into an errno, so what we hand
+                    // out here MUST be negative.
+                    //
+                    // Two traps made that easy to get wrong:
+                    //  * `raw_os_error()` returns a *positive* errno — the
+                    //    driver already negated the CQE result when it built
+                    //    this error (`from_raw_os_error(-result)`).
+                    //  * synthetic errors carry no errno at all, and the old
+                    //    `unwrap_or(-1)` fallback was the only negative value
+                    //    in the function, which is what disguised the bug.
+                    //
+                    // Returning the positive errno made `ENOENT` (2) look like
+                    // a freshly opened fd 2, so `OP_OPENAT` callers wrapped
+                    // stderr in an `OwnedFd` and closed it. The process then
+                    // aborted once mio reused that fd number — with no
+                    // diagnostic, because the abort message is written to the
+                    // very fd that had been destroyed.
+                    let code = err.raw_os_error().unwrap_or(FALLBACK_ERRNO);
+                    Poll::Ready((-code.abs(), Bytes::new()))
                 }
                 None => {
                     let bytes = std::mem::take(&mut state.buffer).freeze();
@@ -116,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    fn double_poll_after_ready_returns_empty_success() {
+    fn double_poll_after_ready_returns_error_not_fd_zero() {
         let data = BytesMut::from(&b"abcdef"[..]);
         let request = completed_request(data, 6);
         let mut fut = UringOpFuture {
@@ -139,8 +168,8 @@ mod tests {
         let second = Pin::new(&mut fut).poll(&mut cx);
         assert_eq!(
             second,
-            Poll::Ready((0, Bytes::new())),
-            "second poll must return a harmless empty success"
+            Poll::Ready((-CONSUMED_ERRNO, Bytes::new())),
+            "second poll must report an error, never a 0 that reads as fd 0"
         );
         assert!(request.state.lock().unwrap().consumed);
     }
@@ -190,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_error_returns_raw_os_error_and_empty_bytes() {
+    fn completed_error_returns_negative_errno_and_empty_bytes() {
         let request = Arc::new(IoRequest {
             fd: -1,
             offset: 0,
@@ -215,7 +244,10 @@ mod tests {
 
         match Pin::new(&mut fut).poll(&mut cx) {
             Poll::Ready((code, bytes)) => {
-                assert_eq!(code, 2);
+                // Negative: callers detect failure with `result < 0`. A
+                // positive 2 here used to be read as "opened fd 2", which
+                // made the caller take ownership of stderr.
+                assert_eq!(code, -2);
                 assert!(bytes.is_empty());
             }
             Poll::Pending => panic!("completed error must be Ready"),

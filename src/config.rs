@@ -930,27 +930,52 @@ const DEFAULT_CLIENT_CACHE_DIR: &str = "/tmp/goosefs_cache";
 /// Page-cache eviction policy.
 ///
 /// Mirrors Java `goosefs.user.client.cache.eviction.policy` (evictor class).
+///
+/// All variants are backed by `foyer-memory`'s sharded eviction containers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum CacheEvictorType {
     /// Least-Recently-Used (default).
     ///
-    /// Backed by `moka::sync::Cache` with `EvictionPolicy::lru()` and
-    /// per-segment write locks — replaces the old global `Mutex<LruState>`.
+    /// foyer `LruConfig` with `high_priority_pool_ratio: 0.0` — the whole
+    /// cache is one LRU list. (foyer's own default reserves 90% for a
+    /// high-priority pool, which the page cache never populates.)
+    ///
+    /// Note this is the only policy where a live `CacheEntry` pins its record
+    /// out of the eviction order, so the manager must never hold one across
+    /// an `.await`. `reads_do_not_stall_eviction_under_lru` guards that, and
+    /// it is a P0 test precisely because this is the default: every hot path
+    /// in `manager.rs` copies what it needs and drops the guard before any
+    /// IO. LFU and S3-FIFO cannot exhibit the problem (their `release()` is
+    /// a no-op), which also makes them useless as a canary for it.
     Lru,
     /// Least-Frequently-Used.
     ///
-    /// Backed by `moka::sync::Cache` with `EvictionPolicy::tiny_lfu()`
-    /// (W-TinyLFU: LRU eviction + LFU admission filter) and per-segment write
-    /// locks — replaces the old global `Mutex<LfuState>`.
+    /// foyer `LfuConfig` — W-TinyLFU: a windowed LRU admission filter in front
+    /// of a segmented LRU main space, with a count-min sketch for frequency.
+    /// Scan-resistant.
+    ///
+    /// Was the default up to and including the moka-backed implementation.
+    /// Worth selecting when the workload has a stable hot set that a
+    /// recency-only policy would let a scan evict.
     Lfu,
+    /// S3-FIFO: small / main / ghost queues.
+    ///
+    /// Scan-resistant like LFU, and the cheapest of the three on the read
+    /// path: its `acquire()` is `Op::immutable`, so a cache hit takes a shard
+    /// *read* lock, whereas LRU and LFU take a write lock.
+    ///
+    /// Measured against LFU the difference is ~0.3µs at p99 (3.38µs vs
+    /// 3.67µs at 32 threads). Worth selecting for scan-heavy workloads.
+    S3Fifo,
 }
 
 impl Default for CacheEvictorType {
     fn default() -> Self {
-        // Match moka's default: TinyLFU (W-TinyLFU = LRU eviction + LFU
-        // admission filter). Suitable for most workloads.
-        CacheEvictorType::Lfu
+        // Matches Java's `goosefs.user.client.cache.eviction.policy` default
+        // (LRUCacheEvictor), so a client configured for one implementation
+        // behaves the same on the other.
+        CacheEvictorType::Lru
     }
 }
 
@@ -961,6 +986,9 @@ impl std::str::FromStr for CacheEvictorType {
         match s.trim().to_ascii_uppercase().as_str() {
             "LRU" => Ok(CacheEvictorType::Lru),
             "LFU" => Ok(CacheEvictorType::Lfu),
+            // Accept the hyphenated spelling too: S3-FIFO is how the paper and
+            // foyer's own docs write it.
+            "S3FIFO" | "S3-FIFO" => Ok(CacheEvictorType::S3Fifo),
             other => Err(format!("unknown cache evictor type: {other}")),
         }
     }

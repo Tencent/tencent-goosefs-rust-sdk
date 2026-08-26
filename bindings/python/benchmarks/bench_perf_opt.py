@@ -77,6 +77,42 @@ from concurrent.futures import ThreadPoolExecutor
 from goosefs import AsyncGoosefs, Config, Goosefs
 
 # ---------------------------------------------------------------------------
+# Shutdown
+# ---------------------------------------------------------------------------
+
+
+def _exit_without_finalising(code: int = 0) -> None:
+    """Exit immediately, skipping CPython's finalisation phase.
+
+    After the async section, returning normally lets the interpreter start
+    finalising while the binding's global Tokio runtime is still alive. A
+    worker thread that still holds a `Py<PyAny>` then drops it, needs the GIL
+    to do so, and CPython aborts:
+
+        Fatal Python error: PyGILState_Release: thread state ... must be
+        current when releasing
+        Python runtime state: finalizing
+
+    which surfaces as SIGABRT / exit 134 *after* every benchmark has already
+    printed its results. The runtime is reached through
+    `pyo3_async_runtimes::tokio::get_runtime()`, which hands back a
+    `&'static Runtime`, so there is no owned handle to shut down first; and
+    the `atexit` safety net cannot help either, because closing an async
+    handle needs `await` (see `tests/test_atexit.py`).
+
+    `examples/async_demo.py` and `examples/positioned_read.py` already do
+    this for the same reason. Benchmarks only print to stdout — flushed
+    below — so there is nothing else to unwind.
+
+    This hides the shutdown bug rather than fixing it; the real fix belongs
+    in the binding, not here.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
+
+
+# ---------------------------------------------------------------------------
 # Timing helpers
 # ---------------------------------------------------------------------------
 
@@ -311,6 +347,9 @@ def main() -> None:
                 await afs.close()
 
     asyncio.run(_run_async())
+
+    # Every result is printed by now; do not risk the shutdown abort.
+    _exit_without_finalising()
 
 
 if __name__ == "__main__":

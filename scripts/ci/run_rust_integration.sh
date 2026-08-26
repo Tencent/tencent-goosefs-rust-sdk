@@ -17,6 +17,25 @@
 #
 # Short-circuit suites (short_circuit_e2e / sc_consistency / sc_inv_s3) need a
 # co-located worker block store on the host filesystem and are excluded here.
+#
+# NOT COVERED HERE: the io_uring page store tests. Every target below is a
+# `--test <file>`, i.e. an integration test under `tests/`; the uring tests are
+# `#[ignore]`d unit tests inside `src/cache/store/uring/store.rs`, so `--lib` is
+# never named and nothing under `tests/` exercises that store. `ci.yml` skips
+# them too (`nextest` ignores `#[ignore]` by default). They therefore run only
+# when someone executes them by hand on an io_uring-capable host.
+#
+# That is a real gap — it hid a bug that closed stderr and aborted the test
+# process partway through the suite. Adding
+#
+#     cargo test --lib uring -- --ignored --nocapture --test-threads=1
+#
+# is the obvious fix but is UNVERIFIED on this runner: if `OP_OPENAT` is denied
+# (EPERM, which is why the tests are ignored in the first place), `temp_store`
+# probes, returns `None`, and every test skips silently — leaving the job green
+# while covering nothing. Check that the runner can perform an io_uring OPENAT
+# before adding the line, otherwise it buys false confidence rather than
+# coverage. See the module comment in `store.rs` for the full picture.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

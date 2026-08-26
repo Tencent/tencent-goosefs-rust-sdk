@@ -68,23 +68,11 @@ async fn bench_single_threaded(
     page_size: usize,
     iterations: usize,
     label: &'static str,
-) -> BenchResult {
+) -> Option<BenchResult> {
     let mut dst = vec![0u8; page_size];
 
-    // Warm-up (fd cache fill for UringPageStore). Timeout after 5s to avoid
-    // hanging the whole benchmark if the io_uring backend is broken.
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        store.get(page_id, 0, &mut dst),
-    )
-    .await
-    {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => panic!("{label} warm-up failed: {e}"),
-        Err(_) => panic!(
-            "{label} warm-up TIMED OUT after 5s — io_uring backend may be broken; \
-             check RUST_LOG=trace output and `dmesg | tail` for kernel errors"
-        ),
+    if !warm_up(store, page_id, page_size, label).await {
+        return None;
     }
 
     let mut latencies_ns: Vec<u64> = Vec::with_capacity(iterations);
@@ -102,12 +90,53 @@ async fn bench_single_threaded(
     let p99 = latencies_ns[latencies_ns.len() * 99 / 100];
     let ops_per_sec = iterations as f64 / total.as_secs_f64().max(1e-9);
 
-    BenchResult {
+    Some(BenchResult {
         label,
         ops_per_sec,
         p50_ns: p50,
         p99_ns: p99,
         total_ns: total.as_nanos() as u64,
+    })
+}
+
+/// Warm up the fd cache and confirm the backend can actually serve a read.
+///
+/// Returns `false` if the backend is unusable, so the caller can skip its
+/// section instead of reporting numbers for a broken store.
+///
+/// This exists because io_uring availability is not all-or-nothing: sandboxes
+/// filter it per opcode. `is_uring_available` probes the real op set now, so a
+/// failure here is unexpected — but reporting it and moving on beats either
+/// aborting the whole benchmark or, worse, timing a store whose every read
+/// fails.
+async fn warm_up(
+    store: &Arc<dyn PageStore>,
+    page_id: &PageId,
+    page_size: usize,
+    label: &str,
+) -> bool {
+    let mut dst = vec![0u8; page_size];
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        store.get(page_id, 0, &mut dst),
+    )
+    .await
+    {
+        Ok(Ok(_)) => true,
+        Ok(Err(e)) => {
+            eprintln!("  !! {label}: skipped — warm-up read failed: {e}");
+            eprintln!(
+                "     If this is io_uring, the environment likely allows some opcodes and \
+                 denies others"
+            );
+            eprintln!("     (GitHub Actions permits OPENAT but denies READ). Try RUST_LOG=warn.");
+            false
+        }
+        Err(_) => {
+            eprintln!("  !! {label}: skipped — warm-up read timed out after 5s");
+            eprintln!("     Check `dmesg | tail` for kernel errors and retry with RUST_LOG=trace.");
+            false
+        }
     }
 }
 
@@ -119,11 +148,11 @@ async fn bench_concurrent(
     concurrency: usize,
     iterations_per_task: usize,
     label: &'static str,
-) -> BenchResult {
-    // Warm-up.
-    {
-        let mut dst = vec![0u8; page_size];
-        let _ = store.get(&page_id, 0, &mut dst).await;
+) -> Option<BenchResult> {
+    // Warm-up. Errors are NOT ignored here: timing a store whose every read
+    // fails produces plausible-looking throughput for work that never happened.
+    if !warm_up(&store, &page_id, page_size, label).await {
+        return None;
     }
 
     let start = Instant::now();
@@ -156,13 +185,13 @@ async fn bench_concurrent(
     let total_ops = concurrency * iterations_per_task;
     let ops_per_sec = total_ops as f64 / total.as_secs_f64().max(1e-9);
 
-    BenchResult {
+    Some(BenchResult {
         label,
         ops_per_sec,
         p50_ns: p50,
         p99_ns: p99,
         total_ns: total.as_nanos() as u64,
-    }
+    })
 }
 
 fn print_result(r: &BenchResult) {
@@ -191,9 +220,16 @@ async fn bench_concurrent_multi_file(
     concurrency: usize,
     iterations_per_task: usize,
     label: &'static str,
-) -> BenchResult {
-    // Warm-up: read each file once.
-    for id in &page_ids {
+) -> Option<BenchResult> {
+    // Warm-up: read each file once. The first read decides whether the backend
+    // works at all; the rest just fill the fd cache.
+    let Some(first) = page_ids.first() else {
+        return None;
+    };
+    if !warm_up(&store, first, page_size, label).await {
+        return None;
+    }
+    for id in page_ids.iter().skip(1) {
         let mut dst = vec![0u8; page_size];
         let _ = store.get(id, 0, &mut dst).await;
     }
@@ -230,13 +266,13 @@ async fn bench_concurrent_multi_file(
     let total_ops = concurrency * iterations_per_task;
     let ops_per_sec = total_ops as f64 / total.as_secs_f64().max(1e-9);
 
-    BenchResult {
+    Some(BenchResult {
         label,
         ops_per_sec,
         p50_ns: p50,
         p99_ns: p99,
         total_ns: total.as_nanos() as u64,
-    }
+    })
 }
 
 #[tokio::main]
@@ -304,30 +340,49 @@ async fn main() {
         .put(&page_id, &page_data)
         .await
         .expect("local put");
+    // A failure here means the uring backend cannot even write; report it and
+    // let the sections below skip themselves rather than aborting the run and
+    // losing the tokio::fs numbers too.
     #[cfg(target_os = "linux")]
-    uring_store
-        .put(&page_id, &page_data)
-        .await
-        .expect("uring put");
+    let uring_writable = match uring_store.put(&page_id, &page_data).await {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("  !! io_uring: cannot write a page: {e}");
+            eprintln!("     Skipping all io_uring sections.");
+            false
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let uring_writable = false;
 
     // ── Single-threaded benchmark ──────────────────────────────
     print_header("Single-threaded cache-hit throughput");
 
     let r_local =
         bench_single_threaded(&local_store, &page_id, page_size, iterations, "tokio::fs").await;
-    print_result(&r_local);
+    if let Some(r) = &r_local {
+        print_result(r);
+    }
 
     #[cfg(target_os = "linux")]
-    let r_uring = Some(
-        bench_single_threaded(&uring_store, &page_id, page_size, iterations, "io_uring").await,
-    );
+    let r_uring = if uring_writable {
+        bench_single_threaded(&uring_store, &page_id, page_size, iterations, "io_uring").await
+    } else {
+        None
+    };
     #[cfg(not(target_os = "linux"))]
     let r_uring: Option<BenchResult> = None;
 
     if let Some(r) = &r_uring {
         print_result(r);
-        let speedup = r.ops_per_sec / r_local.ops_per_sec.max(1.0);
-        println!("  → io_uring speedup: {speedup:.2}×");
+        // Only meaningful with the tokio::fs reference to divide by.
+        let speedup = r_local
+            .as_ref()
+            .map(|base| r.ops_per_sec / base.ops_per_sec.max(1.0));
+        match speedup {
+            Some(x) => println!("  → io_uring speedup: {x:.2}×"),
+            None => println!("  → io_uring speedup: n/a (no tokio::fs baseline)"),
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -348,10 +403,12 @@ async fn main() {
         "tokio::fs",
     )
     .await;
-    print_result(&rc_local);
+    if let Some(r) = &rc_local {
+        print_result(r);
+    }
 
     #[cfg(target_os = "linux")]
-    let rc_uring = Some(
+    let rc_uring = if uring_writable {
         bench_concurrent(
             Arc::clone(&uring_store),
             page_id.clone(),
@@ -360,15 +417,23 @@ async fn main() {
             concurrent_iterations,
             "io_uring",
         )
-        .await,
-    );
+        .await
+    } else {
+        None
+    };
     #[cfg(not(target_os = "linux"))]
     let rc_uring: Option<BenchResult> = None;
 
     if let Some(rc) = &rc_uring {
         print_result(rc);
-        let speedup = rc.ops_per_sec / rc_local.ops_per_sec.max(1.0);
-        println!("  → io_uring speedup: {speedup:.2}×");
+        // Only meaningful with the tokio::fs reference to divide by.
+        let speedup = rc_local
+            .as_ref()
+            .map(|base| rc.ops_per_sec / base.ops_per_sec.max(1.0));
+        match speedup {
+            Some(x) => println!("  → io_uring speedup: {x:.2}×"),
+            None => println!("  → io_uring speedup: n/a (no tokio::fs baseline)"),
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -391,16 +456,25 @@ async fn main() {
     let multi_file_ids: Vec<PageId> = (0..n_files)
         .map(|i| PageId::new(format!("bench-file-{i}"), 0))
         .collect();
+    // Only read and written under cfg(linux); off Linux there is no uring store
+    // to pre-populate, so declaring it per-platform avoids an unused warning.
+    #[cfg(target_os = "linux")]
+    let mut uring_multi_ok = uring_writable;
+    #[cfg(not(target_os = "linux"))]
+    let _uring_multi_ok = uring_writable;
     for id in &multi_file_ids {
         local_store
             .put(id, &page_data)
             .await
             .expect("local put multi");
         #[cfg(target_os = "linux")]
-        uring_store
-            .put(id, &page_data)
-            .await
-            .expect("uring put multi");
+        if uring_multi_ok {
+            if let Err(e) = uring_store.put(id, &page_data).await {
+                eprintln!("  !! io_uring: multi-file pre-population failed: {e}");
+                eprintln!("     Skipping the io_uring multi-file section.");
+                uring_multi_ok = false;
+            }
+        }
     }
 
     // Run concurrent reads: each task picks a file in round-robin.
@@ -415,10 +489,12 @@ async fn main() {
         "tokio::fs",
     )
     .await;
-    print_result(&rc_local_multi);
+    if let Some(r) = &rc_local_multi {
+        print_result(r);
+    }
 
     #[cfg(target_os = "linux")]
-    let rc_uring_multi = Some(
+    let rc_uring_multi = if uring_multi_ok {
         bench_concurrent_multi_file(
             Arc::clone(&uring_store),
             multi_file_ids.clone(),
@@ -427,15 +503,23 @@ async fn main() {
             concurrent_iterations,
             "io_uring",
         )
-        .await,
-    );
+        .await
+    } else {
+        None
+    };
     #[cfg(not(target_os = "linux"))]
     let rc_uring_multi: Option<BenchResult> = None;
 
     if let Some(rc) = &rc_uring_multi {
         print_result(rc);
-        let speedup = rc.ops_per_sec / rc_local_multi.ops_per_sec.max(1.0);
-        println!("  → io_uring speedup: {speedup:.2}×");
+        // Only meaningful with the tokio::fs reference to divide by.
+        let speedup = rc_local_multi
+            .as_ref()
+            .map(|base| rc.ops_per_sec / base.ops_per_sec.max(1.0));
+        match speedup {
+            Some(x) => println!("  → io_uring speedup: {x:.2}×"),
+            None => println!("  → io_uring speedup: n/a (no tokio::fs baseline)"),
+        }
     }
 
     // ── Summary table ──────────────────────────────────────────
@@ -447,14 +531,16 @@ async fn main() {
         "Backend", "Single ops/s", "Conc ops/s", "p99(1T)", "p99(32T)"
     );
     println!("───────────────────────────────────────────────────────────────");
-    println!(
-        "  {:<16} {:>14.0} {:>14.0} {:>8}µs {:>8}µs",
-        "tokio::fs",
-        r_local.ops_per_sec,
-        rc_local.ops_per_sec,
-        r_local.p99_ns / 1000,
-        rc_local.p99_ns / 1000,
-    );
+    if let (Some(r), Some(rc)) = (&r_local, &rc_local) {
+        println!(
+            "  {:<16} {:>14.0} {:>14.0} {:>8}µs {:>8}µs",
+            "tokio::fs",
+            r.ops_per_sec,
+            rc.ops_per_sec,
+            r.p99_ns / 1000,
+            rc.p99_ns / 1000,
+        );
+    }
     if let (Some(r), Some(rc)) = (&r_uring, &rc_uring) {
         println!(
             "  {:<16} {:>14.0} {:>14.0} {:>8}µs {:>8}µs",
@@ -464,6 +550,17 @@ async fn main() {
             r.p99_ns / 1000,
             rc.p99_ns / 1000,
         );
+    } else {
+        // Two different reasons land here, and conflating them misleads: off
+        // Linux io_uring does not exist, whereas on Linux a skip means the
+        // backend was selected and then failed a warm-up read.
+        #[cfg(target_os = "linux")]
+        println!(
+            "  {:<16} {:>14} — selected but unusable, see warnings above",
+            "io_uring", "skipped"
+        );
+        #[cfg(not(target_os = "linux"))]
+        println!("  {:<16} {:>14} — Linux only", "io_uring", "n/a");
     }
     println!("───────────────────────────────────────────────────────────────");
 
