@@ -4,13 +4,13 @@ sidebar_position: 5
 
 # Metadata Cache
 
-Besides the [page cache](./page-cache) for file *data*, the SDK ships an optional **client-side metadata cache** aligned with the GooseFS Java client's `goosefs.user.metadata.cache.*` semantics. When enabled, `get_status` / `exists` / `open_file` / non-recursive `list_status` share one process-local TTL-bounded LRU, so repeated metadata lookups of the same paths no longer hit the Master.
+Besides the [page cache](./page-cache) for file *data*, the SDK ships a **client-side metadata cache** aligned with the GooseFS Java client's `goosefs.user.metadata.cache.*` semantics. `get_status` / `exists` / `open_file` / non-recursive `list_status` share one process-local TTL-bounded LRU, so repeated metadata lookups of the same paths no longer hit the Master. It is **on by default** (see below).
 
 It replaces the earlier `FileInfo` open cache (`goosefs.user.file.info.cache.*`), which has been removed.
 
 ## Behavior
 
-- **Disabled by default** — nothing changes unless you opt in.
+- **Enabled by default** — this diverges from the Java client, whose `goosefs.user.metadata.cache.enabled` default is `false`. Every reader open resolves its `FileInfo` through this cache, so with it off a workload of many small ranged reads pays one Master `get_status` RPC per read. That RPC also hides the [page cache](./page-cache): a page-cache hit over io_uring costs tens of microseconds, so a per-open Master round-trip dwarfs it and the read waits on metadata rather than on disk. Set the switch to `false` to opt out.
 - **Three entry kinds per path** — a `get_status` slot, a directory listing, and a negative (`NotFound`) marker. One LRU key may hold both a status slot and a listing.
 - **Write-time TTL** — entries expire `expiration` after insertion (Java Guava `expireAfterWrite`); status and listing under the same key share the insertion timestamp. Expired entries are dropped lazily on lookup.
 - **`open` reuses the cached status** — a prior `get_status` hit means `open_file` issues **zero** extra `getStatus` RPCs.
@@ -32,7 +32,7 @@ It replaces the earlier `FileInfo` open cache (`goosefs.user.file.info.cache.*`)
 
 | Field                       | Properties key                                | Env var                            | Storage option                     | Default    |
 | --------------------------- | --------------------------------------------- | ---------------------------------- | ---------------------------------- | ---------- |
-| `metadata_cache_enabled`    | `goosefs.user.metadata.cache.enabled`         | `GOOSEFS_METADATA_CACHE_ENABLED`   | `goosefs_metadata_cache_enabled`   | `false`    |
+| `metadata_cache_enabled`    | `goosefs.user.metadata.cache.enabled`         | `GOOSEFS_METADATA_CACHE_ENABLED`   | `goosefs_metadata_cache_enabled`   | `true`     |
 | `metadata_cache_max_size`   | `goosefs.user.metadata.cache.max.size`        | `GOOSEFS_METADATA_CACHE_MAX_SIZE`  | `goosefs_metadata_cache_max_size`  | `100000`   |
 | `metadata_cache_expiration` | `goosefs.user.metadata.cache.expiration.time` | `GOOSEFS_METADATA_CACHE_EXPIRATION`| `goosefs_metadata_cache_expiration`| `10min`    |
 

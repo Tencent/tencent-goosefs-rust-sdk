@@ -4,7 +4,7 @@ sidebar_position: 9
 
 # Metadata Cache
 
-Besides the [page cache](./page-cache) for file *data*, the client ships an optional **metadata cache** aligned with the GooseFS Java client's `goosefs.user.metadata.cache.*` semantics. When enabled, `get_status`, `exists`, `open_file` and non-recursive `list_status` (including their `batch_*` / `*_grouped` variants) share one process-local TTL-bounded LRU, so repeated metadata lookups of the same paths no longer hit the master.
+Besides the [page cache](./page-cache) for file *data*, the client ships a **metadata cache** aligned with the GooseFS Java client's `goosefs.user.metadata.cache.*` semantics. `get_status`, `exists`, `open_file` and non-recursive `list_status` (including their `batch_*` / `*_grouped` variants) share one process-local TTL-bounded LRU, so repeated metadata lookups of the same paths no longer hit the master. It is **on by default** (see below).
 
 It replaces the earlier `FileInfo` open cache (`GOOSEFS_FILE_INFO_CACHE_TTL_MS` / `GOOSEFS_FILE_INFO_CACHE_CAPACITY`), which has been removed.
 
@@ -12,7 +12,7 @@ Because the Python binding shares the Rust configuration core, the cache is avai
 
 ## Behavior
 
-- **Disabled by default** — nothing changes unless you opt in.
+- **Enabled by default** — this diverges from the Java client, whose `goosefs.user.metadata.cache.enabled` default is `false`. Every file open resolves its status through this cache, so with it off a workload of many small ranged reads pays one master `get_status` RPC per read. That RPC also hides the [page cache](./page-cache): a page-cache hit over io_uring costs tens of microseconds, so a per-open master round-trip dwarfs it and the read waits on metadata rather than on disk. Set the switch to `false` to opt out.
 - **Three entry kinds per path** — a status slot, a directory listing, and a negative (`NotFound`) marker.
 - **Write-time TTL** — entries expire `expiration` after insertion; status and listing under the same path share the insertion timestamp.
 - **`open_file()` reuses the cached status** — a prior `get_status` hit means the open issues no extra master RPC.
@@ -29,7 +29,10 @@ Because the Python binding shares the Rust configuration core, the cache is avai
 | `goosefs.user.file.metadata.sync.interval=0` | Cache not consulted, but results are written back |
 | `goosefs.user.metadata.cache.expiration.time<=0` | Cache is not constructed at all, even when enabled |
 
-## Enabling the Cache
+## Tuning the Cache
+
+The switch is already `true` by default; set it explicitly to be
+self-documenting, or to `false` to opt out.
 
 ```bash
 export GOOSEFS_METADATA_CACHE_ENABLED=true
@@ -108,7 +111,7 @@ asyncio.run(main())
 
 | Properties key                                | Env var                             | Storage option                      | Default  |
 | --------------------------------------------- | ----------------------------------- | ----------------------------------- | -------- |
-| `goosefs.user.metadata.cache.enabled`         | `GOOSEFS_METADATA_CACHE_ENABLED`    | `goosefs_metadata_cache_enabled`    | `false`  |
+| `goosefs.user.metadata.cache.enabled`         | `GOOSEFS_METADATA_CACHE_ENABLED`    | `goosefs_metadata_cache_enabled`    | `true`   |
 | `goosefs.user.metadata.cache.max.size`        | `GOOSEFS_METADATA_CACHE_MAX_SIZE`   | `goosefs_metadata_cache_max_size`   | `100000` |
 | `goosefs.user.metadata.cache.expiration.time` | `GOOSEFS_METADATA_CACHE_EXPIRATION` | `goosefs_metadata_cache_expiration` | `10min`  |
 

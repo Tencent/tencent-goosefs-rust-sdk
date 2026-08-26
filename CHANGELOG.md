@@ -13,6 +13,33 @@ kept aligned. Python-specific notes also appear in
 
 ### Changed
 
+- **The client metadata cache is now enabled by default** (`metadata_cache_enabled`,
+  `goosefs.user.metadata.cache.enabled`, `GOOSEFS_METADATA_CACHE_ENABLED`). This
+  deliberately **diverges from the Java client**, whose default is `false`.
+
+  Reason: every reader open resolves its `FileInfo` through
+  `FileSystemContext::get_file_info_cached`. With the cache off that call falls
+  straight through to a Master `get_status` RPC, so a workload that opens one
+  reader per small ranged read — which is exactly what the OpenDAL `goosefs`
+  service does, one `GoosefsFileReader` per `read` — paid one Master round-trip
+  per read. Nothing in the read path made that visible; it simply capped QPS.
+
+  This is also what makes the **local page cache + io_uring** path pay off.
+  A page-cache hit served over io_uring costs tens of microseconds, so a
+  per-open Master RPC on the same read is orders of magnitude larger and hides
+  the entire benefit of caching the data locally: the read never waits on disk,
+  it waits on metadata. Turning the metadata cache on is therefore a
+  prerequisite for the page cache to show up in end-to-end numbers, and users
+  running that combination asked for it to be the default rather than a knob
+  every deployment has to rediscover.
+
+  TTL (`10min`) and capacity (`100000`) are unchanged and still Java-aligned.
+  Set `GOOSEFS_METADATA_CACHE_ENABLED=false` to restore the previous behaviour.
+  Worth doing when the file set mutates behind the client faster than
+  `metadata_cache_expiration`, since the cache is process-local and out-of-band
+  writers are not observed until the TTL elapses (write paths through this
+  client still self-invalidate the path and its parent).
+
 - **Default page cache eviction policy is now `LRU`** (was `LFU`), matching the
   Java client's `goosefs.user.client.cache.eviction.policy` default
   (`LRUCacheEvictor`). `docs/CLIENT_PAGE_CACHE_DESIGN.md` had specified

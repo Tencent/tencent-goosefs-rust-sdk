@@ -2109,10 +2109,27 @@ pub struct GoosefsConfig {
     // ── Metadata cache (Java `goosefs.user.metadata.cache.*`) ──
     /// Whether the Java-aligned client metadata cache is constructed.
     ///
-    /// Default `false` (`goosefs.user.metadata.cache.enabled`). When true,
-    /// `get_status` / `list_status` / `exists` / open share one process-local
-    /// LRU. Writes invalidate path + parent after a successful RPC.
-    #[serde(default = "default_false_bool")]
+    /// Default `true`, which **diverges from Java's
+    /// `goosefs.user.metadata.cache.enabled=false`**. When true, `get_status` /
+    /// `list_status` / `exists` / open share one process-local LRU. Writes
+    /// invalidate path + parent after a successful RPC.
+    ///
+    /// The default was flipped because every reader open resolves its
+    /// `FileInfo` through `FileSystemContext::get_file_info_cached`, so with
+    /// the cache off a workload of many small ranged reads (one
+    /// `GoosefsFileReader` per read, as OpenDAL does) pays one Master
+    /// `get_status` RPC per read.
+    ///
+    /// That RPC is also what hides the local page cache: a page-cache hit
+    /// served over io_uring costs tens of microseconds, so a per-open Master
+    /// round-trip on the same read dwarfs it and the read ends up waiting on
+    /// metadata rather than on disk. Leaving this on is a prerequisite for
+    /// `client_cache_enabled` + `client_cache_uring_enabled` to show up in
+    /// end-to-end throughput.
+    ///
+    /// Set it back to `false` when the file set mutates behind the client
+    /// faster than `metadata_cache_expiration`.
+    #[serde(default = "default_true_bool")]
     pub metadata_cache_enabled: bool,
 
     /// Metadata cache LRU capacity (`goosefs.user.metadata.cache.max.size`).
@@ -2531,7 +2548,7 @@ impl Default for GoosefsConfig {
             client_cache_uring_thread_count: default_client_cache_uring_thread_count(),
             client_cache_sync_read_enabled: false,
             client_cache_sequential_read_enabled: false,
-            metadata_cache_enabled: false,
+            metadata_cache_enabled: default_true_bool(),
             metadata_cache_max_size: default_metadata_cache_max_size(),
             metadata_cache_expiration: default_metadata_cache_expiration(),
             file_metadata_sync_interval: default_file_metadata_sync_interval(),
@@ -5217,14 +5234,40 @@ goosefs.user.metadata.cache.max.size=1000000
         assert_eq!(cfg.metadata_cache_max_size, 1_000_000);
     }
 
+    /// TTL / size / sync-interval / load-type stay Java-aligned; only
+    /// `enabled` deliberately diverges (Java default is `false`).
     #[test]
-    fn test_metadata_cache_java_defaults() {
+    fn test_metadata_cache_defaults() {
         let cfg = GoosefsConfig::default();
-        assert!(!cfg.metadata_cache_enabled);
+        assert!(cfg.metadata_cache_enabled);
         assert_eq!(cfg.metadata_cache_expiration, Duration::from_secs(600));
         assert_eq!(cfg.metadata_cache_max_size, 100_000);
         assert_eq!(cfg.file_metadata_sync_interval, -1);
         assert_eq!(cfg.file_metadata_load_type, LoadMetadataPType::Once);
+    }
+
+    #[test]
+    fn test_metadata_cache_can_be_disabled_explicitly() {
+        let cfg = GoosefsConfig::from_properties_str("goosefs.user.metadata.cache.enabled=false\n");
+        assert!(!cfg.metadata_cache_enabled);
+
+        let cfg = GoosefsConfig::from_properties_str("goosefs_metadata_cache_enabled=false\n");
+        assert!(!cfg.metadata_cache_enabled);
+
+        assert!(
+            !GoosefsConfig::default()
+                .with_metadata_cache_enabled(false)
+                .metadata_cache_enabled
+        );
+    }
+
+    #[test]
+    fn test_apply_env_metadata_cache_disabled() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GOOSEFS_METADATA_CACHE_ENABLED", "false");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var("GOOSEFS_METADATA_CACHE_ENABLED");
+        assert!(!cfg.metadata_cache_enabled);
     }
 
     #[test]
@@ -5242,7 +5285,7 @@ goosefs.user.file.info.cache.ttl.ms=1500
 goosefs.user.file.info.cache.capacity=2048
 ";
         let cfg = GoosefsConfig::from_properties_str(props);
-        assert!(!cfg.metadata_cache_enabled);
+        assert!(cfg.metadata_cache_enabled, "left at the default");
         assert_eq!(cfg.metadata_cache_expiration, Duration::from_secs(600));
         assert_eq!(cfg.metadata_cache_max_size, 100_000);
     }
