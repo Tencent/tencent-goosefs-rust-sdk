@@ -523,8 +523,8 @@ Every knob below can also be set without touching Rust code:
 |-------|---------|-------------|
 | `metrics_enabled` | `true` | Master switch — when `false` the heartbeat task is not spawned. |
 | `metrics_heartbeat_interval` | `10 s` | Period between heartbeat reports. Must be `>= 1 s`. |
-| `metrics_heartbeat_timeout` | `3 s` | Per-RPC timeout. Must be `>= 1 s` and `< metrics_heartbeat_interval`. |
-| `metrics_max_batch_size` | `512` | Max number of metric entries packed into a single heartbeat. |
+| `metrics_heartbeat_timeout` | `5 s` | Per-RPC timeout. Must be `>= 1 s` and `< metrics_heartbeat_interval`. |
+| `metrics_max_batch_size` | `1024` | Max number of metric entries packed into a single heartbeat. |
 | `app_id` | `None` | Optional client tag attached to every heartbeat (useful for grouping in Master logs). |
 
 **Built-in counter names** (re-exported from `goosefs_sdk::metrics::name`):
