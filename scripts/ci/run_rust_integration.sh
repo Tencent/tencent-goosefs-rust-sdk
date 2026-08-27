@@ -48,6 +48,11 @@ cd "$ROOT"
 export GOOSEFS_MASTER_ADDR="${GOOSEFS_MASTER_ADDR:-127.0.0.1:9200}"
 export GOOSEFS_AUTH_TYPE="${GOOSEFS_AUTH_TYPE:-simple}"
 
+# Default features are empty; page-cache / metadata-cache tests declare
+# `required-features`. Keep one feature set so cargo does not rebuild
+# between targets.
+FEATURES=(--features full-client)
+
 # Suites that cannot pass against the Docker fixture, e.g. because they need
 # host-filesystem access to a co-located worker block store. Currently empty.
 SKIP=""
@@ -91,7 +96,7 @@ fi
 failed=""
 for name in $targets; do
   echo "==> integration: $name"
-  if ! cargo test --test "$name" -- --ignored --nocapture --test-threads=1; then
+  if ! cargo test --test "$name" "${FEATURES[@]}" -- --ignored --nocapture --test-threads=1; then
     # Keep going so one broken suite does not mask the state of the rest;
     # the script still exits non-zero below.
     echo "!!! integration suite failed: $name" >&2
