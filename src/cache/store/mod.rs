@@ -24,12 +24,22 @@
 //!   `docs/CLIENT_PAGE_CACHE_DESIGN.md`)
 
 mod local;
+#[cfg(feature = "page-cache-io-uring")]
 mod uring;
 
 pub use local::LocalPageStore;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "page-cache-io-uring"))]
 pub use uring::UringPageStore;
+#[cfg(feature = "page-cache-io-uring")]
 pub use uring::{init_uring_config, is_uring_available};
+
+#[cfg(not(feature = "page-cache-io-uring"))]
+pub fn init_uring_config(_queue_depth: usize, _thread_count: usize) {}
+
+#[cfg(not(feature = "page-cache-io-uring"))]
+pub fn is_uring_available() -> bool {
+    false
+}
 
 use bytes::Bytes;
 
