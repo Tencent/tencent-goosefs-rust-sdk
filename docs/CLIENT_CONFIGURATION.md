@@ -5,6 +5,22 @@
 This document provides a comprehensive reference for all configuration parameters
 supported by the Goosefs Rust Client (`goosefs-sdk`).
 
+The crate has an empty default feature set. Configuration switches for optional
+capabilities are accepted by parsers in every build, but enabling one at
+runtime requires its matching Cargo feature:
+
+| Cargo feature | Runtime capability |
+|---|---|
+| `metadata-cache` | `metadata_cache_enabled` |
+| `page-cache` | `client_cache_enabled` with the portable `tokio::fs` backend |
+| `page-cache-io-uring` | `client_cache_uring_enabled` on Linux; includes `page-cache` |
+| `short-circuit` | `short_circuit_enabled` |
+| `metrics-pushgateway` | `pushgateway_enabled` |
+
+`FileSystemContext::connect` reports a configuration error when a switch is
+enabled without its required feature. `full-client` enables every runtime
+capability above.
+
 ---
 
 ## Table of Contents
@@ -244,7 +260,8 @@ in HA (multi-master) deployments.
 
 ### 2.8 Client Local Page Cache Settings
 
-The optional **client-side local page cache** caches worker/UFS reads on local
+The optional **client-side local page cache** (`page-cache` Cargo feature)
+caches worker/UFS reads on local
 disk in fixed-size pages, serving repeat reads without a worker round-trip.
 **Disabled by default**; best-effort (misses/errors fall back to the worker and
 never affect correctness). Mirrors Java's `goosefs.user.client.cache.*`.
@@ -261,11 +278,11 @@ never affect correctness). Mirrors Java's `goosefs.user.client.cache.*`.
 | `client_cache_quota_enabled` | `bool` | `false` | Whether per-scope quota accounting is enabled (currently treated as Global). |
 | `client_cache_ttl_secs` | `u64` | `0` | Page time-to-live in seconds. `0` = no expiry. Expiry is enforced **on access only**: an expired page is never served, and its slot is reclaimed when it is next read or when capacity eviction reaches it. There is no background sweeper — the eviction cache exposes no iteration, so nothing can walk the entries. The practical difference is that an expired page nobody touches again keeps occupying disk until it is evicted for capacity. Size the cache on `dir_capacity`, not on TTL. |
 | `client_cache_sequential_read_enabled` | `bool` | `false` | Whether **sequential** reads (`read`) are routed through the cache. Random reads (`read_at`) always consult the cache when enabled. Off by default: routing large sequential scans through fixed-size pages turns one streamed request into many per-page positioned reads (read amplification), and a `NoCache` sequential read would re-fetch a whole page per small buffer with no caching benefit. Enable only when sequential reads are expected to be re-read. |
-| `client_cache_uring_enabled` | `bool` | `true` on Linux / `false` on other platforms | **io_uring backend selector (P4, Linux 5.1+).** When `true` and io_uring is available at runtime, cache-hit reads use io_uring SQE/CQE instead of `tokio::fs` `spawn_blocking`, eliminating the per-hit thread-switch overhead (the dominant cost in the 300 QPS `clientcache_oncpu_3` profile). Falls back transparently to `LocalPageStore` (tokio::fs) when io_uring is unavailable, so the setting is safe to leave on by default. See [`docs/CLIENT_PAGE_CACHE_DESIGN.md`](CLIENT_PAGE_CACHE_DESIGN.md). |
+| `client_cache_uring_enabled` | `bool` | `true` with `page-cache-io-uring` on Linux / `false` otherwise | **io_uring backend selector (P4, Linux 5.1+).** When `true` and io_uring is available at runtime, cache-hit reads use io_uring SQE/CQE instead of `tokio::fs` `spawn_blocking`, eliminating the per-hit thread-switch overhead (the dominant cost in the 300 QPS `clientcache_oncpu_3` profile). Falls back transparently to `LocalPageStore` (tokio::fs) when io_uring is unavailable. See [`docs/CLIENT_PAGE_CACHE_DESIGN.md`](CLIENT_PAGE_CACHE_DESIGN.md). |
 | `client_cache_uring_queue_depth` | `usize` | `32768` | **io_uring SQ/CQ depth.** Per-ring entry capacity. Raise further (e.g. `65536`) for high-concurrency workloads to avoid SQ-full back-pressure; lower to reduce per-process kernel memory. `0` falls back to the built-in default of 32768. |
 | `client_cache_uring_thread_count` | `usize` | `2` | **io_uring background thread count.** Each thread owns one `IoUring` instance; requests are dispatched round-robin. Raise to `4` on hosts with many idle cores and high concurrency; the threads spend most of their time in `io_uring_enter`, so over-provisioning wastes RAM without throughput gain. `0` falls back to the built-in default of 2. |
 | `client_cache_sync_read_enabled` | `bool` | `false` | **Sync `pread` read mode for the io_uring backend (Linux only).** When `true`, `UringPageStore` serves cache-hit reads with synchronous `pread`/`openat` on the calling thread instead of io_uring SQE/CQE — intended for complex analytical workloads where io_uring underperforms plain `pread`. The calling tokio worker is blocked for the duration of the local disk read (~µs on OS-page-cache hit; ~10-100µs per small read on NVMe), and batched reads on one task become serial per worker, so enable only when the cache directory sits on local NVMe and the working set mostly fits the OS page cache. **Do not enable with cache dirs on HDD/NFS/Lustre** (no read timeout — a slow device blocks the worker unbounded). Write/delete paths stay on io_uring regardless. See [Sync pread read mode](#sync-pread-read-mode-linux-only) below. |
-| `metadata_cache_enabled` | `bool` | `true` | Java `goosefs.user.metadata.cache.enabled`. When `true`, `get_status` / `list_status` / `exists` / open share one process-local LRU (status + listing + negative cache). Writes invalidate path + parent after a successful RPC. **Enabled by default, unlike Java (`false`)**: every reader open resolves its `FileInfo` through this cache, so with it off a workload of many small ranged reads (one reader per read, as OpenDAL does) pays one Master `get_status` RPC per read. That RPC also hides the local page cache — a page-cache hit over io_uring costs tens of microseconds, so a per-open Master round-trip dwarfs it and the read waits on metadata instead of disk; keeping this on is a prerequisite for `client_cache_enabled` + `client_cache_uring_enabled` to show up in end-to-end throughput. Set to `false` when the file set mutates behind the client faster than `metadata_cache_expiration`. |
+| `metadata_cache_enabled` | `bool` | `true` with `metadata-cache` / `false` otherwise | Java `goosefs.user.metadata.cache.enabled`. When `true`, `get_status` / `list_status` / `exists` / open share one process-local LRU (status + listing + negative cache). Writes invalidate path + parent after a successful RPC. Every reader open resolves its `FileInfo` through this cache, so with it off a workload of many small ranged reads (one reader per read, as OpenDAL does) pays one Master `get_status` RPC per read. Set it to `false` when the file set mutates behind the client faster than `metadata_cache_expiration`. |
 | `metadata_cache_max_size` | `usize` | `100000` | Java `goosefs.user.metadata.cache.max.size`. LRU capacity when the cache is constructed. Values `< 1` are clamped to `1`. |
 | `metadata_cache_expiration` | `Duration` | `10min` | Java `goosefs.user.metadata.cache.expiration.time` (`parseTimeSize`: `10min`, `30s`, `2day`, or raw milliseconds). `<= 0` skips construction even when enabled. |
 | `file_metadata_sync_interval` | `i64` | `-1` | Java `goosefs.user.file.metadata.sync.interval` in milliseconds (`parseTimeSize` when set as a string). Affects **both** `get_status` and `list_status`. `-1` (default) does not skip the cache. `0` skips the cache on every call: `get_status` re-reads from the Master but still writes the result back, `list_status` neither reads nor writes the listing cache. Positive values are parsed and stored, but the skip check only tests for `0`, so they currently behave like `-1`. |
@@ -385,7 +402,8 @@ deployment with non-NVMe cache storage.
 
 ### 2.9 Short-Circuit (Local mmap) Read Settings
 
-When the block being read lives on a **worker co-located with the client**
+This path requires the `short-circuit` Cargo feature. When the block being read
+lives on a **worker co-located with the client**
 (same host), the SDK can skip the gRPC data plane entirely and `mmap` the
 block file from the worker's tiered storage directly (design details in
 [`docs/SHORT_CIRCUIT_DESIGN.md`](SHORT_CIRCUIT_DESIGN.md)). This is called the
@@ -496,14 +514,14 @@ properties file values and built-in defaults.
 | `GOOSEFS_USER_CLIENT_CACHE_QUOTA_ENABLED` | `client_cache_quota_enabled` | `false` | Quota accounting enabled (`true`/`false`). |
 | `GOOSEFS_USER_CLIENT_CACHE_TTL_SECONDS` | `client_cache_ttl_secs` | `0` (no expiry) | Page TTL in seconds (`0` = no expiry). |
 | `GOOSEFS_USER_CLIENT_CACHE_SEQUENTIAL_READ_ENABLED` | `client_cache_sequential_read_enabled` | `false` | Route sequential reads through the cache (`true`/`false`). |
-| `GOOSEFS_USER_CLIENT_CACHE_URING_ENABLED` | `client_cache_uring_enabled` | `true` on Linux / `false` on other platforms | Use the io_uring page-cache backend (`true`/`false`). Falls back to tokio::fs when io_uring is unavailable. |
+| `GOOSEFS_USER_CLIENT_CACHE_URING_ENABLED` | `client_cache_uring_enabled` | `true` with `page-cache-io-uring` on Linux / `false` otherwise | Use the io_uring page-cache backend (`true`/`false`). Falls back to tokio::fs when io_uring is unavailable. |
 | `GOOSEFS_USER_CLIENT_CACHE_URING_QUEUE_DEPTH` | `client_cache_uring_queue_depth` | `32768` | io_uring SQ/CQ depth (plain integer). `0` is ignored. |
 | `GOOSEFS_USER_CLIENT_CACHE_URING_THREAD_COUNT` | `client_cache_uring_thread_count` | `2` | io_uring background thread count (plain integer). `0` is ignored. |
 | `GOOSEFS_USER_CLIENT_CACHE_SYNC_READ_ENABLED` | `client_cache_sync_read_enabled` | `false` | Serve cache-hit reads with synchronous `pread` on the calling thread instead of io_uring (`true`/`false`). Linux only; local-NVMe analytical workloads only — see the field table for caveats. |
 | `GOOSEFS_WORKER_CONNECTION_POOL_SIZE` | `worker_connection_pool_size` | `min(cores, 4)` | Per-worker gRPC channel pool size (plain integer). `0` is clamped to `1`; non-numeric values are ignored (default kept). See FLAMEGRAPH_OPTIMIZATION_PLAN §B3. |
 | `GOOSEFS_MASTER_CONNECTION_POOL_SIZE` | `master_connection_pool_size` | `1` | Master gRPC channel pool size (plain integer). `0` is clamped to `1`; non-numeric values are ignored (default kept). Raise to `4`/`8` in high-concurrency remote scenarios to spread metadata RPCs across multiple HTTP/2 connections. |
 | `GOOSEFS_MASTER_POOL_SCHEDULE` | `master_connection_pool_schedule` | `RoundRobin` | Master pool scheduling strategy. Accepted: `roundrobin`, `round_robin`, `round-robin`, `RoundRobin` (case-insensitive, separators ignored) or `p2c`, `P2C`. Unknown values are ignored (default kept). Only effective when `master_connection_pool_size > 1`. |
-| `GOOSEFS_METADATA_CACHE_ENABLED` | `metadata_cache_enabled` | `true` | Enable the client metadata cache (`true`/`false`/`1`/`0`). **On by default**, unlike Java. Set `false` to opt out. |
+| `GOOSEFS_METADATA_CACHE_ENABLED` | `metadata_cache_enabled` | `true` with `metadata-cache` / `false` otherwise | Enable the client metadata cache (`true`/`false`/`1`/`0`). |
 | `GOOSEFS_METADATA_CACHE_MAX_SIZE` | `metadata_cache_max_size` | `100000` | Metadata cache LRU capacity. `0` is clamped to `1`. |
 | `GOOSEFS_METADATA_CACHE_EXPIRATION` | `metadata_cache_expiration` | `10min` | TTL in Java `parseTimeSize` form (`10min`, `30s`, `2day`, or raw milliseconds). |
 | `GOOSEFS_FILE_METADATA_SYNC_INTERVAL` | `file_metadata_sync_interval` | `-1` | Sync interval (`parseTimeSize`; a bare number is milliseconds). `0` skips the cache on every get/list; `-1` does not. |
@@ -560,13 +578,13 @@ These constants are used in `storage_options` maps (e.g. Lance's
 | `STORAGE_OPT_CLIENT_CACHE_SIZE` | `goosefs_client_cache_size` | `21474836480` (20 GiB) | Per-directory capacity in bytes. |
 | `STORAGE_OPT_CLIENT_CACHE_DIRS` | `goosefs_client_cache_dirs` | `["/tmp/goosefs_cache"]` | Cache directories (comma-separated). |
 | `STORAGE_OPT_CLIENT_CACHE_EVICTOR` | `goosefs_client_cache_eviction_policy` | `Lfu` | Eviction policy (`LRU`/`LFU`/`S3FIFO`). |
-| `STORAGE_OPT_CLIENT_CACHE_URING_ENABLED` | `goosefs_client_cache_uring_enabled` | `true` on Linux / `false` on other platforms | Use the io_uring page-cache backend. |
+| `STORAGE_OPT_CLIENT_CACHE_URING_ENABLED` | `goosefs_client_cache_uring_enabled` | `true` with `page-cache-io-uring` on Linux / `false` otherwise | Use the io_uring page-cache backend. |
 | `STORAGE_OPT_CLIENT_CACHE_URING_QUEUE_DEPTH` | `goosefs_client_cache_uring_queue_depth` | `32768` | io_uring SQ/CQ depth (integer as string). |
 | `STORAGE_OPT_CLIENT_CACHE_URING_THREAD_COUNT` | `goosefs_client_cache_uring_thread_count` | `2` | io_uring background thread count (integer as string). |
 | `STORAGE_OPT_WORKER_CONNECTION_POOL_SIZE` | `goosefs_worker_connection_pool_size` | `min(cores, 4)` | Per-worker gRPC channel pool size (integer as string). `0` is clamped to `1`. |
 | `STORAGE_OPT_MASTER_CONNECTION_POOL_SIZE` | `goosefs_master_connection_pool_size` | `1` | Master gRPC channel pool size (integer as string). `0` is clamped to `1`. Raise to `4`/`8` in high-concurrency remote scenarios. |
 | `STORAGE_OPT_MASTER_POOL_SCHEDULE` | `goosefs_master_pool_schedule` | `RoundRobin` | Master pool scheduling strategy. Accepts `roundrobin` / `round_robin` / `round-robin` / `RoundRobin` / `p2c` / `P2C` (case-insensitive, separators ignored). |
-| `STORAGE_OPT_METADATA_CACHE_ENABLED` | `goosefs_metadata_cache_enabled` | `true` | Enable the client metadata cache (`true`/`false`/`1`/`0`). **On by default**; set `false` to opt out. |
+| `STORAGE_OPT_METADATA_CACHE_ENABLED` | `goosefs_metadata_cache_enabled` | `true` with `metadata-cache` / `false` otherwise | Enable the client metadata cache (`true`/`false`/`1`/`0`). |
 | `STORAGE_OPT_METADATA_CACHE_MAX_SIZE` | `goosefs_metadata_cache_max_size` | `100000` | Metadata cache LRU capacity. |
 | `STORAGE_OPT_METADATA_CACHE_EXPIRATION` | `goosefs_metadata_cache_expiration` | `10min` | TTL (`parseTimeSize` string). |
 | `STORAGE_OPT_FILE_METADATA_SYNC_INTERVAL` | `goosefs_file_metadata_sync_interval` | `-1` | Sync interval (`parseTimeSize`). `0` skips the cache on every get/list. |
@@ -637,14 +655,14 @@ These keys are used in `goosefs-site.properties` files (Java-style `key=value` f
 | `goosefs.user.client.cache.quota.enabled` | `client_cache_quota_enabled` | `true` / `false` | `false` | Quota accounting. |
 | `goosefs.user.client.cache.ttl.seconds` | `client_cache_ttl_secs` | integer (seconds) | `0` (no expiry) | Page TTL. `0` = no expiry. |
 | `goosefs.user.client.cache.sequential.read.enabled` | `client_cache_sequential_read_enabled` | `true` / `false` | `false` | Route sequential reads through the cache (off by default). |
-| `goosefs.user.client.cache.uring.enabled` | `client_cache_uring_enabled` | `true` / `false` | `true` on Linux / `false` elsewhere | Use the io_uring page-cache backend. Falls back to tokio::fs when unavailable. |
+| `goosefs.user.client.cache.uring.enabled` | `client_cache_uring_enabled` | `true` / `false` | `true` with `page-cache-io-uring` on Linux / `false` otherwise | Use the io_uring page-cache backend. Falls back to tokio::fs when unavailable. |
 | `goosefs.user.client.cache.uring.queue.depth` | `client_cache_uring_queue_depth` | integer | `32768` | io_uring SQ/CQ depth. `0` falls back to default. |
 | `goosefs.user.client.cache.uring.thread.count` | `client_cache_uring_thread_count` | integer | `2` | io_uring background thread count. `0` falls back to default. |
 | `goosefs.user.client.cache.sync.read.enabled` | `client_cache_sync_read_enabled` | `true` / `false` | `false` | Sync `pread` read mode for the io_uring backend (Linux only; local-NVMe analytical workloads only). |
 | `goosefs.user.worker.connection.pool.size` | `worker_connection_pool_size` | integer | `min(cores, 4)` | Per-worker gRPC channel pool size. `0` is clamped to `1`. See FLAMEGRAPH_OPTIMIZATION_PLAN §B3. |
 | `goosefs.user.master.connection.pool.size` | `master_connection_pool_size` | integer | `1` | Master gRPC channel pool size. `0` is clamped to `1`. Raise to `4`/`8` in high-concurrency remote scenarios to spread metadata RPCs across multiple HTTP/2 connections. |
 | `goosefs.user.master.pool.schedule` | `master_connection_pool_schedule` | `roundrobin` / `round_robin` / `round-robin` / `RoundRobin` / `p2c` / `P2C` | `RoundRobin` | Master pool scheduling strategy (case-insensitive, separators ignored). Unknown values are ignored (default kept). Only effective when `master_connection_pool_size > 1`. |
-| `goosefs.user.metadata.cache.enabled` | `metadata_cache_enabled` | `true`/`false` | `true` | Construct the client metadata cache. **Default diverges from Java (`false`)**; set `false` to opt out. |
+| `goosefs.user.metadata.cache.enabled` | `metadata_cache_enabled` | `true`/`false` | `true` with `metadata-cache` / `false` otherwise | Construct the client metadata cache. |
 | `goosefs.user.metadata.cache.max.size` | `metadata_cache_max_size` | integer | `100000` | LRU capacity. `0` is clamped to `1`. |
 | `goosefs.user.metadata.cache.expiration.time` | `metadata_cache_expiration` | `parseTimeSize` | `10min` | TTL (`10min`, `30s`, `2day`, or raw milliseconds). |
 | `goosefs.user.file.metadata.sync.interval` | `file_metadata_sync_interval` | `parseTimeSize` | `-1` | `0` skips the cache on every get/list; `-1` does not. Positive values currently behave like `-1`. |
@@ -1212,7 +1230,7 @@ ds = lance.dataset(
 | `master_connection_pool_size` | High-concurrency metadata RPCs over remote RTT | `1` | `4`–`8` | `GOOSEFS_MASTER_CONNECTION_POOL_SIZE` | `goosefs.user.master.connection.pool.size` | `goosefs_master_connection_pool_size` |
 | `master_connection_pool_schedule` | Adaptive load balancing across pooled master channels | `RoundRobin` | `RoundRobin` (default) / `P2C` (opt-in for high concurrency) | `GOOSEFS_MASTER_POOL_SCHEDULE` | `goosefs.user.master.pool.schedule` | `goosefs_master_pool_schedule` |
 | `worker_connection_pool_size` | Single-process high-throughput block reads | `min(cores, 4)` | `4`–`8` | `GOOSEFS_WORKER_CONNECTION_POOL_SIZE` | `goosefs.user.worker.connection.pool.size` | `goosefs_worker_connection_pool_size` |
-| `metadata_cache_enabled` | Repeated opens / get_status / list_status of the same paths | `true` | `true` (default; set `false` only when the file set mutates behind the client) | `GOOSEFS_METADATA_CACHE_ENABLED` | `goosefs.user.metadata.cache.enabled` | `goosefs_metadata_cache_enabled` |
+| `metadata_cache_enabled` | Repeated opens / get_status / list_status of the same paths | `true` | `true` with `metadata-cache` (set `false` when the file set mutates behind the client) | `GOOSEFS_METADATA_CACHE_ENABLED` | `goosefs.user.metadata.cache.enabled` | `goosefs_metadata_cache_enabled` |
 | `prefetch_window` | Sequential (SR) read throughput | `8` | `16` | *(programmatic only)* | *(programmatic only)* | *(programmatic only)* |
 | `ack_interval_bytes` | SR throughput, **only** on workers honouring prefetch | `0` (ACK every chunk) | `4MB`–`8MB` | *(programmatic only)* | *(programmatic only)* | *(programmatic only)* |
 | `short_circuit_enabled` | Kill switch for the local mmap read path (see §2.9) | `false` | `false` (default; safe for Lance/DuckDB); `true` to opt into the local mmap fast path on co-located workloads that benefit | `GOOSEFS_SHORT_CIRCUIT_ENABLED` | `goosefs.user.short.circuit.enabled` | `goosefs_short_circuit_enabled` |

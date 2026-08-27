@@ -2061,8 +2061,8 @@ pub struct GoosefsConfig {
     #[serde(default)]
     pub client_cache_ttl_secs: u64,
 
-    /// Whether to use the io_uring page-store backend (default: `true` on
-    /// Linux, `false` elsewhere).
+    /// Whether to use the io_uring page-store backend (default: `true` when
+    /// `page-cache-io-uring` is enabled on Linux, `false` otherwise).
     ///
     /// When enabled and io_uring is available (Linux kernel ≥ 5.1), the
     /// cache-hit hot path uses io_uring SQE/CQE instead of `tokio::fs`
@@ -2109,7 +2109,8 @@ pub struct GoosefsConfig {
     // ── Metadata cache (Java `goosefs.user.metadata.cache.*`) ──
     /// Whether the Java-aligned client metadata cache is constructed.
     ///
-    /// Default `true`, which **diverges from Java's
+    /// Default `true` when the `metadata-cache` crate feature is enabled and
+    /// `false` otherwise. The feature-enabled default **diverges from Java's
     /// `goosefs.user.metadata.cache.enabled=false`**. When true, `get_status` /
     /// `list_status` / `exists` / open share one process-local LRU. Writes
     /// invalidate path + parent after a successful RPC.
@@ -2129,7 +2130,7 @@ pub struct GoosefsConfig {
     ///
     /// Set it back to `false` when the file set mutates behind the client
     /// faster than `metadata_cache_expiration`.
-    #[serde(default = "default_true_bool")]
+    #[serde(default = "default_metadata_cache_enabled")]
     pub metadata_cache_enabled: bool,
 
     /// Metadata cache LRU capacity (`goosefs.user.metadata.cache.max.size`).
@@ -2324,7 +2325,7 @@ fn default_client_cache_async_write_threads() -> usize {
     DEFAULT_CLIENT_CACHE_ASYNC_WRITE_THREADS
 }
 fn default_client_cache_uring_enabled() -> bool {
-    cfg!(target_os = "linux")
+    cfg!(all(target_os = "linux", feature = "page-cache-io-uring"))
 }
 fn default_client_cache_uring_queue_depth() -> usize {
     32768
@@ -2337,6 +2338,10 @@ fn default_true_bool() -> bool {
 }
 fn default_false_bool() -> bool {
     false
+}
+
+fn default_metadata_cache_enabled() -> bool {
+    cfg!(feature = "metadata-cache")
 }
 
 fn default_metadata_cache_max_size() -> usize {
@@ -2548,7 +2553,7 @@ impl Default for GoosefsConfig {
             client_cache_uring_thread_count: default_client_cache_uring_thread_count(),
             client_cache_sync_read_enabled: false,
             client_cache_sequential_read_enabled: false,
-            metadata_cache_enabled: default_true_bool(),
+            metadata_cache_enabled: default_metadata_cache_enabled(),
             metadata_cache_max_size: default_metadata_cache_max_size(),
             metadata_cache_expiration: default_metadata_cache_expiration(),
             file_metadata_sync_interval: default_file_metadata_sync_interval(),
@@ -3708,6 +3713,35 @@ impl GoosefsConfig {
 
     /// Validate configuration. Returns an error message if invalid.
     pub fn validate(&self) -> Result<(), String> {
+        #[cfg(not(feature = "metadata-cache"))]
+        if self.metadata_cache_enabled {
+            return Err(
+                "metadata_cache_enabled requires the `metadata-cache` crate feature".to_string(),
+            );
+        }
+        #[cfg(not(feature = "page-cache"))]
+        if self.client_cache_enabled {
+            return Err("client_cache_enabled requires the `page-cache` crate feature".to_string());
+        }
+        #[cfg(not(feature = "page-cache-io-uring"))]
+        if self.client_cache_enabled && self.client_cache_uring_enabled {
+            return Err(
+                "client_cache_uring_enabled requires the `page-cache-io-uring` crate feature"
+                    .to_string(),
+            );
+        }
+        #[cfg(not(feature = "short-circuit"))]
+        if self.short_circuit_enabled {
+            return Err(
+                "short_circuit_enabled requires the `short-circuit` crate feature".to_string(),
+            );
+        }
+        #[cfg(not(feature = "metrics-pushgateway"))]
+        if self.pushgateway_enabled {
+            return Err(
+                "pushgateway_enabled requires the `metrics-pushgateway` crate feature".to_string(),
+            );
+        }
         if self.master_addr.is_empty() && self.master_addrs.is_empty() {
             return Err(
                 "at least one master address must be provided (master_addr or master_addrs)"
@@ -5234,16 +5268,69 @@ goosefs.user.metadata.cache.max.size=1000000
         assert_eq!(cfg.metadata_cache_max_size, 1_000_000);
     }
 
-    /// TTL / size / sync-interval / load-type stay Java-aligned; only
-    /// `enabled` deliberately diverges (Java default is `false`).
+    /// TTL / size / sync-interval / load-type stay Java-aligned. The enabled
+    /// default follows whether metadata-cache support was compiled in.
     #[test]
     fn test_metadata_cache_defaults() {
         let cfg = GoosefsConfig::default();
-        assert!(cfg.metadata_cache_enabled);
+        assert_eq!(cfg.metadata_cache_enabled, cfg!(feature = "metadata-cache"));
         assert_eq!(cfg.metadata_cache_expiration, Duration::from_secs(600));
         assert_eq!(cfg.metadata_cache_max_size, 100_000);
         assert_eq!(cfg.file_metadata_sync_interval, -1);
         assert_eq!(cfg.file_metadata_load_type, LoadMetadataPType::Once);
+    }
+
+    #[test]
+    fn optional_runtime_defaults_follow_compiled_features() {
+        let cfg = GoosefsConfig::default();
+        assert_eq!(cfg.metadata_cache_enabled, cfg!(feature = "metadata-cache"));
+        assert!(!cfg.client_cache_enabled);
+        assert_eq!(
+            cfg.client_cache_uring_enabled,
+            cfg!(all(target_os = "linux", feature = "page-cache-io-uring"))
+        );
+        assert!(!cfg.short_circuit_enabled);
+        assert!(!cfg.pushgateway_enabled);
+    }
+
+    #[cfg(not(feature = "metadata-cache"))]
+    #[test]
+    fn validate_rejects_unavailable_metadata_cache() {
+        let cfg = GoosefsConfig::default().with_metadata_cache_enabled(true);
+        assert!(cfg.validate().unwrap_err().contains("metadata-cache"));
+    }
+
+    #[cfg(not(feature = "page-cache"))]
+    #[test]
+    fn validate_rejects_unavailable_page_cache() {
+        let mut cfg = GoosefsConfig::default();
+        cfg.client_cache_enabled = true;
+        assert!(cfg.validate().unwrap_err().contains("page-cache"));
+    }
+
+    #[cfg(all(feature = "page-cache", not(feature = "page-cache-io-uring")))]
+    #[test]
+    fn validate_rejects_unavailable_io_uring_backend() {
+        let mut cfg = GoosefsConfig::default();
+        cfg.client_cache_enabled = true;
+        cfg.client_cache_uring_enabled = true;
+        assert!(cfg.validate().unwrap_err().contains("page-cache-io-uring"));
+    }
+
+    #[cfg(not(feature = "short-circuit"))]
+    #[test]
+    fn validate_rejects_unavailable_short_circuit() {
+        let mut cfg = GoosefsConfig::default();
+        cfg.short_circuit_enabled = true;
+        assert!(cfg.validate().unwrap_err().contains("short-circuit"));
+    }
+
+    #[cfg(not(feature = "metrics-pushgateway"))]
+    #[test]
+    fn validate_rejects_unavailable_pushgateway() {
+        let mut cfg = GoosefsConfig::default();
+        cfg.pushgateway_enabled = true;
+        assert!(cfg.validate().unwrap_err().contains("metrics-pushgateway"));
     }
 
     #[test]
@@ -5285,7 +5372,11 @@ goosefs.user.file.info.cache.ttl.ms=1500
 goosefs.user.file.info.cache.capacity=2048
 ";
         let cfg = GoosefsConfig::from_properties_str(props);
-        assert!(cfg.metadata_cache_enabled, "left at the default");
+        assert_eq!(
+            cfg.metadata_cache_enabled,
+            cfg!(feature = "metadata-cache"),
+            "left at the feature-dependent default"
+        );
         assert_eq!(cfg.metadata_cache_expiration, Duration::from_secs(600));
         assert_eq!(cfg.metadata_cache_max_size, 100_000);
     }
