@@ -610,7 +610,6 @@ dependencies = [
  "lru",
  "memmap2",
  "prost",
- "prost-types",
  "rand 0.9.4",
  "reqwest",
  "serde",
