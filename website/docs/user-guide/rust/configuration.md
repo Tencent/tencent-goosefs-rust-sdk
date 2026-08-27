@@ -42,7 +42,7 @@ Common environment variables:
 | `GOOSEFS_USER_FILE_READ_MAX_NODE_RETRY` | Read candidate pool width / Java `maxRetryNode` (default `3`) |
 | `GOOSEFS_USER_FILE_READ_MAX_NODE_RETRY` | Read candidate pool width / Java `maxRetryNode` (default `3`) |
 | `GOOSEFS_USER_FILE_CHECK_BLOCK_REPLICAS` | CheckBlocks probe count; `0` disables (default) |
-| `GOOSEFS_METADATA_CACHE_ENABLED` | Client metadata cache switch (default `false`) |
+| `GOOSEFS_METADATA_CACHE_ENABLED` | Client metadata cache switch (default `true`) |
 | `GOOSEFS_METADATA_CACHE_EXPIRATION` | Metadata cache TTL (`10min`, `30s`, or raw ms) |
 | `GOOSEFS_METADATA_CACHE_MAX_SIZE` | Metadata cache LRU capacity (default `100000`) |
 
@@ -67,18 +67,18 @@ Disabled by default. Enable via fields, properties, or env:
 | `goosefs.user.client.cache.page.size`         | `client_cache_page_size`         | `1MB`                |
 | `goosefs.user.client.cache.size`              | `client_cache_size`              | `20 GiB`             |
 | `goosefs.user.client.cache.dirs`              | `client_cache_dirs`              | `/tmp/goosefs_cache` |
-| `goosefs.user.client.cache.eviction.policy`   | `client_cache_evictor`           | `LFU`                |
+| `goosefs.user.client.cache.eviction.policy`   | `client_cache_evictor`           | `LFU` (`LRU` / `S3FIFO`) |
 | `goosefs.user.client.cache.sync.read.enabled` | `client_cache_sync_read_enabled` | `false` (Linux only; analytical workloads on local NVMe — see [Page Cache → Sync pread read mode](./page-cache#sync-pread-read-mode-linux-only)) |
 
 See [Page Cache](./page-cache) for a full walkthrough.
 
-## Client Metadata Cache (opt-in)
+## Client Metadata Cache (on by default)
 
-Disabled by default. When enabled, `get_status` / `exists` / `open_file` / non-recursive `list_status` share one process-local TTL-bounded LRU:
+Enabled by default (the Java client defaults it to `false`). `get_status` / `exists` / `open_file` / non-recursive `list_status` share one process-local TTL-bounded LRU:
 
 | Property key                                  | Field                       | Default  |
 | --------------------------------------------- | --------------------------- | -------- |
-| `goosefs.user.metadata.cache.enabled`         | `metadata_cache_enabled`    | `false`  |
+| `goosefs.user.metadata.cache.enabled`         | `metadata_cache_enabled`    | `true`   |
 | `goosefs.user.metadata.cache.max.size`        | `metadata_cache_max_size`   | `100000` |
 | `goosefs.user.metadata.cache.expiration.time` | `metadata_cache_expiration` | `10min`  |
 

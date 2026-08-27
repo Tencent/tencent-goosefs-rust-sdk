@@ -88,6 +88,12 @@ pub struct PageInfo {
     /// be smaller than the configured page size).
     pub page_size: u64,
     /// Index into the cache-manager's directory list that holds this page.
+    ///
+    /// Redundant since the migration to foyer: the manager keeps one cache per
+    /// directory, so the directory is implied by which cache the entry was
+    /// found in. Kept because `PageInfo` is public and removing the field would
+    /// be a breaking change; the reaper still reads it to avoid threading the
+    /// index through the eviction listener separately.
     pub dir_index: usize,
     /// When the page was created (used for TTL expiry).
     pub created_at: Instant,

@@ -23,7 +23,8 @@
 //! Implemented: the public abstractions ([`CacheManager`], [`PageId`],
 //! [`PageInfo`], [`CacheManagerOptions`]), the disabled, always-miss
 //! [`DisabledCacheManager`], and the disk-backed [`LocalCacheManager`]
-//! (multi-dir [`store::LocalPageStore`] + [`evictor`] + bounded async
+//! (multi-dir [`store::LocalPageStore`] + a `foyer` metadata/eviction cache
+//! + bounded async
 //! write-back + striped page locks). The page-split read loop lives in
 //! [`caching_reader::read_through_cache`]. See
 //! `docs/CLIENT_PAGE_CACHE_DESIGN.md` for the full design.
@@ -42,9 +43,9 @@
 //!              │
 //!              ▼
 //!        CacheManager (trait) → LocalCacheManager
-//!              ├── PageMetaStore (index + accounting)
+//!              ├── foyer Cache per dir (metadata + eviction + byte capacity)
 //!              ├── PageStore (LocalPageStore: disk IO)
-//!              ├── CacheEvictor (LRU / LFU)
+//!              ├── reaper task (deletes files of evicted pages)
 //!              └── Allocator (multi-dir)
 //! ```
 //!
@@ -61,7 +62,6 @@ mod page_id;
 
 pub mod allocator;
 pub mod caching_reader;
-pub mod evictor;
 pub mod manager;
 pub mod store;
 
@@ -124,7 +124,7 @@ impl CacheState {
 
 /// Local page cache abstraction.
 ///
-/// Implementations coordinate the metadata store, disk store, evictor and
+/// Implementations coordinate the metadata/eviction cache, disk store and
 /// locking to serve cached pages. See the module docs for the best-effort
 /// contract.
 ///

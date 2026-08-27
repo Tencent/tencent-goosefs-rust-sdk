@@ -27,19 +27,21 @@ use super::driver::{submit_request, try_submit_request};
 use super::future::UringOpFuture;
 use super::requests::{IoRequest, RequestState, UringOpType};
 use super::{hash_file_id, io_error, NUM_BUCKETS};
+use crate::cache::metric_name as mn;
 use crate::cache::page_id::PageId;
 use crate::cache::store::{LocalPageStore, PageStore};
 use crate::error::Result;
+use crate::metrics::counter;
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
-use moka::future::Cache;
+use foyer_memory::{Cache, CacheBuilder, S3FifoConfig};
 use std::ffi::CString;
 use std::fs::File;
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Sidecar filename holding a file's `(length, mtime)` identity — identical to
 /// `LocalPageStore` so both backends share the same on-disk format.
@@ -60,19 +62,29 @@ const DIR_FD_TTL: Duration = Duration::from_secs(300);
 /// unique files in a typical workload is small (1–100).
 const DIR_FD_CACHE_SOFT_CAP: usize = 4096;
 
-/// TTL for the page fd cache — entries not accessed within this window
-/// are evicted by `moka`. Mirrors Lance's `HANDLE_CACHE` design
-/// (`lance-io/src/uring/reader.rs:60`).
+/// Idle window after which a cached page fd is considered stale.
+/// Mirrors Lance's `HANDLE_CACHE` design (`lance-io/src/uring/reader.rs:60`).
+///
+/// **Enforced lazily**, on `get_bytes`: foyer has no built-in TTL, unlike the
+/// `moka` cache this replaced. See [`PageFdEntry::is_expired`] for the
+/// behavioural difference and why it is acceptable here.
 const PAGE_FD_CACHE_TTL: Duration = Duration::from_secs(60);
 
-/// Maximum number of cached page fds. moka uses an LRU eviction policy
-/// when this cap is exceeded. Mirrors Lance's `HANDLE_CACHE` design
+/// Maximum number of cached page fds. Mirrors Lance's `HANDLE_CACHE` design
 /// (`lance-io/src/uring/reader.rs:61`).
+///
+/// Each entry has weight 1, so this is a page *count*, and foyer evicts once
+/// it is exceeded.
 ///
 /// 10,000 entries × `RawFd` (4 bytes) + `Arc<File>` overhead ≈ 1-2 MB.
 /// **Requires `ulimit -n >= 10240`** to avoid `EMFILE` when the cap is
-/// reached. Lance's README notes the same constraint.
-const PAGE_FD_CACHE_MAX_CAPACITY: u64 = 10_000;
+/// reached. Lance's README notes the same constraint. The lazy TTL does not
+/// change this bound — the cap alone is what keeps fd usage in check.
+const PAGE_FD_CACHE_MAX_CAPACITY: usize = 10_000;
+
+/// Shard count for the page fd cache. Matches the order of magnitude of the
+/// segment count the previous `moka` cache used internally.
+const PAGE_FD_CACHE_SHARDS: usize = 64;
 
 /// A cached directory file descriptor, keyed by `file_id`.
 ///
@@ -86,18 +98,24 @@ const PAGE_FD_CACHE_MAX_CAPACITY: u64 = 10_000;
 /// a `DashMap::get()` **read guard** without taking a write lock — this is
 /// critical to avoid blocking tokio workers on the hot path.
 struct DirFdEntry {
-    fd: RawFd,
+    /// Owns the directory fd.
+    ///
+    /// This used to be a bare `RawFd` with a `Drop` that called
+    /// `libc::close`, on the reasoning that no reader could be holding a
+    /// *directory* fd because page fds were opened and closed per `get()`.
+    /// The page fd cache invalidated that: `PAGE_FD_CACHE` is process-global
+    /// and outlives any individual store, so dropping a store closed its dir
+    /// fds while page fds with the same numbers were still cached. The kernel
+    /// reuses fd numbers, so a later read could hit a stale entry and read a
+    /// different file — and the eventual second close aborted the process.
+    ///
+    /// `File` closes the fd exactly once, when the last handle goes away.
+    ///
+    /// Deliberately not accompanied by a cached `RawFd` copy: a second copy of
+    /// the fd sitting beside its owner is what made the original bug possible.
+    /// Callers take `as_raw_fd()` off the handle they hold.
+    dir: Arc<File>,
     last_access: AtomicU64,
-}
-
-impl Drop for DirFdEntry {
-    fn drop(&mut self) {
-        // Close the fd synchronously — safe because `Drop` runs when the
-        // entry is evicted from the DashMap, and no concurrent read holds
-        // a reference to the *directory* fd (reads hold the *page* fd,
-        // which is opened/closed independently per `get()`).
-        unsafe { libc::close(self.fd) };
-    }
 }
 
 /// Current time as epoch nanos — used for `DirFdEntry::last_access`.
@@ -110,24 +128,33 @@ fn now_nanos() -> u64 {
 
 /// Global page fd cache — keyed by `PageId`, holds the open file fd.
 ///
-/// **Mirrors Lance's `HANDLE_CACHE`** (`lance-io/src/uring/reader.rs:55-63`):
-/// TTL-based async cache with built-in LRU eviction. Entries expire after
-/// `PAGE_FD_CACHE_TTL` (60s) of no access, and LRU eviction kicks in when
-/// the cap (`PAGE_FD_CACHE_MAX_CAPACITY`, 10k) is reached.
+/// **Mirrors Lance's `HANDLE_CACHE`** (`lance-io/src/uring/reader.rs:55-63`),
+/// but backed by `foyer-memory` rather than `moka`. Entries are evicted once
+/// [`PAGE_FD_CACHE_MAX_CAPACITY`] is exceeded, and stale entries are dropped
+/// lazily on access ([`PageFdEntry::is_expired`]).
 ///
 /// **Why process-global?** A file's fd is valid for the entire process —
 /// we don't need per-`UringPageStore` caches. This matches Lance's design
 /// and lets caches survive `UringPageStore` re-creation (e.g. when the
 /// cache directory rotates).
 ///
-/// **Concurrency**: `moka::future::Cache::get` is wait-free in the common
-/// case (lock-free hashmap read). `insert` may briefly contend on the
-/// LRU list. The cold path (cache miss → `OP_OPENAT` → insert) is bounded
-/// by the rate of distinct page accesses.
+/// **Why S3-FIFO?** It is scan-resistant: a one-shot sequential scan over many
+/// distinct pages will not flush the hot random-read working set, which plain
+/// LRU (moka's behaviour here) does. It is also the cheapest policy on the read
+/// path — its `acquire()` is `Op::immutable`, so a cache hit takes a shard
+/// *read* lock, whereas LRU/LFU take a write lock
+/// (foyer-memory-0.22.3 `src/eviction/s3fifo.rs:309` vs `lru.rs:241`).
+///
+/// **Concurrency**: `get` is a sharded hash lookup under a read lock. The cold
+/// path (miss → `OP_OPENAT` → insert) is bounded by the rate of distinct page
+/// accesses.
 static PAGE_FD_CACHE: LazyLock<Cache<PageId, Arc<PageFdEntry>>> = LazyLock::new(|| {
-    Cache::builder()
-        .time_to_live(PAGE_FD_CACHE_TTL)
-        .max_capacity(PAGE_FD_CACHE_MAX_CAPACITY)
+    CacheBuilder::new(PAGE_FD_CACHE_MAX_CAPACITY)
+        .with_name("goosefs-page-fd")
+        .with_shards(PAGE_FD_CACHE_SHARDS)
+        // Weight 1 per entry, so the capacity above is an entry count.
+        .with_weighter(|_: &PageId, _: &Arc<PageFdEntry>| 1)
+        .with_eviction_config(S3FifoConfig::default())
         .build()
 });
 
@@ -142,7 +169,8 @@ static PAGE_FD_CACHE: LazyLock<Cache<PageId, Arc<PageFdEntry>>> = LazyLock::new(
 ///
 /// `file: Arc<File>` keeps the file alive while the cache holds the entry;
 /// when the entry is evicted, `Arc::drop` closes the fd automatically —
-/// identical to Lance's pattern.
+/// identical to Lance's pattern, and unchanged by the move to foyer (both
+/// caches are reference-counted).
 struct PageFdEntry {
     /// `RawFd` cached at `new()` time to avoid repeated `as_raw_fd()` calls
     /// on the hot path. Valid as long as `file` is alive.
@@ -152,6 +180,11 @@ struct PageFdEntry {
     /// concurrent reader is still using it.
     #[allow(dead_code)]
     file: Arc<File>,
+    /// Insertion instant, for the lazy TTL check.
+    ///
+    /// `Instant` is monotonic, so a wall-clock jump cannot resurrect an
+    /// expired fd (`SystemTime` would allow that).
+    inserted_at: Instant,
 }
 
 impl PageFdEntry {
@@ -162,7 +195,25 @@ impl PageFdEntry {
         Self {
             fd,
             file: Arc::new(file),
+            inserted_at: Instant::now(),
         }
+    }
+
+    /// Whether this entry has outlived [`PAGE_FD_CACHE_TTL`].
+    ///
+    /// foyer has no built-in TTL, so expiry is checked here and the entry is
+    /// removed on the next access. Compared to moka — which also expired
+    /// lazily but additionally swept in the background — an idle expired fd now
+    /// lingers until it is either touched again or pushed out by capacity.
+    ///
+    /// That is acceptable: the fd count is still bounded by
+    /// [`PAGE_FD_CACHE_MAX_CAPACITY`], so the `ulimit -n >= 10240` requirement
+    /// is unchanged. Correctness never depended on the TTL either — `put` and
+    /// `delete` remove the entry explicitly when a page file is replaced or
+    /// unlinked. The TTL only reclaims fds that stopped being useful.
+    #[inline]
+    fn is_expired(&self) -> bool {
+        self.inserted_at.elapsed() > PAGE_FD_CACHE_TTL
     }
 }
 
@@ -278,14 +329,21 @@ impl UringPageStore {
     ///
     /// Returns `Ok(dirfd)` on success, or `Err(NotFound)` if the directory
     /// does not exist (meaning no pages are cached for this file).
-    async fn get_dir_fd(&self, file_id: &Arc<str>) -> std::io::Result<RawFd> {
+    /// Returns the owning handle rather than a bare `RawFd`.
+    ///
+    /// The `DashMap` read guard is released when this function returns, so a
+    /// concurrent `maybe_cleanup_dir_fd_cache` may evict the entry immediately
+    /// afterwards. Since the entry owns the fd, that would close it while the
+    /// caller was still using it. Handing back the `Arc` keeps it alive for as
+    /// long as the caller needs it.
+    async fn get_dir_fd(&self, file_id: &Arc<str>) -> std::io::Result<Arc<File>> {
         // 1) Lock-free read — the common case (cache hit).
         //    `DashMap::get` takes a per-shard read guard (~10 ns).
         //    The `AtomicU64::store` updates `last_access` without upgrading
         //    to a write guard — this is the key to not blocking tokio workers.
         if let Some(entry) = self.dir_fd_cache.get(file_id) {
             entry.last_access.store(now_nanos(), Ordering::Relaxed);
-            return Ok(entry.fd);
+            return Ok(Arc::clone(&entry.dir));
         }
 
         // 2) Cache miss — open the directory via io_uring OP_OPENAT.
@@ -293,24 +351,33 @@ impl UringPageStore {
         let dirfd = self
             .open_fd(&dir_path, libc::O_RDONLY | libc::O_DIRECTORY)
             .await?;
+        // OwnedFd -> File is a safe, infallible conversion; no `unsafe` and no
+        // window where the fd has no owner.
+        let dir_file = File::from(dirfd);
 
         // 3) Insert. If another thread won the race, close our redundant fd.
         //    `entry()` takes a per-shard write guard only briefly — this is
         //    the cold path (first access to a file), so it does not contend.
         match self.dir_fd_cache.entry(file_id.clone()) {
             dashmap::mapref::entry::Entry::Occupied(existing) => {
-                // Another thread already cached a dir fd — close ours.
-                unsafe { libc::close(dirfd) };
-                Ok(existing.get().fd)
+                // Another thread won the race. Dropping our `File` closes our
+                // redundant fd — no manual close, so no way to close the wrong
+                // one.
+                drop(dir_file);
+                Ok(Arc::clone(&existing.get().dir))
             }
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
+                let dir = Arc::new(dir_file);
+                let handle = Arc::clone(&dir);
                 vacant.insert(DirFdEntry {
-                    fd: dirfd,
+                    dir,
                     last_access: AtomicU64::new(now_nanos()),
                 });
-                // Best-effort cleanup if the cache has grown large.
+                // Best-effort cleanup if the cache has grown large. Safe to run
+                // here: `handle` keeps our own fd alive even if this very entry
+                // is chosen for eviction.
                 self.maybe_cleanup_dir_fd_cache();
-                Ok(dirfd)
+                Ok(handle)
             }
         }
     }
@@ -362,7 +429,13 @@ impl UringPageStore {
     ///
     /// When `pread_enabled` is set, opens synchronously via `open(2)` on
     /// the calling thread instead (no SQE/CQE round-trip).
-    async fn open_fd(&self, path: &Path, flags: i32) -> std::io::Result<RawFd> {
+    /// Open `path`, returning an owning handle.
+    ///
+    /// Returns `OwnedFd` rather than `RawFd` deliberately: with a bare fd, the
+    /// obligation to close it exactly once lives only in comments, and has to be
+    /// re-established at every early return. `OwnedFd` moves that into the type
+    /// system.
+    async fn open_fd(&self, path: &Path, flags: i32) -> std::io::Result<OwnedFd> {
         let buffer = Self::path_buffer_with_nul(&path.to_string_lossy())?;
 
         if self.pread_enabled {
@@ -379,7 +452,9 @@ impl UringPageStore {
             return if fd < 0 {
                 Err(std::io::Error::last_os_error())
             } else {
-                Ok(fd)
+                // SAFETY: `fd` was just returned by a successful `open`/`openat`
+                // and is not owned anywhere else.
+                Ok(unsafe { OwnedFd::from_raw_fd(fd) })
             };
         }
 
@@ -415,7 +490,22 @@ impl UringPageStore {
         if result < 0 {
             Err(std::io::Error::from_raw_os_error(-result))
         } else {
-            Ok(result as RawFd)
+            // A successful `OP_OPENAT` cannot yield 0/1/2 while the standard
+            // streams are open, so such a value means an error code leaked
+            // into the success path.
+            //
+            // Checked in release builds too, on purpose: taking ownership of a
+            // standard stream closes it, and the process then aborts far away
+            // from here with *no* diagnostic at all — the abort message is
+            // written to the very fd that was destroyed. Failing loudly right
+            // at the source is worth one comparison per cache miss.
+            assert!(
+                result > 2,
+                "OP_OPENAT returned fd={result}: an error code leaked into the success path"
+            );
+            // SAFETY: a non-negative CQE result from OP_OPENAT is a fresh fd
+            // owned by nothing else.
+            Ok(unsafe { OwnedFd::from_raw_fd(result as RawFd) })
         }
     }
 
@@ -430,12 +520,14 @@ impl UringPageStore {
     ///
     /// When `pread_enabled` is set, opens synchronously via `openat(2)` on
     /// the calling thread instead (no SQE/CQE round-trip).
+    /// `openat(dirfd, name)`, returning an owning handle. See [`Self::open_fd`]
+    /// for why this is `OwnedFd`.
     async fn openat_relative(
         &self,
         dirfd: RawFd,
         name: &str,
         flags: i32,
-    ) -> std::io::Result<RawFd> {
+    ) -> std::io::Result<OwnedFd> {
         let buffer = Self::path_buffer_with_nul(name)?;
 
         if self.pread_enabled {
@@ -454,7 +546,9 @@ impl UringPageStore {
             return if fd < 0 {
                 Err(std::io::Error::last_os_error())
             } else {
-                Ok(fd)
+                // SAFETY: `fd` was just returned by a successful `open`/`openat`
+                // and is not owned anywhere else.
+                Ok(unsafe { OwnedFd::from_raw_fd(fd) })
             };
         }
 
@@ -490,7 +584,22 @@ impl UringPageStore {
         if result < 0 {
             Err(std::io::Error::from_raw_os_error(-result))
         } else {
-            Ok(result as RawFd)
+            // A successful `OP_OPENAT` cannot yield 0/1/2 while the standard
+            // streams are open, so such a value means an error code leaked
+            // into the success path.
+            //
+            // Checked in release builds too, on purpose: taking ownership of a
+            // standard stream closes it, and the process then aborts far away
+            // from here with *no* diagnostic at all — the abort message is
+            // written to the very fd that was destroyed. Failing loudly right
+            // at the source is worth one comparison per cache miss.
+            assert!(
+                result > 2,
+                "OP_OPENAT returned fd={result}: an error code leaked into the success path"
+            );
+            // SAFETY: a non-negative CQE result from OP_OPENAT is a fresh fd
+            // owned by nothing else.
+            Ok(unsafe { OwnedFd::from_raw_fd(result as RawFd) })
         }
     }
 
@@ -500,7 +609,18 @@ impl UringPageStore {
     /// asynchronously. This eliminates the third round-trip in `get()`
     /// (H3 fix). If submission fails (channel full or disconnected),
     /// falls back to synchronous `libc::close` to prevent fd leaks (H5 fix).
-    fn close_fd_background(&self, fd: RawFd) {
+    ///
+    /// Takes `OwnedFd`, not `RawFd`. With a raw fd this function could be called
+    /// for an fd the caller did not own, or twice for the same one, and neither
+    /// mistake is visible at the call site — the fd number stays valid because
+    /// the kernel has already reassigned it to something else, so the close
+    /// "succeeds" while destroying an unrelated file handle. Requiring ownership
+    /// makes both mistakes fail to compile.
+    fn close_fd_background(&self, fd: OwnedFd) {
+        // Consume ownership before releasing the raw number: from here on this
+        // fd belongs to the kernel (via the SQE) or to the fallback close
+        // below, and no caller can reach it again.
+        let fd = fd.into_raw_fd();
         let request = Arc::new(IoRequest {
             fd,
             offset: 0,
@@ -781,31 +901,60 @@ impl PageStore for UringPageStore {
         }
 
         // ── Hot path: page fd cache hit → 1 SQE (OP_READ only) ───────
-        if let Some(entry) = PAGE_FD_CACHE.get(page_id).await {
-            let fd = entry.fd;
-            // `entry: Arc<PageFdEntry>` keeps the underlying `Arc<File>` alive
-            // for the duration of the read, so the fd is guaranteed valid.
-            let _entry = entry;
+        //
+        // No `.await` here: foyer's in-memory cache is synchronous, so the hit
+        // path no longer builds a future state machine just to look up an fd.
+        //
+        // NOTE: this must be `get`, never `touch`. `touch` calls
+        // `Eviction::acquire` without the paired `release`, which under
+        // `LruConfig` pins the record forever
+        // (foyer-memory-0.22.3 `src/raw.rs:836-851` is the only `release` site).
+        // S3-FIFO is not affected, but using `get` keeps this correct for any
+        // policy — and we need the value anyway.
+        if let Some(cached) = PAGE_FD_CACHE.get(page_id) {
+            // Clone the `Arc` out of the entry so the `CacheEntry` guard can be
+            // dropped before the read: holding it across `.await` would pin the
+            // record under a pinning policy.
+            let entry = cached.value().clone();
+            drop(cached);
 
-            return match self.read_with_fd(fd, offset, len).await {
-                Ok(bytes) => Ok(bytes),
-                Err(e) => {
-                    PAGE_FD_CACHE.invalidate(page_id).await;
-                    if e.kind() == std::io::ErrorKind::NotFound {
-                        Ok(Bytes::new())
-                    } else {
-                        Err(io_error("uring read (page fd cache hit)", e))
+            if entry.is_expired() {
+                // Lazy TTL: drop the stale entry and fall through to the miss
+                // path, which re-opens the file and re-inserts a fresh entry.
+                PAGE_FD_CACHE.remove(page_id);
+                counter(mn::CLIENT_CACHE_PAGE_FD_TTL_EXPIRED).inc(1);
+            } else {
+                let fd = entry.fd;
+                // `entry: Arc<PageFdEntry>` keeps the underlying `Arc<File>`
+                // alive for the duration of the read, so the fd stays valid
+                // even if the cache evicts the entry concurrently.
+                let _entry = entry;
+
+                return match self.read_with_fd(fd, offset, len).await {
+                    Ok(bytes) => Ok(bytes),
+                    Err(e) => {
+                        PAGE_FD_CACHE.remove(page_id);
+                        if e.kind() == std::io::ErrorKind::NotFound {
+                            Ok(Bytes::new())
+                        } else {
+                            Err(io_error("uring read (page fd cache hit)", e))
+                        }
                     }
-                }
-            };
+                };
+            }
         }
 
         // ── Cold path: page fd cache miss → dir fd cache + openat + read ─
-        let dirfd = match self.get_dir_fd(&page_id.file_id).await {
-            Ok(fd) => fd,
+        //
+        // `dir_handle` is held until after the `openat` below completes: it owns
+        // the directory fd, so letting it drop earlier would allow a concurrent
+        // cleanup to close the fd we are resolving against.
+        let dir_handle = match self.get_dir_fd(&page_id.file_id).await {
+            Ok(h) => h,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Bytes::new()),
             Err(e) => return Err(io_error("uring open dir", e)),
         };
+        let dirfd = dir_handle.as_raw_fd();
 
         let page_name = page_id.page_index.to_string();
         let fd = match self
@@ -816,10 +965,13 @@ impl PageStore for UringPageStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Bytes::new()),
             Err(e) => return Err(io_error("uring open page", e)),
         };
+        // The page fd is open now, so the directory fd is no longer needed.
+        drop(dir_handle);
 
-        let read_bytes = match self.read_with_fd(fd, offset, len).await {
+        let read_bytes = match self.read_with_fd(fd.as_raw_fd(), offset, len).await {
             Ok(bytes) => bytes,
             Err(e) => {
+                // Consumes the fd; the success path below cannot reach it.
                 self.close_fd_background(fd);
                 if e.kind() == std::io::ErrorKind::NotFound {
                     return Ok(Bytes::new());
@@ -828,12 +980,13 @@ impl PageStore for UringPageStore {
             }
         };
 
-        // SAFETY: `fd` was just successfully opened by io_uring and ownership
-        // is transferred into `File`; moka closes it when the cache entry drops.
-        let file = unsafe { std::fs::File::from_raw_fd(fd) };
-        PAGE_FD_CACHE
-            .insert(page_id.clone(), Arc::new(PageFdEntry::new(file)))
-            .await;
+        // OwnedFd -> File is safe and infallible. The fd is closed when the last
+        // `Arc<File>` goes away, i.e. once the cache entry is evicted and no
+        // reader still holds it.
+        let file = File::from(fd);
+        // The returned `CacheEntry` is dropped immediately — we hold no
+        // reference to it, so foyer is free to reclaim the record.
+        drop(PAGE_FD_CACHE.insert(page_id.clone(), Arc::new(PageFdEntry::new(file))));
 
         Ok(read_bytes)
     }
@@ -901,13 +1054,22 @@ impl PageStore for UringPageStore {
                 let e = std::io::Error::from_raw_os_error(-result);
                 return Err(io_error("uring open tmp", e));
             }
-            result as RawFd
+            // See `openat_relative` for why 0/1/2 cannot be a real fd here.
+            assert!(
+                result > 2,
+                "OP_OPENAT returned fd={result}: an error code leaked into the success path"
+            );
+            // SAFETY: a non-negative CQE result from OP_OPENAT is a fresh fd
+            // owned by nothing else. Wrapping it here means each of the three
+            // exits below (write timeout, write error, success) must *move* it,
+            // so exactly one close can happen.
+            unsafe { OwnedFd::from_raw_fd(result as RawFd) }
         };
 
         // 2) OP_WRITE (entire page)
         {
             let request = Arc::new(IoRequest {
-                fd,
+                fd: fd.as_raw_fd(),
                 offset: 0,
                 length: page.len(),
                 op_type: UringOpType::Write,
@@ -959,7 +1121,9 @@ impl PageStore for UringPageStore {
         // Invalidate the global page fd cache entry — the atomic rename
         // replaced the page file, so any cached fd points to the old
         // inode. Must be removed so the next get() re-opens the new file.
-        PAGE_FD_CACHE.invalidate(page_id).await;
+        //
+        // This, not the TTL, is what guarantees correctness after a rewrite.
+        PAGE_FD_CACHE.remove(page_id);
 
         Ok(())
     }
@@ -983,8 +1147,8 @@ impl PageStore for UringPageStore {
         // must close it so the inode can be freed. Concurrent reads using
         // the old fd are safe on Unix (inode survives until last close),
         // but we remove the cache entry so future reads go through the
-        // miss path. `invalidate` is async (moka requires a future).
-        PAGE_FD_CACHE.invalidate(page_id).await;
+        // miss path.
+        PAGE_FD_CACHE.remove(page_id);
 
         let path = self.page_path(page_id);
         self.unlink_path(&path)
@@ -1046,6 +1210,34 @@ impl PageStore for UringPageStore {
 
 #[cfg(test)]
 mod tests {
+    //! # No CI coverage
+    //!
+    //! Every test below is `#[ignore]`d, and **no CI job runs them**. Two
+    //! separate reasons, both easy to mistake for coverage:
+    //!
+    //! * `ci.yml` runs `cargo nextest run --workspace --lib --tests`, which
+    //!   skips `#[ignore]` by default.
+    //! * `scripts/ci/run_rust_integration.sh` does pass `--ignored`, but only
+    //!   to specific `--test <file>` targets, i.e. integration tests under
+    //!   `tests/`. These live in `src/`, so `--lib` is never named. Nothing
+    //!   under `tests/` touches the uring store either.
+    //!
+    //! The gap is not theoretical. A bug that turned an `ENOENT` errno into
+    //! "fd 2", closed stderr, and aborted the process mid-suite was invisible
+    //! to CI and only surfaced when the suite was run by hand on a host with
+    //! io_uring. See the fix in `future.rs::poll`.
+    //!
+    //! Adding `cargo test --lib uring -- --ignored` to the integration script
+    //! looks like the obvious closure, but it is **unverified**: the runner may
+    //! not permit `OP_OPENAT` at all (hence the `#[ignore]` reason on each
+    //! test). `temp_store` probes and returns `None` in that case, so the tests
+    //! would skip silently and the job would stay green while covering
+    //! nothing — worse than a known gap. Confirm the runner can actually do an
+    //! io_uring OPENAT before relying on it.
+    //!
+    //! Until then, treat "these pass" as a claim that only holds where they
+    //! were actually executed.
+
     use super::*;
     use crate::cache::store::uring::is_uring_available;
 
@@ -1099,7 +1291,7 @@ mod tests {
         let Some((store, base)) = temp_store(1024).await else {
             return;
         };
-        let id = PageId::new("file-uring-a", 0);
+        let id = unique_id("roundtrip", 0);
         let data = b"hello uring page cache".to_vec();
 
         store.put(&id, &data).await.unwrap();
@@ -1118,7 +1310,7 @@ mod tests {
         let Some((store, base)) = temp_store(1024).await else {
             return;
         };
-        let id = PageId::new("file-uring-b", 0);
+        let id = unique_id("with-offset", 0);
         store.put(&id, b"0123456789").await.unwrap();
 
         let mut dst = vec![0u8; 4];
@@ -1135,7 +1327,7 @@ mod tests {
         let Some((store, base)) = temp_store(1024).await else {
             return;
         };
-        let id = PageId::new("nope-uring", 0);
+        let id = unique_id("missing", 0);
         let mut dst = vec![0u8; 8];
         assert_eq!(store.get(&id, 0, &mut dst).await.unwrap(), 0);
         let _ = tokio::fs::remove_dir_all(&base).await;
@@ -1147,7 +1339,7 @@ mod tests {
         let Some((store, base)) = temp_store(1024).await else {
             return;
         };
-        let id = PageId::new("file-uring-c", 0);
+        let id = unique_id("short-read", 0);
         store.put(&id, b"abc").await.unwrap();
 
         // Ask for more than the page holds → fills only the available bytes.
@@ -1164,7 +1356,7 @@ mod tests {
         let Some((store, base)) = temp_store(1024).await else {
             return;
         };
-        let id = PageId::new("file-uring-d", 1);
+        let id = unique_id("delete-miss", 1);
         store.put(&id, b"data").await.unwrap();
         store.delete(&id).await.unwrap();
 
@@ -1181,7 +1373,7 @@ mod tests {
         let Some((store, base)) = temp_store(1024).await else {
             return;
         };
-        let id = PageId::new("file-uring-conc", 0);
+        let id = unique_id("conc-same-page", 0);
         let data = vec![0x42u8; 64];
         store.put(&id, &data).await.unwrap();
 
@@ -1214,7 +1406,7 @@ mod tests {
         let Some((store, base)) = temp_store(1024).await else {
             return;
         };
-        let id = PageId::new("file-repeat", 0);
+        let id = unique_id("repeat", 0);
         store.put(&id, b"repeated-read-data").await.unwrap();
 
         for _ in 0..10 {
@@ -1235,9 +1427,9 @@ mod tests {
         let Some((store, base)) = temp_store(1024).await else {
             return;
         };
-        let id0 = PageId::new("file-multi", 0);
-        let id1 = PageId::new("file-multi", 1);
-        let id2 = PageId::new("file-multi", 2);
+        let id0 = unique_id("batch-multi", 0);
+        let id1 = unique_id("batch-multi", 1);
+        let id2 = unique_id("batch-multi", 2);
 
         store.put(&id0, b"page-zero-data!!").await.unwrap();
         store.put(&id1, b"page-one-data!!!").await.unwrap();
@@ -1416,17 +1608,28 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&base).await;
     }
 
-    // ── Method E: page fd cache tests (moka-based) ─────────
+    // ── Method E: page fd cache tests (foyer-backed) ─────────
 
-    /// Helper: get a unique `PageId` for each test to avoid moka cache
-    /// collisions across tests (the cache is process-global).
+    /// A `PageId` whose file id is unique to `label`, with `idx` as the page
+    /// index within that file.
+    ///
+    /// Both fd caches are keyed by identity that outlives a single test:
+    /// `PAGE_FD_CACHE` is process-global and keyed by `PageId`, and
+    /// `dir_fd_cache` is keyed by `file_id`. Two tests sharing either key read
+    /// each other's files — silently, because a cached entry keeps its file alive
+    /// through `Arc<File>`. So every test needs its own `label`.
+    ///
+    /// `idx` deliberately does NOT affect the file id. An earlier version folded
+    /// it in, which made `unique_id(l, 0..3)` three separate *files* instead of
+    /// three pages of one file, and broke every test asserting that pages of a
+    /// file share one directory fd.
     fn unique_id(label: &str, idx: u64) -> PageId {
-        PageId::new(format!("file-{label}-{idx}-test"), idx)
+        PageId::new(format!("file-{label}-test"), idx)
     }
 
     /// Helper: check if a `PageId` is in the page fd cache.
     async fn is_in_page_cache(id: &PageId) -> bool {
-        PAGE_FD_CACHE.get(id).await.is_some()
+        PAGE_FD_CACHE.get(id).is_some()
     }
 
     #[tokio::test]
@@ -1463,7 +1666,7 @@ mod tests {
         );
 
         // Cleanup: invalidate cache entry so other tests don't see it.
-        PAGE_FD_CACHE.invalidate(&id).await;
+        PAGE_FD_CACHE.remove(&id);
         let _ = tokio::fs::remove_dir_all(&base).await;
     }
 
@@ -1478,14 +1681,16 @@ mod tests {
         let id1 = unique_id("multi-pg", 1);
         let id2 = unique_id("multi-pg", 2);
 
-        store.put(&id0, b"page-zero!!").await.unwrap();
+        // All three payloads are the same length so one `dst` fits each exactly;
+        // a mismatch here is what made this test fail before.
+        store.put(&id0, b"page-zero!").await.unwrap();
         store.put(&id1, b"page-one!!").await.unwrap();
         store.put(&id2, b"page-two!!").await.unwrap();
 
         // Read all three pages — each should populate the page fd cache.
         let mut dst = vec![0u8; 10];
         assert_eq!(store.get(&id0, 0, &mut dst).await.unwrap(), 10);
-        assert_eq!(&dst, b"page-zero!!");
+        assert_eq!(&dst, b"page-zero!");
         assert_eq!(store.get(&id1, 0, &mut dst).await.unwrap(), 10);
         assert_eq!(&dst, b"page-one!!");
         assert_eq!(store.get(&id2, 0, &mut dst).await.unwrap(), 10);
@@ -1499,7 +1704,7 @@ mod tests {
 
         // Re-read all three — should all be page fd cache hits.
         assert_eq!(store.get(&id0, 0, &mut dst).await.unwrap(), 10);
-        assert_eq!(&dst, b"page-zero!!");
+        assert_eq!(&dst, b"page-zero!");
         assert_eq!(store.get(&id1, 0, &mut dst).await.unwrap(), 10);
         assert_eq!(&dst, b"page-one!!");
         assert_eq!(store.get(&id2, 0, &mut dst).await.unwrap(), 10);
@@ -1507,7 +1712,7 @@ mod tests {
 
         // Cleanup.
         for id in [&id0, &id1, &id2] {
-            PAGE_FD_CACHE.invalidate(id).await;
+            PAGE_FD_CACHE.remove(id);
         }
         let _ = tokio::fs::remove_dir_all(&base).await;
     }
@@ -1547,7 +1752,7 @@ mod tests {
         );
 
         // Cleanup.
-        PAGE_FD_CACHE.invalidate(&id).await;
+        PAGE_FD_CACHE.remove(&id);
         let _ = tokio::fs::remove_dir_all(&base).await;
     }
 
@@ -1562,9 +1767,10 @@ mod tests {
         let id = unique_id("invalidate-del", 0);
         store.put(&id, b"will-be-deleted").await.unwrap();
 
-        // Populate the page fd cache.
-        let mut dst = vec![0u8; 16];
-        assert_eq!(store.get(&id, 0, &mut dst).await.unwrap(), 16);
+        // Populate the page fd cache. 15 bytes, not 16 — the payload length and
+        // the assertion disagreed before.
+        let mut dst = vec![0u8; 15];
+        assert_eq!(store.get(&id, 0, &mut dst).await.unwrap(), 15);
         assert!(is_in_page_cache(&id).await);
 
         // Delete should invalidate the cache entry.
@@ -1610,7 +1816,7 @@ mod tests {
         assert_eq!(&dst2, b"new-data-here!!");
 
         // Cleanup.
-        PAGE_FD_CACHE.invalidate(&id).await;
+        PAGE_FD_CACHE.remove(&id);
         let _ = tokio::fs::remove_dir_all(&base).await;
     }
 
@@ -1646,7 +1852,7 @@ mod tests {
             .unwrap();
         assert!(missing.is_empty());
 
-        PAGE_FD_CACHE.invalidate(&id).await;
+        PAGE_FD_CACHE.remove(&id);
         let _ = tokio::fs::remove_dir_all(&base).await;
     }
 
@@ -1688,7 +1894,7 @@ mod tests {
         assert_eq!(n, data.len());
         assert_eq!(&dst, &data);
 
-        PAGE_FD_CACHE.invalidate(&id).await;
+        PAGE_FD_CACHE.remove(&id);
         let _ = tokio::fs::remove_dir_all(&base).await;
     }
 
@@ -1703,7 +1909,7 @@ mod tests {
         assert_eq!(n, 4);
         assert_eq!(&dst, b"3456");
 
-        PAGE_FD_CACHE.invalidate(&id).await;
+        PAGE_FD_CACHE.remove(&id);
         let _ = tokio::fs::remove_dir_all(&base).await;
     }
 
@@ -1728,7 +1934,7 @@ mod tests {
         assert_eq!(n, 3);
         assert_eq!(&dst[..3], b"abc");
 
-        PAGE_FD_CACHE.invalidate(&id).await;
+        PAGE_FD_CACHE.remove(&id);
         let _ = tokio::fs::remove_dir_all(&base).await;
     }
 
@@ -1741,7 +1947,7 @@ mod tests {
         let bytes = store.get_bytes(&id, 2, 5).await.unwrap();
         assert_eq!(&bytes[..], b"23456");
 
-        PAGE_FD_CACHE.invalidate(&id).await;
+        PAGE_FD_CACHE.remove(&id);
         let _ = tokio::fs::remove_dir_all(&base).await;
     }
 
@@ -1769,7 +1975,7 @@ mod tests {
             h.await.unwrap();
         }
 
-        PAGE_FD_CACHE.invalidate(&id).await;
+        PAGE_FD_CACHE.remove(&id);
         let _ = tokio::fs::remove_dir_all(&base).await;
     }
 
@@ -1798,7 +2004,7 @@ mod tests {
             "page fd cache should still contain entry (reuse)"
         );
 
-        PAGE_FD_CACHE.invalidate(&id).await;
+        PAGE_FD_CACHE.remove(&id);
         let _ = tokio::fs::remove_dir_all(&base).await;
     }
 
@@ -1821,8 +2027,8 @@ mod tests {
         assert_eq!(&dst, b"page-one-data!!!");
         assert_eq!(store.dir_fd_cache.len(), 1);
 
-        PAGE_FD_CACHE.invalidate(&id0).await;
-        PAGE_FD_CACHE.invalidate(&id1).await;
+        PAGE_FD_CACHE.remove(&id0);
+        PAGE_FD_CACHE.remove(&id1);
         let _ = tokio::fs::remove_dir_all(&base).await;
     }
 
@@ -1850,5 +2056,88 @@ mod tests {
         assert_eq!(&offset[..], b"bc");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every uring test must build its `PageId` through [`unique_id`].
+    ///
+    /// `PAGE_FD_CACHE` is process-global and keyed by `PageId` alone — the store
+    /// root is not part of the key. Each `temp_store` gets its own uuid
+    /// directory, so page *files* never clash, but two tests sharing a `PageId`
+    /// share a cache entry. A cached entry keeps its file alive through
+    /// `Arc<File>` (see the `PAGE_FD_CACHE.get` hit path), so the second test
+    /// reads the *first* test's file and gets no error — just the wrong bytes.
+    ///
+    /// Five tests failed the first time this suite ran on a real Linux host, and
+    /// three of them for this reason. The symptom is silent and only appears
+    /// under parallel execution on a host where io_uring actually works, which
+    /// is a poor combination to rely on someone noticing. Hence a source check.
+    ///
+    /// `include_str!` binds the file at compile time, so this does not depend on
+    /// the working directory when the test runs.
+    /// Every uring test must build its `PageId` through [`unique_id`].
+    ///
+    /// `PAGE_FD_CACHE` is process-global and keyed by `PageId` alone — the store
+    /// root is not part of the key. Each `temp_store` gets its own uuid
+    /// directory, so page *files* never clash, but two tests sharing a `PageId`
+    /// share a cache entry, and a cached entry keeps its file alive through
+    /// `Arc<File>` (see the `PAGE_FD_CACHE.get` hit path). The second test then
+    /// reads the *first* test's file and gets no error at all — just the wrong
+    /// bytes.
+    ///
+    /// Three tests failed exactly this way the first time the suite ran on a real
+    /// Linux host. The symptom is silent and needs parallel execution on a host
+    /// where io_uring works, so it is not something to leave to review.
+    ///
+    /// Only a **string literal** first argument is reported.
+    /// `PageId::new(file_id.clone(), i)` is fine: the local carries the
+    /// uniqueness. An earlier version of this guard checked for
+    /// `contains("PageId::new(")` and flagged 19 lines, 14 of them wrongly —
+    /// including its own matching string.
+    ///
+    /// `include_str!` binds the file at compile time, so this does not depend on
+    /// the working directory.
+    #[test]
+    fn uring_tests_use_unique_page_ids() {
+        let src = include_str!("store.rs");
+        let Some(tests_start) = src.find("\nmod tests {") else {
+            panic!("could not locate `mod tests` in store.rs");
+        };
+        let prefix_lines = src[..tests_start].lines().count();
+
+        // Built by concatenation so this line does not match its own pattern —
+        // otherwise the guard reports itself and can never pass.
+        let needle = concat!("PageId", "::new(");
+
+        let mut offenders = Vec::new();
+        for (offset, line) in src[tests_start..].lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            // Extract a literal first argument, if there is one.
+            let Some(after) = trimmed.split(needle).nth(1) else {
+                continue;
+            };
+            let Some(inner) = after.trim_start().strip_prefix('"') else {
+                continue; // an expression, not a literal — fine
+            };
+            let Some(file_id) = inner.split('"').next() else {
+                continue;
+            };
+            // `temp_store`'s probe page is written and deleted before the store
+            // reaches a test, under a name no test uses.
+            if file_id == "__uring_probe__" {
+                continue;
+            }
+            offenders.push(format!("  line {}: {}", prefix_lines + offset + 1, trimmed));
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "these uring tests build a PageId from a hardcoded file id, which \
+             collides in the process-global PAGE_FD_CACHE and makes tests read \
+             each other's files:\n{}\n\nUse `unique_id(\"label\", idx)` instead.",
+            offenders.join("\n")
+        );
     }
 }

@@ -120,13 +120,24 @@ hostname = "0.4"
 # Used only by the metrics pushgateway exporter; gated behind a feature so
 # downstream gRPC-only consumers can opt out.
 reqwest = { version = "^0.12", features = ["rustls-tls"], default-features = false, optional = true }
-# High-performance concurrent cache used by:
-# - `MokaCacheEvictor` (lock-free LRU eviction, see `src/cache/evictor/moka_evictor.rs`)
-# - io_uring page fd cache (Method E, mirrors Lance's `HANDLE_CACHE`)
-# Provides built-in W-TinyLFU eviction + per-segment locking, replacing the
-# previous `Mutex<LruState>` that caused 38x contention under 32 concurrent
-# reads. Pure Rust — works on all platforms.
-moka = { version = "0.12", features = ["future", "sync"] }
+# foyer sharded intrusive eviction containers. Backs both the page metadata
+# cache (`src/cache/manager.rs`) and the io_uring page fd cache
+# (`src/cache/store/uring/store.rs`), replacing moka. See
+# the foyer migration design doc, kept in the `goosefs-lance-tests`
+# repository under `docs/design/`.
+#
+# Owning metadata, eviction order and byte accounting in one structure is what
+# makes victim selection O(1); the previous split forced an O(resident pages)
+# scan to find a victim (~7ms at 100k pages).
+#
+# Deliberately NOT the umbrella `foyer` crate: we only need the in-memory
+# cache, and the umbrella pulls in `foyer-storage`'s block engine / compression
+# / io_uring device stack, which fully overlaps our own `PageStore`.
+# `Cache`/`CacheBuilder`/`*Config` live in foyer-memory, `Event`/`EventListener`
+# in foyer-common. Published MSRV is 1.85.0 for both (the 1.91 in foyer's
+# README is its dev-workspace toolchain, not a consumer constraint).
+foyer-memory = "0.22"
+foyer-common = "0.22"
 # Drives variable-sized batches of cache page reads concurrently without
 # spawning per-page tasks; already used by benchmarks and now required on the
 # cache hit hot path.
@@ -187,12 +198,14 @@ path = "benchmarks/partv_perf_verify.rs"
 name = "repro_concurrent_write"
 path = "benchmarks/repro_concurrent_write.rs"
 
-# Cache evictor A/B benchmark: Moka vs LRU vs LFU under concurrent cache-hit
+# Cache evictor A/B benchmark: LRU vs LFU vs S3-FIFO under concurrent cache-hit
 # workloads. Exercises the full LocalCacheManager::get() path (metadata lookup
 # + evictor on_access + PageStore IO).
 [[example]]
 name = "cache_evictor_bench"
 path = "benchmarks/cache_evictor_bench.rs"
+
+
 
 # P3 benchmark: io_uring vs tokio::fs page-cache backend comparison.
 # Local-only (no GooseFS cluster needed). Runs on any platform; io_uring path

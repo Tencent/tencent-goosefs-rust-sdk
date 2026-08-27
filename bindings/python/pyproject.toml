@@ -13,7 +13,12 @@
 # limitations under the License.
 
 [build-system]
-requires = ["maturin>=1.5,<2.0"]
+# >=1.15: earlier releases bundle cargo-zigbuild 0.22.x, which passes
+# rustc's `-Wl,--fix-cortex-a53-843419` (added to the aarch64 target spec
+# in Rust 1.98) straight through to `zig cc`, which rejects it. The
+# aarch64 manylinux wheel fails to link as a result. cargo-zigbuild
+# 0.23.0 filters the flag out; maturin picked that up in 1.15.
+requires = ["maturin>=1.15,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -58,7 +63,9 @@ examples = ["pyarrow>=10.0", "pandas>=2.0"]
 
 [dependency-groups]
 dev = [
-  "maturin>=1.5",
+  # Lower bound matches [build-system].requires — see the note there for
+  # why anything older breaks the aarch64 cross build.
+  "maturin>=1.15",
   "ruff>=0.5",
   "mypy>=1.10",
 ]

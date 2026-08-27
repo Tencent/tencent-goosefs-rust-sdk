@@ -66,6 +66,44 @@ pub mod name {
     pub const CLIENT_CACHE_BYTES_DISCARDED: &str = "Client.CacheBytesDiscarded";
     /// Pages discarded.
     pub const CLIENT_CACHE_PAGES_DISCARDED: &str = "Client.CachePagesDiscarded";
+    /// Page fds dropped by the io_uring fd cache's lazy TTL check.
+    ///
+    /// foyer has no built-in TTL, so a stale fd is detected and removed on its
+    /// next access rather than by a background sweep. A steadily rising counter
+    /// with a low cache hit rate suggests the TTL is shorter than the access
+    /// interval — the fds are being re-opened rather than reused.
+    ///
+    /// Diagnostic only; no Java counterpart.
+    pub const CLIENT_CACHE_PAGE_FD_TTL_EXPIRED: &str = "Client.CachePageFdTtlExpired";
+
+    // ── Eviction reaper ──────────────────────────────────────
+    /// Pages waiting for their file to be deleted after eviction.
+    ///
+    /// Should hover near zero. A sustained backlog means eviction is outpacing
+    /// disk deletes, and disk usage is running above `dir_capacity` by roughly
+    /// this many pages.
+    ///
+    /// Diagnostic only; no Java counterpart.
+    pub const CLIENT_CACHE_REAP_QUEUE_DEPTH: &str = "Client.CacheReapQueueDepth";
+    /// Evictions dropped because the reaper queue was full.
+    ///
+    /// Each drop leaves an orphan page file, reclaimed by `restore()` on the
+    /// next startup (sidecar-gated, so it is never served as fresh data). A
+    /// space leak, not a correctness problem — but any non-zero value means
+    /// the reaper queue should be larger.
+    ///
+    /// Diagnostic only; no Java counterpart.
+    pub const CLIENT_CACHE_REAP_DROPPED: &str = "Client.CacheReapDropped";
+    /// Evictions skipped because the page was re-admitted before the reaper
+    /// got to it.
+    ///
+    /// Deleting in that situation would remove the *fresh* file written by the
+    /// re-admitting `put`, so the reaper checks and skips. A high rate means
+    /// pages are being evicted and immediately re-read — the working set is
+    /// larger than the cache.
+    ///
+    /// Diagnostic only; no Java counterpart.
+    pub const CLIENT_CACHE_REAP_SKIPPED_READMITTED: &str = "Client.CacheReapSkippedReadmitted";
 
     // ── State ────────────────────────────────────────────────
     /// Cache state (see [`crate::cache::CacheState::as_i64`]).

@@ -930,27 +930,52 @@ const DEFAULT_CLIENT_CACHE_DIR: &str = "/tmp/goosefs_cache";
 /// Page-cache eviction policy.
 ///
 /// Mirrors Java `goosefs.user.client.cache.eviction.policy` (evictor class).
+///
+/// All variants are backed by `foyer-memory`'s sharded eviction containers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum CacheEvictorType {
     /// Least-Recently-Used (default).
     ///
-    /// Backed by `moka::sync::Cache` with `EvictionPolicy::lru()` and
-    /// per-segment write locks — replaces the old global `Mutex<LruState>`.
+    /// foyer `LruConfig` with `high_priority_pool_ratio: 0.0` — the whole
+    /// cache is one LRU list. (foyer's own default reserves 90% for a
+    /// high-priority pool, which the page cache never populates.)
+    ///
+    /// Note this is the only policy where a live `CacheEntry` pins its record
+    /// out of the eviction order, so the manager must never hold one across
+    /// an `.await`. `reads_do_not_stall_eviction_under_lru` guards that, and
+    /// it is a P0 test precisely because this is the default: every hot path
+    /// in `manager.rs` copies what it needs and drops the guard before any
+    /// IO. LFU and S3-FIFO cannot exhibit the problem (their `release()` is
+    /// a no-op), which also makes them useless as a canary for it.
     Lru,
     /// Least-Frequently-Used.
     ///
-    /// Backed by `moka::sync::Cache` with `EvictionPolicy::tiny_lfu()`
-    /// (W-TinyLFU: LRU eviction + LFU admission filter) and per-segment write
-    /// locks — replaces the old global `Mutex<LfuState>`.
+    /// foyer `LfuConfig` — W-TinyLFU: a windowed LRU admission filter in front
+    /// of a segmented LRU main space, with a count-min sketch for frequency.
+    /// Scan-resistant.
+    ///
+    /// Was the default up to and including the moka-backed implementation.
+    /// Worth selecting when the workload has a stable hot set that a
+    /// recency-only policy would let a scan evict.
     Lfu,
+    /// S3-FIFO: small / main / ghost queues.
+    ///
+    /// Scan-resistant like LFU, and the cheapest of the three on the read
+    /// path: its `acquire()` is `Op::immutable`, so a cache hit takes a shard
+    /// *read* lock, whereas LRU and LFU take a write lock.
+    ///
+    /// Measured against LFU the difference is ~0.3µs at p99 (3.38µs vs
+    /// 3.67µs at 32 threads). Worth selecting for scan-heavy workloads.
+    S3Fifo,
 }
 
 impl Default for CacheEvictorType {
     fn default() -> Self {
-        // Match moka's default: TinyLFU (W-TinyLFU = LRU eviction + LFU
-        // admission filter). Suitable for most workloads.
-        CacheEvictorType::Lfu
+        // Matches Java's `goosefs.user.client.cache.eviction.policy` default
+        // (LRUCacheEvictor), so a client configured for one implementation
+        // behaves the same on the other.
+        CacheEvictorType::Lru
     }
 }
 
@@ -961,6 +986,9 @@ impl std::str::FromStr for CacheEvictorType {
         match s.trim().to_ascii_uppercase().as_str() {
             "LRU" => Ok(CacheEvictorType::Lru),
             "LFU" => Ok(CacheEvictorType::Lfu),
+            // Accept the hyphenated spelling too: S3-FIFO is how the paper and
+            // foyer's own docs write it.
+            "S3FIFO" | "S3-FIFO" => Ok(CacheEvictorType::S3Fifo),
             other => Err(format!("unknown cache evictor type: {other}")),
         }
     }
@@ -2081,10 +2109,27 @@ pub struct GoosefsConfig {
     // ── Metadata cache (Java `goosefs.user.metadata.cache.*`) ──
     /// Whether the Java-aligned client metadata cache is constructed.
     ///
-    /// Default `false` (`goosefs.user.metadata.cache.enabled`). When true,
-    /// `get_status` / `list_status` / `exists` / open share one process-local
-    /// LRU. Writes invalidate path + parent after a successful RPC.
-    #[serde(default = "default_false_bool")]
+    /// Default `true`, which **diverges from Java's
+    /// `goosefs.user.metadata.cache.enabled=false`**. When true, `get_status` /
+    /// `list_status` / `exists` / open share one process-local LRU. Writes
+    /// invalidate path + parent after a successful RPC.
+    ///
+    /// The default was flipped because every reader open resolves its
+    /// `FileInfo` through `FileSystemContext::get_file_info_cached`, so with
+    /// the cache off a workload of many small ranged reads (one
+    /// `GoosefsFileReader` per read, as OpenDAL does) pays one Master
+    /// `get_status` RPC per read.
+    ///
+    /// That RPC is also what hides the local page cache: a page-cache hit
+    /// served over io_uring costs tens of microseconds, so a per-open Master
+    /// round-trip on the same read dwarfs it and the read ends up waiting on
+    /// metadata rather than on disk. Leaving this on is a prerequisite for
+    /// `client_cache_enabled` + `client_cache_uring_enabled` to show up in
+    /// end-to-end throughput.
+    ///
+    /// Set it back to `false` when the file set mutates behind the client
+    /// faster than `metadata_cache_expiration`.
+    #[serde(default = "default_true_bool")]
     pub metadata_cache_enabled: bool,
 
     /// Metadata cache LRU capacity (`goosefs.user.metadata.cache.max.size`).
@@ -2503,7 +2548,7 @@ impl Default for GoosefsConfig {
             client_cache_uring_thread_count: default_client_cache_uring_thread_count(),
             client_cache_sync_read_enabled: false,
             client_cache_sequential_read_enabled: false,
-            metadata_cache_enabled: false,
+            metadata_cache_enabled: default_true_bool(),
             metadata_cache_max_size: default_metadata_cache_max_size(),
             metadata_cache_expiration: default_metadata_cache_expiration(),
             file_metadata_sync_interval: default_file_metadata_sync_interval(),
@@ -5189,14 +5234,40 @@ goosefs.user.metadata.cache.max.size=1000000
         assert_eq!(cfg.metadata_cache_max_size, 1_000_000);
     }
 
+    /// TTL / size / sync-interval / load-type stay Java-aligned; only
+    /// `enabled` deliberately diverges (Java default is `false`).
     #[test]
-    fn test_metadata_cache_java_defaults() {
+    fn test_metadata_cache_defaults() {
         let cfg = GoosefsConfig::default();
-        assert!(!cfg.metadata_cache_enabled);
+        assert!(cfg.metadata_cache_enabled);
         assert_eq!(cfg.metadata_cache_expiration, Duration::from_secs(600));
         assert_eq!(cfg.metadata_cache_max_size, 100_000);
         assert_eq!(cfg.file_metadata_sync_interval, -1);
         assert_eq!(cfg.file_metadata_load_type, LoadMetadataPType::Once);
+    }
+
+    #[test]
+    fn test_metadata_cache_can_be_disabled_explicitly() {
+        let cfg = GoosefsConfig::from_properties_str("goosefs.user.metadata.cache.enabled=false\n");
+        assert!(!cfg.metadata_cache_enabled);
+
+        let cfg = GoosefsConfig::from_properties_str("goosefs_metadata_cache_enabled=false\n");
+        assert!(!cfg.metadata_cache_enabled);
+
+        assert!(
+            !GoosefsConfig::default()
+                .with_metadata_cache_enabled(false)
+                .metadata_cache_enabled
+        );
+    }
+
+    #[test]
+    fn test_apply_env_metadata_cache_disabled() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GOOSEFS_METADATA_CACHE_ENABLED", "false");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var("GOOSEFS_METADATA_CACHE_ENABLED");
+        assert!(!cfg.metadata_cache_enabled);
     }
 
     #[test]
@@ -5214,7 +5285,7 @@ goosefs.user.file.info.cache.ttl.ms=1500
 goosefs.user.file.info.cache.capacity=2048
 ";
         let cfg = GoosefsConfig::from_properties_str(props);
-        assert!(!cfg.metadata_cache_enabled);
+        assert!(cfg.metadata_cache_enabled, "left at the default");
         assert_eq!(cfg.metadata_cache_expiration, Duration::from_secs(600));
         assert_eq!(cfg.metadata_cache_max_size, 100_000);
     }

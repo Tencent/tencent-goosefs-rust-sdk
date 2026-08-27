@@ -46,11 +46,19 @@ struct UringConfig {
 /// Must be called before the first `submit_request` (i.e. before any store
 /// operation). Subsequent calls are no-ops — the thread pool is process-global.
 ///
-/// Values of `0` fall back to the env var / built-in default.
+/// `0` means "not configured" and falls back to the env var / built-in default,
+/// exactly as if this function had never been called.
+///
+/// It must not be clamped to 1 instead. `queue_depth` sizes both the
+/// `sync_channel` feeding each uring thread and the io_uring SQ itself, and
+/// submission uses `try_send`, which fails rather than blocks when the channel
+/// is full. A depth of 1 therefore turns any concurrency — even a single `put`,
+/// which issues three ops (openat, write, close) — into spurious `WouldBlock`
+/// errors surfacing as failed cache writes.
 pub fn init_uring_config(queue_depth: usize, thread_count: usize) {
     let _ = URING_CONFIG.set(UringConfig {
-        queue_depth: queue_depth.max(1),
-        thread_count: thread_count.max(1),
+        queue_depth: resolve_or_default(queue_depth, default_queue_depth()),
+        thread_count: resolve_or_default(thread_count, default_thread_count()),
     });
 }
 
@@ -64,7 +72,9 @@ struct UringThreadHandle {
 /// on first access.
 ///
 /// References: Lance `thread.rs:30-54`.
-pub static URING_THREADS: LazyLock<Vec<UringThreadHandle>> = LazyLock::new(|| {
+/// Not `pub`: the handle type is private, and every user (`submit_request`,
+/// `try_submit_request`) lives in this module.
+static URING_THREADS: LazyLock<Vec<UringThreadHandle>> = LazyLock::new(|| {
     let queue_depth = get_queue_depth();
     let thread_count = get_thread_count();
 
@@ -214,16 +224,40 @@ fn run_uring_thread(request_rx: Receiver<Arc<IoRequest>>, queue_depth: u32, thre
         // can be reaped per iteration. We always do this first to free
         // up SQ slots before pushing new requests.
         let retries = process_completions(&mut ring, &mut pending);
-        let needs_submit = !retries.is_empty();
+
+        // Re-arm every short read/write. `process_completions` has already
+        // removed these from `pending` and advanced `bytes_transferred`, so
+        // without this loop the request is never driven again: no further CQE
+        // can arrive for it and its waker is never called, leaving the caller
+        // blocked until `URING_OP_TIMEOUT` fires. Any read whose page holds
+        // fewer bytes than requested takes this path, which is the common case
+        // at a file tail.
+        let mut needs_submit = false;
+        // NOTE: this loop has no unit test — it needs a live ring and a running
+        // driver thread. Its regression guard is
+        // `store::tests::uring_get_short_read_at_tail`, which is `#[ignore]`d
+        // and therefore skipped by CI (GitHub Actions denies io_uring OPENAT
+        // with EPERM); it only runs on a host with io_uring available. Dropping
+        // `retries` here does not fail loudly — the request is already out of
+        // `pending`, so no CQE can arrive and no waker fires, and the caller
+        // simply blocks until `URING_OP_TIMEOUT`.
+        for request in retries {
+            match push_to_sq(&mut ring, &mut pending, request) {
+                Ok(()) => needs_submit = true,
+                // `push_to_sq` has already failed the request, so the caller
+                // observes an error instead of hanging.
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to resubmit short io_uring op")
+                }
+            }
+        }
 
         // Reset spin counter — we just did useful work (reaped CQEs or
         // processed retries), so the next idle spin starts fresh.
         if !pending.is_empty() {
-            // After reaping, pending may still have in-flight ops. The
-            // counter is reset only when we successfully reap CQEs (i.e.,
-            // when process_completions returns non-empty retries or when
-            // the CQE ring had entries). We detect this by checking if
-            // retries is non-empty — if so, IO is flowing, reset the counter.
+            // After reaping, pending may still have in-flight ops. Reset the
+            // counter only when a retry was actually resubmitted above — that
+            // means IO is flowing, so the next idle spin starts fresh.
             if needs_submit {
                 SPIN_COUNT.with(|c| c.set(0));
             }
@@ -330,6 +364,24 @@ fn run_uring_thread(request_rx: Receiver<Arc<IoRequest>>, queue_depth: u32, thre
     }
 }
 
+/// Whether a read/write SQE may still point into `RequestState::buffer`.
+///
+/// A resubmitted short transfer must still own the buffer it was created with.
+/// Once the result has been consumed, `Future::poll` moved the buffer out with
+/// `mem::take`, leaving a zero-length `BytesMut`; `as_ptr().add(transferred)`
+/// would then hand the kernel a pointer past the end of that empty allocation,
+/// and the kernel — not us — performs the out-of-bounds write.
+///
+/// Split out from `push_to_sq` so it can be tested without an `IoUring`: the
+/// dangerous path only opens up when a timed-out request is retried, which is
+/// hard to provoke end-to-end but trivial to state as a predicate.
+///
+/// `transferred >= total` also covers the nonsensical "retry something already
+/// complete" case, where `total - transferred` would be zero or would wrap.
+fn buffer_usable_for_transfer(transferred: usize, total: usize, buffer_len: usize) -> bool {
+    transferred < total && buffer_len >= total
+}
+
 /// Construct an SQE for the request and push it to the submission queue
 /// (without calling `submit`).
 ///
@@ -355,6 +407,12 @@ fn push_to_sq(
             let (buf_ptr, read_offset, read_len) = {
                 let state = request.state.lock().unwrap();
                 let br = state.bytes_transferred;
+                if !buffer_usable_for_transfer(br, request.length, state.buffer.len()) {
+                    drop(state);
+                    let msg = "io_uring read buffer no longer valid for retry";
+                    request.fail(io::Error::other(msg));
+                    return Err(io::Error::other(msg));
+                }
                 (
                     unsafe { state.buffer.as_ptr().add(br) as *mut u8 },
                     request.offset + br as u64,
@@ -369,6 +427,12 @@ fn push_to_sq(
             let (buf_ptr, write_offset, write_len) = {
                 let state = request.state.lock().unwrap();
                 let bt = state.bytes_transferred;
+                if !buffer_usable_for_transfer(bt, request.length, state.buffer.len()) {
+                    drop(state);
+                    let msg = "io_uring write buffer no longer valid for retry";
+                    request.fail(io::Error::other(msg));
+                    return Err(io::Error::other(msg));
+                }
                 (
                     unsafe { state.buffer.as_ptr().add(bt) as *const u8 },
                     request.offset + bt as u64,
@@ -517,26 +581,192 @@ fn process_completions(
 
 // ── Configuration ───────────────────────────────────────────
 
+/// Built-in default io_uring SQ / channel depth, used when neither
+/// `CacheManagerOptions` nor the env var specifies one.
+fn default_queue_depth() -> usize {
+    std::env::var("GOOSEFS_USER_CLIENT_CACHE_URING_QUEUE_DEPTH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&d: &usize| d > 0)
+        .unwrap_or(16384)
+}
+
+/// Built-in default uring thread count.
+///
+/// 8 threads (was 2) to match NVMe multi-queue parallelism: 2 threads gave only
+/// 2-4 effective concurrency and left most cores idle, while 8 allows up to 8
+/// concurrent in-flight SQE batches, saturating a typical NVMe (queue depth
+/// 32-64) without head-of-line blocking.
+fn default_thread_count() -> usize {
+    std::env::var("GOOSEFS_USER_CLIENT_CACHE_URING_THREAD_COUNT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&t: &usize| t > 0)
+        .unwrap_or(8)
+}
+
 fn get_queue_depth() -> usize {
     if let Some(config) = URING_CONFIG.get() {
         return config.queue_depth;
     }
-    std::env::var("GOOSEFS_USER_CLIENT_CACHE_URING_QUEUE_DEPTH")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(16384)
+    default_queue_depth()
 }
 
 fn get_thread_count() -> usize {
     if let Some(config) = URING_CONFIG.get() {
         return config.thread_count;
     }
-    // B2 fix: default 8 threads (was 2) to match NVMe multi-queue parallelism.
-    // 2 threads → 2-4 effective concurrency, leaving most cores idle.
-    // 8 threads → up to 8 concurrent in-flight SQE batches, saturating
-    // typical NVMe (queue depth 32-64) without head-of-line blocking.
-    std::env::var("GOOSEFS_USER_CLIENT_CACHE_URING_THREAD_COUNT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8)
+    default_thread_count()
+}
+
+/// Resolve a configured value against the built-in default.
+///
+/// Extracted so the `0 means unset` rule can be tested: `URING_CONFIG` is a
+/// process-global `OnceLock`, so a test that actually called
+/// `init_uring_config` would fix the value for every other test in the binary.
+fn resolve_or_default(configured: usize, default: usize) -> usize {
+    if configured == 0 {
+        default
+    } else {
+        configured
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `0` must mean "unset", not "one".
+    ///
+    /// Regression test. `init_uring_config` used `queue_depth.max(1)` while its
+    /// doc comment promised a fallback to the default, so `CacheManagerOptions`
+    /// with `uring_queue_depth: 0` — which is what "leave it alone" looks like
+    /// to a caller — silently produced a depth of 1.
+    ///
+    /// That is not a mild misconfiguration. `queue_depth` sizes both the
+    /// `sync_channel` feeding each uring thread and the io_uring SQ, and
+    /// `submit_request` uses `try_send`, which fails instead of blocking when
+    /// the channel is full. At depth 1 a single `put` — three ops: openat,
+    /// write, close — is enough to overflow it, so writes fail with
+    /// `WouldBlock` and surface as failed cache puts.
+    #[test]
+    fn zero_means_unset_not_one() {
+        assert_eq!(resolve_or_default(0, 16384), 16384, "0 must fall back");
+        assert_eq!(resolve_or_default(0, 8), 8);
+        // An explicit value is respected, including a small one.
+        assert_eq!(resolve_or_default(1, 16384), 1);
+        assert_eq!(resolve_or_default(64, 16384), 64);
+        assert_eq!(resolve_or_default(16384, 16384), 16384);
+    }
+
+    /// The built-in defaults must be usable, i.e. deep enough that one `put`
+    /// cannot fill the queue.
+    ///
+    /// Asserts a floor rather than the exact number so tuning the default does
+    /// not break the test, while still catching a change to something
+    /// degenerate.
+    #[test]
+    fn defaults_are_deep_enough_for_a_multi_op_put() {
+        // A single `put` issues openat + write + close.
+        const OPS_PER_PUT: usize = 3;
+        let depth = default_queue_depth();
+        assert!(
+            depth >= OPS_PER_PUT * 16,
+            "default queue depth {depth} leaves no headroom over the {OPS_PER_PUT} ops \
+             a single put issues"
+        );
+        let threads = default_thread_count();
+        assert!(threads >= 1, "default thread count must be at least 1");
+    }
+
+    /// An env var set to `0` must not defeat the default either.
+    ///
+    /// `parse().ok()` alone would accept `"0"` and hand back a depth of zero,
+    /// which `IoUring::builder().build(0)` rejects outright — the uring threads
+    /// would fail to start and every operation would fall back to a miss.
+    #[test]
+    fn env_var_zero_is_ignored() {
+        // Exercises the same `.filter(|&d| d > 0)` guard the env path uses,
+        // without mutating process-wide environment state mid-suite.
+        let parsed: Option<usize> = "0".parse().ok();
+        assert_eq!(parsed.filter(|&d: &usize| d > 0), None);
+        let parsed: Option<usize> = "64".parse().ok();
+        assert_eq!(parsed.filter(|&d: &usize| d > 0), Some(64));
+    }
+
+    // ── Short-transfer retry safety ──────────────────────────────────────
+    //
+    // `push_to_sq` needs a live `IoUring`, so these exercise the predicate it
+    // consults rather than the function itself. That predicate is the whole of
+    // the decision: everything after it is pointer arithmetic on a buffer the
+    // predicate has just certified.
+
+    /// A partially-filled buffer is exactly the case retries exist for, so it
+    /// must be accepted — otherwise short reads fail instead of resuming.
+    #[test]
+    fn partially_transferred_buffer_is_still_usable() {
+        assert!(buffer_usable_for_transfer(0, 4096, 4096), "fresh request");
+        assert!(buffer_usable_for_transfer(1, 4096, 4096), "1 byte in");
+        assert!(buffer_usable_for_transfer(4095, 4096, 4096), "1 byte left");
+    }
+
+    /// A buffer moved out by `Future::poll` (timeout, then a late CQE triggers
+    /// a retry) is left zero-length. Retrying against it would make the kernel
+    /// write past the end of an empty allocation, so it must be rejected.
+    #[test]
+    fn taken_buffer_is_rejected() {
+        // `mem::take` leaves len 0 while `length` still says 4096.
+        assert!(
+            !buffer_usable_for_transfer(0, 4096, 0),
+            "empty buffer must never be handed to the kernel"
+        );
+        // Partially transferred *and* taken — the timeout-then-retry shape.
+        assert!(!buffer_usable_for_transfer(2048, 4096, 0));
+        // Any buffer shorter than the declared length is equally unsafe.
+        assert!(!buffer_usable_for_transfer(0, 4096, 4095));
+    }
+
+    /// Retrying an already-complete transfer would compute a zero (or
+    /// wrapping) length, so it is rejected too.
+    #[test]
+    fn fully_transferred_request_is_not_retried() {
+        assert!(
+            !buffer_usable_for_transfer(4096, 4096, 4096),
+            "exactly done"
+        );
+        assert!(
+            !buffer_usable_for_transfer(5000, 4096, 4096),
+            "over-transferred would wrap `length - transferred`"
+        );
+    }
+
+    /// The guard must not fire on a rejected request before it has a chance to
+    /// run: `fail` marks the request complete and wakes the waiter, which is
+    /// how the caller learns of the error instead of blocking until
+    /// `URING_OP_TIMEOUT`.
+    #[test]
+    fn failing_a_request_completes_it_for_the_waiter() {
+        let request = Arc::new(IoRequest {
+            fd: -1,
+            offset: 0,
+            length: 4096,
+            op_type: UringOpType::Read,
+            open_flags: 0,
+            state: std::sync::Mutex::new(crate::cache::store::uring::requests::RequestState {
+                completed: false,
+                consumed: false,
+                waker: None,
+                err: None,
+                buffer: bytes::BytesMut::new(),
+                bytes_transferred: 0,
+                result_code: 0,
+            }),
+        });
+
+        request.fail(io::Error::other("buffer no longer valid"));
+
+        let state = request.state.lock().unwrap();
+        assert!(state.completed, "a failed request must be observable");
+        assert!(state.err.is_some(), "the error must reach the caller");
+    }
 }

@@ -12,14 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Cache evictor A/B benchmark: LRU vs LFU (both moka-backed), **local-only**
+//! Cache evictor A/B benchmark: LRU vs LFU vs S3-FIFO (all foyer-backed), **local-only**
 //! (no GooseFS cluster required).
 //!
 //! Exercises the full `LocalCacheManager::get()` path (metadata lookup +
 //! evictor `on_access` + PageStore IO) to measure the evictor's impact on
 //! concurrent cache-hit latency. This is the benchmark that validates the
-//! moka replacement documented in
-//! the Moka LRU optimisation analysis.
+//! the evictor rework documented in
+//! the foyer migration design doc (`goosefs-lance-tests`,
+//! `docs/design/FOYER_MIGRATION_DESIGN.md`).
 //!
 //! ## Usage
 //! ```bash
@@ -35,9 +36,34 @@
 //!
 //! ## Expected results
 //!
-//! Under 32 concurrent reads of the same file (single-dir workload):
-//! - **LRU (moka)**: ~300-450µs avg (per-segment locks, ~3x improvement vs old Mutex)
-//! - **LFU (moka TinyLFU)**: ~300-450µs avg (similar per-segment locks)
+//! Measured on a TencentOS host (NVMe, 1 KiB pages, 1000 pages, 10k iters/task).
+//! Average latency; absolute values track the disk, so treat the *shape* as the
+//! expectation rather than the numbers:
+//!
+//! | Evictor | conc=1 | conc=8 | conc=16 | conc=32 |
+//! |---|---|---|---|---|
+//! | tokio::fs / LFU | 26.6µs | 22.2µs | 36.7µs | 77.2µs |
+//! | tokio::fs / LRU | 25.9µs | 21.2µs | 36.7µs | 77.2µs |
+//! | tokio::fs / S3Fifo | 26.9µs | 20.7µs | 37.0µs | 74.4µs |
+//! | io_uring / LFU | 17.6µs | 16.4µs | 20.9µs | 32.7µs |
+//! | io_uring / LRU | 15.6µs | 16.8µs | 21.4µs | 35.2µs |
+//! | io_uring / S3Fifo | 15.6µs | 16.2µs | 22.1µs | 31.9µs |
+//!
+//! Two things to read from this, and one non-conclusion:
+//!
+//! - **The three policies are within noise of each other** (spreads of 0.88-1.08x
+//!   with no consistent winner across concurrency levels). That is the expected
+//!   outcome, not a disappointment: this benchmark is a pure cache-hit read path,
+//!   so it measures disk IO, and the metadata work the eviction policy governs is
+//!   nanoseconds against ~16-77µs of it. Do NOT use this benchmark to choose a
+//!   policy — run `BENCH_EVICTION_PRESSURE=1`, which sizes the cache below the
+//!   working set so victim selection actually runs.
+//! - **io_uring widens its lead as concurrency rises** (1.51x at conc=1 to 2.36x
+//!   at conc=32), because tokio::fs pays a `spawn_blocking` hop per read while
+//!   io_uring batches SQEs.
+//! - The metadata-level gains from foyer are **not visible here** and were never
+//!   expected to be. They are isolated in the foyer migration design doc in the
+//!   `goosefs-lance-tests` repository.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -68,6 +94,7 @@ async fn create_manager(
     page_size: u64,
     num_pages: u64,
     use_uring: bool,
+    capacity_divisor: u64,
 ) -> (Arc<LocalCacheManager>, std::path::PathBuf) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -76,7 +103,9 @@ async fn create_manager(
     let label = format!("{evictor:?}").to_lowercase();
     let dir = std::env::temp_dir().join(format!("gfs_evictor_bench_{label}_{ts}"));
 
-    let capacity = page_size * num_pages + page_size; // slight headroom
+    // `capacity_divisor` > 1 shrinks the cache below the working set, so every
+    // insert has to evict. Used by BENCH_EVICTION_PRESSURE.
+    let capacity = (page_size * num_pages + page_size) / capacity_divisor.max(1);
     let options = CacheManagerOptions {
         page_size,
         dir_capacity: capacity,
@@ -87,12 +116,16 @@ async fn create_manager(
         quota_enabled: false,
         ttl: None,
         uring_enabled: use_uring,
+        // 0 = use the built-in defaults (16384 SQ depth, 8 threads). Passing a
+        // small non-zero value here would starve the submission channel:
+        // `submit_request` uses `try_send`, so a full channel fails the op
+        // rather than waiting, and one `put` already issues three ops.
         uring_queue_depth: 0,
         uring_thread_count: 0,
         sync_read_enabled: false,
     };
 
-    let mgr = Arc::new(LocalCacheManager::create(options).await.unwrap());
+    let mgr = LocalCacheManager::create(options).await.unwrap();
     (mgr, dir)
 }
 
@@ -103,7 +136,12 @@ async fn populate(mgr: &LocalCacheManager, file_id: &str, num_pages: u64, page_s
         let id = PageId::new(file_id, i);
         assert!(
             mgr.put(&id, Bytes::from(data.clone())).await,
-            "put failed for page {i}"
+            "put failed for page {i} of {num_pages}. `put` returns a bool, so the \
+             cause is in the logs — run with RUST_LOG=warn. A failure partway \
+             through a run that fits in capacity usually means the backend \
+             rejected the write: with io_uring, check that the submission queue \
+             depth is not tiny (`submit_request` uses try_send and fails a full \
+             channel instead of waiting)."
         );
     }
 }
@@ -205,6 +243,15 @@ async fn main() {
         .filter_map(|s| s.trim().parse().ok())
         .collect();
     let iters_per_task: usize = env_or("BENCH_ITERS_PER_TASK", 10_000);
+    // BENCH_EVICTION_PRESSURE=1 sizes the cache at a quarter of the working
+    // set, so the steady state is continuous eviction rather than pure hits.
+    // This is the mode that exercises victim selection; the default mode is
+    // hit-path only and will not show a difference between eviction policies.
+    let pressure = matches!(
+        std::env::var("BENCH_EVICTION_PRESSURE").as_deref(),
+        Ok("1") | Ok("true")
+    );
+    let capacity_divisor: u64 = if pressure { 4 } else { 1 };
     #[cfg(target_os = "linux")]
     let use_uring_str = std::env::var("BENCH_USE_URING").unwrap_or_else(|_| "1".to_string());
     #[cfg(target_os = "linux")]
@@ -213,14 +260,25 @@ async fn main() {
     let use_uring = false;
 
     println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║  Cache Evictor Benchmark: LRU vs LFU (moka-backed)          ║");
+    println!("║  Cache Evictor Benchmark: LRU vs LFU (foyer-backed)         ║");
     println!("╚══════════════════════════════════════════════════════════════╝");
     println!("  page_size={page_size}B  num_pages={num_pages}  iters/task={iters_per_task}");
     println!("  concurrency levels: {concurrency_str}");
     println!("  io_uring backend: {use_uring}");
+    if pressure {
+        println!(
+            "  eviction pressure: ON (capacity = 1/{capacity_divisor} of the working set, \
+             so ~{}% of reads miss and every insert evicts)",
+            100 - 100 / capacity_divisor
+        );
+    }
     println!();
 
-    let evictors = [CacheEvictorType::Lfu, CacheEvictorType::Lru];
+    let evictors = [
+        CacheEvictorType::Lfu,
+        CacheEvictorType::Lru,
+        CacheEvictorType::S3Fifo,
+    ];
 
     // Backends to test: tokio::fs always; io_uring only when requested
     // (and on Linux). Each backend gets its own sub-table in the summary.
@@ -253,8 +311,14 @@ async fn main() {
             for evictor in &evictors {
                 let evictor_label = format!("{evictor:?}");
                 let label = format!("{backend_name} / {evictor_label}");
-                let (mgr, dir) =
-                    create_manager(*evictor, page_size as u64, num_pages, *backend_uring).await;
+                let (mgr, dir) = create_manager(
+                    *evictor,
+                    page_size as u64,
+                    num_pages,
+                    *backend_uring,
+                    capacity_divisor,
+                )
+                .await;
                 populate(&mgr, "bench-file", num_pages, page_size).await;
 
                 let result = bench_concurrent_gets(

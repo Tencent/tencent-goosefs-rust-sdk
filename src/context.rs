@@ -905,15 +905,15 @@ mod tests {
 
     // ── Metadata cache construction gate ────────────────────────────────
 
-    /// Java default: cache is **off**. `maybe_new` is not consulted unless
-    /// `metadata_cache_enabled` is true.
+    /// Cache is **on** by default (diverges from Java, whose
+    /// `USER_METADATA_CACHE_ENABLED` default is `false`) so that a workload
+    /// opening one reader per small ranged read does not pay a Master
+    /// `get_status` RPC per read — that RPC otherwise dwarfs a page-cache hit
+    /// served over io_uring. TTL / size stay Java-aligned.
     #[test]
-    fn metadata_cache_disabled_by_default() {
+    fn metadata_cache_enabled_by_default() {
         let cfg = GoosefsConfig::default();
-        assert!(
-            !cfg.metadata_cache_enabled,
-            "Java USER_METADATA_CACHE_ENABLED default is false"
-        );
+        assert!(cfg.metadata_cache_enabled);
         assert_eq!(
             cfg.metadata_cache_expiration,
             Duration::from_secs(600),
@@ -932,12 +932,28 @@ mod tests {
             None
         };
         assert!(
-            constructed.is_none(),
-            "default enabled=false must not construct a cache"
+            constructed.is_some(),
+            "default enabled=true plus a positive TTL must construct a cache"
         );
     }
 
-    /// Opt-in via `with_metadata_cache_enabled(true)` keeps Java TTL / size.
+    /// Opting out must still bypass construction entirely.
+    #[test]
+    fn metadata_cache_opt_out_constructs_nothing() {
+        let cfg = GoosefsConfig::default().with_metadata_cache_enabled(false);
+        assert!(!cfg.metadata_cache_enabled);
+        let constructed = if cfg.metadata_cache_enabled {
+            crate::metadata_cache::MetadataCache::maybe_new(
+                cfg.metadata_cache_expiration,
+                cfg.metadata_cache_max_size,
+            )
+        } else {
+            None
+        };
+        assert!(constructed.is_none());
+    }
+
+    /// Setting the switch explicitly still keeps Java TTL / size.
     #[test]
     fn metadata_cache_opt_in_keeps_java_defaults() {
         let cfg = GoosefsConfig::new("127.0.0.1:9200").with_metadata_cache_enabled(true);

@@ -177,6 +177,30 @@ read path decides SC once per block and reuses the mmap slice for every
 chunk, so it is intentionally excluded from this histogram — its throughput
 remains observable via `ShortCircuitReadCalls` / `ShortCircuitReadBytes`.
 
+
+### 2.x Local page cache — eviction and reaping
+
+The disk-backed page cache (`src/cache/`) keeps its metadata and eviction order
+in a [`foyer`](https://crates.io/crates/foyer-memory) cache. Eviction drops the
+metadata synchronously, but the page *file* is deleted by a background reaper,
+so these counters describe that queue.
+
+None of these have a Java counterpart; they are diagnostic only.
+
+| Internal Name | Type | Description |
+|---|---|---|
+| `Client.CacheReapQueueDepth` | Gauge | Pages evicted but whose file is not yet deleted. Should hover near zero. A sustained backlog means eviction is outpacing disk deletes, and disk usage is running above `dir_capacity` by roughly this many pages. |
+| `Client.CacheReapDropped` | Counter | Evictions dropped because the reaper queue was full. Each one leaves an orphan page file, reclaimed by `restore()` on the next startup (sidecar-gated, so it is never served as fresh data). A space leak rather than a correctness problem — but any non-zero value means the queue should be larger. |
+| `Client.CacheReapSkippedReadmitted` | Counter | Evictions skipped because the page was re-admitted before the reaper reached it. Deleting then would remove the *fresh* file written by the re-admitting `put`, so the reaper checks and skips. A high rate means pages are evicted and immediately re-read: the working set is larger than the cache. |
+| `Client.CachePageFdTtlExpired` | Counter | Page fds dropped by the io_uring fd cache's lazy TTL check. foyer has no built-in TTL, so a stale fd is detected on its next access rather than by a background sweep. Rising steadily alongside a low hit rate suggests the TTL is shorter than the access interval — fds are being re-opened rather than reused. |
+
+> **Known gap**: the other ~50 `Client.Cache*` metrics defined in
+> `src/cache/metrics.rs` (hit/miss counts, byte counters, per-error-class
+> counters, occupancy gauges) are exported at runtime but are **not yet
+> documented here**. They predate this section; only the eviction-related ones
+> above were added with the foyer migration.
+
+---
 ---
 
 ## 3. Metric Naming Convention

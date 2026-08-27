@@ -470,9 +470,14 @@ async fn opendal_rename_no_replace_overwrite_and_nested() -> Result<()> {
     assert_eq!(read_streaming(&ctx, &dst_nr).await?, b"dst-original");
     assert_eq!(read_streaming(&ctx, &src_nr).await?, b"from-src");
 
-    // OpenDAL overwrite path: delete dst then rename.
+    // OpenDAL overwrite path: delete dst then rename. The reads above cached
+    // both entries, and raw Master calls bypass the client's write-path
+    // invalidation, so drop them the way `GoosefsCore::rename` does after a
+    // successful rename — otherwise the open below serves pre-rename metadata.
     master.delete(&dst_nr, false).await?;
     master.rename(&src_nr, &dst_nr).await?;
+    ctx.invalidate_file_info(&src_nr);
+    ctx.invalidate_file_info(&dst_nr);
     assert_eq!(read_streaming(&ctx, &dst_nr).await?, b"from-src");
 
     // Nested dst: create_directory(parent, true) then rename.
