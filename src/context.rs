@@ -66,7 +66,9 @@ use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::block::router::WorkerRouter;
-use crate::cache::{CacheManager, LocalCacheManager};
+use crate::cache::CacheManager;
+#[cfg(feature = "page-cache")]
+use crate::cache::LocalCacheManager;
 use crate::client::metrics_master::MetricsClient;
 use crate::client::metrics_master::MetricsMasterClient;
 use crate::client::{
@@ -74,7 +76,7 @@ use crate::client::{
     WorkerClientPool, WorkerManagerClient,
 };
 use crate::config::{ConfigRefresher, GoosefsConfig, TransparentAccelerationSwitch};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::metadata_cache::MetadataCache;
 use crate::metrics::heartbeat::{resolve_app_id, HeartbeatTask};
 #[cfg(feature = "metrics-pushgateway")]
@@ -185,6 +187,9 @@ impl FileSystemContext {
     /// This is the **only** call that performs network I/O.  All subsequent
     /// operations on the context are zero-cost Arc clones.
     pub async fn connect(config: GoosefsConfig) -> Result<Arc<Self>> {
+        config
+            .validate()
+            .map_err(|message| Error::InvalidArgument { message })?;
         let config = Arc::new(config);
 
         // Build a shared inquire client so Master + WorkerManager both use the
@@ -242,6 +247,7 @@ impl FileSystemContext {
         let worker_pool = WorkerClientPool::new_shared((*config).clone());
 
         // Build the client-side local page cache (best-effort).
+        #[cfg(feature = "page-cache")]
         let cache_manager: Option<Arc<dyn CacheManager>> = if config.client_cache_enabled {
             match LocalCacheManager::from_config(&config).await {
                 Ok(mgr) => {
@@ -260,6 +266,8 @@ impl FileSystemContext {
         } else {
             None
         };
+        #[cfg(not(feature = "page-cache"))]
+        let cache_manager: Option<Arc<dyn CacheManager>> = None;
 
         // Java `FileSystem.Factory`: enabled → MetadataCachingBaseFileSystem.
         // Rust hangs the same LRU on the context instead of swapping types.
@@ -883,6 +891,7 @@ mod tests {
     /// opening one reader per small ranged read does not pay a Master
     /// `get_status` RPC per read — that RPC otherwise dwarfs a page-cache hit
     /// served over io_uring. TTL / size stay Java-aligned.
+    #[cfg(feature = "metadata-cache")]
     #[test]
     fn metadata_cache_enabled_by_default() {
         let cfg = GoosefsConfig::default();
@@ -927,6 +936,7 @@ mod tests {
     }
 
     /// Setting the switch explicitly still keeps Java TTL / size.
+    #[cfg(feature = "metadata-cache")]
     #[test]
     fn metadata_cache_opt_in_keeps_java_defaults() {
         let cfg = GoosefsConfig::new("127.0.0.1:9200").with_metadata_cache_enabled(true);

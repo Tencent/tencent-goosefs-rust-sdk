@@ -197,7 +197,7 @@ pub async fn read_through_cache<R: ExternalRangeReader + ?Sized>(
     Ok(out.freeze())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "page-cache"))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

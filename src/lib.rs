@@ -88,6 +88,10 @@ pub mod context;
 pub mod error;
 pub mod fs;
 pub mod io;
+#[cfg(feature = "metadata-cache")]
+pub(crate) mod metadata_cache;
+#[cfg(not(feature = "metadata-cache"))]
+#[path = "metadata_cache_disabled.rs"]
 pub(crate) mod metadata_cache;
 pub mod metrics;
 pub mod retry;
