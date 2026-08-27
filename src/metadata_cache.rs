@@ -31,7 +31,7 @@ use tracing::debug;
 
 use crate::error::{Error, Result};
 use crate::metrics;
-use crate::proto::grpc::file::{FileBlockInfo, FileInfo, LoadMetadataPType};
+use crate::proto::grpc::file::{FileInfo, LoadMetadataPType};
 
 /// Result of a status-slot lookup.
 #[derive(Clone, Debug)]
@@ -389,6 +389,40 @@ pub fn should_skip_listing_cache(
         || sync_interval_ms == 0
 }
 
+/// Drop `path` and its parent after a successful mutation.
+///
+/// On error the cache is left unchanged — Rust invalidates **after** the
+/// Master RPC (more conservative than Java, which invalidates before).
+/// `mkdir` / `delete` / writer create·close·cancel share this policy.
+#[inline]
+pub fn invalidate_on_success<T>(
+    cache: Option<&MetadataCache>,
+    path: &str,
+    result: Result<T>,
+) -> Result<T> {
+    let value = result?;
+    if let Some(cache) = cache {
+        cache.invalidate_with_parent(path);
+    }
+    Ok(value)
+}
+
+/// Drop `src`, `dst`, and both parents after a successful rename.
+#[inline]
+pub fn invalidate_rename_on_success<T>(
+    cache: Option<&MetadataCache>,
+    src: &str,
+    dst: &str,
+    result: Result<T>,
+) -> Result<T> {
+    let value = result?;
+    if let Some(cache) = cache {
+        cache.invalidate_with_parent(src);
+        cache.invalidate_with_parent(dst);
+    }
+    Ok(value)
+}
+
 /// Resolve a getStatus/open from the cache, or fetch from Master.
 ///
 /// When `sync_interval_ms == 0` the cache is not consulted, but a successful
@@ -473,6 +507,8 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::proto::grpc::file::FileBlockInfo;
 
     fn info_of_length(len: i64) -> FileInfo {
         FileInfo {
@@ -705,6 +741,32 @@ mod tests {
     }
 
     #[test]
+    fn should_skip_listing_cache_covers_all_mermaid_flags() {
+        let once = LoadMetadataPType::Once;
+        let always = LoadMetadataPType::Always;
+        let never = LoadMetadataPType::Never;
+        assert!(
+            !should_skip_listing_cache(false, once, false, -1),
+            "default non-recursive ONCE sync=-1 must use the listing cache"
+        );
+        assert!(
+            !should_skip_listing_cache(false, once, false, 5_000),
+            "positive sync interval must not skip the listing cache"
+        );
+        assert!(
+            !should_skip_listing_cache(false, never, false, -1),
+            "NEVER is not a listing-cache skip flag"
+        );
+        assert!(should_skip_listing_cache(true, once, false, -1));
+        assert!(should_skip_listing_cache(false, always, false, -1));
+        assert!(should_skip_listing_cache(false, once, true, -1));
+        assert!(
+            should_skip_listing_cache(false, once, false, 0),
+            "INV-MC-S4: sync=0 must skip listing cache read/write"
+        );
+    }
+
+    #[test]
     fn parent_path_helpers() {
         assert_eq!(parent_path("/data/hello.txt"), Some("/data".to_string()));
         assert_eq!(parent_path("/hello.txt"), Some("/".to_string()));
@@ -793,6 +855,99 @@ mod tests {
         assert_eq!(rpcs.load(Ordering::SeqCst), 2);
     }
 
+    /// `sync=0` skips the read but still writes Present, so a later default
+    /// lookup is a hit (mermaid get_status: RPC → insert Present).
+    #[tokio::test]
+    async fn sync_interval_zero_still_writes_status_cache() {
+        let cache = enabled_cache();
+        let rpcs = AtomicUsize::new(0);
+        get_status_through_cache(Some(&cache), "/f", 0, || async {
+            rpcs.fetch_add(1, Ordering::SeqCst);
+            Ok(info_of_length(7))
+        })
+        .await
+        .unwrap();
+        assert_eq!(rpcs.load(Ordering::SeqCst), 1);
+
+        let got = get_status_through_cache(Some(&cache), "/f", -1, || async {
+            rpcs.fetch_add(1, Ordering::SeqCst);
+            Ok(info_of_length(99))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            rpcs.load(Ordering::SeqCst),
+            1,
+            "write-back must make the next default lookup a hit"
+        );
+        assert_eq!(got.length, Some(7));
+    }
+
+    /// `sync=0` also writes NotFound, so a later default lookup is a negative hit.
+    #[tokio::test]
+    async fn sync_interval_zero_still_writes_negative_cache() {
+        let cache = enabled_cache();
+        let rpcs = AtomicUsize::new(0);
+        assert!(
+            get_status_through_cache(Some(&cache), "/gone", 0, || async {
+                rpcs.fetch_add(1, Ordering::SeqCst);
+                Err(Error::NotFound {
+                    path: "/gone".into(),
+                })
+            })
+            .await
+            .unwrap_err()
+            .is_not_found()
+        );
+        assert!(
+            get_status_through_cache(Some(&cache), "/gone", -1, || async {
+                rpcs.fetch_add(1, Ordering::SeqCst);
+                Err(Error::NotFound {
+                    path: "/gone".into(),
+                })
+            })
+            .await
+            .unwrap_err()
+            .is_not_found()
+        );
+        assert_eq!(rpcs.load(Ordering::SeqCst), 1);
+    }
+
+    /// Non-NotFound errors must not populate the negative cache.
+    #[tokio::test]
+    async fn get_status_other_error_does_not_negative_cache() {
+        let cache = enabled_cache();
+        let rpcs = AtomicUsize::new(0);
+        let denied = || async {
+            rpcs.fetch_add(1, Ordering::SeqCst);
+            Err(Error::PermissionDenied {
+                message: "denied".into(),
+            })
+        };
+        assert!(get_status_through_cache(Some(&cache), "/f", -1, denied)
+            .await
+            .unwrap_err()
+            .is_access_denied());
+        assert!(get_status_through_cache(Some(&cache), "/f", -1, denied)
+            .await
+            .unwrap_err()
+            .is_access_denied());
+        assert_eq!(rpcs.load(Ordering::SeqCst), 2);
+        assert!(
+            matches!(cache.lookup_status("/f"), StatusLookup::Miss),
+            "PermissionDenied must not become a NotFound slot"
+        );
+
+        let got = get_status_through_cache(Some(&cache), "/f", -1, || async {
+            rpcs.fetch_add(1, Ordering::SeqCst);
+            Ok(info_of_length(1))
+        })
+        .await
+        .unwrap();
+        assert_eq!(rpcs.load(Ordering::SeqCst), 3);
+        assert_eq!(got.length, Some(1));
+    }
+
     #[tokio::test]
     async fn create_invalidates_negative_cache() {
         let cache = enabled_cache();
@@ -829,13 +984,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_status_skip_always_rpcs() {
-        let cache = enabled_cache();
+    async fn list_status_through_cache_disabled_always_rpcs() {
         let rpcs = AtomicUsize::new(0);
-        let skip = should_skip_listing_cache(false, LoadMetadataPType::Always, false, -1);
-        assert!(skip);
         for _ in 0..2 {
-            list_status_through_cache(Some(&cache), "/d", skip, || async {
+            list_status_through_cache(None, "/d", false, || async {
                 rpcs.fetch_add(1, Ordering::SeqCst);
                 Ok(vec![info_of_length(1)])
             })
@@ -843,6 +995,53 @@ mod tests {
             .unwrap();
         }
         assert_eq!(rpcs.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn list_status_skip_always_rpcs() {
+        let cache = enabled_cache();
+        cache.insert_listing("/d", Arc::new(vec![info_of_length(1)]));
+        let rpcs = AtomicUsize::new(0);
+        let skip = should_skip_listing_cache(false, LoadMetadataPType::Always, false, -1);
+        assert!(skip);
+        for _ in 0..2 {
+            list_status_through_cache(Some(&cache), "/d", skip, || async {
+                rpcs.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![info_of_length(9)])
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(rpcs.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            cache.get_listing("/d").unwrap().len(),
+            1,
+            "ALWAYS must not overwrite the cached listing"
+        );
+    }
+
+    /// INV-MC-S4: `sync=0` listing skips both read and write.
+    #[tokio::test]
+    async fn list_status_sync_zero_skips_listing_cache() {
+        let cache = enabled_cache();
+        cache.insert_listing("/d", Arc::new(vec![info_of_length(1)]));
+        let skip = should_skip_listing_cache(false, LoadMetadataPType::Once, false, 0);
+        assert!(skip);
+        let rpcs = AtomicUsize::new(0);
+        for _ in 0..2 {
+            list_status_through_cache(Some(&cache), "/d", skip, || async {
+                rpcs.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![info_of_length(9)])
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(rpcs.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            cache.get_listing("/d").unwrap().len(),
+            1,
+            "sync=0 must not overwrite the cached listing"
+        );
     }
 
     #[tokio::test]
@@ -1039,6 +1238,108 @@ mod tests {
             .unwrap();
         }
         assert_eq!(rpcs.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            cache.get_listing("/d").unwrap().len(),
+            1,
+            "recursive list must not overwrite the cached listing"
+        );
+    }
+
+    fn permission_denied() -> Error {
+        Error::PermissionDenied {
+            message: "mkdir failed".into(),
+        }
+    }
+
+    /// Write mermaid KEEP: a failed RPC must not drop status or parent listing.
+    #[test]
+    fn write_failure_keeps_cache() {
+        let cache = enabled_cache();
+        cache.insert("/data/file", info_of_length(10));
+        cache.insert_listing("/data", Arc::new(vec![info_of_length(10)]));
+
+        let err = invalidate_on_success(
+            Some(&cache),
+            "/data/file",
+            Err::<(), _>(permission_denied()),
+        )
+        .unwrap_err();
+        assert!(err.is_access_denied());
+
+        assert!(matches!(
+            cache.lookup_status("/data/file"),
+            StatusLookup::Present(_)
+        ));
+        assert_eq!(cache.get_listing("/data").unwrap().len(), 1);
+    }
+
+    /// Write mermaid INV: success drops path + parent.
+    #[test]
+    fn write_success_invalidates_path_and_parent() {
+        let cache = enabled_cache();
+        cache.insert("/data/file", info_of_length(10));
+        cache.insert_listing("/data", Arc::new(vec![info_of_length(10)]));
+
+        invalidate_on_success(Some(&cache), "/data/file", Ok(())).expect("Ok must pass through");
+
+        assert!(matches!(
+            cache.lookup_status("/data/file"),
+            StatusLookup::Miss
+        ));
+        assert!(cache.get_listing("/data").is_none());
+    }
+
+    #[test]
+    fn write_success_with_cache_disabled_is_noop() {
+        invalidate_on_success(None, "/data/file", Ok(())).unwrap();
+        let err = invalidate_on_success(None, "/data/file", Err::<(), _>(permission_denied()))
+            .unwrap_err();
+        assert!(err.is_access_denied());
+    }
+
+    #[test]
+    fn rename_failure_keeps_src_dst_and_parents() {
+        let cache = enabled_cache();
+        cache.insert("/a/src", info_of_length(1));
+        cache.insert("/b/dst", info_of_length(2));
+        cache.insert_listing("/a", Arc::new(vec![info_of_length(1)]));
+        cache.insert_listing("/b", Arc::new(vec![info_of_length(2)]));
+
+        let err = invalidate_rename_on_success(
+            Some(&cache),
+            "/a/src",
+            "/b/dst",
+            Err::<(), _>(permission_denied()),
+        )
+        .unwrap_err();
+        assert!(err.is_access_denied());
+
+        assert!(matches!(
+            cache.lookup_status("/a/src"),
+            StatusLookup::Present(_)
+        ));
+        assert!(matches!(
+            cache.lookup_status("/b/dst"),
+            StatusLookup::Present(_)
+        ));
+        assert_eq!(cache.get_listing("/a").unwrap().len(), 1);
+        assert_eq!(cache.get_listing("/b").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn rename_success_invalidates_src_dst_and_parents() {
+        let cache = enabled_cache();
+        cache.insert("/a/src", info_of_length(1));
+        cache.insert("/b/dst", info_of_length(2));
+        cache.insert_listing("/a", Arc::new(vec![info_of_length(1)]));
+        cache.insert_listing("/b", Arc::new(vec![info_of_length(2)]));
+
+        invalidate_rename_on_success(Some(&cache), "/a/src", "/b/dst", Ok(())).unwrap();
+
+        assert!(matches!(cache.lookup_status("/a/src"), StatusLookup::Miss));
+        assert!(matches!(cache.lookup_status("/b/dst"), StatusLookup::Miss));
+        assert!(cache.get_listing("/a").is_none());
+        assert!(cache.get_listing("/b").is_none());
     }
 
     fn info_with_empty_locations(block_id: i64) -> FileInfo {

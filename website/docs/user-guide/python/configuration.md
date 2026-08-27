@@ -42,9 +42,11 @@ cfg = Config.from_uri("gfs://127.0.0.1:9200/data")
 | `GOOSEFS_MASTER_CONNECTION_POOL_SIZE` | Master gRPC channel pool size (default 1)     |
 | `GOOSEFS_MASTER_POOL_SCHEDULE`        | `roundrobin` / `p2c`                          |
 | `GOOSEFS_WORKER_CONNECTION_POOL_SIZE` | Per-worker gRPC channel pool size              |
-| `GOOSEFS_METADATA_CACHE_ENABLED`      | Client metadata cache switch (default `false`) |
+| `GOOSEFS_METADATA_CACHE_ENABLED`      | Client metadata cache switch (default `true`) |
 | `GOOSEFS_METADATA_CACHE_EXPIRATION`   | Metadata cache TTL (`10min`, `30s`, raw ms)    |
 | `GOOSEFS_METADATA_CACHE_MAX_SIZE`     | Metadata cache LRU capacity (default `100000`) |
+| `GOOSEFS_FILE_METADATA_SYNC_INTERVAL` | Metadata sync interval (`parseTimeSize`; default `-1`. `0` skips cache on every get/list) |
+| `GOOSEFS_FILE_METADATA_LOAD_TYPE`     | `ONCE` / `ALWAYS` / `NEVER` (default `ONCE`. `ALWAYS` skips listing cache) |
 
 ## Write / Read Types
 
@@ -95,17 +97,19 @@ Disabled by default. Enable via env or properties:
 
 See [Page Cache](./page-cache) for a full walkthrough.
 
-## Client Metadata Cache (opt-in)
+## Client Metadata Cache (on by default)
 
-Disabled by default. When enabled, `get_status` / `exists` / `open_file` / non-recursive `list_status` share one process-local TTL-bounded LRU (status + listing + negative cache); `mkdir` / `delete` / `rename` invalidate the path and its parent.
+Enabled by default (the Java client defaults it to `false`). `get_status` / `exists` / `open_file` / non-recursive `list_status` share one process-local TTL-bounded LRU (status + listing + negative cache); `mkdir` / `delete` / `rename` invalidate the path and its parent.
 
-| Property key                                  | Env var                             | Default  |
-| --------------------------------------------- | ----------------------------------- | -------- |
-| `goosefs.user.metadata.cache.enabled`         | `GOOSEFS_METADATA_CACHE_ENABLED`    | `false`  |
-| `goosefs.user.metadata.cache.max.size`        | `GOOSEFS_METADATA_CACHE_MAX_SIZE`   | `100000` |
-| `goosefs.user.metadata.cache.expiration.time` | `GOOSEFS_METADATA_CACHE_EXPIRATION` | `10min`  |
+| Property key | Env var | Default |
+| --- | --- | --- |
+| `goosefs.user.metadata.cache.enabled` | `GOOSEFS_METADATA_CACHE_ENABLED` | `true` |
+| `goosefs.user.metadata.cache.max.size` | `GOOSEFS_METADATA_CACHE_MAX_SIZE` | `100000` |
+| `goosefs.user.metadata.cache.expiration.time` | `GOOSEFS_METADATA_CACHE_EXPIRATION` | `10min` |
+| `goosefs.user.file.metadata.sync.interval` | `GOOSEFS_FILE_METADATA_SYNC_INTERVAL` | `-1` |
+| `goosefs.user.file.metadata.load.type` | `GOOSEFS_FILE_METADATA_LOAD_TYPE` | `ONCE` |
 
-This replaces the removed `GOOSEFS_FILE_INFO_CACHE_TTL_MS` / `GOOSEFS_FILE_INFO_CACHE_CAPACITY` knobs. See [Metadata Cache](./metadata-cache) for semantics and metrics.
+This replaces the removed `GOOSEFS_FILE_INFO_CACHE_TTL_MS` / `GOOSEFS_FILE_INFO_CACHE_CAPACITY` knobs. See [Metadata Cache](./metadata-cache) for semantics, env vars, and metrics.
 
 ## Full Parameter Reference
 
