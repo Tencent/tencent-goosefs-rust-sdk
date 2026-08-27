@@ -70,15 +70,16 @@ regen-proto = ["dep:tonic-prost-build"]
 [dependencies]
 # `default-features = false` removes the `router` feature (and its `axum`,
 # `matchit`, `axum-core`, `tower-http` chain) which is server-side only.
-# We keep `transport` (Channel/Endpoint/Server types used by the SDK) and
-# `codegen` (required by tonic-prost generated client stubs).
-tonic = { version = "0.14", default-features = false, features = ["transport", "codegen"] }
+# The SDK only consumes generated clients, so keep the channel half of
+# transport without Tonic's server stack. `codegen` is required by the
+# tonic-prost generated client stubs.
+tonic = { version = "0.14", default-features = false, features = ["channel", "codegen"] }
 tonic-prost = "0.14"
 prost = "0.14.1"
-prost-types = "0.14.1"
 # Trim `tokio = "full"` to the concrete features actually used by the SDK
-# (runtime, sync primitives, IO, time, signal/process are NOT needed).
-tokio = { version = "1.23", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "io-util", "net", "fs"] }
+# (single-thread-capable runtime, macros, sync primitives, IO, time, and fs).
+# Tonic's channel enables Tokio networking through hyper-util.
+tokio = { version = "1.23", features = ["rt", "macros", "sync", "time", "io-util", "fs"] }
 tokio-stream = "0.1.14"
 bytes = "1.11.1"
 thiserror = "2"
