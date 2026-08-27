@@ -53,8 +53,10 @@ export GOOSEFS_AUTH_TYPE="${GOOSEFS_AUTH_TYPE:-simple}"
 # between targets.
 FEATURES=(--features full-client)
 
-# Suites that cannot pass against the Docker fixture, e.g. because they need
-# host-filesystem access to a co-located worker block store. Currently empty.
+# Suites that cannot pass against the Docker fixture, e.g. because they need a
+# co-located worker block store on the host filesystem, which the containerised
+# worker does not give the test process access to. Empty today: the only such
+# suites were the short-circuit ones, removed with that read path.
 SKIP=""
 
 skipped() {
@@ -79,7 +81,7 @@ targets=""
 while IFS= read -r file; do
   name="$(basename "$file" .rs)"
   if skipped "$name"; then
-    echo "==> skipping $name (needs a co-located worker block store)"
+    echo "==> skipping $name (listed in SKIP)"
     continue
   fi
   targets="$targets $name"

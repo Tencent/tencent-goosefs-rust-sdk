@@ -45,9 +45,9 @@ EXAMPLES=(
   verify_checkblocks_locations
 )
 
-# Default features are empty; page-cache / short-circuit / pushgateway
-# examples declare `required-features`. Build and run against full-client
-# so gated examples are not skipped then failed at `cargo run`.
+# Default features are empty; page-cache / pushgateway examples declare
+# `required-features`. Build and run against full-client so gated examples
+# are not skipped then failed at `cargo run`.
 FEATURES=(--features full-client)
 
 echo "==> Building examples"
