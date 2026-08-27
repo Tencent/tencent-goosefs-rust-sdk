@@ -62,11 +62,14 @@ mod page_id;
 
 pub mod allocator;
 pub mod caching_reader;
+#[cfg(feature = "page-cache")]
 pub mod manager;
+#[cfg(feature = "page-cache")]
 pub mod store;
 
 pub use allocator::{Allocator, HashAllocator};
 pub use caching_reader::{read_through_cache, ExternalRangeReader, FillMode};
+#[cfg(feature = "page-cache")]
 pub use manager::LocalCacheManager;
 pub use metrics::name as metric_name;
 pub use options::CacheManagerOptions;

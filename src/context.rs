@@ -66,8 +66,11 @@ use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::block::router::WorkerRouter;
+#[cfg(feature = "short-circuit")]
 use crate::block::short_circuit::{ShortCircuitConfig, ShortCircuitFactory};
-use crate::cache::{CacheManager, LocalCacheManager};
+use crate::cache::CacheManager;
+#[cfg(feature = "page-cache")]
+use crate::cache::LocalCacheManager;
 use crate::client::metrics_master::MetricsClient;
 use crate::client::metrics_master::MetricsMasterClient;
 use crate::client::{
@@ -75,7 +78,7 @@ use crate::client::{
     WorkerClientPool, WorkerManagerClient,
 };
 use crate::config::{ConfigRefresher, GoosefsConfig, TransparentAccelerationSwitch};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::metadata_cache::MetadataCache;
 use crate::metrics::heartbeat::{resolve_app_id, HeartbeatTask};
 #[cfg(feature = "metrics-pushgateway")]
@@ -134,6 +137,7 @@ pub struct FileSystemContext {
     /// local block is `OpenLocalBlock`+mmap'd once and reused across every
     /// concurrent stream/task, instead of once per stream. `None` when the SC
     /// kill switch is off. See `docs/SHORT_CIRCUIT_DESIGN.md`  /  P8.
+    #[cfg(feature = "short-circuit")]
     short_circuit: Option<Arc<ShortCircuitFactory>>,
 
     /// Client-side local page cache, when `config.client_cache_enabled`.
@@ -195,6 +199,9 @@ impl FileSystemContext {
     /// This is the **only** call that performs network I/O.  All subsequent
     /// operations on the context are zero-cost Arc clones.
     pub async fn connect(config: GoosefsConfig) -> Result<Arc<Self>> {
+        config
+            .validate()
+            .map_err(|message| Error::InvalidArgument { message })?;
         let config = Arc::new(config);
 
         // Build a shared inquire client so Master + WorkerManager both use the
@@ -255,18 +262,22 @@ impl FileSystemContext {
         // every stream) when the SC kill switch is on. It uses the shared
         // worker pool + router so local-worker detection and connection reuse
         // are consistent across all streams (P8).
-        let sc_cfg = ShortCircuitConfig::from_config(&config);
-        let short_circuit = if sc_cfg.enabled {
-            Some(Arc::new(ShortCircuitFactory::new(
-                worker_pool.clone(),
-                worker_router.clone(),
-                sc_cfg,
-            )))
-        } else {
-            None
+        #[cfg(feature = "short-circuit")]
+        let short_circuit = {
+            let sc_cfg = ShortCircuitConfig::from_config(&config);
+            if sc_cfg.enabled {
+                Some(Arc::new(ShortCircuitFactory::new(
+                    worker_pool.clone(),
+                    worker_router.clone(),
+                    sc_cfg,
+                )))
+            } else {
+                None
+            }
         };
 
         // Build the client-side local page cache (best-effort).
+        #[cfg(feature = "page-cache")]
         let cache_manager: Option<Arc<dyn CacheManager>> = if config.client_cache_enabled {
             match LocalCacheManager::from_config(&config).await {
                 Ok(mgr) => {
@@ -285,6 +296,8 @@ impl FileSystemContext {
         } else {
             None
         };
+        #[cfg(not(feature = "page-cache"))]
+        let cache_manager: Option<Arc<dyn CacheManager>> = None;
 
         // Java `FileSystem.Factory`: enabled → MetadataCachingBaseFileSystem.
         // Rust hangs the same LRU on the context instead of swapping types.
@@ -312,6 +325,7 @@ impl FileSystemContext {
             worker_manager,
             worker_pool,
             worker_router,
+            #[cfg(feature = "short-circuit")]
             short_circuit,
             cache_manager,
             metadata_cache,
@@ -377,6 +391,7 @@ impl FileSystemContext {
     /// Return the shared short-circuit factory, if SC is enabled (zero-cost
     /// Arc clone). All streams built from this context share it (P8), so a hot
     /// local block is opened/mmap'd once and reused across streams.
+    #[cfg(feature = "short-circuit")]
     pub fn acquire_short_circuit(&self) -> Option<Arc<ShortCircuitFactory>> {
         self.short_circuit.clone()
     }
@@ -910,6 +925,7 @@ mod tests {
     /// opening one reader per small ranged read does not pay a Master
     /// `get_status` RPC per read — that RPC otherwise dwarfs a page-cache hit
     /// served over io_uring. TTL / size stay Java-aligned.
+    #[cfg(feature = "metadata-cache")]
     #[test]
     fn metadata_cache_enabled_by_default() {
         let cfg = GoosefsConfig::default();
@@ -954,6 +970,7 @@ mod tests {
     }
 
     /// Setting the switch explicitly still keeps Java TTL / size.
+    #[cfg(feature = "metadata-cache")]
     #[test]
     fn metadata_cache_opt_in_keeps_java_defaults() {
         let cfg = GoosefsConfig::new("127.0.0.1:9200").with_metadata_cache_enabled(true);

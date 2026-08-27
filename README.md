@@ -134,6 +134,29 @@ goosefs-sdk = "0.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
+The default feature set is empty, so downstream crates only compile the core
+gRPC client. Enable optional capabilities explicitly:
+
+| Feature | Capability | Additional dependency group |
+|---|---|---|
+| `metadata-cache` | Process-local status and listing cache | `lru` |
+| `page-cache` | Portable disk-backed page cache | `foyer-*`, `tokio/fs` |
+| `page-cache-io-uring` | Linux io_uring page-cache backend | `page-cache`, `io-uring`, `libc` |
+| `short-circuit` | Local mmap block reads | `memmap2`, `lru`, `libc` |
+| `metrics-pushgateway` | Prometheus Pushgateway exporter | `reqwest` and HTTP/TLS stack |
+| `full-client` | All runtime capabilities above | all of the above |
+| `regen-proto` | Regenerate checked-in protobuf bindings | `tonic-prost-build` |
+
+For example:
+
+```toml
+goosefs-sdk = { version = "0.1", features = ["metadata-cache"] }
+```
+
+Runtime configuration cannot enable a capability that was not compiled in;
+`GoosefsConfig::validate` and `FileSystemContext::connect` return an actionable
+configuration error in that case.
+
 ### Example: File Metadata Operations
 
 ```rust
@@ -405,7 +428,7 @@ Configuration is also accepted via `goosefs-site.properties` keys,
 | `goosefs.user.client.cache.quota.enabled` | `client_cache_quota_enabled` | `false` |
 | `goosefs.user.client.cache.ttl.seconds` | `client_cache_ttl_secs` | `0` (no expiry) |
 | `goosefs.user.client.cache.sequential.read.enabled` | `client_cache_sequential_read_enabled` | `false` |
-| `goosefs.user.client.cache.uring.enabled` | `client_cache_uring_enabled` | `true` on Linux / `false` elsewhere |
+| `goosefs.user.client.cache.uring.enabled` | `client_cache_uring_enabled` | `true` with `page-cache-io-uring` on Linux / `false` otherwise |
 | `goosefs.user.client.cache.uring.queue.depth` | `client_cache_uring_queue_depth` | `32768` |
 | `goosefs.user.client.cache.uring.thread.count` | `client_cache_uring_thread_count` | `2` |
 

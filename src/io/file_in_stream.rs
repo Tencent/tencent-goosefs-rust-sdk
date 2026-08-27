@@ -63,6 +63,7 @@ use bytes::{Bytes, BytesMut};
 use tracing::{debug, warn};
 
 use crate::block::router::{rpc_endpoint, WorkerRouterView};
+#[cfg(feature = "short-circuit")]
 use crate::block::short_circuit::{ShortCircuitError, ShortCircuitFactory};
 use crate::cache::{page_cache_eligible, CacheManager, ExternalRangeReader};
 use crate::client::{WorkerClient, WorkerClientPool, WorkerManagerClient};
@@ -202,6 +203,7 @@ pub struct GoosefsFileInStream {
     /// and the sequential `read()` path first attempt a local mmap read and
     /// transparently fall back to gRPC on any recoverable failure (INV-S1).
     /// See `docs/SHORT_CIRCUIT_DESIGN.md` .
+    #[cfg(feature = "short-circuit")]
     short_circuit: Option<Arc<ShortCircuitFactory>>,
 
     /// Block id currently being served sequentially via the short-circuit
@@ -209,6 +211,7 @@ pub struct GoosefsFileInStream {
     /// same block reuse the SC decision (and the cached reader) without
     /// re-running `should_use` each chunk. Reset to `-1` when the block falls
     /// back to gRPC.
+    #[cfg(feature = "short-circuit")]
     sc_seq_block: i64,
 }
 
@@ -314,7 +317,9 @@ impl GoosefsFileInStream {
             cache_sequential_read: false,
             // SC needs the shared pool + router from a FileSystemContext; the
             // legacy `open()` path has neither, so SC is disabled here.
+            #[cfg(feature = "short-circuit")]
             short_circuit: None,
+            #[cfg(feature = "short-circuit")]
             sc_seq_block: -1,
         })
     }
@@ -386,6 +391,7 @@ impl GoosefsFileInStream {
         // this context share one hot-block reader LRU, so a hot local block is
         // opened/mmap'd once and reused across streams. `None` when the SC kill
         // switch is off.
+        #[cfg(feature = "short-circuit")]
         let short_circuit = ctx.acquire_short_circuit();
 
         // Inject the shared page cache (best-effort; `None` when disabled).
@@ -445,7 +451,9 @@ impl GoosefsFileInStream {
             cache_fill,
             cache_async_write: config.client_cache_async_write_enabled,
             cache_sequential_read: config.client_cache_sequential_read_enabled,
+            #[cfg(feature = "short-circuit")]
             short_circuit,
+            #[cfg(feature = "short-circuit")]
             sc_seq_block: -1,
         })
     }
@@ -643,15 +651,18 @@ impl GoosefsFileInStream {
         // block_id`) and `should_use` approves. We do NOT switch a block that
         // is mid-gRPC-stream. Any recoverable failure transparently falls back
         // to gRPC (INV-S1).
-        if self.short_circuit.is_some() {
-            let use_sc = self.sc_seq_block == block_id
-                || (self.block_in_stream_block_id != block_id
-                    && self.sc_should_use_seq(block_id, block_idx).await);
-            if use_sc {
-                if let Some(res) = self.sc_sequential_read(buf, block_idx, block_id).await {
-                    return res;
+        #[cfg(feature = "short-circuit")]
+        {
+            if self.short_circuit.is_some() {
+                let use_sc = self.sc_seq_block == block_id
+                    || (self.block_in_stream_block_id != block_id
+                        && self.sc_should_use_seq(block_id, block_idx).await);
+                if use_sc {
+                    if let Some(res) = self.sc_sequential_read(buf, block_idx, block_id).await {
+                        return res;
+                    }
+                    // SC declined/failed for this block — fall through to gRPC.
                 }
-                // SC declined/failed for this block — fall through to gRPC.
             }
         }
 
@@ -971,6 +982,7 @@ impl GoosefsFileInStream {
     /// remainder. This is what the Worker reports as the `OpenLocalBlock`
     /// response `block_size`, so it is the value passed to the short-circuit
     /// factory (request `block_size` + the SC decision's size threshold).
+    #[cfg(any(feature = "short-circuit", test))]
     fn block_logical_size(&self, block_idx: usize) -> i64 {
         let bs = self.status.block_size_bytes;
         if bs <= 0 {
@@ -997,6 +1009,7 @@ impl GoosefsFileInStream {
     ///
     /// TODO(java-parity): align SC gating/open with Java (locations-first read
     /// target must be local). Deferred; this PR does not change the SC path.
+    #[cfg(feature = "short-circuit")]
     async fn try_short_circuit_read(
         &self,
         block_id: i64,
@@ -1075,9 +1088,21 @@ impl GoosefsFileInStream {
         }
     }
 
+    #[cfg(not(feature = "short-circuit"))]
+    async fn try_short_circuit_read(
+        &self,
+        _block_id: i64,
+        _block_idx: usize,
+        _offset_in_block: i64,
+        _length: i64,
+    ) -> Option<Result<Bytes>> {
+        None
+    }
+
     // ── Convenience ───────────────────────────────────────────────────────────
 
     /// Whether the sequential read at the current block should use SC.
+    #[cfg(feature = "short-circuit")]
     async fn sc_should_use_seq(&self, block_id: i64, block_idx: usize) -> bool {
         match &self.short_circuit {
             Some(f) => {
@@ -1098,6 +1123,7 @@ impl GoosefsFileInStream {
     /// - `Some(Err(e))` — a semantic error (`OutOfRange`) to surface (INV-S4).
     /// - `None` — recoverable failure; the caller falls back to the gRPC
     ///   streaming path for this block (INV-S1).
+    #[cfg(feature = "short-circuit")]
     async fn sc_sequential_read(
         &mut self,
         buf: &mut [u8],
@@ -1573,7 +1599,9 @@ mod tests {
             cache_fill: false,
             cache_async_write: false,
             cache_sequential_read: false,
+            #[cfg(feature = "short-circuit")]
             short_circuit: None,
+            #[cfg(feature = "short-circuit")]
             sc_seq_block: -1,
         }
     }
@@ -1727,6 +1755,7 @@ mod tests {
             stream.worker_pool.is_none(),
             "legacy mode should have no pool"
         );
+        #[cfg(feature = "short-circuit")]
         assert!(
             stream.short_circuit.is_none(),
             "legacy mode should not enable short-circuit"

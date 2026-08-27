@@ -64,6 +64,7 @@ use tracing::{debug, warn};
 
 use crate::block::mapper::{BlockMapper, BlockReadPlan};
 use crate::block::router::WorkerRouterView;
+#[cfg(feature = "short-circuit")]
 use crate::block::short_circuit::{ShortCircuitError, ShortCircuitFactory};
 use crate::cache::{
     page_cache_eligible, read_through_cache, CacheManager, ExternalRangeReader, FillMode,
@@ -150,6 +151,7 @@ pub struct GoosefsFileReader {
     /// When `Some`, the per-block read convergence (`read_segment`) first attempts a
     /// local mmap read and transparently falls back to gRPC on any recoverable
     /// failure.
+    #[cfg(feature = "short-circuit")]
     short_circuit: Option<Arc<ShortCircuitFactory>>,
 
     // ── S4: pre-built UFS read options ───────────────────────────────────────
@@ -380,6 +382,7 @@ impl GoosefsFileReader {
             cache_page_size: config.client_cache_page_size,
             cache_fill: false,
             cache_async_write: false,
+            #[cfg(feature = "short-circuit")]
             short_circuit: None,
             ufs_read_options,
         })
@@ -396,7 +399,10 @@ impl GoosefsFileReader {
     async fn attach_cache(&mut self, ctx: &Arc<FileSystemContext>) {
         // Short-circuit is independent of the page cache: it can accelerate the
         // worker read even when the page cache is disabled.
-        self.short_circuit = ctx.acquire_short_circuit();
+        #[cfg(feature = "short-circuit")]
+        {
+            self.short_circuit = ctx.acquire_short_circuit();
+        }
 
         // HR-1 (design ): `file_id <= 0` means no stable inode identity.
         // See [`page_cache_eligible`]. This guard MUST run before
@@ -692,6 +698,7 @@ impl GoosefsFileReader {
     ///
     /// TODO(java-parity): align SC gating/open with Java (locations-first read
     /// target must be local). Deferred; this PR does not change the SC path.
+    #[cfg(feature = "short-circuit")]
     async fn try_short_circuit_read(
         &self,
         block_id: i64,
@@ -771,11 +778,21 @@ impl GoosefsFileReader {
         }
     }
 
+    #[cfg(not(feature = "short-circuit"))]
+    async fn try_short_circuit_read(
+        &self,
+        _block_id: i64,
+        _plan: &BlockReadPlan,
+    ) -> Option<Result<Bytes>> {
+        None
+    }
+
     /// Logical (on-disk) byte size of the block at `block_index`.
     ///
     /// Full blocks are `block_size_bytes`; the trailing block is the file
     /// remainder. This is the value the short-circuit factory expects (matching
     /// the Worker's `OpenLocalBlock` response `block_size`).
+    #[cfg(any(feature = "short-circuit", test))]
     fn block_logical_size(&self, block_index: u64) -> i64 {
         let bs = self.file_info.block_size_bytes.unwrap_or(64 * 1024 * 1024);
         let file_length = self.file_length() as i64;
@@ -1245,6 +1262,7 @@ mod tests {
         let reader = make_reader(1024, 1024);
         assert!(reader.cache.is_none(), "cache must default to disabled");
         assert!(!reader.cache_fill, "fill must default to false");
+        #[cfg(feature = "short-circuit")]
         assert!(
             reader.short_circuit.is_none(),
             "short-circuit must default to disabled"

@@ -18,6 +18,7 @@ pub mod locations;
 pub mod mapper;
 pub(crate) mod murmur3;
 pub mod router;
+#[cfg(feature = "short-circuit")]
 pub mod short_circuit;
 
 pub use locations::{
@@ -26,6 +27,7 @@ pub use locations::{
 };
 pub use mapper::{BlockMapper, BlockReadPlan, BlockWritePlan};
 pub use router::WorkerRouter;
+#[cfg(feature = "short-circuit")]
 pub use short_circuit::{
     should_use_short_circuit, AccessHint, LocalBlockReader, ScDecisionCtx, ShortCircuitConfig,
     ShortCircuitError, ShortCircuitFactory,
