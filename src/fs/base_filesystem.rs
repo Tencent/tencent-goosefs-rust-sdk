@@ -391,28 +391,34 @@ impl FileSystem for BaseFileSystem {
 
     async fn mkdir(&self, path: &str, recursive: bool) -> Result<()> {
         let master = self.master();
-        master.create_directory(path, recursive).await?;
-        self.ctx.invalidate_metadata(path, true);
-        Ok(())
+        crate::metadata_cache::invalidate_on_success(
+            self.ctx.acquire_metadata_cache().as_deref(),
+            path,
+            master.create_directory(path, recursive).await,
+        )
     }
 
     // ── Delete ────────────────────────────────────────────────────────────────
 
     async fn delete(&self, path: &str, options: DeleteOptions) -> Result<()> {
         let master = self.master();
-        master.delete_with_options(path, options).await?;
-        self.ctx.invalidate_metadata(path, true);
-        Ok(())
+        crate::metadata_cache::invalidate_on_success(
+            self.ctx.acquire_metadata_cache().as_deref(),
+            path,
+            master.delete_with_options(path, options).await,
+        )
     }
 
     // ── Rename ────────────────────────────────────────────────────────────────
 
     async fn rename(&self, src: &str, dst: &str) -> Result<()> {
         let master = self.master();
-        master.rename(src, dst).await?;
-        self.ctx.invalidate_metadata(src, true);
-        self.ctx.invalidate_metadata(dst, true);
-        Ok(())
+        crate::metadata_cache::invalidate_rename_on_success(
+            self.ctx.acquire_metadata_cache().as_deref(),
+            src,
+            dst,
+            master.rename(src, dst).await,
+        )
     }
 }
 

@@ -45,6 +45,8 @@ Common environment variables:
 | `GOOSEFS_METADATA_CACHE_ENABLED` | Client metadata cache switch (default `true`) |
 | `GOOSEFS_METADATA_CACHE_EXPIRATION` | Metadata cache TTL (`10min`, `30s`, or raw ms) |
 | `GOOSEFS_METADATA_CACHE_MAX_SIZE` | Metadata cache LRU capacity (default `100000`) |
+| `GOOSEFS_FILE_METADATA_SYNC_INTERVAL` | Metadata sync interval (`parseTimeSize`; default `-1`. `0` skips cache on every get/list) |
+| `GOOSEFS_FILE_METADATA_LOAD_TYPE` | `ONCE` / `ALWAYS` / `NEVER` (default `ONCE`. `ALWAYS` skips listing cache) |
 
 ## Write / Read Types
 
@@ -76,13 +78,15 @@ See [Page Cache](./page-cache) for a full walkthrough.
 
 Enabled by default (the Java client defaults it to `false`). `get_status` / `exists` / `open_file` / non-recursive `list_status` share one process-local TTL-bounded LRU:
 
-| Property key                                  | Field                       | Default  |
-| --------------------------------------------- | --------------------------- | -------- |
-| `goosefs.user.metadata.cache.enabled`         | `metadata_cache_enabled`    | `true`   |
-| `goosefs.user.metadata.cache.max.size`        | `metadata_cache_max_size`   | `100000` |
-| `goosefs.user.metadata.cache.expiration.time` | `metadata_cache_expiration` | `10min`  |
+| Property key | Field | Default |
+| --- | --- | --- |
+| `goosefs.user.metadata.cache.enabled` | `metadata_cache_enabled` | `true` |
+| `goosefs.user.metadata.cache.max.size` | `metadata_cache_max_size` | `100000` |
+| `goosefs.user.metadata.cache.expiration.time` | `metadata_cache_expiration` | `10min` |
+| `goosefs.user.file.metadata.sync.interval` | `file_metadata_sync_interval` | `-1` |
+| `goosefs.user.file.metadata.load.type` | `file_metadata_load_type` | `ONCE` |
 
-This replaces the removed `FileInfo` open cache (`goosefs.user.file.info.cache.*`). See [Metadata Cache](./metadata-cache) for hit/bypass rules, invalidation, and metrics.
+This replaces the removed `FileInfo` open cache (`goosefs.user.file.info.cache.*`). See [Metadata Cache](./metadata-cache) for hit/bypass rules, invalidation, env vars, and metrics.
 
 ## Worker Connection Pool
 

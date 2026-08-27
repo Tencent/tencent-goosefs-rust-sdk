@@ -22,12 +22,14 @@ Because the Python binding shares the Rust configuration core, the cache is avai
 
 ## When the cache is bypassed
 
-| Situation                                | Effect                                                |
-| ---------------------------------------- | ----------------------------------------------------- |
-| `list_status(..., recursive=True)`       | Never cached (master-side walk each time)              |
-| `goosefs.user.file.metadata.load.type=ALWAYS` | Listing cache skipped                            |
-| `goosefs.user.file.metadata.sync.interval=0` | Cache not consulted, but results are written back |
-| `goosefs.user.metadata.cache.expiration.time<=0` | Cache is not constructed at all, even when enabled |
+| Situation | Effect |
+| --- | --- |
+| `list_status(..., recursive=True)` | Listing never cached (client-side walk each time). |
+| `goosefs.user.file.metadata.load.type=ALWAYS` | **Listing** cache skipped (no read/write). Does **not** skip `get_status` / `exists` / `open_file`. |
+| `goosefs.user.file.metadata.sync.interval=0` | `get_status`: skip read, still write back. `list_status`: skip read **and** write. |
+| `goosefs.user.metadata.cache.expiration.time<=0` | Cache is not constructed at all, even when enabled. |
+
+`ALWAYS` is a listing-only flag. To force every **status** lookup to the master, set `GOOSEFS_FILE_METADATA_SYNC_INTERVAL=0`.
 
 ## Tuning the Cache
 
@@ -38,6 +40,11 @@ self-documenting, or to `false` to opt out.
 export GOOSEFS_METADATA_CACHE_ENABLED=true
 export GOOSEFS_METADATA_CACHE_EXPIRATION=1min       # 10min default; also accepts raw ms
 export GOOSEFS_METADATA_CACHE_MAX_SIZE=100000
+export GOOSEFS_FILE_METADATA_SYNC_INTERVAL=-1       # default; 0 skips cache on every get/list
+export GOOSEFS_FILE_METADATA_LOAD_TYPE=ONCE         # ONCE / ALWAYS / NEVER (ALWAYS skips listing cache)
+
+# Force every list to the master:
+# export GOOSEFS_FILE_METADATA_LOAD_TYPE=ALWAYS
 ```
 
 ```properties
@@ -45,6 +52,8 @@ export GOOSEFS_METADATA_CACHE_MAX_SIZE=100000
 goosefs.user.metadata.cache.enabled=true
 goosefs.user.metadata.cache.expiration.time=1min
 goosefs.user.metadata.cache.max.size=100000
+goosefs.user.file.metadata.sync.interval=-1
+goosefs.user.file.metadata.load.type=ONCE
 ```
 
 Or inline via the `Config` builder:
@@ -58,6 +67,8 @@ cfg = Config(
         "goosefs.user.metadata.cache.enabled": "true",
         "goosefs.user.metadata.cache.expiration.time": "1min",
         "goosefs.user.metadata.cache.max.size": "100000",
+        "goosefs.user.file.metadata.sync.interval": "-1",
+        "goosefs.user.file.metadata.load.type": "ONCE",
     },
 )
 ```
@@ -73,6 +84,8 @@ ds = lance.dataset(
         "goosefs_metadata_cache_enabled": "true",
         "goosefs_metadata_cache_expiration": "1min",
         "goosefs_metadata_cache_max_size": "100000",
+        "goosefs_file_metadata_sync_interval": "-1",
+        "goosefs_file_metadata_load_type": "ONCE",
     },
 )
 ```
@@ -109,13 +122,37 @@ asyncio.run(main())
 
 ## Configuration Reference
 
-| Properties key                                | Env var                             | Storage option                      | Default  |
-| --------------------------------------------- | ----------------------------------- | ----------------------------------- | -------- |
-| `goosefs.user.metadata.cache.enabled`         | `GOOSEFS_METADATA_CACHE_ENABLED`    | `goosefs_metadata_cache_enabled`    | `true`   |
-| `goosefs.user.metadata.cache.max.size`        | `GOOSEFS_METADATA_CACHE_MAX_SIZE`   | `goosefs_metadata_cache_max_size`   | `100000` |
-| `goosefs.user.metadata.cache.expiration.time` | `GOOSEFS_METADATA_CACHE_EXPIRATION` | `goosefs_metadata_cache_expiration` | `10min`  |
+| Properties key | Env var | Storage option | Default |
+| --- | --- | --- | --- |
+| `goosefs.user.metadata.cache.enabled` | `GOOSEFS_METADATA_CACHE_ENABLED` | `goosefs_metadata_cache_enabled` | `true` |
+| `goosefs.user.metadata.cache.max.size` | `GOOSEFS_METADATA_CACHE_MAX_SIZE` | `goosefs_metadata_cache_max_size` | `100000` |
+| `goosefs.user.metadata.cache.expiration.time` | `GOOSEFS_METADATA_CACHE_EXPIRATION` | `goosefs_metadata_cache_expiration` | `10min` |
+| `goosefs.user.file.metadata.sync.interval` | `GOOSEFS_FILE_METADATA_SYNC_INTERVAL` | `goosefs_file_metadata_sync_interval` | `-1` |
+| `goosefs.user.file.metadata.load.type` | `GOOSEFS_FILE_METADATA_LOAD_TYPE` | `goosefs_file_metadata_load_type` | `ONCE` |
 
-Values below `1` for `max.size` are clamped to `1`. The expiration accepts `10min` / `30s` / `2day` or raw milliseconds.
+Values below `1` for `max.size` are clamped to `1`. Expiration and sync interval accept `10min` / `30s` / `2day` or a raw millisecond number (`-1` / `0` are milliseconds).
+
+### `goosefs.user.file.metadata.load.type` values
+
+The value is sent on every `list_status` RPC, so it has **two** effects: one on the client cache, one on how the master treats the under file system (UFS). It is not sent on `get_status`, so it never affects `get_status` / `exists` / `open_file`.
+
+| Value | Client listing cache | Master behaviour | Use when |
+| --- | --- | --- | --- |
+| `ONCE` (default) | Used normally (read + write) | Loads a path's metadata from the UFS the first time it is accessed, then serves it from the master namespace | Default. GooseFS is the only writer, or a stale window of one TTL is acceptable |
+| `ALWAYS` | **Skipped** — every call goes to the master, and the result is not cached | Re-loads metadata from the UFS on every call, so files written out-of-band (directly to COS/HDFS) become visible immediately | Another system writes into the UFS behind GooseFS and the listing must be fresh |
+| `NEVER` | Used normally (read + write) | Never touches the UFS; only what is already in the master namespace is returned, so unloaded UFS files stay invisible | Pure GooseFS namespace, and you want to avoid UFS round-trips entirely |
+
+`ALWAYS` costs a UFS round-trip **and** a master RPC per list, so it is the slowest option. Values are case-insensitive; an unrecognised value is ignored and the default `ONCE` is kept.
+
+### `goosefs.user.file.metadata.sync.interval` values
+
+| Value | Effect |
+| --- | --- |
+| `-1` (default) | Does not skip the cache. `get_status` and non-recursive `list_status` may be served from the LRU. |
+| `0` | Skips the cache on every call: `get_status` re-reads from the master but still writes the result back; `list_status` neither reads nor writes the listing cache. |
+| `> 0` (e.g. `5s`) | Parsed and stored, but the skip check only tests for `0`, so it currently behaves like `-1`. |
+
+Unlike `load.type`, this knob affects **both** `get_status` and `list_status`, and it does not change what the master does with the UFS.
 
 ## Observability
 

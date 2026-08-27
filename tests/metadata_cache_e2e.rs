@@ -302,3 +302,156 @@ async fn open_reuses_get_status_cache() -> Result<()> {
     cleanup(&fs, &root).await;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "Requires GooseFS master (metadata cache e2e)"]
+async fn list_status_sync_zero_skips_cache() -> Result<()> {
+    let fs = connect(true).await?;
+    let root = unique_root();
+    fs.write_file(&format!("{root}/a.bin"), b"a", write_opts())
+        .await?;
+
+    let opts = ListStatusOptions {
+        sync_interval_ms: Some(0),
+        ..Default::default()
+    };
+    let before = list_status_ops();
+    let _ = fs.list_status_with_options(&root, opts.clone()).await?;
+    let _ = fs.list_status_with_options(&root, opts).await?;
+    let delta = list_status_ops() - before;
+    eprintln!("[list sync=0] list_status x2 → RPC={delta}");
+    assert_eq!(delta, 2, "sync=0 must skip listing cache");
+
+    cleanup(&fs, &root).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "Requires GooseFS master (metadata cache e2e)"]
+async fn exists_reuses_get_status_cache() -> Result<()> {
+    let fs = connect(true).await?;
+    let root = unique_root();
+    let path = format!("{root}/file.bin");
+    fs.write_file(&path, b"exists-cache", write_opts()).await?;
+
+    let before = get_status_ops();
+    assert!(fs.exists(&path).await?);
+    assert!(fs.exists(&path).await?);
+    let delta = get_status_ops() - before;
+    eprintln!("[exists] present x2 → RPC={delta}");
+    assert_eq!(delta, 1, "second exists must reuse the cached get_status");
+
+    let missing = format!("{root}/missing.bin");
+    let miss_before = get_status_ops();
+    assert!(!fs.exists(&missing).await?);
+    assert!(!fs.exists(&missing).await?);
+    let miss_delta = get_status_ops() - miss_before;
+    eprintln!("[exists] missing x2 → RPC={miss_delta}");
+    assert_eq!(
+        miss_delta, 1,
+        "NotFound must be negatively cached for exists"
+    );
+
+    cleanup(&fs, &root).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "Requires GooseFS master (metadata cache e2e)"]
+async fn delete_invalidates_parent_listing() -> Result<()> {
+    let fs = connect(true).await?;
+    let root = unique_root();
+    let child = format!("{root}/gone.bin");
+    fs.write_file(&format!("{root}/keep.bin"), b"keep", write_opts())
+        .await?;
+    fs.write_file(&child, b"gone", write_opts()).await?;
+
+    let before = list_status_ops();
+    let first = fs.list_status(&root, false).await?;
+    let _ = fs.list_status(&root, false).await?;
+    assert_eq!(list_status_ops() - before, 1);
+    assert!(first.len() >= 2);
+
+    fs.delete(&child, DeleteOptions::default()).await?;
+    let after = fs.list_status(&root, false).await?;
+    eprintln!(
+        "[delete] parent listing before={} after={}",
+        first.len(),
+        after.len()
+    );
+    assert_eq!(
+        after.len(),
+        first.len() - 1,
+        "delete must invalidate the parent listing"
+    );
+
+    let gs_before = get_status_ops();
+    let gone = fs.get_status(&child).await;
+    let gs_delta = get_status_ops() - gs_before;
+    assert!(gone.unwrap_err().is_not_found());
+    assert_eq!(gs_delta, 1, "deleted path must not stay as Present");
+
+    cleanup(&fs, &root).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "Requires GooseFS master (metadata cache e2e)"]
+async fn rename_invalidates_src_dst_and_parents() -> Result<()> {
+    let fs = connect(true).await?;
+    let root = unique_root();
+    let src_dir = format!("{root}/src");
+    let dst_dir = format!("{root}/dst");
+    fs.mkdir(&src_dir, true).await?;
+    fs.mkdir(&dst_dir, true).await?;
+    let src = format!("{src_dir}/file.bin");
+    let dst = format!("{dst_dir}/file.bin");
+    fs.write_file(&src, b"renamed", write_opts()).await?;
+
+    let src_before = list_status_ops();
+    let src_list = fs.list_status(&src_dir, false).await?;
+    let _ = fs.list_status(&src_dir, false).await?;
+    assert_eq!(list_status_ops() - src_before, 1);
+    assert_eq!(src_list.len(), 1);
+
+    let dst_before = list_status_ops();
+    let dst_list = fs.list_status(&dst_dir, false).await?;
+    let _ = fs.list_status(&dst_dir, false).await?;
+    assert_eq!(list_status_ops() - dst_before, 1);
+    assert_eq!(dst_list.len(), 0);
+
+    fs.rename(&src, &dst).await?;
+
+    let after_src = fs.list_status(&src_dir, false).await?;
+    let after_dst = fs.list_status(&dst_dir, false).await?;
+    eprintln!(
+        "[rename] src listing {} → {}, dst listing {} → {}",
+        src_list.len(),
+        after_src.len(),
+        dst_list.len(),
+        after_dst.len()
+    );
+    assert_eq!(
+        after_src.len(),
+        0,
+        "src parent listing must miss after rename"
+    );
+    assert_eq!(
+        after_dst.len(),
+        1,
+        "dst parent listing must miss after rename"
+    );
+
+    let gs_before = get_status_ops();
+    assert!(fs.get_status(&src).await.unwrap_err().is_not_found());
+    let moved = fs.get_status(&dst).await?;
+    let gs_delta = get_status_ops() - gs_before;
+    assert_eq!(moved.length, b"renamed".len() as i64);
+    assert_eq!(
+        gs_delta, 2,
+        "rename must invalidate src and dst status slots"
+    );
+
+    cleanup(&fs, &root).await;
+    Ok(())
+}
