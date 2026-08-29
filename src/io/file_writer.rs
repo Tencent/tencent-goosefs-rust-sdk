@@ -221,7 +221,12 @@ pub struct GoosefsFileWriter {
     _context: Option<Arc<FileSystemContext>>,
     /// File info returned by CreateFile.
     file_info: FileInfo,
-    /// Total bytes written so far across all blocks (committed only).
+    /// Total bytes accepted by `write()` so far, across every branch.
+    ///
+    /// Advanced once per successful `write()` rather than per stream, so a
+    /// writer that switches branches mid-file (cache → UFS degrade) still
+    /// reports the true file length. This is what `CompleteFile` sends as
+    /// `ufs_length` — Java `GoosefsFileOutStream.mBytesWritten`.
     total_bytes_written: u64,
     /// Idempotency token for `CompleteFile`.
     ///
@@ -455,6 +460,13 @@ impl GoosefsFileWriter {
             self.write_to_ufs_stream(data).await?;
         }
 
+        // 3) Single accounting point for `CompleteFilePOptions.ufs_length`,
+        //    matching Java `GoosefsFileOutStream.writeInternal`'s trailing
+        //    `mBytesWritten += len`. Keeping this out of the per-stream
+        //    helpers means the counter stays correct when a writer switches
+        //    branches at runtime (cache → UFS degrade).
+        self.total_bytes_written += data.len() as u64;
+
         Ok(())
     }
 
@@ -576,9 +588,10 @@ impl GoosefsFileWriter {
         let total = data.len();
         match ufs.write_all(data, chunk_size).await {
             Ok(()) => {
-                // Track total UFS bytes written (for completeFile's ufsLength).
-                self.total_bytes_written += total as u64;
-                // Instrument: record UFS-path bytes written.
+                // Instrument: record UFS-path bytes written. The authoritative
+                // `total_bytes_written` counter is advanced once per `write()`
+                // (Java `GoosefsFileOutStream.writeInternal` does the same),
+                // so neither stream branch may touch it here.
                 crate::metrics::counter(crate::metrics::name::CLIENT_BYTES_WRITTEN_UFS)
                     .inc(total as i64);
                 Ok(())
@@ -854,9 +867,6 @@ impl GoosefsFileWriter {
             }
 
             self.committed_block_ids.push(block_id);
-            if !self.write_strategy.ufs_stream {
-                self.total_bytes_written += bytes_written;
-            }
             Ok(loc)
         } else {
             active.cancel_replicas().await;
@@ -1333,7 +1343,11 @@ impl GoosefsFileWriter {
         Ok(writer.total_bytes_written)
     }
 
-    /// Get the total bytes written so far.
+    /// Total bytes accepted by `write()` so far.
+    ///
+    /// Counts bytes as they are accepted, not as they are committed, so a
+    /// read taken before `close()` may include a block that is still in
+    /// flight. After `close()` returns this is the final file length.
     pub fn bytes_written(&self) -> u64 {
         self.total_bytes_written
     }
