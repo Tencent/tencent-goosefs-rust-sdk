@@ -296,7 +296,9 @@ pub struct GoosefsFileWriter {
     /// `createNonexistingFile` exactly once (on the first chunk) and then
     /// appends every subsequent chunk to the same `OutputStream`.
     ///
-    /// Opened lazily on the first `write()` that needs UFS persistence.
+    /// Opened eagerly in `create_with_context` for CACHE_THROUGH / THROUGH, so
+    /// that a zero-byte write still creates the file on the UFS. ASYNC_THROUGH
+    /// leaves it `None` and only opens one if the cache write degrades.
     ufs_stream: Option<GrpcBlockWriter>,
     /// Worker address hosting the UFS stream (for failure tracking).
     ufs_worker_addr: Option<String>,
@@ -382,10 +384,11 @@ impl GoosefsFileWriter {
         let write_strategy = resolve_write_strategy(effective_write_type, &file_info);
 
         // Reuse shared router and pool from context (zero additional RPCs).
-        // Worker list is NOT eagerly snapshotted here — it is deferred to the
-        // first `write()` call via `ensure_router_init()`. This avoids expensive
-        // hash-ring builds for zero-byte writes (e.g. CreateFile-then-close),
-        // which is the dominant pattern in metadata-only benchmarks.
+        // For cache-only write types the worker list is NOT snapshotted here —
+        // it is deferred to the first `write()` via `ensure_router_init()`, so
+        // a zero-byte MUST_CACHE write never pays for a hash-ring build. Write
+        // types with a UFS stream give that up a few lines below, because they
+        // have to reach a worker at create time anyway.
         let worker_pool = ctx.acquire_worker_pool();
         let router = WorkerRouterView::empty();
 
@@ -395,7 +398,7 @@ impl GoosefsFileWriter {
         // The file_writer holds it by value; the Arc in ctx keeps the channel alive.
         let master = (*master_arc).clone();
 
-        Ok(Self {
+        let mut writer = Self {
             config,
             path: path.to_string(),
             master,
@@ -417,7 +420,41 @@ impl GoosefsFileWriter {
             ufs_worker_addr: None,
             ufs_stream_completed: AtomicBool::new(false),
             _router_needs_init: AtomicBool::new(true),
-        })
+        };
+
+        // Java opens the UFS stream in the `GoosefsFileOutStream` constructor
+        // whenever `mUnderStorageType.isSyncPersist()` — CACHE_THROUGH and
+        // THROUGH. Opening it here rather than on the first `write()` is what
+        // makes a zero-byte write land an empty file on the UFS: the initial
+        // `WriteBlock` command carries `CreateUfsFileOptions`, and the worker's
+        // `completeRequest` creates the file on stream close even when no chunk
+        // was ever sent. Deferring the open skips that RPC entirely, so the UFS
+        // silently ends up with no file at all.
+        //
+        // ASYNC_THROUGH is excluded, matching Java: it has no UFS stream unless
+        // the cache write degrades, and that path opens one on demand.
+        if writer.write_strategy.ufs_stream {
+            let opened = match writer.ensure_router_init().await {
+                Ok(()) => writer.open_ufs_stream().await,
+                Err(e) => Err(e),
+            };
+            if let Err(e) = opened {
+                warn!(
+                    path = %path,
+                    error = %e,
+                    "failed to open the UFS stream during create; \
+                     the INCOMPLETE inode is left for a retry to reuse"
+                );
+                // Suppress the `Drop` cleanup: there is nothing written to roll
+                // back, and its "dropped without close()" warning would be
+                // misleading. Java's `closeAndRethrow` likewise leaves the inode
+                // in place rather than deleting it.
+                writer.cancelled.store(true, Ordering::SeqCst);
+                return Err(e);
+            }
+        }
+
+        Ok(writer)
     }
 
     /// Lazily populate the local worker router from the shared context.
@@ -646,8 +683,11 @@ impl GoosefsFileWriter {
     }
 
     /// Append data to the single long-lived UFS stream (`RequestType::UfsFile`,
-    /// `block_id = -1`, `length = i64::MAX`). Opens the stream lazily on the
-    /// first call.
+    /// `block_id = -1`, `length = i64::MAX`).
+    ///
+    /// CACHE_THROUGH / THROUGH already opened the stream at create time; the
+    /// lazy open here is what serves a degraded ASYNC_THROUGH write, which
+    /// only learns it needs a UFS stream once the cache write has failed.
     async fn write_to_ufs_stream(&mut self, data: &[u8]) -> Result<()> {
         if self.ufs_stream.is_none() {
             self.open_ufs_stream().await?;
@@ -960,7 +1000,14 @@ impl GoosefsFileWriter {
         }
     }
 
-    /// Open the single long-lived UFS stream used by CACHE_THROUGH / THROUGH.
+    /// Open the single long-lived UFS stream used by CACHE_THROUGH / THROUGH,
+    /// and by a degraded ASYNC_THROUGH write.
+    ///
+    /// Note this returns as soon as the worker connection is established: the
+    /// `WriteBlock` call runs on a background task and the server's response
+    /// headers do not arrive until the first flush or the stream close. So a
+    /// failure here means "no reachable worker", not "the UFS rejected us" —
+    /// UFS-side errors surface later, on flush or close.
     ///
     /// Matches Java `UnderFileSystemFileOutStream`:
     /// - picks a worker at random (independent of cache routing);
