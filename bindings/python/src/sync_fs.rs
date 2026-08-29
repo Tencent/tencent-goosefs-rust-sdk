@@ -521,8 +521,10 @@ impl PyGoosefs {
 
     /// `fs.read_file(path)` → `bytes` (full file contents).
     ///
-    /// Synchronous counterpart of [`PyAsyncGoosefs::read_file`]; same caveats
-    /// about full materialisation in RAM apply (Review #17.1: documented).
+    /// Worker-direct one-shot path: does **not** consult the client page cache
+    /// (only `open_file` does). Synchronous counterpart of
+    /// [`PyAsyncGoosefs::read_file`]; same caveats about full materialisation
+    /// in RAM apply (Review #17.1: documented).
     fn read_file<'py>(
         &self,
         py: Python<'py>,

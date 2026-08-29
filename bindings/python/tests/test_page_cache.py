@@ -31,6 +31,7 @@ Set ``GOOSEFS_AUTH_TYPE`` (``nosasl`` / ``simple``) to match your cluster.
 
 from __future__ import annotations
 
+import concurrent.futures
 import os
 import shutil
 import tempfile
@@ -199,6 +200,39 @@ def test_sequential_read_bypasses_cache_by_default() -> None:
             chunk = r.read_at(PAGE_SIZE, 4096)
         assert chunk == payload[PAGE_SIZE : PAGE_SIZE + 4096], "read_at mismatch"
         assert _count_files(cache_dir) > 0, "random read_at must still back-fill pages"
+    finally:
+        try:
+            fs.delete(path)
+        except Exception:  # noqa: BLE001
+            pass
+        fs.close()
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def test_read_file_bypasses_page_cache_and_does_not_hang() -> None:
+    """One-shot ``read_file`` must stay worker-direct when the page cache is on.
+
+    CACHE-05 / related Bug 162900390: with cache enabled, ``read_file`` of a
+    file spanning 2+ pages used to hang on the 2nd page (and even a 1-page
+    file incorrectly wrote page files). Contract: only ``open_file`` consults
+    the cache; ``read_file`` / ``read_range`` go worker-direct.
+    """
+    cache_dir = tempfile.mkdtemp(prefix="pygfs_cache_")
+    fs = Goosefs(_cache_config(cache_dir, enabled=True))
+    path = _scratch_path()
+    try:
+        fs.mkdir("/tmp/pygoosefs-cache-tests", recursive=True)
+        # 4 × 64 KiB pages — the size that used to hang (1 page did not).
+        payload = _make_payload(4 * PAGE_SIZE)
+        fs.write_file(path, payload, write_type=WriteType.Through)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            got = pool.submit(fs.read_file, path).result(timeout=20)
+
+        assert got == payload, "read_file mismatch on multi-page file with cache on"
+        assert _count_files(cache_dir) == 0, (
+            "read_file must bypass the page cache and not write page files"
+        )
     finally:
         try:
             fs.delete(path)

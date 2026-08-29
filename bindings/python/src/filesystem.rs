@@ -725,8 +725,9 @@ impl PyAsyncGoosefs {
     ///
     /// Implementation: dispatches to
     /// [`goosefs_sdk::io::GoosefsFileReader::read_file_with_context`], which
-    /// internally splits the file into block-sized segments and concatenates
-    /// the resulting `Bytes`. The Python `bytes` object is built in a
+    /// is the worker-direct one-shot path and does **not** consult the client
+    /// page cache (only `open_file` does). The file is split into block-sized
+    /// segments and concatenated. The Python `bytes` object is built in a
     /// GIL-reacquired closure via `PyBytes::new`, which copies once from the
     /// SDK's `Bytes` into Python-owned memory.
     fn read_file<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {

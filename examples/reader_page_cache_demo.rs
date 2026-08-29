@@ -21,8 +21,11 @@
 //!
 //! Unlike `GoosefsFileInStream::read_all` (whose sequential fast path only
 //! consults the cache when `client_cache_sequential_read_enabled` is set),
-//! **every** `GoosefsFileReader` read goes through `read_through_cache` when the
-//! cache is enabled. So a plain whole-file read shows:
+//! **every** streaming `GoosefsFileReader` read (`open_with_context` /
+//! `open_range_with_context` → `read_next_block`) goes through
+//! `read_through_cache` when the cache is enabled. The one-shot helpers
+//! `read_file_with_context` / `read_range_with_context` stay worker-direct.
+//! So a streaming whole-file read shows:
 //!
 //! - cold read → `CacheBytesReadExternal` grows, `CacheBytesReadCache` flat
 //! - warm read (fresh reader) → `CacheBytesReadCache` grows, external flat
@@ -135,12 +138,16 @@ async fn main() -> Result<()> {
     writer.close().await?;
     println!("  Wrote {} bytes", writer.bytes_written());
 
-    // ── Step 3: COLD whole-file read via GoosefsFileReader ───────
-    // `read_file_with_context` loops `read_next_block`, which now flows through
-    // the page cache — so a cold read fetches externally and back-fills.
-    println!("\n3. COLD GoosefsFileReader::read_file_with_context() — expect external bytes...");
+    // ── Step 3: COLD whole-file read via streaming GoosefsFileReader ──
+    // One-shot `read_file_with_context` is worker-direct (bypasses the page
+    // cache). The cache-aware path is `open_with_context` → `read_all`, which
+    // is what OpenDAL / Lance drive.
+    println!("\n3. COLD open_with_context()+read_all() — expect external bytes...");
     let cold_before = snapshot();
-    let cold = GoosefsFileReader::read_file_with_context(ctx.clone(), TEST_PATH).await?;
+    let cold = {
+        let mut r = GoosefsFileReader::open_with_context(ctx.clone(), TEST_PATH).await?;
+        r.read_all().await?
+    };
     let cold_after = snapshot();
     print_delta("cold", cold_before, cold_after);
     assert_eq!(cold.len(), PAYLOAD_SIZE, "cold read length");
@@ -158,7 +165,10 @@ async fn main() -> Result<()> {
     // ── Step 4: WARM whole-file read on a FRESH reader → cache hit ──
     println!("\n4. WARM read on a FRESH GoosefsFileReader — expect cache hits, no external...");
     let warm_before = snapshot();
-    let warm = GoosefsFileReader::read_file_with_context(ctx.clone(), TEST_PATH).await?;
+    let warm = {
+        let mut r = GoosefsFileReader::open_with_context(ctx.clone(), TEST_PATH).await?;
+        r.read_all().await?
+    };
     let warm_after = snapshot();
     print_delta("warm", warm_before, warm_after);
     assert_eq!(warm, cold, "warm read must match cold read");

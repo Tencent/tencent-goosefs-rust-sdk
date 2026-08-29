@@ -791,6 +791,8 @@ mod reader_consistency {
 
     /// The one-shot whole-file reader (`read_file_with_context`) returns the
     /// exact source bytes under cache-on, on both cold and warm passes.
+    /// One-shot helpers are worker-direct (they do not attach the page cache);
+    /// this test gates byte-equivalence, not cache hits.
     #[tokio::test]
     #[ignore]
     async fn inv_reader_read_all_equals_source() -> Result<()> {
@@ -801,12 +803,12 @@ mod reader_consistency {
         let path = unique_path("all");
         write_blob(&ctx, &path, &payload).await?;
 
-        // Cold: primes the cache.
+        // Cold: worker-direct one-shot (does not prime the page cache).
         let cold = GoosefsFileReader::read_file_with_context(ctx.clone(), &path).await?;
         assert_eq!(cold.len(), payload.len(), "read_all length (cold)");
         assert_eq!(cold.as_ref(), payload.as_slice(), "read_all bytes (cold)");
 
-        // Warm: served (partly) from cache — must still match byte-for-byte.
+        // Warm: second one-shot pass — still worker-direct, must match.
         let warm = GoosefsFileReader::read_file_with_context(ctx.clone(), &path).await?;
         assert_eq!(warm.as_ref(), payload.as_slice(), "read_all bytes (warm)");
         assert_eq!(warm, cold, "read_all cold vs warm mismatch");
