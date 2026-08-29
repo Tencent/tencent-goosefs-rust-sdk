@@ -83,6 +83,9 @@ pub struct URIStatus {
     /// Block size in bytes as configured on file creation.
     pub block_size_bytes: i64,
     /// Ordered list of block IDs belonging to this file.
+    ///
+    /// Empty for directories. Master omits `blockIds` on the wire; filled
+    /// from `file_block_infos` in [`URIStatus::from_proto`].
     pub block_ids: Vec<i64>,
 
     // ── Timestamps ──────────────────────────────────────────────────────────
@@ -157,6 +160,12 @@ impl URIStatus {
     /// `block_id → FileBlockInfo` map so that subsequent [`get_block_info`](URIStatus::get_block_info)
     /// calls are O(1).
     pub fn from_proto(fi: FileInfo) -> Self {
+        let mut fi = fi;
+        // Java `GrpcUtils.toProto(FileInfo)` serialises `fileBlockInfos` but
+        // never `blockIds`, so Master GetStatus/ListStatus leave `block_ids`
+        // empty even when `file_block_infos` is populated.
+        crate::block::ensure_block_ids_from_file_block_infos(&mut fi);
+
         // Build block-info map from the repeated file_block_infos field.
         // The key is the block_id stored in FileBlockInfo.block_info.block_id.
         let block_infos: HashMap<i64, FileBlockInfo> = fi
@@ -250,9 +259,8 @@ impl URIStatus {
 
     /// Returns `true` if per-block metadata (`FileBlockInfo`) is available.
     ///
-    /// The server only populates `file_block_infos` on `GetStatus` calls that
-    /// request location info (T6/T5).  This is `false` for metadata-only
-    /// results.
+    /// Master `GetStatus` / `ListStatus` populate `file_block_infos` for
+    /// completed files. This is `false` for directories and empty files.
     #[inline]
     pub fn has_block_infos(&self) -> bool {
         !self.block_infos.is_empty()
@@ -383,6 +391,22 @@ mod tests {
         assert_eq!(status.in_goose_fs_percentage, 100);
         assert_eq!(status.in_memory_percentage, 50);
         assert_eq!(status.mount_id, 7);
+    }
+
+    #[test]
+    fn test_from_proto_backfills_block_ids_from_file_block_infos() {
+        // Master proto omits `blockIds`; offsets may arrive out of order.
+        let fi = FileInfo {
+            length: Some(200),
+            block_size_bytes: Some(100),
+            completed: Some(true),
+            folder: Some(false),
+            block_ids: vec![],
+            file_block_infos: vec![make_file_block_info(20, 100), make_file_block_info(10, 0)],
+            ..Default::default()
+        };
+        let status = URIStatus::from_proto(fi);
+        assert_eq!(status.block_ids, vec![10, 20]);
     }
 
     #[test]

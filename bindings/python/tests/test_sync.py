@@ -58,6 +58,23 @@ def test_sync_get_status_raises_notfound(sync_fs: Goosefs, sync_tmp_dir: str) ->
         sync_fs.get_status(f"{sync_tmp_dir}/missing")
 
 
+def test_sync_get_status_file_reports_block_ids(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
+    """Same contract as the async test: ``write_file`` then ``get_status``
+    must expose non-empty ``block_ids``.
+    """
+    path = f"{sync_tmp_dir}/block-ids.bin"
+    sync_fs.write_file(path, b"x" * 100)
+
+    st = sync_fs.get_status(path)
+    assert st.block_ids
+    assert all(isinstance(b, int) and b > 0 for b in st.block_ids)
+
+    listed = sync_fs.list_status(sync_tmp_dir)
+    files = [s for s in listed if s.path == path]
+    assert len(files) == 1
+    assert files[0].block_ids == list(st.block_ids)
+
+
 def test_sync_exists_true_and_false(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
     assert sync_fs.exists(sync_tmp_dir) is True
     assert sync_fs.exists(f"{sync_tmp_dir}/missing") is False

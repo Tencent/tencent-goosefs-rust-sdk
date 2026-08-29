@@ -49,6 +49,7 @@ from __future__ import annotations
 import os
 
 import pytest
+from goosefs import WriteType
 
 # ---------------------------------------------------------------------------
 # Layer 1 — Import-time guards (always run, no cluster needed)
@@ -170,6 +171,27 @@ class TestAsyncPositionedReadAuthRetryGuard:
             f"got {data[:16]!r}..., expected {payload[16:32]!r}..."
         )
 
+    @pytest.mark.asyncio
+    async def test_async_positioned_read_offset_past_block_raises_value_error(
+        self, async_fs, tmp_dir
+    ) -> None:
+        path = f"{tmp_dir}/pread-oob.bin"
+        await async_fs.write_file(path, b"x" * 100)
+
+        with pytest.raises(ValueError, match=r"offset=1000 >= actual_block_length=100"):
+            await async_fs.positioned_read(path, offset=1000, length=10)
+
+    @pytest.mark.asyncio
+    async def test_async_positioned_read_length_minus_one_reads_stored_bytes(
+        self, async_fs, tmp_dir
+    ) -> None:
+        """``length=-1`` must request stored bytes, not the configured 64 MiB."""
+        path = f"{tmp_dir}/pread-len-neg1.bin"
+        payload = b"hello goosefs " * 100
+        await async_fs.write_file(path, payload)
+        data = await async_fs.positioned_read(path, offset=0, length=-1)
+        assert data == payload
+
 
 @pytest.mark.skipif(
     not _MASTER,
@@ -214,3 +236,43 @@ class TestSyncPositionedReadAuthRetryGuard:
         assert data == payload[16:48], (
             "sync positioned_read(offset=16, length=32) returned wrong slice"
         )
+
+    def test_sync_positioned_read_offset_past_block_raises_value_error(
+        self, sync_fs, sync_tmp_dir
+    ) -> None:
+        """``offset >= actual stored block length`` must be ``ValueError``,
+        not a worker short-read ``GoosefsError``. Master may report
+        ``block_info.length`` as the configured 64 MiB for a 100-byte file.
+        """
+        path = f"{sync_tmp_dir}/pread-oob.bin"
+        sync_fs.write_file(path, b"x" * 100)
+
+        with pytest.raises(ValueError, match=r"offset=1000 >= actual_block_length=100"):
+            sync_fs.positioned_read(path, offset=1000, length=10)
+
+    def test_sync_positioned_read_length_minus_one_reads_stored_bytes(
+        self, sync_fs, sync_tmp_dir
+    ) -> None:
+        """``length=-1`` must request the stored block length, not 64 MiB."""
+        path = f"{sync_tmp_dir}/pread-len-neg1.bin"
+        payload = b"hello goosefs " * 100
+        sync_fs.write_file(path, payload)
+
+        data = sync_fs.positioned_read(path, offset=0, length=-1)
+        assert data == payload
+
+    @pytest.mark.parametrize(
+        "wt",
+        [WriteType.MustCache, WriteType.CacheThrough, WriteType.Through],
+        ids=["MustCache", "CacheThrough", "Through"],
+    )
+    def test_sync_positioned_read_length_minus_one_across_write_types(
+        self, sync_fs, sync_tmp_dir, wt: WriteType
+    ) -> None:
+        """Through blocks live in UFS; ``positioned_read`` must send OpenUfsBlockOptions."""
+        path = f"{sync_tmp_dir}/pread-len-neg1-{wt}.bin"
+        payload = b"hello goosefs " * 100
+        sync_fs.write_file(path, payload, write_type=wt)
+
+        data = sync_fs.positioned_read(path, offset=0, length=-1)
+        assert data == payload

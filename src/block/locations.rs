@@ -330,6 +330,44 @@ fn recompute_in_goosefs_percentage(file_info: &mut FileInfo) {
     file_info.in_goose_fs_percentage = Some(pct as i32);
 }
 
+/// Fill `in_goose_fs_percentage` without probing workers (Java
+/// `populateFilePercentage` cheap paths).
+///
+/// Master `GetStatus` never computes this field (see
+/// `MutableInodeFile.generateClientFileInfo`). Java only overwrites it when
+/// the caller sets `checkBlockReplicas > 0`. Python `get_status()` has no
+/// such argument, so MustCache writes otherwise always report `0` even though
+/// the file lives entirely in GooseFS.
+///
+/// Applied only when CheckBlocks is off (`check_block_replicas == 0`):
+/// - empty file → 100
+/// - `TO_BE_PERSISTED` (ASYNC_THROUGH pending UFS) → 100 (Java shortcut)
+/// - completed MustCache (`cacheable && !persisted`) → 100
+/// - otherwise recompute from Master `BlockInfo.locations` (may stay 0)
+pub fn fill_in_goosefs_percentage_without_probe(file_info: &mut FileInfo) {
+    if file_info.folder.unwrap_or(false) {
+        return;
+    }
+    if file_info.length.unwrap_or(0) == 0 {
+        file_info.in_goose_fs_percentage = Some(100);
+        return;
+    }
+    let state = file_info.persistence_state.as_deref().unwrap_or("");
+    if state.eq_ignore_ascii_case("TO_BE_PERSISTED") {
+        file_info.in_goose_fs_percentage = Some(100);
+        return;
+    }
+    if file_info.completed.unwrap_or(false)
+        && file_info.cacheable.unwrap_or(false)
+        && !file_info.persisted.unwrap_or(false)
+        && (state.is_empty() || state.eq_ignore_ascii_case("NOT_PERSISTED"))
+    {
+        file_info.in_goose_fs_percentage = Some(100);
+        return;
+    }
+    recompute_in_goosefs_percentage(file_info);
+}
+
 /// Convenience: enrich when `check_count > 0`, swallowing enrichment errors
 /// (Master metadata still usable; routing falls back to hash).
 pub async fn maybe_enrich_file_block_locations(
@@ -437,6 +475,69 @@ mod tests {
         };
         recompute_in_goosefs_percentage(&mut fi);
         assert_eq!(fi.in_goose_fs_percentage, Some(0));
+    }
+
+    #[test]
+    fn fill_percentage_must_cache_completed_file_is_100() {
+        let mut fi = FileInfo {
+            length: Some(4096),
+            completed: Some(true),
+            folder: Some(false),
+            cacheable: Some(true),
+            persisted: Some(false),
+            persistence_state: Some("NOT_PERSISTED".to_string()),
+            file_block_infos: vec![fbi(1, 0, 4096)],
+            in_goose_fs_percentage: Some(0),
+            ..Default::default()
+        };
+        fill_in_goosefs_percentage_without_probe(&mut fi);
+        assert_eq!(fi.in_goose_fs_percentage, Some(100));
+    }
+
+    #[test]
+    fn fill_percentage_to_be_persisted_is_100() {
+        let mut fi = FileInfo {
+            length: Some(100),
+            completed: Some(true),
+            folder: Some(false),
+            cacheable: Some(true),
+            persisted: Some(false),
+            persistence_state: Some("TO_BE_PERSISTED".to_string()),
+            in_goose_fs_percentage: Some(0),
+            ..Default::default()
+        };
+        fill_in_goosefs_percentage_without_probe(&mut fi);
+        assert_eq!(fi.in_goose_fs_percentage, Some(100));
+    }
+
+    #[test]
+    fn fill_percentage_through_file_stays_zero_without_locations() {
+        let mut fi = FileInfo {
+            length: Some(200),
+            completed: Some(true),
+            folder: Some(false),
+            cacheable: Some(false),
+            persisted: Some(true),
+            persistence_state: Some("PERSISTED".to_string()),
+            file_block_infos: vec![fbi(1, 0, 200)],
+            in_goose_fs_percentage: Some(0),
+            ..Default::default()
+        };
+        fill_in_goosefs_percentage_without_probe(&mut fi);
+        assert_eq!(fi.in_goose_fs_percentage, Some(0));
+    }
+
+    #[test]
+    fn fill_percentage_empty_file_is_100() {
+        let mut fi = FileInfo {
+            length: Some(0),
+            completed: Some(true),
+            folder: Some(false),
+            in_goose_fs_percentage: Some(0),
+            ..Default::default()
+        };
+        fill_in_goosefs_percentage_without_probe(&mut fi);
+        assert_eq!(fi.in_goose_fs_percentage, Some(100));
     }
 
     #[test]

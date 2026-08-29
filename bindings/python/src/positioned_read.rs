@@ -47,8 +47,9 @@ use std::sync::Arc;
 
 use goosefs_sdk::client::WorkerClient;
 use goosefs_sdk::context::FileSystemContext;
-use goosefs_sdk::fs::URIStatus;
+use goosefs_sdk::fs::{InStreamOptions, URIStatus};
 use goosefs_sdk::io::GrpcBlockReader;
+use goosefs_sdk::proto::proto::dataserver::OpenUfsBlockOptions;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::PyResult;
 
@@ -141,42 +142,73 @@ pub(crate) fn resolve_block_id(
 
 /// Bytes stored in `block_id` / `block_index` for this file.
 ///
-/// Preference order:
-/// 1. `FileBlockInfo.block_info.length` when Master populated it
-/// 2. `min(configured block_size, file_length - block_offset)`
-/// 3. configured `block_size_bytes` as a last resort
+/// Master `BlockInfo.length` is not always the stored size of a short last
+/// block (`FileLocation.getLength()` can be the configured 64 MiB). Always
+/// clamp to `min(file_length - block_offset, configured block_size)` so
+/// `offset >= actual_block_length` fails fast as `ValueError` instead of
+/// sending an OOB `positioned_read` to the worker (short-read `GoosefsError`).
 fn actual_block_length(status: &URIStatus, block_id: i64, block_index: usize) -> i64 {
     let configured = status.block_size_bytes.max(0);
-    if let Some(fbi) = status.get_block_info(block_id) {
-        if let Some(len) = fbi.block_info.as_ref().and_then(|bi| bi.length) {
-            if len > 0 {
-                return len;
-            }
-        }
-        let offset = fbi.offset.unwrap_or(0).max(0);
-        let remaining = status.length.saturating_sub(offset);
-        if remaining > 0 {
-            return if configured > 0 {
-                remaining.min(configured)
+    let block_offset = status
+        .get_block_info(block_id)
+        .and_then(|fbi| fbi.offset)
+        .filter(|o| *o >= 0)
+        .unwrap_or_else(|| {
+            if configured > 0 {
+                (block_index as i64).saturating_mul(configured)
             } else {
-                remaining
-            };
-        }
+                0
+            }
+        });
+    let remaining = status.length.saturating_sub(block_offset);
+    if remaining <= 0 {
+        return 0;
     }
-    let offset = if configured > 0 {
-        (block_index as i64).saturating_mul(configured)
+    let cap = if configured > 0 {
+        remaining.min(configured)
+    } else {
+        remaining
+    };
+    if let Some(len) = status
+        .get_block_info(block_id)
+        .and_then(|fbi| fbi.block_info.as_ref())
+        .and_then(|bi| bi.length)
+        .filter(|len| *len > 0)
+    {
+        return len.min(cap);
+    }
+    cap
+}
+
+/// `OpenUfsBlockOptions` for a positioned read, matching
+/// [`goosefs_sdk::io::GoosefsFileInStream`].
+///
+/// Through-mode blocks live only in UFS. Passing `None` makes the worker
+/// return `Internal` because it cannot open the UFS file.
+pub(crate) fn open_ufs_block_options(
+    status: &URIStatus,
+    block_index: usize,
+) -> Option<OpenUfsBlockOptions> {
+    if status.ufs_path.is_empty() {
+        return None;
+    }
+    let block_size = status.block_size_bytes;
+    let offset_in_file = if block_size > 0 {
+        (block_index as i64).saturating_mul(block_size)
     } else {
         0
     };
-    let remaining = status.length.saturating_sub(offset);
-    if remaining > 0 {
-        return if configured > 0 {
-            remaining.min(configured)
-        } else {
-            remaining
-        };
-    }
-    configured
+    Some(OpenUfsBlockOptions {
+        ufs_path: Some(status.ufs_path.clone()),
+        offset_in_file: Some(offset_in_file),
+        block_size: Some(block_size),
+        max_ufs_read_concurrency: Some(InStreamOptions::default().max_ufs_read_concurrency),
+        mount_id: Some(status.mount_id),
+        no_cache: Some(!status.cacheable),
+        user: None,
+        caller_type: None,
+        file_length: Some(status.length),
+    })
 }
 
 /// Master `BlockInfo.locations` for `block_id`, or empty when unavailable.
@@ -333,12 +365,15 @@ where
 /// idiomatic Rust pattern for this situation.
 pub(crate) async fn positioned_read_with_reauth(
     ctx: Arc<FileSystemContext>,
+    status: &URIStatus,
     block_id: i64,
-    locations: &[goosefs_sdk::proto::grpc::BlockLocation],
+    block_index: usize,
     offset: i64,
     effective_length: i64,
     chunk_size: i64,
 ) -> PyResult<Vec<u8>> {
+    let locations = block_locations_from_status(status, block_id);
+    let ufs_opts = open_ufs_block_options(status, block_index);
     // 1. Route to the responsible worker.
     //
     // Prefer Master BlockInfo.locations (Java getInStream / Rust
@@ -361,7 +396,7 @@ pub(crate) async fn positioned_read_with_reauth(
     let max_retry_node = ctx.config().file_read_max_node_retry;
     let worker_info = ctx
         .acquire_router()
-        .select_worker_for_read(block_id, locations, replication, max_retry_node)
+        .select_worker_for_read(block_id, &locations, replication, max_retry_node)
         .await
         .map_err(map_err)?;
     let net_addr = worker_info
@@ -397,7 +432,7 @@ pub(crate) async fn positioned_read_with_reauth(
         offset,
         effective_length,
         chunk_size,
-        /* ufs_opts */ None,
+        ufs_opts.clone(),
     )
     .await
     {
@@ -413,7 +448,7 @@ pub(crate) async fn positioned_read_with_reauth(
                 offset,
                 effective_length,
                 chunk_size,
-                /* ufs_opts */ None,
+                ufs_opts,
             )
             .await
             .map_err(map_err)?
@@ -502,6 +537,41 @@ mod tests {
         let (_, len1) = resolve_block_id(&status, 1, "/big.bin").unwrap();
         assert_eq!(len0, 64 << 20);
         assert_eq!(len1, 100);
+    }
+
+    #[test]
+    fn resolve_block_id_clamps_inflated_master_block_length() {
+        // FileLocation.getLength() / default block size on a 100-byte file.
+        let status = status_with_blocks(100, 64 << 20, &[(1, 0, 64 << 20)]);
+        let (_, len) = resolve_block_id(&status, 0, "/blob.bin").unwrap();
+        assert_eq!(len, 100);
+    }
+
+    #[test]
+    fn open_ufs_block_options_none_when_ufs_path_empty() {
+        let status = status_with_blocks(100, 64 << 20, &[(1, 0, 64 << 20)]);
+        assert!(open_ufs_block_options(&status, 0).is_none());
+    }
+
+    #[test]
+    fn open_ufs_block_options_sets_geometry_from_status() {
+        let mut status = status_with_blocks(
+            (64 << 20) + 100,
+            64 << 20,
+            &[(1, 0, 64 << 20), (2, 64 << 20, 100)],
+        );
+        status.ufs_path = "cosn://bucket/file.bin".into();
+        status.mount_id = 7;
+        status.cacheable = false;
+
+        let opts = open_ufs_block_options(&status, 1).expect("ufs path present");
+        assert_eq!(opts.ufs_path.as_deref(), Some("cosn://bucket/file.bin"));
+        assert_eq!(opts.offset_in_file, Some(64 << 20));
+        assert_eq!(opts.block_size, Some(64 << 20));
+        assert_eq!(opts.mount_id, Some(7));
+        assert_eq!(opts.no_cache, Some(true));
+        assert_eq!(opts.file_length, Some((64 << 20) + 100));
+        assert_eq!(opts.max_ufs_read_concurrency, Some(8));
     }
 
     // ── Helper: fabricate a WorkerClient from a never-connected channel ────

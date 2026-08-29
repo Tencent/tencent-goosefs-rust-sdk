@@ -22,7 +22,8 @@ pub mod short_circuit;
 
 pub use locations::{
     enrich_file_block_locations, enrich_file_block_locations_with_router,
-    ensure_block_ids_from_file_block_infos, maybe_enrich_file_block_locations,
+    ensure_block_ids_from_file_block_infos, fill_in_goosefs_percentage_without_probe,
+    maybe_enrich_file_block_locations,
 };
 pub use mapper::{BlockMapper, BlockReadPlan, BlockWritePlan};
 pub use router::WorkerRouter;

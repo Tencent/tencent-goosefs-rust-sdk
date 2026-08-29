@@ -270,6 +270,12 @@ impl FileSystem for BaseFileSystem {
         // overwrite BlockInfo.locations (same as `fs stat --check_replicas`).
         // Enrichment mutates this owned clone — never write locations back
         // into the metadata cache (INV-MC-D1).
+        //
+        // Master never computes `in_goose_fs_percentage` (always 0). Java only
+        // fills it when CheckBlocks is set; Python `get_status()` has no such
+        // argument, so without a cheap fill MustCache writes always report 0.
+        // CheckBlocks, when enabled, stays authoritative — do not overlay the
+        // MustCache heuristic after a probe that found 0 cached bytes.
         let check = self.ctx.config().check_block_replicas;
         if check > 0 {
             let router = self.ctx.acquire_router();
@@ -285,6 +291,7 @@ impl FileSystem for BaseFileSystem {
             .await;
         } else {
             crate::block::ensure_block_ids_from_file_block_infos(&mut fi);
+            crate::block::fill_in_goosefs_percentage_without_probe(&mut fi);
         }
         Ok(URIStatus::from_proto(fi))
     }

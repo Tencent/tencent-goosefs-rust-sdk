@@ -26,13 +26,14 @@ a live cluster:
 * ``AlreadyExists``    — mkdir an existing directory.
 * ``InvalidArgument``  — pass an empty path.
 * ``DirectoryNotEmpty``— delete a non-empty dir without ``recursive``.
+* ``IsADirectory``     — ``read_file`` / ``read_range`` / ``open_file`` on a dir.
 
 The remaining classes (``PermissionDenied``, ``AuthenticationFailed``,
 ``MasterUnavailable``, ``RpcError``, ``IoError``, ``FileIncomplete``,
-``IsADirectory``, ``NoWorkerAvailable``, ``ConfigError``,
-``GoosefsError``) cover internal SDK conditions that cannot be reliably
-provoked from the public API surface in P2; their *registration* and
-*subclass relationship* is verified statically below.
+``NoWorkerAvailable``, ``ConfigError``, ``GoosefsError``) cover internal
+SDK conditions that cannot be reliably provoked from the public API
+surface in P2; their *registration* and *subclass relationship* is
+verified statically below.
 """
 
 from __future__ import annotations
@@ -148,6 +149,34 @@ async def test_directory_not_empty_on_non_recursive_delete(
     with pytest.raises((DirectoryNotEmpty, GoosefsError)):
         await async_fs.delete(parent)
     assert await async_fs.exists(parent), "delete must not have partially succeeded"
+
+
+async def test_read_file_on_directory_raises_is_a_directory(
+    async_fs: AsyncGoosefs, tmp_dir: str
+) -> None:
+    """``read_file`` on a directory must raise ``IsADirectory``, not return ``b''``."""
+    path = f"{tmp_dir}/is-a-dir"
+    await async_fs.mkdir(path)
+    with pytest.raises(IsADirectory):
+        await async_fs.read_file(path)
+
+
+async def test_read_range_on_directory_raises_is_a_directory(
+    async_fs: AsyncGoosefs, tmp_dir: str
+) -> None:
+    path = f"{tmp_dir}/is-a-dir-range"
+    await async_fs.mkdir(path)
+    with pytest.raises(IsADirectory):
+        await async_fs.read_range(path, 0, 1)
+
+
+async def test_open_file_on_directory_raises_is_a_directory(
+    async_fs: AsyncGoosefs, tmp_dir: str
+) -> None:
+    path = f"{tmp_dir}/is-a-dir-open"
+    await async_fs.mkdir(path)
+    with pytest.raises(IsADirectory):
+        await async_fs.open_file(path)
 
 
 async def test_use_after_close_raises_runtime_error(async_fs: AsyncGoosefs, tmp_dir: str) -> None:

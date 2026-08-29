@@ -164,7 +164,7 @@ pub struct GoosefsFileReader {
 
 // ── F1: on_file_open dedup cache ─────────────────────────────────────────
 //
-// `attach_cache` is called on every `open_range_with_context`. When the same
+// `attach_cache` is called on every context open. When the same
 // file is read repeatedly (e.g. Lance vector search hitting the same .lance
 // file), `on_file_open` is invoked every time even though the (file_id, length,
 // mtime) triple is identical. The `versions` RwLock read inside `on_file_open`
@@ -198,22 +198,7 @@ impl GoosefsFileReader {
     /// to Master or Worker Manager is performed. This is the recommended
     /// constructor for long-running clients (OpenDAL, Lance, etc.).
     pub async fn open_with_context(ctx: Arc<FileSystemContext>, path: &str) -> Result<Self> {
-        let (file_info, router) = Self::init_with_context(&ctx, path).await?;
-        let file_length = file_info.length.unwrap_or(0) as u64;
-        let config = ctx.config().clone();
-        let pool = Some(ctx.acquire_worker_pool());
-        let mut reader = Self::build(
-            &config,
-            path,
-            file_info,
-            router,
-            pool,
-            Some(ctx.clone()),
-            0,
-            file_length,
-        )?;
-        reader.attach_cache(&ctx).await;
-        Ok(reader)
+        Self::open_inner(ctx, path, None, true).await
     }
 
     /// Open a file for range reading using a shared [`FileSystemContext`].
@@ -226,7 +211,26 @@ impl GoosefsFileReader {
         offset: u64,
         length: u64,
     ) -> Result<Self> {
+        Self::open_inner(ctx, path, Some((offset, length)), true).await
+    }
+
+    /// Shared opener for the context path.
+    ///
+    /// `range = None` reads the whole file. `use_page_cache` is `true` for the
+    /// streaming constructors (`open_with_context` / `open_range_with_context`,
+    /// OpenDAL / Lance) and `false` for the one-shot helpers (`read_file` /
+    /// `read_range`), which stay worker-direct per the page-cache contract.
+    async fn open_inner(
+        ctx: Arc<FileSystemContext>,
+        path: &str,
+        range: Option<(u64, u64)>,
+        use_page_cache: bool,
+    ) -> Result<Self> {
         let (file_info, router) = Self::init_with_context(&ctx, path).await?;
+        let (offset, length) = match range {
+            Some((offset, length)) => (offset, length),
+            None => (0, file_info.length.unwrap_or(0) as u64),
+        };
         let config = ctx.config().clone();
         let pool = Some(ctx.acquire_worker_pool());
         let mut reader = Self::build(
@@ -239,7 +243,7 @@ impl GoosefsFileReader {
             offset,
             length,
         )?;
-        reader.attach_cache(&ctx).await;
+        reader.attach_cache(&ctx, use_page_cache).await;
         Ok(reader)
     }
 
@@ -270,6 +274,7 @@ impl GoosefsFileReader {
         // Shared Master + metadata cache (status / NotFound / incomplete fall-through).
         // CheckBlocks enrichment below mutates this owned copy (INV-MC-D1).
         let mut file_info = ctx.get_file_info_cached(path).await?;
+        Self::reject_directory(&file_info, path)?;
 
         let file_length = file_info.length.unwrap_or(0);
         if file_length == 0 {
@@ -312,6 +317,20 @@ impl GoosefsFileReader {
         .await;
 
         Ok((Arc::new(file_info), router))
+    }
+
+    /// Reject a directory the same way Java `BaseFileSystem.openFile` does.
+    ///
+    /// Directories report `length == 0`, so skipping this check makes
+    /// `read_file` / `read_range` return empty bytes instead of
+    /// [`Error::OpenDirectory`].
+    fn reject_directory(file_info: &FileInfo, path: &str) -> Result<()> {
+        if file_info.folder.unwrap_or(false) {
+            return Err(Error::OpenDirectory {
+                path: path.to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// Internal: build the reader from file info and router.
@@ -385,18 +404,30 @@ impl GoosefsFileReader {
         })
     }
 
-    /// Inject the shared local page cache and short-circuit factory from a
-    /// shared [`FileSystemContext`] (best-effort).
+    /// Inject the shared short-circuit factory and (optionally) the local page
+    /// cache from a shared [`FileSystemContext`] (best-effort).
+    ///
+    /// `use_page_cache` is `false` for the one-shot `read_file` / `read_range`
+    /// helpers: those stay on the worker-direct path (Python binding contract
+    /// and `docs/CLIENT_PAGE_CACHE_DESIGN.md` §14.1). Streaming
+    /// `open_with_context` still attaches the cache for OpenDAL / Lance.
+    /// Short-circuit is independent of that flag.
     ///
     /// `build()` is synchronous, but `on_file_open` is async, so cache
     /// activation is deferred to this async opener helper. The `file_id`,
     /// `length` and `mtime` derivations are kept **byte-for-byte aligned** with
     /// `URIStatus::from_proto` (all `unwrap_or(0)`), so this reader hits exactly
     /// the same on-disk pages as `GoosefsFileInStream`.
-    async fn attach_cache(&mut self, ctx: &Arc<FileSystemContext>) {
+    async fn attach_cache(&mut self, ctx: &Arc<FileSystemContext>, use_page_cache: bool) {
         // Short-circuit is independent of the page cache: it can accelerate the
         // worker read even when the page cache is disabled.
         self.short_circuit = ctx.acquire_short_circuit();
+
+        if !use_page_cache {
+            self.cache = None;
+            self.cache_fill = false;
+            return;
+        }
 
         // HR-1 (design ): `file_id <= 0` means no stable inode identity.
         // See [`page_cache_eligible`]. This guard MUST run before
@@ -492,10 +523,10 @@ impl GoosefsFileReader {
         };
 
         // 2) Fetch the bytes. With a cache, route through `read_through_cache`
-        //    (this reader acts as the miss source via `ExternalRangeReader`);
-        //    otherwise read directly, which is byte-for-byte equivalent to the
-        //    pre-cache implementation (same plan → same worker verb → same
-        //    bytes).
+        //    (this reader acts as the miss source via `ExternalRangeReader`,
+        //    which uses `positioned_read` per page — the streaming ReadBlock
+        //    verb deadlocks on the 2nd page of the same block). Otherwise read
+        //    the whole segment directly (pre-cache worker-direct path).
         let data = match self.cache.clone() {
             Some(cache) => {
                 let file_id = self.cache_file_id.clone();
@@ -523,7 +554,7 @@ impl GoosefsFileReader {
                 )
                 .await?
             }
-            None => self.read_file_range(abs_offset, abs_end).await?,
+            None => self.read_file_range(abs_offset, abs_end, false).await?,
         };
 
         // 3) Advance the iterator state (identical to the old implementation).
@@ -556,7 +587,20 @@ impl GoosefsFileReader {
     ///
     /// Uses only `&self` — it never touches iterator state, so it is safe to be
     /// re-entered as the cache-miss source.
-    async fn read_segment(&self, block_id: i64, plan: &BlockReadPlan) -> Result<Bytes> {
+    ///
+    /// `positioned = true` uses `GrpcBlockReader::positioned_read`
+    /// (`position_short`). Page-cache fills issue many small reads against the
+    /// **same** block; the streaming `ReadBlock` verb holds the worker-side
+    /// block lock until the bidi stream is fully closed, so a second page open
+    /// on the same connection can wait forever (Python `read_file` hang on the
+    /// 2nd page). `position_short` completes and unlocks after exactly
+    /// `length` bytes, matching `GoosefsFileInStream`.
+    async fn read_segment(
+        &self,
+        block_id: i64,
+        plan: &BlockReadPlan,
+        positioned: bool,
+    ) -> Result<Bytes> {
         // Try the short-circuit (local mmap) path first; a recoverable failure
         // returns `None` and we fall through to the gRPC path below().
         if let Some(sc_result) = self.try_short_circuit_read(block_id, plan).await {
@@ -618,7 +662,7 @@ impl GoosefsFileReader {
         // ② Read the segment + single-flight auth reconnect on RPC failure.
         let worker_generation = worker.generation();
         match self
-            .try_read_block(&worker, block_id, plan, ufs_options.clone())
+            .try_read_block(&worker, block_id, plan, ufs_options.clone(), positioned)
             .await
         {
             Ok(d) => Ok(d),
@@ -633,7 +677,7 @@ impl GoosefsFileReader {
                 let fresh = self
                     .reconnect_worker(&worker_addr, Some(worker_generation))
                     .await?;
-                self.try_read_block(&fresh, block_id, plan, ufs_options)
+                self.try_read_block(&fresh, block_id, plan, ufs_options, positioned)
                     .await
             }
             Err(e) => Err(e),
@@ -646,7 +690,12 @@ impl GoosefsFileReader {
     /// `self.length`, so it is safe to be re-entered as the cache-miss source
     /// (page-level back-fill) without corrupting the outer `read_next_block`
     /// iteration.
-    async fn read_file_range(&self, abs_offset: i64, abs_end: i64) -> Result<Bytes> {
+    async fn read_file_range(
+        &self,
+        abs_offset: i64,
+        abs_end: i64,
+        positioned: bool,
+    ) -> Result<Bytes> {
         if abs_end <= abs_offset {
             return Ok(Bytes::new());
         }
@@ -669,7 +718,7 @@ impl GoosefsFileReader {
             if block_id <= 0 {
                 continue;
             }
-            let data = self.read_segment(block_id, plan).await?;
+            let data = self.read_segment(block_id, plan, positioned).await?;
             if data.is_empty() {
                 return Err(Error::Internal {
                     message: format!("read_file_range: 0 bytes for block {block_id}"),
@@ -868,13 +917,29 @@ impl GoosefsFileReader {
     ///
     /// Factored out from `read_next_block` so the auth-failure retry path
     /// can reuse the same logic with a fresh worker.
+    ///
+    /// `positioned` selects `position_short` (page-cache miss / random fill)
+    /// vs the streaming `ReadBlock` verb (whole-segment sequential read).
     async fn try_read_block(
         &self,
         worker: &WorkerClient,
         block_id: i64,
         plan: &BlockReadPlan,
         ufs_options: Option<OpenUfsBlockOptions>,
+        positioned: bool,
     ) -> Result<Bytes> {
+        if positioned {
+            return GrpcBlockReader::positioned_read(
+                worker,
+                block_id,
+                plan.offset_in_block as i64,
+                plan.length as i64,
+                self.config.chunk_size as i64,
+                ufs_options,
+            )
+            .await;
+        }
+
         let mut block_reader = GrpcBlockReader::open(
             worker,
             block_id,
@@ -959,6 +1024,8 @@ impl GoosefsFileReader {
     /// [`FileSystemContext`]. This is the recommended entry point for
     /// long-running clients that want to avoid per-call handshakes.
     ///
+    /// Returns [`Error::OpenDirectory`] if `path` is a directory.
+    ///
     /// ```rust,no_run
     /// # async fn example() -> goosefs_sdk::error::Result<()> {
     /// use std::sync::Arc;
@@ -973,7 +1040,11 @@ impl GoosefsFileReader {
     /// # }
     /// ```
     pub async fn read_file_with_context(ctx: Arc<FileSystemContext>, path: &str) -> Result<Bytes> {
-        let mut reader = Self::open_with_context(ctx, path).await?;
+        // One-shot helpers stay worker-direct: attaching the page cache here
+        // turns a single streamed block read into per-page positioned fills
+        // and (before the miss source used `position_short`) hung on the 2nd
+        // page. Streaming `open_with_context` is the cache-aware path.
+        let mut reader = Self::open_inner(ctx, path, None, false).await?;
         reader.read_all().await
     }
 
@@ -984,7 +1055,7 @@ impl GoosefsFileReader {
         offset: u64,
         length: u64,
     ) -> Result<Bytes> {
-        let mut reader = Self::open_range_with_context(ctx, path, offset, length).await?;
+        let mut reader = Self::open_inner(ctx, path, Some((offset, length)), false).await?;
         reader.read_all().await
     }
 
@@ -1170,17 +1241,18 @@ impl GoosefsFileReader {
     }
 }
 
-/// Bridges the reader's stateless worker/UFS range read to the cache layer's
-/// miss source, so [`crate::cache::read_through_cache`] can drive page fills
+/// Bridges the reader's worker/UFS range read to the cache layer's miss
+/// source, so [`crate::cache::read_through_cache`] can drive page fills
 /// from within [`GoosefsFileReader::read_next_block`].
 ///
-/// `read_file_range` is stateless (`&self`), so being re-entered here does not
-/// perturb the outer `read_next_block` iteration state (`plans` /
-/// `current_plan_index` / `offset` / `length`).
+/// Misses use `positioned_read` (`position_short`): streaming `ReadBlock`
+/// holds the worker block lock until the bidi stream closes, so a 2nd-page
+/// fill of the same block can hang. `read_file_range` is stateless (`&self`),
+/// so re-entry here does not perturb `read_next_block` iteration state.
 #[async_trait::async_trait]
 impl ExternalRangeReader for GoosefsFileReader {
     async fn read_range(&mut self, offset: i64, end: i64) -> Result<Bytes> {
-        self.read_file_range(offset, end).await
+        self.read_file_range(offset, end, true).await
     }
 }
 
@@ -1236,6 +1308,29 @@ mod tests {
         assert_eq!(reader.block_logical_size(2), bs / 2);
         // Past EOF clamps to 0 (never negative).
         assert_eq!(reader.block_logical_size(99), 0);
+    }
+
+    /// `read_file` / `read_range` must reject directories (Java
+    /// `openFile` / `OpenDirectoryException`). Without this, a directory's
+    /// length-0 metadata would return empty bytes.
+    #[test]
+    fn test_reject_directory() {
+        let mut info = FileInfo {
+            folder: Some(true),
+            length: Some(0),
+            ..Default::default()
+        };
+        let err = GoosefsFileReader::reject_directory(&info, "/d").unwrap_err();
+        assert!(
+            matches!(err, Error::OpenDirectory { ref path } if path == "/d"),
+            "expected OpenDirectory, got {err:?}"
+        );
+
+        info.folder = Some(false);
+        assert!(GoosefsFileReader::reject_directory(&info, "/f").is_ok());
+
+        info.folder = None;
+        assert!(GoosefsFileReader::reject_directory(&info, "/f").is_ok());
     }
 
     /// A freshly-built reader (no context) has caching and short-circuit off,

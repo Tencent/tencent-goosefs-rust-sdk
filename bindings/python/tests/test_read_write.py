@@ -47,7 +47,7 @@ import asyncio
 
 import pytest
 from goosefs import AsyncGoosefs, Goosefs, WriteType
-from goosefs.exceptions import GoosefsError
+from goosefs.exceptions import GoosefsError, InvalidArgument, IsADirectory
 
 # ---------------------------------------------------------------------------
 # Parametrisation
@@ -123,6 +123,20 @@ async def test_async_round_trip(
 
 
 @pytest.mark.asyncio
+async def test_async_must_cache_get_status_reports_in_goosefs_percentage(
+    async_fs: AsyncGoosefs, tmp_dir: str
+) -> None:
+    """Same contract as the sync test: MustCache → ``in_goose_fs_percentage > 0``."""
+    path = f"{tmp_dir}/must-cache-pct.bin"
+    await async_fs.write_file(path, b"x" * 4096, write_type=WriteType.MustCache)
+
+    st = await async_fs.get_status(path)
+    assert st.cacheable is True
+    assert st.is_persisted() is False
+    assert st.in_goose_fs_percentage > 0
+
+
+@pytest.mark.asyncio
 async def test_async_read_range_arbitrary_offsets(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     """Spot-check ``read_range`` on three offset+length combinations."""
     path = f"{tmp_dir}/read-range.bin"
@@ -140,6 +154,22 @@ async def test_async_read_range_arbitrary_offsets(async_fs: AsyncGoosefs, tmp_di
     # 3) Range that *crosses* EOF: the SDK short-reads.
     chunk = await async_fs.read_range(path, 4000, 1024)
     assert chunk == payload[4000:4096], "read_range past EOF should short-read, not raise"
+
+
+@pytest.mark.asyncio
+async def test_async_read_range_rejects_negative_offset_and_length(
+    async_fs: AsyncGoosefs, tmp_dir: str
+) -> None:
+    """Negatives must be ``InvalidArgument``, not PyO3 ``OverflowError``
+    from extracting into ``u64``.
+    """
+    path = f"{tmp_dir}/read-range-neg.bin"
+    await async_fs.write_file(path, b"x" * 10)
+
+    with pytest.raises(InvalidArgument, match="non-negative"):
+        await async_fs.read_range(path, 0, -1)
+    with pytest.raises(InvalidArgument, match="non-negative"):
+        await async_fs.read_range(path, -1, 1)
 
 
 @pytest.mark.asyncio
@@ -212,6 +242,22 @@ def test_sync_round_trip(
     assert st.is_completed()
 
 
+def test_sync_must_cache_get_status_reports_in_goosefs_percentage(
+    sync_fs: Goosefs, sync_tmp_dir: str
+) -> None:
+    """MustCache writes live entirely in GooseFS; ``in_goose_fs_percentage``
+    must not stay at Master's default of 0 (Python ``get_status`` has no
+    ``checkBlockReplicas`` argument to trigger the Java CheckBlocks path).
+    """
+    path = f"{sync_tmp_dir}/must-cache-pct.bin"
+    sync_fs.write_file(path, b"x" * 4096, write_type=WriteType.MustCache)
+
+    st = sync_fs.get_status(path)
+    assert st.cacheable is True
+    assert st.is_persisted() is False
+    assert st.in_goose_fs_percentage > 0
+
+
 def test_sync_read_range_arbitrary_offsets(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
     path = f"{sync_tmp_dir}/sync-read-range.bin"
     payload = _make_payload("sync-read-range", 4096)
@@ -220,6 +266,31 @@ def test_sync_read_range_arbitrary_offsets(sync_fs: Goosefs, sync_tmp_dir: str) 
     assert sync_fs.read_range(path, 1024, 512) == payload[1024:1536]
     assert sync_fs.read_range(path, 4000, 96) == payload[4000:4096]
     assert sync_fs.read_range(path, 4000, 1024) == payload[4000:4096]
+
+
+def test_sync_read_range_rejects_negative_offset_and_length(
+    sync_fs: Goosefs, sync_tmp_dir: str
+) -> None:
+    """Negatives must be ``InvalidArgument``, not PyO3 ``OverflowError``."""
+    path = f"{sync_tmp_dir}/sync-read-range-neg.bin"
+    sync_fs.write_file(path, b"x" * 10)
+
+    with pytest.raises(InvalidArgument, match="non-negative"):
+        sync_fs.read_range(path, 0, -1)
+    with pytest.raises(InvalidArgument, match="non-negative"):
+        sync_fs.read_range(path, -1, 1)
+
+
+def test_sync_read_file_on_directory_raises_is_a_directory(
+    sync_fs: Goosefs, sync_tmp_dir: str
+) -> None:
+    """``read_file`` / ``read_range`` on a directory must raise, not return ``b''``."""
+    path = f"{sync_tmp_dir}/is-a-dir"
+    sync_fs.mkdir(path)
+    with pytest.raises(IsADirectory):
+        sync_fs.read_file(path)
+    with pytest.raises(IsADirectory):
+        sync_fs.read_range(path, 0, 1)
 
 
 def test_sync_write_rejects_non_bytes(sync_fs: Goosefs, sync_tmp_dir: str) -> None:

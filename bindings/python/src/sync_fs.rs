@@ -521,8 +521,12 @@ impl PyGoosefs {
 
     /// `fs.read_file(path)` → `bytes` (full file contents).
     ///
-    /// Synchronous counterpart of [`PyAsyncGoosefs::read_file`]; same caveats
-    /// about full materialisation in RAM apply (Review #17.1: documented).
+    /// Worker-direct one-shot path: does **not** consult the client page cache
+    /// (only `open_file` does). Synchronous counterpart of
+    /// [`PyAsyncGoosefs::read_file`]; same caveats about full materialisation
+    /// in RAM apply (Review #17.1: documented).
+    ///
+    /// Raises [`crate::errors::IsADirectory`] if `path` is a directory.
     fn read_file<'py>(
         &self,
         py: Python<'py>,
@@ -542,13 +546,17 @@ impl PyGoosefs {
     }
 
     /// `fs.read_range(path, offset, length)` → `bytes`.
+    ///
+    /// Both `offset` and `length` must be non-negative; negatives raise
+    /// `InvalidArgument` (not `OverflowError`). Past-EOF ranges short-read.
     fn read_range<'py>(
         &self,
         py: Python<'py>,
         path: String,
-        offset: u64,
-        length: u64,
+        offset: i64,
+        length: i64,
     ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        let (offset, length) = crate::filesystem::parse_read_range(offset, length)?;
         let h = self.handle()?;
         let bytes: bytes::Bytes = Self::guarded_block_on(py, async move {
             goosefs_sdk::io::GoosefsFileReader::read_range_with_context(
@@ -747,11 +755,11 @@ impl PyGoosefs {
             //       Delegated to `positioned_read_with_reauth` so both
             //       async and sync paths share the same retry logic
             //       (Critical #1 fix: sync was previously missing this).
-            let locations = crate::positioned_read::block_locations_from_status(&status, block_id);
             let bytes = crate::positioned_read::positioned_read_with_reauth(
                 h.ctx,
+                &status,
                 block_id,
-                &locations,
+                block_index,
                 offset,
                 effective_length,
                 chunk_size,

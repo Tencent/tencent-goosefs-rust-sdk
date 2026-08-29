@@ -57,6 +57,24 @@ async def test_get_status_raises_notfound(async_fs: AsyncGoosefs, tmp_dir: str) 
         await async_fs.get_status(missing)
 
 
+async def test_get_status_file_reports_block_ids(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
+    """Master proto omits ``blockIds``; ``get_status`` must still surface them
+    from ``file_block_infos`` (Java ``GrpcUtils.toProto`` does not serialise
+    the old field).
+    """
+    path = f"{tmp_dir}/block-ids.bin"
+    await async_fs.write_file(path, b"x" * 100)
+
+    st = await async_fs.get_status(path)
+    assert st.block_ids, "URIStatus.block_ids must not stay empty after write_file"
+    assert all(isinstance(b, int) and b > 0 for b in st.block_ids)
+
+    listed = await async_fs.list_status(tmp_dir)
+    files = [s for s in listed if s.path == path]
+    assert len(files) == 1
+    assert files[0].block_ids == list(st.block_ids)
+
+
 async def test_exists_returns_false_for_missing(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     assert await async_fs.exists(f"{tmp_dir}/missing") is False
 
