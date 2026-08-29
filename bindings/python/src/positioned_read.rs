@@ -141,42 +141,42 @@ pub(crate) fn resolve_block_id(
 
 /// Bytes stored in `block_id` / `block_index` for this file.
 ///
-/// Preference order:
-/// 1. `FileBlockInfo.block_info.length` when Master populated it
-/// 2. `min(configured block_size, file_length - block_offset)`
-/// 3. configured `block_size_bytes` as a last resort
+/// Master `BlockInfo.length` is not always the stored size of a short last
+/// block (`FileLocation.getLength()` can be the configured 64 MiB). Always
+/// clamp to `min(file_length - block_offset, configured block_size)` so
+/// `offset >= actual_block_length` fails fast as `ValueError` instead of
+/// sending an OOB `positioned_read` to the worker (short-read `GoosefsError`).
 fn actual_block_length(status: &URIStatus, block_id: i64, block_index: usize) -> i64 {
     let configured = status.block_size_bytes.max(0);
-    if let Some(fbi) = status.get_block_info(block_id) {
-        if let Some(len) = fbi.block_info.as_ref().and_then(|bi| bi.length) {
-            if len > 0 {
-                return len;
-            }
-        }
-        let offset = fbi.offset.unwrap_or(0).max(0);
-        let remaining = status.length.saturating_sub(offset);
-        if remaining > 0 {
-            return if configured > 0 {
-                remaining.min(configured)
+    let block_offset = status
+        .get_block_info(block_id)
+        .and_then(|fbi| fbi.offset)
+        .filter(|o| *o >= 0)
+        .unwrap_or_else(|| {
+            if configured > 0 {
+                (block_index as i64).saturating_mul(configured)
             } else {
-                remaining
-            };
-        }
+                0
+            }
+        });
+    let remaining = status.length.saturating_sub(block_offset);
+    if remaining <= 0 {
+        return 0;
     }
-    let offset = if configured > 0 {
-        (block_index as i64).saturating_mul(configured)
+    let cap = if configured > 0 {
+        remaining.min(configured)
     } else {
-        0
+        remaining
     };
-    let remaining = status.length.saturating_sub(offset);
-    if remaining > 0 {
-        return if configured > 0 {
-            remaining.min(configured)
-        } else {
-            remaining
-        };
+    if let Some(len) = status
+        .get_block_info(block_id)
+        .and_then(|fbi| fbi.block_info.as_ref())
+        .and_then(|bi| bi.length)
+        .filter(|len| *len > 0)
+    {
+        return len.min(cap);
     }
-    configured
+    cap
 }
 
 /// Master `BlockInfo.locations` for `block_id`, or empty when unavailable.
@@ -502,6 +502,14 @@ mod tests {
         let (_, len1) = resolve_block_id(&status, 1, "/big.bin").unwrap();
         assert_eq!(len0, 64 << 20);
         assert_eq!(len1, 100);
+    }
+
+    #[test]
+    fn resolve_block_id_clamps_inflated_master_block_length() {
+        // FileLocation.getLength() / default block size on a 100-byte file.
+        let status = status_with_blocks(100, 64 << 20, &[(1, 0, 64 << 20)]);
+        let (_, len) = resolve_block_id(&status, 0, "/blob.bin").unwrap();
+        assert_eq!(len, 100);
     }
 
     // ── Helper: fabricate a WorkerClient from a never-connected channel ────
