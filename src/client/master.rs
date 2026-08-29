@@ -540,6 +540,55 @@ impl MasterClient {
         result
     }
 
+    /// `GetStatus` with an explicit `load_metadata_type` / `sync_interval_ms`.
+    ///
+    /// # Java authority
+    ///
+    /// The `close()` recovery path in `GoosefsFileOutStream` re-reads the file
+    /// with `LoadMetadataPType.ALWAYS` and `syncIntervalMs = 0` after a
+    /// `completeFile` failure, forcing the Master to re-import metadata from
+    /// the UFS copy that was already written.
+    ///
+    /// Unlike [`Self::get_status`] this deliberately bypasses no client-side
+    /// cache of its own — callers wanting cache semantics should go through
+    /// `FileSystem::get_status_with_options`.
+    #[instrument(skip(self), fields(path = %path, ?load_metadata_type, ?sync_interval_ms))]
+    pub async fn get_status_with_load_type(
+        &self,
+        path: &str,
+        load_metadata_type: Option<LoadMetadataPType>,
+        sync_interval_ms: Option<i64>,
+    ) -> Result<FileInfo> {
+        let load = load_metadata_type.map(|t| t as i32);
+        let mut path_owned: Option<String> = Some(path.to_string());
+        self.with_retry("get_status", |mut client| {
+            let req_path = path_owned.take().unwrap_or_else(|| path.to_string());
+            async move {
+                let req = GetStatusPRequest {
+                    path: Some(req_path),
+                    options: Some(GetStatusPOptions {
+                        load_metadata_type: load,
+                        common_options: sync_interval_ms.map(|ms| {
+                            FileSystemMasterCommonPOptions {
+                                sync_interval_ms: Some(ms),
+                                ..Default::default()
+                            }
+                        }),
+                        ..Default::default()
+                    }),
+                    request_id: None,
+                };
+                client
+                    .get_status(req)
+                    .await?
+                    .into_inner()
+                    .file_info
+                    .ok_or_else(|| Error::missing_field("file_info"))
+            }
+        })
+        .await
+    }
+
     /// List the contents of a directory. Returns all FileInfo entries.
     ///
     /// GooseFS 2.0 dropped `ListStatusPOptions.recursive`; each Master RPC

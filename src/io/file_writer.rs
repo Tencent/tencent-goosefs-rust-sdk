@@ -72,7 +72,7 @@ use crate::io::replica_write::{
 use crate::io::writer::{owned_chunk, GrpcBlockWriter};
 use crate::proto::grpc::block::{RequestType, WorkerInfo};
 use crate::proto::grpc::file::{
-    CreateFilePOptions, FileInfo, FsOpPId, ScheduleAsyncPersistencePOptions,
+    CreateFilePOptions, FileInfo, FsOpPId, LoadMetadataPType, ScheduleAsyncPersistencePOptions,
 };
 use crate::proto::grpc::WorkerNetAddress;
 use crate::proto::proto::dataserver::CreateUfsFileOptions;
@@ -1106,62 +1106,82 @@ impl GoosefsFileWriter {
     // T2-C: CACHE_THROUGH error recovery
     // -----------------------------------------------------------------------
 
-    /// Handle a `completeFile` failure after UFS `close()` succeeded.
+    /// Recover from a `completeFile` failure when the UFS write already
+    /// succeeded.
     ///
-    /// In CACHE_THROUGH mode there is a small window where the UFS file has
-    /// been fully written (UFS `close()` returned OK) but `completeFile` on
-    /// the Master then fails (e.g. a Master failover or transient network
-    /// error).  In this situation we must:
+    /// There is a window where the UFS file is fully written (UFS `close()`
+    /// returned OK) but `completeFile` on the Master then fails — a Master
+    /// failover or a transient network error. The bytes are safe; only the
+    /// Goosefs-side metadata is wrong. Two steps fix that:
     ///
-    /// 1. Delete the Goosefs metadata entry (`goosefs_only=true, unchecked=true`)
-    ///    so the incomplete inode is cleaned up.
-    /// 2. **Not** touch the UFS file — it was written successfully and serves
-    ///    as the source of truth.
+    /// 1. `delete(goosefs_only = true, unchecked = true)` — drop the
+    ///    INCOMPLETE inode without touching the UFS file, which is now the
+    ///    source of truth.
+    /// 2. `get_status(LoadMetadataPType::Always, sync_interval_ms = 0)` — force
+    ///    the Master to re-import the file from the UFS.
     ///
-    /// # Java authority (T2-C)
+    /// When both succeed the write **is** successful and the original error is
+    /// swallowed; `close()` returns `Ok`. If either step fails the file is left
+    /// in whatever state it reached and the original error surfaces, since that
+    /// is the more actionable one.
     ///
-    /// Matches the catch block in `GoosefsFileOutStream.close()`:
-    /// ```java
-    /// } catch (Exception e) {
-    ///     if (ufsSucceeded) {
-    ///         // UFS file is OK; remove the Goosefs entry only.
-    ///         mFileSystem.delete(mUri,
-    ///             DeleteOptions.defaults().setGoosefsOnly(true).setUnchecked(true));
-    ///         // Reload so the next open() sees the UFS file via listStatus(ALWAYS).
-    ///         mFileSystem.loadMetadata(mUri, ...);
-    ///     }
-    ///     throw e;
-    /// }
-    /// ```
+    /// # Java authority
     ///
-    /// The `listStatus` reload (equivalent of `loadMetadata`) is tracked as a
-    /// separate TODO — it requires a new `list_status` RPC variant — and is
-    /// deferred to Wave 2.
-    async fn handle_complete_file_error(&mut self, err: Error) -> Error {
-        if self.ufs_stream_completed.load(Ordering::SeqCst) {
+    /// The catch block in `GoosefsFileOutStream.close()`, which ends the
+    /// recovery with a bare `return;` — not a rethrow. Applies to SYNC_PERSIST
+    /// and ASYNC_PERSIST alike (`(isSyncPersist() || isAsyncPersist()) &&
+    /// mUnderStorageOutputStreamCompleted`), so a degraded ASYNC_THROUGH write
+    /// is covered too.
+    async fn handle_complete_file_error(&mut self, err: Error) -> Result<()> {
+        let persistable = self.write_strategy.ufs_stream || self.write_strategy.need_async_persist;
+        if !persistable || !self.ufs_stream_completed.load(Ordering::SeqCst) {
+            return Err(err);
+        }
+
+        warn!(
+            path = %self.path,
+            error = %err,
+            "completeFile failed after UFS close succeeded; attempting UFS metadata recovery"
+        );
+
+        if let Err(del_err) = self
+            .master
+            .delete_with_options(&self.path, DeleteOptions::goosefs_only_unchecked())
+            .await
+        {
             warn!(
                 path = %self.path,
-                error = %err,
-                "completeFile failed after UFS close succeeded; \
-                 removing Goosefs-only metadata entry (goosefs_only=true, unchecked=true)"
+                error = %del_err,
+                "recovery step 1/2 (delete goosefs-only) failed — \
+                 manual cleanup may be required"
             );
-            if let Err(del_err) = self
-                .master
-                .delete_with_options(&self.path, DeleteOptions::goosefs_only_unchecked())
-                .await
-            {
-                warn!(
-                    path = %self.path,
-                    error = %del_err,
-                    "failed to clean up Goosefs metadata after completeFile failure — \
-                     manual cleanup may be required"
-                );
-            }
-            // TODO (Wave 2): call list_status_with_load_type(..., Always) to force
-            // the Master to reload UFS metadata so a subsequent open() of this
-            // path returns the UFS file.
+            return Err(err);
         }
-        err
+
+        if let Err(reload_err) = self
+            .master
+            .get_status_with_load_type(&self.path, Some(LoadMetadataPType::Always), Some(0))
+            .await
+        {
+            warn!(
+                path = %self.path,
+                error = %reload_err,
+                "recovery step 2/2 (loadMetadata ALWAYS) failed — \
+                 the UFS file exists but Goosefs cannot see it yet"
+            );
+            return Err(err);
+        }
+
+        warn!(
+            path = %self.path,
+            error = %err,
+            "completeFile failed but the file was recovered from UFS; \
+             treating the write as successful"
+        );
+        if let Some(ctx) = &self._context {
+            ctx.invalidate_file_info(&self.path);
+        }
+        Ok(())
     }
 
     /// Close the file writer, finalizing the file on the Master.
@@ -1271,9 +1291,9 @@ impl GoosefsFileWriter {
             )
             .await
         {
-            // T2-C: CACHE_THROUGH error recovery — clean up Goosefs-only if UFS succeeded.
-            let e = self.handle_complete_file_error(e).await;
-            return Err(e);
+            // The UFS copy may already be complete, in which case re-importing
+            // it from the UFS makes this a successful write after all.
+            self.handle_complete_file_error(e).await?;
         }
 
         info!(
