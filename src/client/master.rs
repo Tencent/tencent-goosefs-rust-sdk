@@ -113,6 +113,37 @@ pub fn default_file_mode() -> PMode {
     }
 }
 
+/// Write-path-driven fields of `CompleteFilePOptions`.
+///
+/// # Java authority
+///
+/// Mirrors the builder calls in `GoosefsFileOutStream.close()`. Grouping them
+/// keeps [`MasterClient::complete_file_with_options`] to two arguments as the
+/// option set grows.
+#[derive(Debug, Default, Clone)]
+pub struct CompleteFileOptions {
+    /// Final file length (`setUfsLength`). Java sends this for every write
+    /// type, not just the persisting ones.
+    pub ufs_length: Option<i64>,
+    /// Idempotency token, carried in `commonOptions.operationId`.
+    pub operation_id: Option<FsOpPId>,
+    /// Last block's replica locations. ASYNC_THROUGH only — sending these for
+    /// other write types makes the Master treat the file as persist-scheduled.
+    pub locations: Vec<FileLocation>,
+    /// Ask the Master to schedule an async-persist job.
+    ///
+    /// Mutually exclusive with [`force_persisted`](Self::force_persisted): a
+    /// file that is already on the UFS must not also be queued for persisting.
+    pub async_persist_options: Option<ScheduleAsyncPersistencePOptions>,
+    /// Mark the file as already persisted.
+    ///
+    /// Set when the client degraded to a UFS-only write and that write
+    /// completed, so the bytes are on the UFS before `CompleteFile` runs. The
+    /// Master then fetches the UFS fingerprint and stamps the inode
+    /// `PERSISTED` instead of queueing a persist job.
+    pub force_persisted: Option<bool>,
+}
+
 /// Strip a trailing slash except for the filesystem root (`"/"`).
 ///
 /// GooseFS listings generally omit trailing slashes, but treating `/foo` and
@@ -677,8 +708,15 @@ impl MasterClient {
         ufs_length: Option<i64>,
         operation_id: Option<FsOpPId>,
     ) -> Result<()> {
-        self.complete_file_with_options(path, ufs_length, operation_id, Vec::new(), None)
-            .await
+        self.complete_file_with_options(
+            path,
+            CompleteFileOptions {
+                ufs_length,
+                operation_id,
+                ..Default::default()
+            },
+        )
+        .await
     }
 
     /// `CompleteFile` with ASYNC_THROUGH location metadata and persist options.
@@ -689,31 +727,34 @@ impl MasterClient {
     /// `writeSucceedWorkers` into `CompleteFilePOptions.locations` and, for
     /// ASYNC_THROUGH, embeds `asyncPersistOptions` rather than issuing a
     /// separate `ScheduleAsyncPersistence` RPC.
-    #[instrument(skip(self, locations, async_persist_options), fields(path = %path, location_count = locations.len()))]
+    #[instrument(
+        skip(self, opts),
+        fields(path = %path, location_count = opts.locations.len())
+    )]
     pub async fn complete_file_with_options(
         &self,
         path: &str,
-        ufs_length: Option<i64>,
-        operation_id: Option<FsOpPId>,
-        locations: Vec<FileLocation>,
-        async_persist_options: Option<ScheduleAsyncPersistencePOptions>,
+        opts: CompleteFileOptions,
     ) -> Result<()> {
         let path = path.to_string();
         self.with_retry("complete_file", |mut client| {
             let path = path.clone();
-            let locations = locations.clone();
+            let opts = opts.clone();
             async move {
-                let common_options = operation_id.map(|op_id| FileSystemMasterCommonPOptions {
-                    operation_id: Some(op_id),
-                    ..Default::default()
-                });
+                let common_options =
+                    opts.operation_id
+                        .map(|op_id| FileSystemMasterCommonPOptions {
+                            operation_id: Some(op_id),
+                            ..Default::default()
+                        });
                 let req = CompleteFilePRequest {
                     path: Some(path),
                     options: Some(CompleteFilePOptions {
-                        ufs_length,
+                        ufs_length: opts.ufs_length,
                         common_options,
-                        locations,
-                        async_persist_options,
+                        locations: opts.locations,
+                        async_persist_options: opts.async_persist_options,
+                        force_persisted: opts.force_persisted,
                         ..Default::default()
                     }),
                     inode_id: None,

@@ -60,8 +60,8 @@ use uuid::Uuid;
 use crate::block::router::{rpc_endpoint, WorkerRouterView};
 use crate::client::master::default_file_mode;
 use crate::client::worker::{WorkerClientPool, WriteBlockOptions};
-use crate::client::MasterClient;
-use crate::config::GoosefsConfig;
+use crate::client::{CompleteFileOptions, MasterClient};
+use crate::config::{GoosefsConfig, NO_AUTO_PERSIST};
 use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
 use crate::fs::options::DeleteOptions;
@@ -71,7 +71,9 @@ use crate::io::replica_write::{
 };
 use crate::io::writer::{owned_chunk, GrpcBlockWriter};
 use crate::proto::grpc::block::{RequestType, WorkerInfo};
-use crate::proto::grpc::file::{CreateFilePOptions, FileInfo, FsOpPId};
+use crate::proto::grpc::file::{
+    CreateFilePOptions, FileInfo, FsOpPId, ScheduleAsyncPersistencePOptions,
+};
 use crate::proto::grpc::WorkerNetAddress;
 use crate::proto::proto::dataserver::CreateUfsFileOptions;
 use crate::proto::proto::shared::FileLocation;
@@ -1226,13 +1228,10 @@ impl GoosefsFileWriter {
         };
 
         // 3) Complete the file on Master with the idempotency operation ID.
-        //    Always pass ufs_length for CACHE_THROUGH/THROUGH so Master knows
-        //    exactly how many bytes ended up in UFS.
-        let ufs_length = if self.write_strategy.ufs_stream || self.total_bytes_written > 0 {
-            Some(self.total_bytes_written as i64)
-        } else {
-            None
-        };
+        //    Java sets `ufsLength` unconditionally — even under MUST_CACHE it
+        //    doubles as the file size, and omitting it for a zero-byte file
+        //    makes the Master record `UNKNOWN_SIZE`.
+        let ufs_length = Some(self.total_bytes_written as i64);
 
         let op_id = uuid_to_fs_op_pid(self.operation_id);
         // Java `GoosefsFileOutStream.close()` only attaches last-block
@@ -1242,22 +1241,22 @@ impl GoosefsFileWriter {
         // persist-scheduled and multi-block reads can miss the last block.
         let locations =
             complete_file_locations(self.write_strategy.need_async_persist, last_location);
-        let async_persist_options = if self.write_strategy.need_async_persist {
-            Some(crate::proto::grpc::file::ScheduleAsyncPersistencePOptions {
-                common_options: None,
-                persistence_wait_time: None,
-            })
-        } else {
-            None
-        };
+        let (force_persisted, async_persist_options) = resolve_persist_options(
+            self.write_strategy.need_async_persist,
+            self.ufs_stream_completed.load(Ordering::SeqCst),
+            self.config.file_persistence_initial_wait_time_ms,
+        );
         if let Err(e) = self
             .master
             .complete_file_with_options(
                 &self.path,
-                ufs_length,
-                Some(op_id),
-                locations,
-                async_persist_options,
+                CompleteFileOptions {
+                    ufs_length,
+                    operation_id: Some(op_id),
+                    locations,
+                    async_persist_options,
+                    force_persisted,
+                },
             )
             .await
         {
@@ -1722,6 +1721,57 @@ async fn fanout_parallel(
     Ok(())
 }
 
+/// Resolve the mutually exclusive persist fields of `CompleteFilePOptions`.
+///
+/// Returns `(force_persisted, async_persist_options)`.
+///
+/// # Java authority
+///
+/// `GoosefsFileOutStream.close()`:
+///
+/// ```java
+/// if (!mCanceled && mUnderStorageType.isAsyncPersist()) {
+///   if (mUnderStorageOutputStreamCompleted) {
+///     optionsBuilder.setForcePersisted(true);
+///   } else if (mOptions.getPersistenceWaitTime() != Constants.NO_AUTO_PERSIST) {
+///     optionsBuilder.setAsyncPersistOptions(... .setPersistenceWaitTime(...));
+///   }
+/// }
+/// ```
+///
+/// Three outcomes, all reachable:
+/// - the writer degraded to UFS and finished it → `force_persisted`, and the
+///   Master skips the persist job entirely;
+/// - a normal ASYNC_THROUGH write → schedule the job after `wait_time_ms`;
+/// - `wait_time_ms == NO_AUTO_PERSIST` → neither, so the file waits for a
+///   rename or an explicit persist command.
+///
+/// `common_options` stays `None`: Java fills it from
+/// `scheduleAsyncPersistDefaults`, but the Master's
+/// `ScheduleAsyncPersistenceContext` only ever reads `persistenceWaitTime`.
+fn resolve_persist_options(
+    need_async_persist: bool,
+    ufs_stream_completed: bool,
+    wait_time_ms: i64,
+) -> (Option<bool>, Option<ScheduleAsyncPersistencePOptions>) {
+    if !need_async_persist {
+        return (None, None);
+    }
+    if ufs_stream_completed {
+        return (Some(true), None);
+    }
+    if wait_time_ms == NO_AUTO_PERSIST {
+        return (None, None);
+    }
+    (
+        None,
+        Some(ScheduleAsyncPersistencePOptions {
+            common_options: None,
+            persistence_wait_time: Some(wait_time_ms),
+        }),
+    )
+}
+
 /// Last-block locations for `CompleteFile`, matching Java
 /// `GoosefsFileOutStream.close()`: only ASYNC_THROUGH attaches them.
 fn complete_file_locations(
@@ -1928,6 +1978,66 @@ mod tests {
         assert!(!s.ufs_stream);
         assert!(s.create_ufs_file_options.is_none());
         assert!(s.need_async_persist);
+    }
+
+    /// A degraded ASYNC_THROUGH write lands on the UFS before `CompleteFile`
+    /// runs, so the Master must be told the file is already persisted rather
+    /// than being asked to queue a persist job for it.
+    #[test]
+    fn persist_options_force_persisted_after_degrade() {
+        let (force, async_opts) = resolve_persist_options(true, true, 0);
+        assert_eq!(force, Some(true));
+        assert!(
+            async_opts.is_none(),
+            "a persisted file must not also be queued for persisting"
+        );
+
+        // The wait time is irrelevant once the UFS copy exists.
+        let (force, async_opts) = resolve_persist_options(true, true, 5_000);
+        assert_eq!(force, Some(true));
+        assert!(async_opts.is_none());
+    }
+
+    #[test]
+    fn persist_options_schedule_job_on_the_normal_path() {
+        let (force, async_opts) = resolve_persist_options(true, false, 0);
+        assert!(force.is_none());
+        assert_eq!(
+            async_opts,
+            Some(ScheduleAsyncPersistencePOptions {
+                common_options: None,
+                persistence_wait_time: Some(0),
+            })
+        );
+
+        let (_, async_opts) = resolve_persist_options(true, false, 5_000);
+        assert_eq!(
+            async_opts.and_then(|o| o.persistence_wait_time),
+            Some(5_000),
+            "the configured wait time must reach the Master"
+        );
+    }
+
+    /// `NO_AUTO_PERSIST` means the file is only persisted by a later rename or
+    /// an explicit persist command. Sending `async_persist_options` anyway
+    /// would make the Master queue the job regardless.
+    #[test]
+    fn persist_options_no_auto_persist_sends_neither() {
+        let (force, async_opts) = resolve_persist_options(true, false, NO_AUTO_PERSIST);
+        assert!(force.is_none());
+        assert!(async_opts.is_none());
+    }
+
+    /// Only ASYNC_PERSIST write types touch these fields. CACHE_THROUGH also
+    /// completes a UFS stream, so gating on `ufs_stream_completed` alone would
+    /// wrongly stamp `force_persisted` on every CACHE_THROUGH write.
+    #[test]
+    fn persist_options_untouched_for_non_async_write_types() {
+        for ufs_completed in [false, true] {
+            let (force, async_opts) = resolve_persist_options(false, ufs_completed, 0);
+            assert!(force.is_none(), "ufs_completed={ufs_completed}");
+            assert!(async_opts.is_none(), "ufs_completed={ufs_completed}");
+        }
     }
 
     #[test]

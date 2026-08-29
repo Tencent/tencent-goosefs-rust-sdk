@@ -20,6 +20,7 @@ pub mod metrics_master;
 pub mod worker;
 pub mod worker_manager;
 
+pub use master::CompleteFileOptions;
 pub use master::MasterClient;
 pub use master::MasterClientPool;
 pub use master_inquire::{
