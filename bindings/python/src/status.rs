@@ -16,15 +16,12 @@
 //! snapshot.
 //!
 //! Wraps `goosefs_sdk::fs::URIStatus`. The full set of 25 fields is exposed
-//! as `@getter`s. We deliberately do not expose `block_infos` / `xattr` from
-//! this stage (P2) because:
-//!
-//! - `block_infos` is only populated for read-path calls (P5). In P2 it would
-//!   always be empty / misleading.
-//! - `xattr` is `HashMap<String, Vec<u8>>` — handing raw bytes to Python is
-//!   safe but the layer is more useful once a typed accessor (e.g.
-//!   `get_write_type_xattr()`) lands. Until then `xattr` is exposed as a
-//!   plain `dict[str, bytes]` so users can inspect it.
+//! as `@getter`s. We deliberately do not expose `block_infos` as its own
+//! Python attribute: `block_ids` is backfilled from Master `file_block_infos`
+//! (Java `GrpcUtils.toProto` omits `blockIds`). `xattr` is
+//! `HashMap<String, Vec<u8>>` — handing raw bytes to Python is safe but a
+//! typed accessor (e.g. `get_write_type_xattr()`) is more useful; until then
+//! `xattr` is a plain `dict[str, bytes]`.
 //!
 //! ## Equality / hashing
 //!
@@ -94,6 +91,10 @@ impl PyURIStatus {
         self.inner.block_size_bytes
     }
 
+    /// Ordered block IDs for this file (empty for directories).
+    ///
+    /// Master omits `blockIds` on the wire; the SDK fills this from
+    /// `file_block_infos` in `URIStatus::from_proto`.
     #[getter]
     fn block_ids(&self) -> Vec<i64> {
         self.inner.block_ids.clone()
