@@ -250,7 +250,7 @@ class URIStatus:
     def __eq__(self, other: object, /) -> bool: ...
     def __hash__(self) -> int: ...
 
-
+@final
 class URIStatusList:
     """Lazy list view of ``list_status`` results.
 
@@ -260,7 +260,7 @@ class URIStatusList:
     """
 
     def __len__(self) -> int: ...
-    def __getitem__(self, index: int) -> URIStatus: ...
+    def __getitem__(self, index: int, /) -> URIStatus: ...
     def __iter__(self) -> Iterator[URIStatus]: ...
     def __bool__(self) -> bool: ...
     def __repr__(self) -> str: ...
@@ -319,6 +319,24 @@ class Config:
     def file_replication_number(self) -> int:
         """Target replication for block-worker selection
         (``goosefs.user.file.replication.number``, default ``1``)."""
+        ...
+    @property
+    def file_replication_durable(self) -> int:
+        """Replicas ``ASYNC_THROUGH`` tries to open before the file is
+        persisted (``goosefs.user.file.replication.durable``, default ``2``).
+
+        Used in place of ``file_replication_number`` when it is the larger of
+        the two, since an unpersisted file has no UFS copy to fall back on."""
+        ...
+    @property
+    def file_replication_durable_min(self) -> int:
+        """Replicas that must succeed for an ``ASYNC_THROUGH`` write to be
+        accepted (``goosefs.user.file.replication.durable.min``, default
+        ``2``).
+
+        A hard floor, unlike ``file_replication_durable``: if the cluster
+        cannot meet it the write fails rather than degrading to a UFS-only
+        copy, because that would silently drop the requested durability."""
         ...
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -998,6 +1016,7 @@ __all__ = [
     "OpenFileOptions",
     "ReadType",
     "URIStatus",
+    "URIStatusList",
     "WorkerClient",
     "WriteType",
     "__version__",

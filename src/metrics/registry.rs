@@ -158,6 +158,13 @@ pub mod name {
     /// Cluster aggregated: true
     pub const CLIENT_BYTES_WRITTEN_UFS: &str = "Client.BytesWrittenUfs";
 
+    /// Files whose cache write failed and fell back to a UFS-only write.
+    ///
+    /// Incremented once per file, not per failed write. A sustained non-zero
+    /// rate means writes are silently bypassing the cache, so the data lands
+    /// safely but reads of those files will miss.
+    pub const CLIENT_WRITE_DEGRADED_TO_UFS: &str = "Client.WriteDegradedToUfs";
+
     // ── RPC operation counters ───────────────────────────────────────────────
 
     /// Total number of file read operations (open + stream fully consumed or closed).

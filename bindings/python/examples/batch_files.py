@@ -62,8 +62,7 @@ async def main() -> None:
     master = os.environ.get("GOOSEFS_MASTER_ADDR")
     if not master:
         print(
-            "GOOSEFS_MASTER_ADDR is not set. "
-            "Example: export GOOSEFS_MASTER_ADDR=127.0.0.1:9200",
+            "GOOSEFS_MASTER_ADDR is not set. Example: export GOOSEFS_MASTER_ADDR=127.0.0.1:9200",
             file=sys.stderr,
         )
         raise SystemExit(2)

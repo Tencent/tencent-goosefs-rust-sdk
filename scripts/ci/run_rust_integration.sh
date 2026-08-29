@@ -13,12 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Run ignored Rust integration tests that work against the Docker GooseFS fixture.
+# Run ignored Rust integration tests against the Docker GooseFS fixture.
 #
-# Short-circuit suites (short_circuit_e2e / sc_consistency / sc_inv_s3) need a
-# co-located worker block store on the host filesystem and are excluded here.
+# Targets are DISCOVERED from `tests/*.rs`, not listed by hand. This script
+# used to enumerate every `--test` explicitly, which silently skips any suite
+# added later: a new file runs nowhere until someone remembers to edit this
+# script, and a green CI says nothing about it. Discovery inverts that — a new
+# suite runs by default, and skipping one takes a deliberate entry in SKIP
+# below.
 #
-# NOT COVERED HERE: the io_uring page store tests. Every target below is a
+# NOT COVERED HERE: the io_uring page store tests. Everything run below is a
 # `--test <file>`, i.e. an integration test under `tests/`; the uring tests are
 # `#[ignore]`d unit tests inside `src/cache/store/uring/store.rs`, so `--lib` is
 # never named and nothing under `tests/` exercises that store. `ci.yml` skips
@@ -44,28 +48,61 @@ cd "$ROOT"
 export GOOSEFS_MASTER_ADDR="${GOOSEFS_MASTER_ADDR:-127.0.0.1:9200}"
 export GOOSEFS_AUTH_TYPE="${GOOSEFS_AUTH_TYPE:-simple}"
 
-echo "==> integration: page_cache_e2e"
-cargo test --test page_cache_e2e -- --ignored --nocapture --test-threads=1
+# Suites that cannot pass against the Docker fixture. Each needs a co-located
+# worker block store on the host filesystem, which the containerised worker
+# does not give the test process access to.
+SKIP="short_circuit_e2e sc_consistency sc_inv_s3"
 
-echo "==> integration: page_cache_consistency"
-cargo test --test page_cache_consistency -- --ignored --nocapture --test-threads=1
+skipped() {
+  case " $SKIP " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
-echo "==> integration: master_rename_no_replace"
-cargo test --test master_rename_no_replace -- --ignored --nocapture --test-threads=1
+# Keep SKIP honest: a renamed or deleted suite would otherwise leave a dead
+# entry here that quietly excuses nothing, and the next suite to take that
+# name would be skipped without anyone asking for it.
+for name in $SKIP; do
+  if [[ ! -f "tests/$name.rs" ]]; then
+    echo "error: SKIP lists '$name' but tests/$name.rs does not exist." >&2
+    echo "       Remove the stale entry, or fix the name." >&2
+    exit 1
+  fi
+done
 
-echo "==> integration: opendal_sdk_api (OpenDAL GooseFS v2.1.0.1 SDK surface)"
-cargo test --test opendal_sdk_api -- --ignored --nocapture --test-threads=1
+targets=""
+while IFS= read -r file; do
+  name="$(basename "$file" .rs)"
+  if skipped "$name"; then
+    echo "==> skipping $name (needs a co-located worker block store)"
+    continue
+  fi
+  targets="$targets $name"
+done < <(find tests -maxdepth 1 -name '*.rs' | sort)
 
-echo "==> integration: metadata_cache_e2e (recursive list_status BFS + cache)"
-cargo test --test metadata_cache_e2e -- --ignored --nocapture --test-threads=1
+if [[ -z "${targets// /}" ]]; then
+  echo "error: no integration test targets found under tests/." >&2
+  exit 1
+fi
 
-echo "==> integration: auth_retry (ignored)"
-cargo test --test auth_retry -- --ignored --nocapture
+# `--test-threads=1` throughout: these suites share one cluster, and several
+# assert on cluster-wide state (worker capacity, metrics counters) that a
+# concurrent suite can move underneath them.
+failed=""
+for name in $targets; do
+  echo "==> integration: $name"
+  if ! cargo test --test "$name" -- --ignored --nocapture --test-threads=1; then
+    # Keep going so one broken suite does not mask the state of the rest;
+    # the script still exits non-zero below.
+    echo "!!! integration suite failed: $name" >&2
+    failed="$failed $name"
+  fi
+done
 
-echo "==> integration: connection_reuse (ignored)"
-cargo test --test connection_reuse -- --ignored --nocapture
+if [[ -n "${failed// /}" ]]; then
+  echo "Rust Docker integration tests FAILED:$failed" >&2
+  exit 1
+fi
 
-echo "==> integration: metrics_heartbeat (ignored)"
-cargo test --test metrics_heartbeat -- --ignored --nocapture
-
-echo "Rust Docker integration tests finished."
+echo "Rust Docker integration tests finished:$targets"
