@@ -1058,11 +1058,11 @@ impl PyAsyncGoosefs {
             // 2–4. Route + acquire + read with SASL auth-failure retry.
             //       Delegated to `positioned_read_with_reauth` so both
             //       async and sync paths share the same retry logic.
-            let locations = crate::positioned_read::block_locations_from_status(&status, block_id);
             let bytes = positioned_read_with_reauth(
                 h.ctx,
+                &status,
                 block_id,
-                &locations,
+                block_index,
                 offset,
                 effective_length,
                 chunk_size,

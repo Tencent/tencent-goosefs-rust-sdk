@@ -755,11 +755,11 @@ impl PyGoosefs {
             //       Delegated to `positioned_read_with_reauth` so both
             //       async and sync paths share the same retry logic
             //       (Critical #1 fix: sync was previously missing this).
-            let locations = crate::positioned_read::block_locations_from_status(&status, block_id);
             let bytes = crate::positioned_read::positioned_read_with_reauth(
                 h.ctx,
+                &status,
                 block_id,
-                &locations,
+                block_index,
                 offset,
                 effective_length,
                 chunk_size,
