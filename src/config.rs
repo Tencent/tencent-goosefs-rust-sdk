@@ -416,10 +416,15 @@ impl PropertiesMap {
 
         // No positive-value guard here: `0` (persist immediately) and
         // `NO_AUTO_PERSIST` (`-1`, never auto-persist) are both meaningful.
-        if let Some(ms) =
-            self.get_parsed::<i64>("goosefs.user.file.persistence.initial.wait.time")
+        if let Some(ms) = self.get_parsed::<i64>("goosefs.user.file.persistence.initial.wait.time")
         {
             cfg.file_persistence_initial_wait_time_ms = ms;
+        }
+
+        if let Some(b) =
+            self.get_bool("goosefs.user.local.ufs.client.ignore.block.stream.unknown.status")
+        {
+            cfg.local_ufs_client_ignore_block_stream_unknown_status = b;
         }
 
         // CheckBlocks probe width (Java GetStatusPOptions.checkBlockReplicas).
@@ -1109,6 +1114,15 @@ pub const ENV_FILE_ASYNC_PERSIST_FLUSH_ENABLED: &str =
 pub const ENV_FILE_PERSISTENCE_INITIAL_WAIT_TIME: &str =
     "GOOSEFS_USER_FILE_PERSISTENCE_INITIAL_WAIT_TIME";
 
+/// Environment variable:
+/// `goosefs.user.local.ufs.client.ignore.block.stream.unknown.status`.
+///
+/// Mirrors
+/// [`GoosefsConfig::local_ufs_client_ignore_block_stream_unknown_status`].
+/// Default is `true`.
+pub const ENV_IGNORE_BLOCK_STREAM_UNKNOWN_STATUS: &str =
+    "GOOSEFS_USER_LOCAL_UFS_CLIENT_IGNORE_BLOCK_STREAM_UNKNOWN_STATUS";
+
 /// Environment variable: `goosefs.user.file.check.block.replicas`.
 ///
 /// Mirrors [`GoosefsConfig::check_block_replicas`]. Default is `0`.
@@ -1764,6 +1778,19 @@ pub struct GoosefsConfig {
     /// `Constants.NO_AUTO_PERSIST`.
     #[serde(default = "default_file_persistence_initial_wait_time_ms")]
     pub file_persistence_initial_wait_time_ms: i64,
+
+    /// Whether a *first* block-open failure may degrade to a UFS-only write
+    /// (`goosefs.user.local.ufs.client.ignore.block.stream.unknown.status`,
+    /// Java default `true`).
+    ///
+    /// When the very first block stream fails to open, the client never got a
+    /// reply and so cannot tell a permission rejection apart from a transport
+    /// error. Set this to `false` to treat that ambiguity as fatal rather than
+    /// silently writing to the UFS with credentials the cluster might have
+    /// rejected. Only affects the first block: once one has opened
+    /// successfully, authentication is known-good.
+    #[serde(default = "default_ignore_block_stream_unknown_status")]
+    pub local_ufs_client_ignore_block_stream_unknown_status: bool,
 
     /// How many hash-selected workers to probe per block via `CheckBlocks`
     /// when enriching `FileInfo.locations` (Java `checkBlockReplicas` /
@@ -2477,6 +2504,11 @@ fn default_file_persistence_initial_wait_time_ms() -> i64 {
     0
 }
 
+fn default_ignore_block_stream_unknown_status() -> bool {
+    // Matches Java USER_LOCAL_UFS_CLIENT_IGNORE_BLOCK_STREAM_UNKNOWN_STATUS.
+    true
+}
+
 fn default_file_async_persist_flush_enabled() -> bool {
     // Matches Java USER_FILE_ASYNC_PERSIST_FLUSH_ENABLED default.
     true
@@ -2544,8 +2576,9 @@ impl Default for GoosefsConfig {
             block_worker_available_min_remain_ratio: default_block_worker_min_remain_ratio(),
             worker_read_cache_min_ratio: default_worker_read_cache_min_ratio(),
             file_async_persist_flush_enabled: default_file_async_persist_flush_enabled(),
-            file_persistence_initial_wait_time_ms:
-                default_file_persistence_initial_wait_time_ms(),
+            file_persistence_initial_wait_time_ms: default_file_persistence_initial_wait_time_ms(),
+            local_ufs_client_ignore_block_stream_unknown_status:
+                default_ignore_block_stream_unknown_status(),
             check_block_replicas: default_check_block_replicas(),
             file_read_max_node_retry: default_file_read_max_node_retry(),
             prefetch_window: default_prefetch_window(),
@@ -2848,6 +2881,15 @@ impl GoosefsConfig {
     /// disables automatic persistence altogether. Default is `0`.
     pub fn with_file_persistence_initial_wait_time_ms(mut self, ms: i64) -> Self {
         self.file_persistence_initial_wait_time_ms = ms;
+        self
+    }
+
+    /// Set
+    /// [`local_ufs_client_ignore_block_stream_unknown_status`](Self::local_ufs_client_ignore_block_stream_unknown_status).
+    ///
+    /// Default is `true`.
+    pub fn with_ignore_block_stream_unknown_status(mut self, ignore: bool) -> Self {
+        self.local_ufs_client_ignore_block_stream_unknown_status = ignore;
         self
     }
 
@@ -3331,6 +3373,12 @@ impl GoosefsConfig {
         if let Ok(val) = env::var(ENV_FILE_PERSISTENCE_INITIAL_WAIT_TIME) {
             if let Ok(ms) = val.parse::<i64>() {
                 self.file_persistence_initial_wait_time_ms = ms;
+            }
+        }
+
+        if let Ok(val) = env::var(ENV_IGNORE_BLOCK_STREAM_UNKNOWN_STATUS) {
+            if let Some(b) = parse_bool_loose(&val) {
+                self.local_ufs_client_ignore_block_stream_unknown_status = b;
             }
         }
 
@@ -4048,6 +4096,7 @@ mod tests {
         assert_eq!(config.worker_read_cache_min_ratio, 0.1);
         assert!(config.file_async_persist_flush_enabled);
         assert_eq!(config.file_persistence_initial_wait_time_ms, 0);
+        assert!(config.local_ufs_client_ignore_block_stream_unknown_status);
         assert_eq!(config.check_block_replicas, 0);
         assert_eq!(config.file_read_max_node_retry, 3);
         assert!(!config.is_multi_master());
@@ -4649,6 +4698,10 @@ mod tests {
         assert_eq!(
             ENV_FILE_PERSISTENCE_INITIAL_WAIT_TIME,
             "GOOSEFS_USER_FILE_PERSISTENCE_INITIAL_WAIT_TIME"
+        );
+        assert_eq!(
+            ENV_IGNORE_BLOCK_STREAM_UNKNOWN_STATUS,
+            "GOOSEFS_USER_LOCAL_UFS_CLIENT_IGNORE_BLOCK_STREAM_UNKNOWN_STATUS"
         );
         assert_eq!(
             ENV_FILE_READ_MAX_NODE_RETRY,

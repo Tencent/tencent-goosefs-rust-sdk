@@ -94,9 +94,17 @@ struct WriteStrategy {
     /// Open a per-block cache stream (`RequestType::GoosefsBlock`).
     cache_stream: bool,
     /// Open a single long-lived UFS stream (`RequestType::UfsFile`,
-    /// `block_id = -1`, `length = i64::MAX`).
+    /// `block_id = -1`, `length = i64::MAX`) from the first write onwards.
+    ///
+    /// ASYNC_THROUGH leaves this `false` yet can still end up on the UFS
+    /// stream, by degrading — see `GoosefsFileWriter::ufs_write_enabled`.
     ufs_stream: bool,
     /// UFS file creation options — used on the UFS stream's initial command.
+    ///
+    /// Populated for every write type that *can* reach the UFS stream,
+    /// including ASYNC_THROUGH, which only reaches it by degrading. Resolving
+    /// them up front keeps the degrade path free of `FileInfo` lookups at the
+    /// point where the cache write has already failed.
     create_ufs_file_options: Option<CreateUfsFileOptions>,
     /// Whether `close()` should call `schedule_async_persistence` (ASYNC_THROUGH).
     need_async_persist: bool,
@@ -143,7 +151,10 @@ fn resolve_write_strategy(write_type: Option<i32>, file_info: &FileInfo) -> Writ
         Some(5) => WriteStrategy {
             cache_stream: true,
             ufs_stream: false,
-            create_ufs_file_options: None,
+            // Not used unless the cache write degrades, but resolved eagerly:
+            // by then `handle_cache_write_exception` has already torn the
+            // block writer down and has no clean way to fail.
+            create_ufs_file_options: Some(build_ufs_opts()),
             need_async_persist: true,
         },
         // MUST_CACHE (1), TRY_CACHE (2), NONE (6), unset: cache only
@@ -245,7 +256,31 @@ pub struct GoosefsFileWriter {
     /// `close()` does `compare_exchange(false, true)` to claim exclusive access.
     closed: AtomicBool,
     /// Write strategy derived from config.write_type + FileInfo.
+    ///
+    /// The file's *initial* configuration; it is never mutated. Where the
+    /// writer actually sends bytes right now is [`Self::should_cache`] /
+    /// [`Self::ufs_write_enabled`], which can diverge after a degrade.
     write_strategy: WriteStrategy,
+    /// Whether writes still go to the Goosefs cache.
+    ///
+    /// Starts as `write_strategy.cache_stream` and latches to `false` the
+    /// moment a cache write degrades to UFS-only. Java
+    /// `mShouldCacheCurrentBlock`.
+    should_cache: bool,
+    /// Whether writes go to the UFS stream.
+    ///
+    /// Starts as `write_strategy.ufs_stream` and latches to `true` on a
+    /// degrade, which is how ASYNC_THROUGH — configured with no UFS stream —
+    /// can end up writing straight to the UFS. Java tracks this as
+    /// `mUnderStorageOutputStream != null`.
+    ufs_write_enabled: bool,
+    /// Whether any cache block has ever been opened successfully.
+    ///
+    /// Gates the two degrade rules that depend on how much the client knows:
+    /// once a block has opened, ASYNC_THROUGH must not degrade (partial data
+    /// is already cached), and authentication is proven to work. Java
+    /// `openBlock`.
+    block_opened: bool,
     /// Block IDs that have been successfully committed to workers.
     /// Used for cancel/rollback — matches Java's `mPreviousCommittedBlockIds`.
     committed_block_ids: Vec<i64>,
@@ -372,6 +407,9 @@ impl GoosefsFileWriter {
             operation_id,
             cancelled: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            should_cache: write_strategy.cache_stream,
+            ufs_write_enabled: write_strategy.ufs_stream,
+            block_opened: false,
             write_strategy,
             committed_block_ids: Vec::new(),
             current_block_writer: None,
@@ -451,14 +489,26 @@ impl GoosefsFileWriter {
         // hash-ring builds for zero-byte writes (CreateFile-then-close).
         self.ensure_router_init().await?;
 
-        // 1) Feed the cache stream (sliced by block boundaries).
-        if self.write_strategy.cache_stream {
-            self.write_to_cache_stream(data).await?;
+        // 1) Feed the cache stream (sliced by block boundaries). A failure
+        //    here is not necessarily fatal: `handle_cache_write_exception`
+        //    decides between aborting the write and degrading to UFS-only,
+        //    and on a degrade it has already torn the cache block down.
+        if self.should_cache {
+            if let Err(e) = self.write_to_cache_stream(data).await {
+                self.handle_cache_write_exception(e).await?;
+            }
         }
 
         // 2) Feed the UFS stream (single long stream, no block boundaries —
         //    only sliced by chunk_size).
-        if self.write_strategy.ufs_stream {
+        //
+        //    After a degrade this receives the *whole* buffer, including the
+        //    prefix the cache stream had already accepted. That is not double
+        //    writing: the cache block was cancelled, so those bytes exist
+        //    nowhere else. It is also the only reason the degrade produces a
+        //    complete file — see `handle_cache_write_exception` for why a
+        //    degrade can never happen once earlier blocks have been committed.
+        if self.ufs_write_enabled {
             self.write_to_ufs_stream(data).await?;
         }
 
@@ -584,9 +634,9 @@ impl GoosefsFileWriter {
                 block_full = writer.remaining() == 0;
                 emit_result = emit_aligned_chunks(writer, slice, chunk_size).await;
             }
-            if let Err(e) = emit_result {
-                return self.handle_cache_write_exception(e).await;
-            }
+            // Raw error on purpose: only `write()` knows whether a degrade is
+            // permitted, so the classification happens there.
+            emit_result?;
             if block_full {
                 self.close_current_block(true).await?;
             }
@@ -655,6 +705,7 @@ impl GoosefsFileWriter {
         {
             Ok(active) => {
                 self.current_block_writer = Some(active);
+                self.block_opened = true;
                 Ok(())
             }
             Err(e) => {
@@ -667,6 +718,7 @@ impl GoosefsFileWriter {
                     .open_replica_writers(block_id, block_size, &plan, true)
                     .await?;
                 self.current_block_writer = Some(active);
+                self.block_opened = true;
                 Ok(())
             }
         }
@@ -968,29 +1020,97 @@ impl GoosefsFileWriter {
         Ok(())
     }
 
-    /// Handle a cache write exception.
+    /// Decide what a failed cache write means: abort, or degrade to UFS-only.
     ///
-    /// Matches Java's `GoosefsFileOutStream.handleCacheWriteException()`:
-    /// - Cancel the current block stream
-    /// - Mark the worker as failed
-    /// - Return the error (caller decides whether to retry or propagate)
+    /// `Ok(())` means the writer has degraded — the cache block is torn down,
+    /// [`Self::should_cache`] is off, [`Self::ufs_write_enabled`] is on, and
+    /// the caller should send its buffer to the UFS stream. `Err` means the
+    /// write is unrecoverable; the writer is marked cancelled.
+    ///
+    /// # Java authority
+    ///
+    /// `GoosefsFileOutStream.handleCacheWriteException`. Four rules make the
+    /// failure fatal, and each protects a different guarantee:
+    ///
+    /// 1. `ResourceExhausted` / `InvalidArgument` — the block store already
+    ///    degraded the replica count as far as it is allowed to and still came
+    ///    up short. Silently writing one UFS copy would break the replication
+    ///    contract the caller asked for.
+    /// 2. Neither sync- nor async-persist (MUST_CACHE, TRY_CACHE, NONE) —
+    ///    there is no UFS destination configured to degrade *to*.
+    /// 3. ASYNC_THROUGH with a block already opened — earlier blocks are
+    ///    committed in the cache and are not on the UFS, so a UFS stream
+    ///    started now would produce a truncated file.
+    /// 4. `Unauthenticated` / `PermissionDenied` — the credentials are
+    ///    rejected, and the UFS write would use the same ones.
+    ///
+    /// Rule 3 is also what makes the degrade safe for the caller: it can only
+    /// fire while no cache block has ever opened, so no committed bytes are
+    /// stranded and the UFS stream starts from a genuinely empty file.
+    ///
+    /// One further rule is conditional. If the *first* block failed to open,
+    /// the client never got a reply and cannot distinguish a rejection from a
+    /// transport error, so
+    /// `goosefs.user.local.ufs.client.ignore.block.stream.unknown.status`
+    /// (default `true`) decides whether to treat that ambiguity as fatal.
     async fn handle_cache_write_exception(&mut self, err: Error) -> Result<()> {
         warn!(
             path = %self.path,
             error = %err,
-            "failed to write to Goosefs cache, cancelling block"
+            block_opened = self.block_opened,
+            "failed to write into the Goosefs cache"
         );
 
-        // Cancel every replica of the current block writer
+        let credentials_rejected = matches!(
+            err,
+            Error::AuthenticationFailed { .. } | Error::PermissionDenied { .. }
+        );
+        let fatal = cache_write_failure_is_fatal(
+            &err,
+            &self.write_strategy,
+            self.block_opened,
+            self.config
+                .local_ufs_client_ignore_block_stream_unknown_status,
+        );
+
+        // A rejected credential says nothing about the worker's health, and
+        // blacklisting on it would walk the whole pool one worker at a time.
+        self.tear_down_cache_block(!credentials_rejected).await;
+
+        if fatal {
+            self.cancelled.store(true, Ordering::SeqCst);
+            return Err(err);
+        }
+
+        warn!(
+            path = %self.path,
+            "degrading to a UFS-only write for the rest of this file"
+        );
+        crate::metrics::counter(crate::metrics::name::CLIENT_WRITE_DEGRADED_TO_UFS).inc(1);
+        self.should_cache = false;
+        self.ufs_write_enabled = true;
+        Ok(())
+    }
+
+    /// Cancel the in-progress cache block, optionally blacklisting the workers
+    /// behind it.
+    ///
+    /// Pass `blacklist = false` when the failure says nothing about worker
+    /// health (a rejected credential, say) — the connections are still dropped
+    /// so nothing is left half-written, but the workers stay selectable.
+    ///
+    /// Safe to call with no block open. Failures are swallowed: this only ever
+    /// runs while a more interesting error is being handled.
+    async fn tear_down_cache_block(&mut self, blacklist: bool) {
         if let Some(active) = self.current_block_writer.take() {
-            for r in &active.replicas {
-                self.router.mark_failed(&r.net_address);
-                self.worker_pool.invalidate(&r.worker_addr).await;
+            if blacklist {
+                for r in &active.replicas {
+                    self.router.mark_failed(&r.net_address);
+                    self.worker_pool.invalidate(&r.worker_addr).await;
+                }
             }
             active.cancel_replicas().await;
         }
-
-        Err(err)
     }
 
     /// Handle a UFS-stream write exception.
@@ -1773,6 +1893,45 @@ async fn fanout_parallel(
     Ok(())
 }
 
+/// Whether a failed cache write must abort the file rather than degrade to a
+/// UFS-only write.
+///
+/// See [`GoosefsFileWriter::handle_cache_write_exception`] for what each rule
+/// protects; this is the decision on its own so it can be exercised directly.
+fn cache_write_failure_is_fatal(
+    err: &Error,
+    strategy: &WriteStrategy,
+    block_opened: bool,
+    ignore_unknown_first_block_status: bool,
+) -> bool {
+    // The replication contract was already relaxed as far as allowed.
+    if matches!(
+        err,
+        Error::ResourceExhausted { .. } | Error::InvalidArgument { .. }
+    ) {
+        return true;
+    }
+    // MUST_CACHE / TRY_CACHE / NONE: nothing to degrade to.
+    if !strategy.ufs_stream && !strategy.need_async_persist {
+        return true;
+    }
+    // ASYNC_THROUGH past the first block: earlier blocks are cached but not on
+    // the UFS, so a UFS stream started now would produce a truncated file.
+    if strategy.need_async_persist && block_opened {
+        return true;
+    }
+    // The UFS write would reuse the credentials that were just rejected.
+    if matches!(
+        err,
+        Error::AuthenticationFailed { .. } | Error::PermissionDenied { .. }
+    ) {
+        return true;
+    }
+    // First block never opened: the failure could be a rejection or just
+    // transport trouble, and the operator decides how to read that ambiguity.
+    !block_opened && !ignore_unknown_first_block_status
+}
+
 /// Resolve the mutually exclusive persist fields of `CompleteFilePOptions`.
 ///
 /// Returns `(force_persisted, async_persist_options)`.
@@ -2028,8 +2187,165 @@ mod tests {
         let s = resolve_write_strategy(Some(5), &fi); // ASYNC_THROUGH
         assert!(s.cache_stream);
         assert!(!s.ufs_stream);
-        assert!(s.create_ufs_file_options.is_none());
         assert!(s.need_async_persist);
+        // Options are resolved but unused unless the cache write degrades;
+        // `ufs_stream` above is what keeps the happy path off the UFS.
+        assert!(s.create_ufs_file_options.is_some());
+    }
+
+    fn cache_through() -> WriteStrategy {
+        resolve_write_strategy(Some(3), &FileInfo::default())
+    }
+
+    fn async_through() -> WriteStrategy {
+        resolve_write_strategy(Some(5), &FileInfo::default())
+    }
+
+    fn must_cache() -> WriteStrategy {
+        resolve_write_strategy(Some(1), &FileInfo::default())
+    }
+
+    fn io_err() -> Error {
+        Error::BlockIoError {
+            message: "worker went away".to_string(),
+        }
+    }
+
+    /// The baseline degrade: a plain I/O failure on a write type that has a
+    /// UFS destination should fall back rather than fail the write.
+    #[test]
+    fn cache_failure_degrades_on_plain_io_error() {
+        assert!(!cache_write_failure_is_fatal(
+            &io_err(),
+            &cache_through(),
+            true,
+            true
+        ));
+        // ASYNC_THROUGH may degrade too, but only before any block opened.
+        assert!(!cache_write_failure_is_fatal(
+            &io_err(),
+            &async_through(),
+            false,
+            true
+        ));
+    }
+
+    /// `ResourceExhausted` / `InvalidArgument` mean the block store already
+    /// relaxed the replica count as far as allowed and still fell short.
+    /// Degrading would quietly leave a single UFS copy in place of the
+    /// replication the caller asked for.
+    #[test]
+    fn cache_failure_is_fatal_when_replication_contract_broken() {
+        for err in [
+            Error::ResourceExhausted {
+                message: "alive < durable.min".to_string(),
+            },
+            Error::InvalidArgument {
+                message: "durable < durable.min".to_string(),
+            },
+        ] {
+            assert!(
+                cache_write_failure_is_fatal(&err, &cache_through(), true, true),
+                "{err} must not degrade"
+            );
+        }
+    }
+
+    /// MUST_CACHE / TRY_CACHE / NONE have no UFS destination configured, so
+    /// there is nothing to degrade to.
+    #[test]
+    fn cache_failure_is_fatal_without_a_ufs_destination() {
+        assert!(cache_write_failure_is_fatal(
+            &io_err(),
+            &must_cache(),
+            true,
+            true
+        ));
+    }
+
+    /// Once an ASYNC_THROUGH block has opened, earlier blocks are committed in
+    /// the cache and absent from the UFS. A UFS stream started now would only
+    /// hold the bytes from this `write()` onward, silently truncating the file.
+    #[test]
+    fn cache_failure_is_fatal_for_async_through_past_the_first_block() {
+        assert!(cache_write_failure_is_fatal(
+            &io_err(),
+            &async_through(),
+            true,
+            true
+        ));
+        // CACHE_THROUGH is unaffected: its UFS stream already has every byte.
+        assert!(!cache_write_failure_is_fatal(
+            &io_err(),
+            &cache_through(),
+            true,
+            true
+        ));
+    }
+
+    /// The UFS write would present the same credentials that were just
+    /// rejected, so degrading only converts a clear error into a confusing one.
+    #[test]
+    fn cache_failure_is_fatal_when_credentials_are_rejected() {
+        for err in [
+            Error::AuthenticationFailed {
+                message: "bad token".to_string(),
+            },
+            Error::PermissionDenied {
+                message: "no write permission".to_string(),
+            },
+        ] {
+            assert!(
+                cache_write_failure_is_fatal(&err, &cache_through(), true, true),
+                "{err} must not degrade"
+            );
+        }
+    }
+
+    /// A first-block open failure leaves the client unable to tell a rejection
+    /// from a transport error. The default is to degrade anyway; flipping the
+    /// flag makes that ambiguity fatal.
+    #[test]
+    fn cache_failure_first_block_ambiguity_follows_the_config() {
+        assert!(!cache_write_failure_is_fatal(
+            &io_err(),
+            &cache_through(),
+            false,
+            true
+        ));
+        assert!(cache_write_failure_is_fatal(
+            &io_err(),
+            &cache_through(),
+            false,
+            false
+        ));
+        // The flag only covers the first block; afterwards auth is known-good.
+        assert!(!cache_write_failure_is_fatal(
+            &io_err(),
+            &cache_through(),
+            true,
+            false
+        ));
+    }
+
+    /// ASYNC_THROUGH opens no UFS stream up front, but a degrade needs one, so
+    /// the create options must be resolved even though the happy path drops
+    /// them.
+    #[test]
+    fn async_through_carries_ufs_options_for_the_degrade_path() {
+        let info = FileInfo {
+            ufs_path: Some("cosn://bucket/f".to_string()),
+            ..Default::default()
+        };
+        let strategy = resolve_write_strategy(Some(5), &info);
+        assert!(!strategy.ufs_stream);
+        assert_eq!(
+            strategy
+                .create_ufs_file_options
+                .as_ref()
+                .and_then(|o| o.ufs_path.as_deref()),
+            Some("cosn://bucket/f")
+        );
     }
 
     /// A degraded ASYNC_THROUGH write lands on the UFS before `CompleteFile`
@@ -2188,6 +2504,9 @@ mod tests {
             operation_id: Uuid::nil(),
             cancelled: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            should_cache: strategy.cache_stream,
+            ufs_write_enabled: strategy.ufs_stream,
+            block_opened: false,
             write_strategy: strategy,
             committed_block_ids: Vec::new(),
             current_block_writer: None,

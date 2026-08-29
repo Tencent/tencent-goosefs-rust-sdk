@@ -568,11 +568,9 @@ impl MasterClient {
                     path: Some(req_path),
                     options: Some(GetStatusPOptions {
                         load_metadata_type: load,
-                        common_options: sync_interval_ms.map(|ms| {
-                            FileSystemMasterCommonPOptions {
-                                sync_interval_ms: Some(ms),
-                                ..Default::default()
-                            }
+                        common_options: sync_interval_ms.map(|ms| FileSystemMasterCommonPOptions {
+                            sync_interval_ms: Some(ms),
+                            ..Default::default()
                         }),
                         ..Default::default()
                     }),

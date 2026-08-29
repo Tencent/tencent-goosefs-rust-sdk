@@ -3152,7 +3152,9 @@ mod tests {
     #[tokio::test]
     async fn test_view_clear_failed_is_noop_when_never_failed() {
         let shared = WorkerRouter::new();
-        shared.update_workers(vec![make_worker(1, "w1", 9203)]).await;
+        shared
+            .update_workers(vec![make_worker(1, "w1", 9203)])
+            .await;
 
         let view = WorkerRouterView::from_shared(&shared);
         view.clear_failed();
