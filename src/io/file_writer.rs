@@ -485,8 +485,26 @@ impl GoosefsFileWriter {
     ///
     /// # Java authority
     ///
-    /// Mirrors `GoosefsFileOutStream.flush()` which calls
-    /// `mCurrentBlockOutStream.flush()` if one is active.
+    /// `GoosefsFileOutStream.flush()`:
+    ///
+    /// ```java
+    /// if (mUnderStorageOutputStream != null) {
+    ///   mUnderStorageOutputStream.flush();
+    /// }
+    /// if (mUnderStorageType.isAsyncPersist() && mCurrentBlockOutStream != null
+    ///     && conf.getBoolean(USER_FILE_ASYNC_PERSIST_FLUSH_ENABLED)) {
+    ///   mCurrentBlockOutStream.flush();
+    /// }
+    /// ```
+    ///
+    /// Two things follow from that. The cache flush is *narrower* than a
+    /// naive reading suggests — only ASYNC_THROUGH with the flag on reaches
+    /// `mCurrentBlockOutStream.flush()`, because for every other write type
+    /// the durability the caller asked for comes from the UFS stream, and
+    /// forcing a worker-disk sync would just add latency. And a flush failure
+    /// is always fatal: Java routes it to `handleUnderStorageWriteException`,
+    /// which rethrows unconditionally. Degrading here would be wrong anyway,
+    /// since the caller has been told the earlier bytes were accepted.
     pub async fn flush(&mut self) -> Result<()> {
         if self.cancelled.load(Ordering::SeqCst) || self.closed.load(Ordering::SeqCst) {
             return Err(Error::BlockIoError {
@@ -494,17 +512,20 @@ impl GoosefsFileWriter {
             });
         }
 
-        if let Some(active) = self.current_block_writer.as_mut() {
-            if active.bytes_written > 0 {
-                let tail = std::mem::take(&mut active.pending_chunk);
-                if !tail.is_empty() {
-                    if let Err(e) = active.write_chunk(tail).await {
-                        return self.handle_cache_write_exception(e).await;
+        if let Some(ufs) = self.ufs_stream.as_mut() {
+            ufs.flush().await?;
+        }
+
+        if self.write_strategy.need_async_persist && self.config.file_async_persist_flush_enabled {
+            if let Some(active) = self.current_block_writer.as_mut() {
+                if active.bytes_written > 0 {
+                    // An explicit flush is a safe boundary for the chunk
+                    // alignment workaround: the caller wants an ack, and no
+                    // further chunk follows this one on the stream.
+                    let tail = std::mem::take(&mut active.pending_chunk);
+                    if !tail.is_empty() {
+                        active.write_chunk(tail).await?;
                     }
-                }
-                if !self.write_strategy.need_async_persist
-                    || self.config.file_async_persist_flush_enabled
-                {
                     active.flush_replicas().await?;
                 }
             }
