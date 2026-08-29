@@ -47,7 +47,7 @@ import asyncio
 
 import pytest
 from goosefs import AsyncGoosefs, Goosefs, WriteType
-from goosefs.exceptions import GoosefsError, InvalidArgument
+from goosefs.exceptions import GoosefsError, InvalidArgument, IsADirectory
 
 # ---------------------------------------------------------------------------
 # Parametrisation
@@ -279,6 +279,18 @@ def test_sync_read_range_rejects_negative_offset_and_length(
         sync_fs.read_range(path, 0, -1)
     with pytest.raises(InvalidArgument, match="non-negative"):
         sync_fs.read_range(path, -1, 1)
+
+
+def test_sync_read_file_on_directory_raises_is_a_directory(
+    sync_fs: Goosefs, sync_tmp_dir: str
+) -> None:
+    """``read_file`` / ``read_range`` on a directory must raise, not return ``b''``."""
+    path = f"{sync_tmp_dir}/is-a-dir"
+    sync_fs.mkdir(path)
+    with pytest.raises(IsADirectory):
+        sync_fs.read_file(path)
+    with pytest.raises(IsADirectory):
+        sync_fs.read_range(path, 0, 1)
 
 
 def test_sync_write_rejects_non_bytes(sync_fs: Goosefs, sync_tmp_dir: str) -> None:

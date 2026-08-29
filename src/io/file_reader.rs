@@ -274,6 +274,7 @@ impl GoosefsFileReader {
         // Shared Master + metadata cache (status / NotFound / incomplete fall-through).
         // CheckBlocks enrichment below mutates this owned copy (INV-MC-D1).
         let mut file_info = ctx.get_file_info_cached(path).await?;
+        Self::reject_directory(&file_info, path)?;
 
         let file_length = file_info.length.unwrap_or(0);
         if file_length == 0 {
@@ -316,6 +317,20 @@ impl GoosefsFileReader {
         .await;
 
         Ok((Arc::new(file_info), router))
+    }
+
+    /// Reject a directory the same way Java `BaseFileSystem.openFile` does.
+    ///
+    /// Directories report `length == 0`, so skipping this check makes
+    /// `read_file` / `read_range` return empty bytes instead of
+    /// [`Error::OpenDirectory`].
+    fn reject_directory(file_info: &FileInfo, path: &str) -> Result<()> {
+        if file_info.folder.unwrap_or(false) {
+            return Err(Error::OpenDirectory {
+                path: path.to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// Internal: build the reader from file info and router.
@@ -1009,6 +1024,8 @@ impl GoosefsFileReader {
     /// [`FileSystemContext`]. This is the recommended entry point for
     /// long-running clients that want to avoid per-call handshakes.
     ///
+    /// Returns [`Error::OpenDirectory`] if `path` is a directory.
+    ///
     /// ```rust,no_run
     /// # async fn example() -> goosefs_sdk::error::Result<()> {
     /// use std::sync::Arc;
@@ -1291,6 +1308,29 @@ mod tests {
         assert_eq!(reader.block_logical_size(2), bs / 2);
         // Past EOF clamps to 0 (never negative).
         assert_eq!(reader.block_logical_size(99), 0);
+    }
+
+    /// `read_file` / `read_range` must reject directories (Java
+    /// `openFile` / `OpenDirectoryException`). Without this, a directory's
+    /// length-0 metadata would return empty bytes.
+    #[test]
+    fn test_reject_directory() {
+        let mut info = FileInfo {
+            folder: Some(true),
+            length: Some(0),
+            ..Default::default()
+        };
+        let err = GoosefsFileReader::reject_directory(&info, "/d").unwrap_err();
+        assert!(
+            matches!(err, Error::OpenDirectory { ref path } if path == "/d"),
+            "expected OpenDirectory, got {err:?}"
+        );
+
+        info.folder = Some(false);
+        assert!(GoosefsFileReader::reject_directory(&info, "/f").is_ok());
+
+        info.folder = None;
+        assert!(GoosefsFileReader::reject_directory(&info, "/f").is_ok());
     }
 
     /// A freshly-built reader (no context) has caching and short-circuit off,

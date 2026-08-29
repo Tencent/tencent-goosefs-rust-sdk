@@ -525,6 +525,8 @@ impl PyGoosefs {
     /// (only `open_file` does). Synchronous counterpart of
     /// [`PyAsyncGoosefs::read_file`]; same caveats about full materialisation
     /// in RAM apply (Review #17.1: documented).
+    ///
+    /// Raises [`crate::errors::IsADirectory`] if `path` is a directory.
     fn read_file<'py>(
         &self,
         py: Python<'py>,

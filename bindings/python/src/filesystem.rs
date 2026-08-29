@@ -737,6 +737,9 @@ impl PyAsyncGoosefs {
     /// payload in RAM — for large files prefer the streaming reader that will
     /// land in P5 (`open_file()`).
     ///
+    /// Raises [`crate::errors::IsADirectory`] if `path` is a directory
+    /// (same as Java `openFile` / Python `open_file`).
+    ///
     /// Implementation: dispatches to
     /// [`goosefs_sdk::io::GoosefsFileReader::read_file_with_context`], which
     /// is the worker-direct one-shot path and does **not** consult the client
