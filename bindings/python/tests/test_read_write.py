@@ -123,6 +123,20 @@ async def test_async_round_trip(
 
 
 @pytest.mark.asyncio
+async def test_async_must_cache_get_status_reports_in_goosefs_percentage(
+    async_fs: AsyncGoosefs, tmp_dir: str
+) -> None:
+    """Same contract as the sync test: MustCache → ``in_goose_fs_percentage > 0``."""
+    path = f"{tmp_dir}/must-cache-pct.bin"
+    await async_fs.write_file(path, b"x" * 4096, write_type=WriteType.MustCache)
+
+    st = await async_fs.get_status(path)
+    assert st.cacheable is True
+    assert st.is_persisted() is False
+    assert st.in_goose_fs_percentage > 0
+
+
+@pytest.mark.asyncio
 async def test_async_read_range_arbitrary_offsets(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     """Spot-check ``read_range`` on three offset+length combinations."""
     path = f"{tmp_dir}/read-range.bin"
@@ -210,6 +224,22 @@ def test_sync_round_trip(
     st = sync_fs.get_status(path)
     assert st.length == size
     assert st.is_completed()
+
+
+def test_sync_must_cache_get_status_reports_in_goosefs_percentage(
+    sync_fs: Goosefs, sync_tmp_dir: str
+) -> None:
+    """MustCache writes live entirely in GooseFS; ``in_goose_fs_percentage``
+    must not stay at Master's default of 0 (Python ``get_status`` has no
+    ``checkBlockReplicas`` argument to trigger the Java CheckBlocks path).
+    """
+    path = f"{sync_tmp_dir}/must-cache-pct.bin"
+    sync_fs.write_file(path, b"x" * 4096, write_type=WriteType.MustCache)
+
+    st = sync_fs.get_status(path)
+    assert st.cacheable is True
+    assert st.is_persisted() is False
+    assert st.in_goose_fs_percentage > 0
 
 
 def test_sync_read_range_arbitrary_offsets(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
