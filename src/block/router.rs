@@ -738,6 +738,22 @@ impl WorkerRouter {
         }
     }
 
+    /// Forget every recorded worker failure.
+    ///
+    /// # Java authority
+    ///
+    /// `GooseFSBlockStore.getOutStream` calls `failedWorkers.clear()` when the
+    /// candidate pool filters down to empty, so the caller's retry re-picks
+    /// from a pool that stale failures cannot poison. Only meaningful at that
+    /// one point: clearing while candidates remain would send writes straight
+    /// back to a worker that just failed.
+    pub fn clear_failed(&self) {
+        if let Some(map) = self.failed_workers.get() {
+            map.clear();
+        }
+        self.failed_count.store(0, Ordering::Relaxed);
+    }
+
     /// `source_is_local` pre-filter for short-circuit reads
     /// (SHORT_CIRCUIT_DESIGN ).
     ///
@@ -1538,6 +1554,17 @@ impl WorkerRouterView {
         if map.insert(key, Instant::now()).is_none() {
             self.failed_count.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// Forget every recorded worker failure on this view.
+    ///
+    /// Same contract as [`WorkerRouter::clear_failed`]; scoped to this view's
+    /// own failure set, so it cannot disturb other readers or writers.
+    pub fn clear_failed(&self) {
+        if let Some(map) = self.failed_workers.get() {
+            map.clear();
+        }
+        self.failed_count.store(0, Ordering::Relaxed);
     }
 
     /// Check whether a worker key is currently marked failed.
@@ -3086,6 +3113,52 @@ mod tests {
         // inherit the first view's failure — per-view isolation.
         let view2 = WorkerRouterView::from_shared(&shared);
         assert!(!view2.is_failed(&worker_addr_key(workers[0].address.as_ref().unwrap())));
+    }
+
+    /// `clear_failed` must make every worker selectable again and reset the
+    /// fast-path counter, so the write path can retry on a clean pool after it
+    /// blacklists every worker (Java `failedWorkers.clear()`).
+    ///
+    /// A stale `failed_count` would be worse than a stale map: it gates
+    /// `cleanup_expired_failures`, so a non-zero count over an empty map costs
+    /// a pointless shard walk on every selection.
+    #[tokio::test]
+    async fn test_view_clear_failed_restores_full_pool() {
+        let shared = WorkerRouter::with_failure_ttl(Duration::from_secs(3600));
+        let workers = vec![
+            make_worker(1, "w1", 9203),
+            make_worker(2, "w2", 9203),
+            make_worker(3, "w3", 9203),
+        ];
+        shared.update_workers(workers.clone()).await;
+
+        let view = WorkerRouterView::from_shared(&shared);
+        for w in &workers {
+            view.mark_failed(w.address.as_ref().unwrap());
+        }
+        assert!(view.filter_not_failed(&workers).is_empty());
+        assert_eq!(view.failed_count.load(Ordering::Relaxed), 3);
+
+        view.clear_failed();
+
+        assert_eq!(view.filter_not_failed(&workers).len(), 3);
+        assert_eq!(view.failed_count.load(Ordering::Relaxed), 0);
+        // Clearing a view must not disturb the shared router.
+        assert!(!shared.is_failed(&worker_addr_key(workers[0].address.as_ref().unwrap())));
+    }
+
+    /// `clear_failed` before any failure was recorded must not allocate the
+    /// lazily-initialised map — the happy path never touches it.
+    #[tokio::test]
+    async fn test_view_clear_failed_is_noop_when_never_failed() {
+        let shared = WorkerRouter::new();
+        shared.update_workers(vec![make_worker(1, "w1", 9203)]).await;
+
+        let view = WorkerRouterView::from_shared(&shared);
+        view.clear_failed();
+
+        assert!(view.failed_workers_is_uninitialised());
+        assert_eq!(view.failed_count.load(Ordering::Relaxed), 0);
     }
 
     /// : `pick_any_worker` on a view must match the shared

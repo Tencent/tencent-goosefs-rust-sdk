@@ -681,6 +681,17 @@ impl GoosefsFileWriter {
             );
         }
         if pool.is_empty() {
+            // Java resets the failure list here so the caller's retry re-picks
+            // from a clean pool. Without this, a writer that transiently
+            // blacklists every worker can never recover for the rest of the
+            // file. Deliberately not done on the "opened fewer replicas than
+            // required" path below — there the workers really did fail.
+            debug!(
+                block_id = block_id,
+                "no available GooseFS worker after filtering; \
+                 clearing failed-worker set so the retry can re-pick"
+            );
+            self.router.clear_failed();
             return Err(Error::NoWorkerAvailable {
                 message: format!("no available GooseFS worker for block_id={block_id}"),
             });
