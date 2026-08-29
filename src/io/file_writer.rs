@@ -1015,6 +1015,18 @@ impl GoosefsFileWriter {
     ///   `RequestType::UfsFile`, and the resolved `CreateUfsFileOptions`;
     /// - the Worker calls `createNonexistingFile` exactly once and appends every
     ///   subsequent chunk to the same `OutputStream`.
+    ///
+    /// TODO(java-parity): retry across workers instead of giving up after one.
+    /// Java's worker-UFS branch (`GooseFSFileOutStream` constructor, the
+    /// `USER_LOCAL_WRITE_UFS_CLIENT_ENABLED = false` path) loops under
+    /// `USER_FILE_WRITE_INIT_MAX_DURATION`, reshuffling the worker list each
+    /// round and calling `handleRetryableException` on failure, so one flaky
+    /// worker does not fail the write. Here a single failure marks the worker
+    /// and returns. Deferred rather than done inline because it interacts with
+    /// the degrade path added alongside it: a retry loop has to decide whether
+    /// a degraded write may retry at all (it has already lost its cache copy)
+    /// and how the retries interact with `failed_workers`, which the caller
+    /// also mutates. Worth its own change with its own fault-injection tests.
     async fn open_ufs_stream(&mut self) -> Result<()> {
         const UFS_BLOCK_ID: i64 = -1; // ID_UNUSED in Java
         const UFS_STREAM_LENGTH: i64 = i64::MAX; // Long.MAX_VALUE in Java
