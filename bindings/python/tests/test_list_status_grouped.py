@@ -86,9 +86,7 @@ async def test_list_status_grouped_iter_full_and_empty(
     assert sorted(names) == ["a", "b", "c"]
 
 
-async def test_list_status_grouped_recursive(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_list_status_grouped_recursive(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     await async_fs.mkdir(f"{tmp_dir}/sub")
     await async_fs.write_file(f"{tmp_dir}/sub/child", b"x")
     grouped = await async_fs.list_status_grouped(tmp_dir, recursive=True)
@@ -97,9 +95,7 @@ async def test_list_status_grouped_recursive(
     assert len(grouped) >= 2
 
 
-async def test_list_status_grouped_bool(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_list_status_grouped_bool(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     empty = await async_fs.list_status_grouped(tmp_dir)
     assert not empty
 
@@ -130,9 +126,7 @@ async def test_batch_list_status_grouped_returns_list_in_order(
         assert len(g) == i + 1, f"dir {i} should have {i + 1} entries"
 
 
-async def test_batch_list_status_grouped_empty_dirs(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_batch_list_status_grouped_empty_dirs(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     dirs = [f"{tmp_dir}/empty-{i}" for i in range(3)]
     await async_fs.batch_create_dir(dirs)
     groups = await async_fs.batch_list_status_grouped(dirs, recursive=False)
@@ -141,9 +135,7 @@ async def test_batch_list_status_grouped_empty_dirs(
     assert all(not g for g in groups)
 
 
-async def test_batch_list_status_grouped_recursive(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_batch_list_status_grouped_recursive(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     parent = f"{tmp_dir}/parent"
     await async_fs.mkdir(parent)
     await async_fs.mkdir(f"{parent}/sub")

@@ -266,9 +266,7 @@ async def test_batch_create_dir_recursive(async_fs: AsyncGoosefs, tmp_dir: str) 
     assert await async_fs.batch_exists(nested) == [True, True]
 
 
-async def test_batch_create_file_creates_empty_files(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_batch_create_file_creates_empty_files(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     files = [f"{tmp_dir}/bf{i}" for i in range(3)]
     written = await async_fs.batch_create_file(files)
     # Empty files report 0 bytes written.
@@ -313,6 +311,3 @@ async def test_batch_delete_recursive(async_fs: AsyncGoosefs, tmp_dir: str) -> N
     # Non-recursive delete of a non-empty dir would fail.
     await async_fs.batch_delete([parent], recursive=True)
     assert await async_fs.exists(parent) is False
-
-
-

@@ -248,9 +248,7 @@ def test_sync_write_inside_asyncio_loop_is_refused(sync_fs: Goosefs, sync_tmp_di
 # ---------------------------------------------------------------------------
 
 
-async def test_batch_open_file_reads_all_in_order(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_batch_open_file_reads_all_in_order(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     """Open N files in parallel and verify contents match in input order."""
     paths = [f"{tmp_dir}/bof-{i}.bin" for i in range(3)]
     payloads = [f"payload-{i}".encode() for i in range(3)]
