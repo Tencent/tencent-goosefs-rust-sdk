@@ -237,7 +237,6 @@ class TestSyncPositionedReadAuthRetryGuard:
             "sync positioned_read(offset=16, length=32) returned wrong slice"
         )
 
-
     def test_sync_positioned_read_offset_past_block_raises_value_error(
         self, sync_fs, sync_tmp_dir
     ) -> None:
@@ -250,7 +249,6 @@ class TestSyncPositionedReadAuthRetryGuard:
 
         with pytest.raises(ValueError, match=r"offset=1000 >= actual_block_length=100"):
             sync_fs.positioned_read(path, offset=1000, length=10)
-
 
     def test_sync_positioned_read_length_minus_one_reads_stored_bytes(
         self, sync_fs, sync_tmp_dir

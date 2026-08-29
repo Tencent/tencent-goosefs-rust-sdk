@@ -58,9 +58,7 @@ def test_sync_get_status_raises_notfound(sync_fs: Goosefs, sync_tmp_dir: str) ->
         sync_fs.get_status(f"{sync_tmp_dir}/missing")
 
 
-def test_sync_get_status_file_reports_block_ids(
-    sync_fs: Goosefs, sync_tmp_dir: str
-) -> None:
+def test_sync_get_status_file_reports_block_ids(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
     """Same contract as the async test: ``write_file`` then ``get_status``
     must expose non-empty ``block_ids``.
     """

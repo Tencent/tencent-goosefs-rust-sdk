@@ -57,9 +57,7 @@ async def test_get_status_raises_notfound(async_fs: AsyncGoosefs, tmp_dir: str) 
         await async_fs.get_status(missing)
 
 
-async def test_get_status_file_reports_block_ids(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_get_status_file_reports_block_ids(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     """Master proto omits ``blockIds``; ``get_status`` must still surface them
     from ``file_block_infos`` (Java ``GrpcUtils.toProto`` does not serialise
     the old field).
