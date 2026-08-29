@@ -43,6 +43,61 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Lint / typecheck / stub validation.
+  #
+  # These are the four commands DEVELOPMENT.md tells contributors to run, and
+  # until now none of them ran in CI — the stubs had already drifted from the
+  # module (missing `Config` getters, `URIStatusList` absent from `__all__`)
+  # with nothing to catch it. A documented check that no job runs is not a
+  # check.
+  #
+  # Platform-independent, so one runner is enough; the wheel matrix below
+  # covers the per-OS build concerns.
+  lint:
+    name: lint + typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Sync deps
+        working-directory: bindings/python
+        run: uv sync --all-extras --group dev --group test
+
+      # stubtest imports the real extension module and compares it against the
+      # stubs, so the module has to be built and installed first.
+      - name: Build binding
+        working-directory: bindings/python
+        run: uv run maturin develop --uv --release
+
+      - name: ruff check
+        working-directory: bindings/python
+        run: uv run ruff check python/goosefs tests examples
+
+      - name: ruff format --check
+        working-directory: bindings/python
+        run: uv run ruff format --check python/goosefs tests examples
+
+      - name: mypy
+        working-directory: bindings/python
+        run: uv run --group test mypy python/goosefs
+
+      - name: stubtest
+        working-directory: bindings/python
+        run: uv run --group test python -m mypy.stubtest goosefs
+
   build-wheel:
     name: wheel (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
