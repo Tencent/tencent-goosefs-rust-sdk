@@ -29,6 +29,12 @@
 //!   count. That breaks the replication contract the caller asked for, so
 //!   falling back to a single UFS copy is forbidden and the write must fail.
 //!
+//! Paths are flat, directly under the Goosefs root, on purpose. A write that
+//! reaches the UFS needs its parent directory to exist *on the UFS*, and
+//! `mkdir` does not put it there — see the TODO on
+//! [`unique_path`]. Nesting the fixtures would test that gap rather than the
+//! degrade path.
+//!
 //! TODO(coverage): both cases here fail *before* any block opens, which is the
 //! only kind of failure client config can provoke. The rules that need a
 //! failure to land mid-stream are still uncovered:
@@ -42,10 +48,11 @@
 //!   already open.
 //!
 //! Reaching those means killing or partitioning a worker part-way through a
-//! write, which the Docker fixture cannot currently do. `cache_write_failure_is_fatal`
-//! is unit-tested over the full matrix, so the *decisions* are covered; what
-//! is missing is proof the writer survives the failure arriving mid-stream.
-//! Needs a fixture that can drop a worker on command.
+//! write, which the Docker fixture cannot currently do.
+//! `cache_write_failure_is_fatal` is unit-tested over the full matrix, so the
+//! *decisions* are covered; what is missing is proof the writer survives the
+//! failure arriving mid-stream. Needs a fixture that can drop a worker on
+//! command.
 //!
 //! Ignored by default — needs a live master with a mounted UFS. Run:
 //! ```bash
@@ -60,9 +67,7 @@ use goosefs_sdk::auth::AuthType;
 use goosefs_sdk::config::{GoosefsConfig, WriteType};
 use goosefs_sdk::context::FileSystemContext;
 use goosefs_sdk::error::{Error, Result};
-use goosefs_sdk::fs::options::{
-    CreateFileOptions, DeleteOptions, ListStatusOptions, OpenFileOptions,
-};
+use goosefs_sdk::fs::options::{CreateFileOptions, DeleteOptions, OpenFileOptions};
 use goosefs_sdk::fs::{BaseFileSystem, FileSystem};
 use goosefs_sdk::io::GoosefsFileInStream;
 use goosefs_sdk::proto::grpc::file::LoadMetadataPType;
@@ -82,12 +87,25 @@ fn auth_type() -> AuthType {
     }
 }
 
-fn unique_root() -> String {
+/// A unique path directly under the Goosefs root.
+///
+/// TODO(java-parity): this is flat because a nested one would not work.
+/// `MasterClient::create_directory` never sets `CreateDirectoryPOptions`
+/// `write_type` (the field exists, tag 4), so directories are created with the
+/// Master's default — cache-only. Java takes the write type from
+/// `alluxio.user.file.writetype.default` and a CACHE_THROUGH/THROUGH `mkdir`
+/// creates the directory on the UFS too. The consequence is that a Rust client
+/// writing a CACHE_THROUGH file into a freshly-created subdirectory gets
+/// `NOT_FOUND: <ufs path> (No such file or directory)` from the worker, because
+/// the parent exists in Goosefs but not on the UFS. Fixing it means plumbing
+/// the write type through `mkdir`, which changes directory-creation behaviour
+/// for every caller and so wants its own change and its own tests.
+fn unique_path(name: &str) -> String {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    format!("/sdk-write-degrade-e2e/{}_{ts}", std::process::id())
+    format!("/sdk-write-degrade-e2e-{}_{ts}-{name}", std::process::id())
 }
 
 fn base_config() -> GoosefsConfig {
@@ -108,48 +126,33 @@ async fn connect(config: GoosefsConfig) -> Result<Arc<BaseFileSystem>> {
 }
 
 fn write_opts(write_type: WriteType) -> CreateFileOptions {
-    let mut opts = CreateFileOptions::with_write_type(write_type);
-    opts.recursive = true;
-    opts
+    CreateFileOptions::with_write_type(write_type)
 }
 
-async fn cleanup(fs: &BaseFileSystem, root: &str) {
-    let _ = fs.delete(root, DeleteOptions::recursive()).await;
-}
-
-/// Ask the UFS directly whether it holds the file, by dropping the Goosefs
-/// inode and forcing a re-import. `None` means the UFS never got it.
+/// Ask the UFS directly whether it holds the file: drop the Goosefs inode and
+/// force the Master to re-import. `None` means the UFS never got it.
 ///
-/// The Goosefs-only delete is best-effort: a write that failed may have left
-/// no inode to delete, and that is not what this helper is measuring.
-async fn reimport_length_from_ufs(
-    fs: &BaseFileSystem,
-    dir: &str,
-    name: &str,
-) -> Result<Option<i64>> {
+/// The Goosefs-only delete is best-effort — a write that failed may have left
+/// no inode to delete, and that is not what this is measuring.
+async fn reimport_length_from_ufs(fs: &BaseFileSystem, path: &str) -> Result<Option<i64>> {
     let _ = fs
-        .delete(
-            &format!("{dir}/{name}"),
-            DeleteOptions::goosefs_only_unchecked(),
-        )
+        .delete(path, DeleteOptions::goosefs_only_unchecked())
         .await;
 
-    let entries = fs
-        .list_status_with_options(
-            dir,
-            ListStatusOptions {
-                recursive: false,
-                sync_interval_ms: Some(0),
-                load_metadata_type: Some(LoadMetadataPType::Always),
-                load_metadata_only: false,
-            },
-        )
-        .await?;
+    match fs
+        .context()
+        .acquire_master()
+        .get_status_with_load_type(path, Some(LoadMetadataPType::Always), Some(0))
+        .await
+    {
+        Ok(info) => Ok(Some(info.length.unwrap_or_default())),
+        Err(Error::NotFound { .. }) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
 
-    Ok(entries
-        .into_iter()
-        .find(|e| e.name == name)
-        .map(|e| e.length))
+async fn cleanup(fs: &BaseFileSystem, path: &str) {
+    let _ = fs.delete(path, DeleteOptions::default()).await;
 }
 
 /// The degradation main line. Before this path existed the write simply
@@ -165,10 +168,16 @@ async fn reimport_length_from_ufs(
 async fn async_through_degrades_to_ufs_when_no_worker_has_space() -> Result<()> {
     let mut config = base_config();
     config.block_worker_available_min_remain_bytes = UNSATISFIABLE_REMAIN_BYTES;
+    // Pin replication to 1 so the watermark is the *only* reason the candidate
+    // pool empties. On a single-worker cluster the default `durable.min = 2`
+    // would also come up short, and that failure is ResourceExhausted — fatal
+    // by rule 1, not a degrade. The test would then pass or fail depending on
+    // how many workers the cluster happens to have.
+    config.file_replication_durable = 1;
+    config.file_replication_durable_min = 1;
     let fs = connect(config).await?;
 
-    let root = unique_root();
-    let path = format!("{root}/degraded.bin");
+    let path = unique_path("degraded.bin");
     let payload: Vec<u8> = (0..48 * 1024).map(|i| (i % 241) as u8).collect();
 
     if let Err(e) = fs
@@ -198,7 +207,7 @@ async fn async_through_degrades_to_ufs_when_no_worker_has_space() -> Result<()> 
          stream had already accepted before it failed"
     );
 
-    let length = reimport_length_from_ufs(&fs, &root, "degraded.bin").await?;
+    let length = reimport_length_from_ufs(&fs, &path).await?;
     assert_eq!(
         length,
         Some(payload.len() as i64),
@@ -206,7 +215,7 @@ async fn async_through_degrades_to_ufs_when_no_worker_has_space() -> Result<()> 
          not after an async-persist job"
     );
 
-    cleanup(&fs, &root).await;
+    cleanup(&fs, &path).await;
     Ok(())
 }
 
@@ -224,8 +233,7 @@ async fn async_through_does_not_degrade_when_replication_contract_broken() -> Re
     config.file_replication_durable_min = 9;
     let fs = connect(config).await?;
 
-    let root = unique_root();
-    let path = format!("{root}/must-not-degrade.bin");
+    let path = unique_path("must-not-degrade.bin");
 
     let err = fs
         .write_file(&path, b"payload", write_opts(WriteType::AsyncThrough))
@@ -236,12 +244,12 @@ async fn async_through_does_not_degrade_when_replication_contract_broken() -> Re
         "expected InvalidArgument, got {err:?}"
     );
 
-    let length = reimport_length_from_ufs(&fs, &root, "must-not-degrade.bin").await?;
+    let length = reimport_length_from_ufs(&fs, &path).await?;
     assert_eq!(
         length, None,
         "an aborted write must leave nothing behind on the UFS"
     );
 
-    cleanup(&fs, &root).await;
+    cleanup(&fs, &path).await;
     Ok(())
 }
