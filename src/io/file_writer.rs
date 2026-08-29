@@ -1016,6 +1016,16 @@ impl GoosefsFileWriter {
     /// - the Worker calls `createNonexistingFile` exactly once and appends every
     ///   subsequent chunk to the same `OutputStream`.
     ///
+    /// This deliberately tracks Java's *worker*-UFS branch, which is not Java's
+    /// default. With `goosefs.user.local.write.ufs.client.enabled = true`
+    /// (Java's default) the client writes to the UFS itself and never involves
+    /// a worker. Routing through a worker instead is an intentional choice, not
+    /// an unfinished one: it keeps UFS credentials and endpoint configuration
+    /// on the workers, so a client needs no direct UFS reachability. The
+    /// trade-off is an extra network hop and a dependency on worker liveness
+    /// for what Java can do client-side. Revisit only if client-direct UFS
+    /// writes become a requirement — it is a new code path, not a tweak here.
+    ///
     /// TODO(java-parity): retry across workers instead of giving up after one.
     /// Java's worker-UFS branch (`GooseFSFileOutStream` constructor, the
     /// `USER_LOCAL_WRITE_UFS_CLIENT_ENABLED = false` path) loops under
