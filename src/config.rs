@@ -414,6 +414,14 @@ impl PropertiesMap {
             cfg.file_async_persist_flush_enabled = enabled;
         }
 
+        // No positive-value guard here: `0` (persist immediately) and
+        // `NO_AUTO_PERSIST` (`-1`, never auto-persist) are both meaningful.
+        if let Some(ms) =
+            self.get_parsed::<i64>("goosefs.user.file.persistence.initial.wait.time")
+        {
+            cfg.file_persistence_initial_wait_time_ms = ms;
+        }
+
         // CheckBlocks probe width (Java GetStatusPOptions.checkBlockReplicas).
         if let Some(n) = self.get_parsed::<i32>("goosefs.user.file.check.block.replicas") {
             if n >= 0 {
@@ -1093,6 +1101,14 @@ pub const ENV_FILE_WRITE_MAX_NODE_RETRY: &str = "GOOSEFS_USER_FILE_WRITE_MAX_NOD
 pub const ENV_FILE_ASYNC_PERSIST_FLUSH_ENABLED: &str =
     "GOOSEFS_USER_FILE_ASYNC_PERSIST_FLUSH_ENABLED";
 
+/// Environment variable: `goosefs.user.file.persistence.initial.wait.time`.
+///
+/// Mirrors [`GoosefsConfig::file_persistence_initial_wait_time_ms`]. Default
+/// is `0`. Accepts [`NO_AUTO_PERSIST`] (`-1`); only non-numeric input is
+/// ignored.
+pub const ENV_FILE_PERSISTENCE_INITIAL_WAIT_TIME: &str =
+    "GOOSEFS_USER_FILE_PERSISTENCE_INITIAL_WAIT_TIME";
+
 /// Environment variable: `goosefs.user.file.check.block.replicas`.
 ///
 /// Mirrors [`GoosefsConfig::check_block_replicas`]. Default is `0`.
@@ -1114,6 +1130,14 @@ pub const ENV_FILE_READ_MAX_NODE_RETRY: &str = "GOOSEFS_USER_FILE_READ_MAX_NODE_
 /// Default [`GoosefsConfig::file_read_max_node_retry`] / Java
 /// `goosefs.user.file.read.max.node.retry` (`InStreamOptions.maxRetryNode`).
 pub const DEFAULT_FILE_READ_MAX_NODE_RETRY: i32 = 3;
+
+/// Sentinel for [`GoosefsConfig::file_persistence_initial_wait_time_ms`]
+/// meaning "never persist automatically".
+///
+/// A file written with ASYNC_THROUGH under this setting is only persisted by
+/// a later rename or an explicit persist command. Matches Java
+/// `Constants.NO_AUTO_PERSIST`.
+pub const NO_AUTO_PERSIST: i64 = -1;
 
 /// Environment variable: block size.
 pub const ENV_BLOCK_SIZE: &str = "GOOSEFS_BLOCK_SIZE";
@@ -1727,6 +1751,19 @@ pub struct GoosefsConfig {
     /// Java default `true`).
     #[serde(default = "default_file_async_persist_flush_enabled")]
     pub file_async_persist_flush_enabled: bool,
+
+    /// Delay in milliseconds before the Master schedules the async-persist job
+    /// for an ASYNC_THROUGH file
+    /// (`goosefs.user.file.persistence.initial.wait.time`, Java default `0`).
+    ///
+    /// Sent as `CompleteFilePOptions.async_persist_options.persistence_wait_time`.
+    /// [`NO_AUTO_PERSIST`] (`-1`) means "never auto-persist": the client then
+    /// omits `async_persist_options` entirely, so the file is only persisted
+    /// by a later rename or an explicit persist command. Matches Java
+    /// `OutStreamOptions.getPersistenceWaitTime()` /
+    /// `Constants.NO_AUTO_PERSIST`.
+    #[serde(default = "default_file_persistence_initial_wait_time_ms")]
+    pub file_persistence_initial_wait_time_ms: i64,
 
     /// How many hash-selected workers to probe per block via `CheckBlocks`
     /// when enriching `FileInfo.locations` (Java `checkBlockReplicas` /
@@ -2435,6 +2472,11 @@ fn default_worker_read_cache_min_ratio() -> f64 {
     0.1
 }
 
+fn default_file_persistence_initial_wait_time_ms() -> i64 {
+    // Matches Java ClientPropertyKey.USER_FILE_PERSISTENCE_INITIAL_WAIT_TIME.
+    0
+}
+
 fn default_file_async_persist_flush_enabled() -> bool {
     // Matches Java USER_FILE_ASYNC_PERSIST_FLUSH_ENABLED default.
     true
@@ -2502,6 +2544,8 @@ impl Default for GoosefsConfig {
             block_worker_available_min_remain_ratio: default_block_worker_min_remain_ratio(),
             worker_read_cache_min_ratio: default_worker_read_cache_min_ratio(),
             file_async_persist_flush_enabled: default_file_async_persist_flush_enabled(),
+            file_persistence_initial_wait_time_ms:
+                default_file_persistence_initial_wait_time_ms(),
             check_block_replicas: default_check_block_replicas(),
             file_read_max_node_retry: default_file_read_max_node_retry(),
             prefetch_window: default_prefetch_window(),
@@ -2794,6 +2838,16 @@ impl GoosefsConfig {
         if n > 0 {
             self.file_write_max_node_retry = n;
         }
+        self
+    }
+
+    /// Set
+    /// [`file_persistence_initial_wait_time_ms`](Self::file_persistence_initial_wait_time_ms).
+    ///
+    /// Every value is accepted, including [`NO_AUTO_PERSIST`] (`-1`), which
+    /// disables automatic persistence altogether. Default is `0`.
+    pub fn with_file_persistence_initial_wait_time_ms(mut self, ms: i64) -> Self {
+        self.file_persistence_initial_wait_time_ms = ms;
         self
     }
 
@@ -3269,6 +3323,14 @@ impl GoosefsConfig {
         if let Ok(val) = env::var(ENV_FILE_ASYNC_PERSIST_FLUSH_ENABLED) {
             if let Some(b) = parse_bool_loose(&val) {
                 self.file_async_persist_flush_enabled = b;
+            }
+        }
+
+        // No positive-value guard: `0` and `NO_AUTO_PERSIST` (`-1`) are both
+        // meaningful settings.
+        if let Ok(val) = env::var(ENV_FILE_PERSISTENCE_INITIAL_WAIT_TIME) {
+            if let Ok(ms) = val.parse::<i64>() {
+                self.file_persistence_initial_wait_time_ms = ms;
             }
         }
 
@@ -3985,6 +4047,7 @@ mod tests {
         assert_eq!(config.block_worker_available_min_remain_ratio, 0.015);
         assert_eq!(config.worker_read_cache_min_ratio, 0.1);
         assert!(config.file_async_persist_flush_enabled);
+        assert_eq!(config.file_persistence_initial_wait_time_ms, 0);
         assert_eq!(config.check_block_replicas, 0);
         assert_eq!(config.file_read_max_node_retry, 3);
         assert!(!config.is_multi_master());
@@ -4293,6 +4356,45 @@ mod tests {
     }
 
     #[test]
+    /// `goosefs.user.file.persistence.initial.wait.time` must round-trip every
+    /// value, including `0` (persist immediately) and `NO_AUTO_PERSIST` (`-1`,
+    /// never auto-persist). A naive `n > 0` guard — the pattern used by the
+    /// replication keys — would silently drop both.
+    fn test_persistence_initial_wait_time_accepts_zero_and_no_auto_persist() {
+        let cfg = GoosefsConfig::from_properties_str(
+            "goosefs.user.file.persistence.initial.wait.time=5000\n\
+             goosefs.master.rpc.addresses=127.0.0.1:9200\n",
+        );
+        assert_eq!(cfg.file_persistence_initial_wait_time_ms, 5000);
+
+        let cfg = GoosefsConfig::from_properties_str(
+            "goosefs.user.file.persistence.initial.wait.time=-1\n\
+             goosefs.master.rpc.addresses=127.0.0.1:9200\n",
+        );
+        assert_eq!(cfg.file_persistence_initial_wait_time_ms, NO_AUTO_PERSIST);
+
+        let cfg = GoosefsConfig::from_properties_str(
+            "goosefs.user.file.persistence.initial.wait.time=0\n\
+             goosefs.master.rpc.addresses=127.0.0.1:9200\n",
+        );
+        assert_eq!(cfg.file_persistence_initial_wait_time_ms, 0);
+
+        // Non-numeric input leaves the default untouched.
+        let cfg = GoosefsConfig::from_properties_str(
+            "goosefs.user.file.persistence.initial.wait.time=soon\n\
+             goosefs.master.rpc.addresses=127.0.0.1:9200\n",
+        );
+        assert_eq!(cfg.file_persistence_initial_wait_time_ms, 0);
+
+        assert_eq!(
+            GoosefsConfig::new("127.0.0.1:9200")
+                .with_file_persistence_initial_wait_time_ms(NO_AUTO_PERSIST)
+                .file_persistence_initial_wait_time_ms,
+            NO_AUTO_PERSIST
+        );
+    }
+
+    #[test]
     fn test_file_replication_number_builder_and_properties() {
         let config = GoosefsConfig::new("127.0.0.1:9200").with_file_replication_number(3);
         assert_eq!(config.file_replication_number, 3);
@@ -4543,6 +4645,10 @@ mod tests {
         assert_eq!(
             ENV_FILE_ASYNC_PERSIST_FLUSH_ENABLED,
             "GOOSEFS_USER_FILE_ASYNC_PERSIST_FLUSH_ENABLED"
+        );
+        assert_eq!(
+            ENV_FILE_PERSISTENCE_INITIAL_WAIT_TIME,
+            "GOOSEFS_USER_FILE_PERSISTENCE_INITIAL_WAIT_TIME"
         );
         assert_eq!(
             ENV_FILE_READ_MAX_NODE_RETRY,
