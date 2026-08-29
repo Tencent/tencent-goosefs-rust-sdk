@@ -47,7 +47,7 @@ import asyncio
 
 import pytest
 from goosefs import AsyncGoosefs, Goosefs, WriteType
-from goosefs.exceptions import GoosefsError
+from goosefs.exceptions import GoosefsError, InvalidArgument
 
 # ---------------------------------------------------------------------------
 # Parametrisation
@@ -157,6 +157,22 @@ async def test_async_read_range_arbitrary_offsets(async_fs: AsyncGoosefs, tmp_di
 
 
 @pytest.mark.asyncio
+async def test_async_read_range_rejects_negative_offset_and_length(
+    async_fs: AsyncGoosefs, tmp_dir: str
+) -> None:
+    """Negatives must be ``InvalidArgument``, not PyO3 ``OverflowError``
+    from extracting into ``u64``.
+    """
+    path = f"{tmp_dir}/read-range-neg.bin"
+    await async_fs.write_file(path, b"x" * 10)
+
+    with pytest.raises(InvalidArgument, match="non-negative"):
+        await async_fs.read_range(path, 0, -1)
+    with pytest.raises(InvalidArgument, match="non-negative"):
+        await async_fs.read_range(path, -1, 1)
+
+
+@pytest.mark.asyncio
 async def test_async_write_accepts_bytes_like_objects(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     """``write_file`` should accept ``bytes`` / ``bytearray`` / ``memoryview``
     interchangeably (PyO3's ``&[u8]`` extractor handles the buffer protocol)."""
@@ -250,6 +266,19 @@ def test_sync_read_range_arbitrary_offsets(sync_fs: Goosefs, sync_tmp_dir: str) 
     assert sync_fs.read_range(path, 1024, 512) == payload[1024:1536]
     assert sync_fs.read_range(path, 4000, 96) == payload[4000:4096]
     assert sync_fs.read_range(path, 4000, 1024) == payload[4000:4096]
+
+
+def test_sync_read_range_rejects_negative_offset_and_length(
+    sync_fs: Goosefs, sync_tmp_dir: str
+) -> None:
+    """Negatives must be ``InvalidArgument``, not PyO3 ``OverflowError``."""
+    path = f"{sync_tmp_dir}/sync-read-range-neg.bin"
+    sync_fs.write_file(path, b"x" * 10)
+
+    with pytest.raises(InvalidArgument, match="non-negative"):
+        sync_fs.read_range(path, 0, -1)
+    with pytest.raises(InvalidArgument, match="non-negative"):
+        sync_fs.read_range(path, -1, 1)
 
 
 def test_sync_write_rejects_non_bytes(sync_fs: Goosefs, sync_tmp_dir: str) -> None:

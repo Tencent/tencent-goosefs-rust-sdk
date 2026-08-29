@@ -120,6 +120,20 @@ pub(crate) fn extract_bytes_like(data: &Bound<'_, PyAny>) -> PyResult<bytes::Byt
     Ok(bytes::Bytes::from(v))
 }
 
+/// Accept signed `offset`/`length` at the PyO3 boundary (`.pyi` is `int`)
+/// and reject negatives as SDK [`Error::InvalidArgument`] — not PyO3's
+/// `OverflowError` from extracting into `u64`.
+pub(crate) fn parse_read_range(offset: i64, length: i64) -> PyResult<(u64, u64)> {
+    if offset < 0 || length < 0 {
+        return Err(map_err(goosefs_sdk::error::Error::InvalidArgument {
+            message: format!(
+                "read_range offset and length must be non-negative (offset={offset}, length={length})"
+            ),
+        }));
+    }
+    Ok((offset as u64, length as u64))
+}
+
 /// Owner adaptor that lets `bytes::Bytes` borrow a `PyBuffer`'s memory with
 /// zero copy(). `AsRef<[u8]>` exposes the contiguous bytes; the
 /// `PyBuffer` is released on drop (pyo3 re-acquires the GIL internally).
@@ -747,16 +761,18 @@ impl PyAsyncGoosefs {
 
     /// `await fs.read_range(path, offset, length)` → `bytes`.
     ///
-    /// Read `length` bytes starting at byte `offset`. Both arguments are
-    /// non-negative. If `offset + length` exceeds the file length the SDK
-    /// will short-read and return whatever is available — no error.
+    /// Read `length` bytes starting at byte `offset`. Both arguments must be
+    /// non-negative (`InvalidArgument` otherwise). If `offset + length`
+    /// exceeds the file length the SDK short-reads and returns whatever is
+    /// available — no error.
     fn read_range<'py>(
         &self,
         py: Python<'py>,
         path: String,
-        offset: u64,
-        length: u64,
+        offset: i64,
+        length: i64,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let (offset, length) = parse_read_range(offset, length)?;
         let h = self.handle()?;
         future_into_py(py, async move {
             let bytes = goosefs_sdk::io::GoosefsFileReader::read_range_with_context(
