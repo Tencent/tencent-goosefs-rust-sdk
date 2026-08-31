@@ -262,7 +262,7 @@ def test_sync_must_cache_get_status_reports_in_goosefs_percentage(
 def test_sync_oneshot_read_same_path_twice_does_not_hang(
     sync_fs: Goosefs, sync_tmp_dir: str
 ) -> None:
-    """CACHE-05: a second one-shot read of the same path must not hang.
+    """A second one-shot read of the same path must not hang.
 
     ``read_file`` / ``read_range`` used to leave the worker ``ReadBlock``
     session open, so the next call on that path blocked forever in native
@@ -288,7 +288,7 @@ def test_sync_oneshot_read_same_path_twice_does_not_hang(
 async def test_async_oneshot_read_same_path_twice_does_not_hang(
     async_fs: AsyncGoosefs, tmp_dir: str
 ) -> None:
-    """Async counterpart of CACHE-05: two ``read_file`` calls on one path."""
+    """Async counterpart: two ``read_file`` calls on one path."""
     path = f"{tmp_dir}/same-path-twice-async.bin"
     payload = _make_payload("same-path-twice-async", 64 * 1024)
     await async_fs.write_file(path, payload, write_type=WriteType.Through)

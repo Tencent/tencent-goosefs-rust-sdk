@@ -143,7 +143,7 @@ def test_uri_wrong_scheme_treated_as_bare_list_and_rejected() -> None:
     assert cfg.master_addr == "http://a:9200/x"
 
 
-# ── CFG-17 / CFG-20 / CFG-21: timeouts + VPC via properties ──────────────
+# ── timeouts + VPC via properties ──────────────────────────────────────
 
 
 def test_timeout_and_vpc_defaults() -> None:

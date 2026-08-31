@@ -212,7 +212,7 @@ def test_sequential_read_bypasses_cache_by_default() -> None:
 def test_read_file_bypasses_page_cache_and_does_not_hang() -> None:
     """One-shot ``read_file`` must stay worker-direct when the page cache is on.
 
-    CACHE-05: ``read_file`` of the same path twice used to hang on the 2nd
+    ``read_file`` of the same path twice used to hang on the 2nd
     call (native ``ReadBlock`` left the worker block lock held). Contract:
     only ``open_file`` consults the cache; ``read_file`` / ``read_range`` go
     worker-direct; a second one-shot read of the same path must return.

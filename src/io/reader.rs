@@ -128,8 +128,7 @@ pub struct GrpcBlockReader {
     /// Wrapped in `Option` so [`Self::half_close`] / [`Drop`] can close the
     /// client→server half *before* the response `Streaming` is dropped.
     /// Dropping the response stream first CANCELS the RPC; the Worker then
-    /// keeps the block lock, and the next `ReadBlock` of the same path hangs
-    /// (CACHE-05 / TAPD 1010099441163277744).
+    /// keeps the block lock, and the next `ReadBlock` of the same path hangs.
     request_tx: Option<mpsc::Sender<ReadRequest>>,
     /// Source of server → client responses (data chunks).
     source: ChunkSource,
@@ -640,7 +639,7 @@ impl Drop for GrpcBlockReader {
         // block lock until it observes `onCompleted`. Dropping `source`
         // (the response `Streaming`) first would CANCEL the RPC instead,
         // leaving the lock held — the next ReadBlock of the same path then
-        // waits forever (CACHE-05 / TAPD 1010099441163277744).
+        // waits forever.
         self.half_close();
         // Abort the background drain task (if any) so it does not keep
         // draining the stream after the consumer goes away.

@@ -594,7 +594,7 @@ impl GoosefsFileReader {
     /// block lock until the client half-closes the bidi stream. A second
     /// open on the same block (2nd page, or a 2nd `read_file` of the same
     /// path) waits forever if that close is skipped or the RPC is cancelled
-    /// instead (CACHE-05). `position_short` completes and unlocks after
+    /// instead. `position_short` completes and unlocks after
     /// exactly `length` bytes, matching `GoosefsFileInStream`.
     async fn read_segment(
         &self,

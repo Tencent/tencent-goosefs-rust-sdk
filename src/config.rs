@@ -474,7 +474,7 @@ impl PropertiesMap {
         }
 
         // Connect timeout: goosefs.user.network.rpc.connect.timeout
-        // Java `parseTimeSize` (`5sec`, `5000ms`, `5000`). CFG-20.
+        // Java `parseTimeSize` (`5sec`, `5000ms`, `5000`).
         if let Some(s) = self.get("goosefs.user.network.rpc.connect.timeout") {
             overlay_positive_duration(&mut cfg.connect_timeout, s);
         }
@@ -482,7 +482,7 @@ impl PropertiesMap {
             overlay_positive_duration(&mut cfg.connect_timeout, s);
         }
 
-        // Request timeout: goosefs.user.network.rpc.timeout (CFG-21).
+        // Request timeout: goosefs.user.network.rpc.timeout.
         if let Some(s) = self.get("goosefs.user.network.rpc.timeout") {
             overlay_positive_duration(&mut cfg.request_timeout, s);
         }
@@ -490,7 +490,7 @@ impl PropertiesMap {
             overlay_positive_duration(&mut cfg.request_timeout, s);
         }
 
-        // VPC mapping: goosefs.user.network.vpc.mapping.enabled (CFG-17).
+        // VPC mapping: goosefs.user.network.vpc.mapping.enabled.
         if let Some(b) = self.get_bool("goosefs.user.network.vpc.mapping.enabled") {
             cfg.use_vpc_mapping = b;
         }
@@ -3549,7 +3549,7 @@ impl GoosefsConfig {
             }
         }
 
-        // gRPC connect / request timeouts (Java parseTimeSize). CFG-20 / CFG-21.
+        // gRPC connect / request timeouts (Java parseTimeSize).
         if let Ok(val) = env::var(ENV_CONNECT_TIMEOUT) {
             overlay_positive_duration(&mut self.connect_timeout, &val);
         }
@@ -4942,7 +4942,7 @@ goosefs.user.network.data.transfer.chunk.size=1MB
         assert_eq!(cfg.chunk_size, 1024 * 1024);
     }
 
-    /// CFG-17 / CFG-20 / CFG-21: the three Python-readable fields must be
+    /// `connect_timeout`, `request_timeout`, and `use_vpc_mapping` must be
     /// settable via properties. `parseTimeSize` accepts `5sec` / `5000ms`
     /// / `5000`; bools accept `true`/`false`.
     #[test]
