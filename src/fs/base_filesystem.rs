@@ -259,11 +259,14 @@ impl FileSystem for BaseFileSystem {
         let sync = opts
             .sync_interval_ms
             .unwrap_or(self.config.file_metadata_sync_interval);
+        let load = opts
+            .load_metadata_type
+            .unwrap_or(self.config.file_metadata_load_type);
         let master = self.master();
         let cache = self.ctx.acquire_metadata_cache();
         let mut fi =
             crate::metadata_cache::get_status_through_cache(cache.as_deref(), path, sync, || {
-                master.get_status(path)
+                master.get_status_with_load_type(path, Some(load), Some(sync))
             })
             .await?;
         // Mirror Java getStatus when checkBlockReplicas > 0: probe workers and

@@ -59,9 +59,11 @@ pub trait FileSystem: Send + Sync + 'static {
     /// - [`crate::error::Error::NotFound`] if the path does not exist.
     async fn get_status(&self, path: &str) -> Result<URIStatus>;
 
-    /// Retrieve metadata with per-call cache / sync options.
+    /// Retrieve metadata with per-call cache / sync / load-metadata options.
     ///
     /// `None` fields in `opts` fall back to `GoosefsConfig`.
+    /// `load_metadata_type` is sent on the GetStatus RPC (Java
+    /// `getStatusDefaults`; default `ONCE`).
     async fn get_status_with_options(
         &self,
         path: &str,

@@ -25,11 +25,11 @@ Because the Python binding shares the Rust configuration core, the cache is avai
 | Situation | Effect |
 | --- | --- |
 | `list_status(..., recursive=True)` | Listing never cached (client-side walk each time). |
-| `goosefs.user.file.metadata.load.type=ALWAYS` | **Listing** cache skipped (no read/write). Does **not** skip `get_status` / `exists` / `open_file`. |
+| `goosefs.user.file.metadata.load.type=ALWAYS` | **Listing** cache skipped (no read/write). Does **not** skip `get_status` / `exists` / `open_file` client cache. Master still re-loads from UFS on those RPCs. |
 | `goosefs.user.file.metadata.sync.interval=0` | `get_status`: skip read, still write back. `list_status`: skip read **and** write. |
 | `goosefs.user.metadata.cache.expiration.time<=0` | Cache is not constructed at all, even when enabled. |
 
-`ALWAYS` is a listing-only flag. To force every **status** lookup to the master, set `GOOSEFS_FILE_METADATA_SYNC_INTERVAL=0`.
+`ALWAYS` skips the listing cache. To force every **status** lookup to skip the client cache, set `GOOSEFS_FILE_METADATA_SYNC_INTERVAL=0`. `load_metadata_type` is still sent on `get_status` (default `ONCE`) so the master can load missing UFS paths.
 
 ## Tuning the Cache
 
@@ -134,7 +134,7 @@ Values below `1` for `max.size` are clamped to `1`. Expiration and sync interval
 
 ### `goosefs.user.file.metadata.load.type` values
 
-The value is sent on every `list_status` RPC, so it has **two** effects: one on the client cache, one on how the master treats the under file system (UFS). It is not sent on `get_status`, so it never affects `get_status` / `exists` / `open_file`.
+The value is sent on every `get_status` **and** `list_status` RPC, so it has **two** effects: one on the client listing cache, one on how the master treats the under file system (UFS). Default `ONCE` matches the Java SDK; an unset field is proto `NEVER` and COS-only files fail `stat` with `NotFound`.
 
 | Value | Client listing cache | Master behaviour | Use when |
 | --- | --- | --- | --- |

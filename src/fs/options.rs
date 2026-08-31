@@ -317,6 +317,9 @@ pub struct GetStatusOptions {
     /// `None` = `GoosefsConfig::file_metadata_sync_interval`.
     /// `Some(0)` = this call skips the metadata cache.
     pub sync_interval_ms: Option<i64>,
+    /// `None` = `GoosefsConfig::file_metadata_load_type` (default `ONCE`).
+    /// Sent on the Master `GetStatus` RPC (Java `getStatusDefaults`).
+    pub load_metadata_type: Option<crate::proto::grpc::file::LoadMetadataPType>,
 }
 
 impl GetStatusOptions {
@@ -324,6 +327,7 @@ impl GetStatusOptions {
     pub fn always_sync() -> Self {
         Self {
             sync_interval_ms: Some(0),
+            load_metadata_type: None,
         }
     }
 }
@@ -485,6 +489,7 @@ mod tests {
     fn test_get_status_options_always_sync() {
         let opts = GetStatusOptions::always_sync();
         assert_eq!(opts.sync_interval_ms, Some(0));
+        assert!(opts.load_metadata_type.is_none());
     }
 
     #[test]

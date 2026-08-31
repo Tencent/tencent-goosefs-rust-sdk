@@ -11,6 +11,17 @@ kept aligned. Python-specific notes also appear in
 
 ## [Unreleased]
 
+### Fixed
+
+- **`get_status` / OpenDAL `stat` now send `loadMetadataType=ONCE`**, matching
+  Java `FileSystemOptions.getStatusDefaults`. The previous empty
+  `GetStatusPOptions` left the field unset; Master proto default is `NEVER`,
+  so COS/UFS files not yet in the GooseFS namespace returned
+  `NotFound` (`Path "..." does not exist.`). `exists` / `open_file` /
+  `GoosefsFileReader` share this GetStatus path. Per-call override:
+  `GetStatusOptions.load_metadata_type`. Set
+  `GOOSEFS_FILE_METADATA_LOAD_TYPE=NEVER` to keep the old Master behaviour.
+
 ### Changed
 
 - **The client metadata cache is now enabled by default** (`metadata_cache_enabled`,

@@ -176,6 +176,27 @@ fn list_status_bfs_child_dir<'a>(
     Some(child)
 }
 
+/// Java `FileSystemOptions.getStatusDefaults` wire shape.
+///
+/// Master `GetStatusContext.create` does **not** merge server defaults. An
+/// unset `load_metadata_type` is protobuf enum `0` (`NEVER`), which makes
+/// `checkLoadMetadataOptions` reject UFS-only paths with
+/// `Path "..." does not exist.` OpenDAL `stat` / `get_status` must therefore
+/// always send `ONCE` (config default) unless the caller overrides.
+pub(crate) fn get_status_p_options(
+    load_metadata_type: Option<LoadMetadataPType>,
+    sync_interval_ms: Option<i64>,
+) -> GetStatusPOptions {
+    GetStatusPOptions {
+        load_metadata_type: load_metadata_type.map(|t| t as i32),
+        common_options: sync_interval_ms.map(|ms| FileSystemMasterCommonPOptions {
+            sync_interval_ms: Some(ms),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
 /// Client for Goosefs `FileSystemMasterClientService` (Master:9200).
 ///
 /// In HA mode, the client holds a reference to the [`MasterInquireClient`]
@@ -502,42 +523,24 @@ impl MasterClient {
     }
 
     /// Get the file/directory status (equivalent to `stat` / `head`).
+    ///
+    /// Sends Java `FileSystemOptions.getStatusDefaults`:
+    /// `loadMetadataType` from [`GoosefsConfig::file_metadata_load_type`]
+    /// (default `ONCE`) and `syncIntervalMs` from
+    /// [`GoosefsConfig::file_metadata_sync_interval`] (default `-1`).
+    ///
+    /// The Master handler uses client options as-is (`GetStatusContext.create`,
+    /// no server-side merge). An unset `loadMetadataType` is proto enum `0`
+    /// (`NEVER`), so COS/UFS files not yet in the namespace would return
+    /// `NotFound`. Matching Java is required for OpenDAL `stat`.
     #[instrument(skip(self), fields(path = %path))]
     pub async fn get_status(&self, path: &str) -> Result<FileInfo> {
-        let start = std::time::Instant::now();
-        // Allocate the owned path exactly once.
-        //
-        // The closure captures `path_owned: Option<String>` by `&mut`. On
-        // the first attempt we `take()` (move) into the request — zero
-        // additional allocation. On a retry attempt (rare) the `Option` is
-        // empty, so we re-allocate from `path` (`&str`) one more time. Since
-        // `with_retry` accepts `FnMut`, this pattern is sound.
-        //
-        // Net effect on the success path (the common case): one `String`
-        // allocation per `get_status` call instead of two. See
-        let mut path_owned: Option<String> = Some(path.to_string());
-        let result = self
-            .with_retry("get_status", |mut client| {
-                let req_path = path_owned.take().unwrap_or_else(|| path.to_string());
-                async move {
-                    let req = GetStatusPRequest {
-                        path: Some(req_path),
-                        options: Some(GetStatusPOptions::default()),
-                        request_id: None,
-                    };
-                    let resp = client.get_status(req).await?;
-                    resp.into_inner()
-                        .file_info
-                        .ok_or_else(|| Error::missing_field("file_info"))
-                }
-            })
-            .await;
-        // Instrument: ops count and latency — use the cached Arc<Counter>
-        // handles to bypass the global DashMap lookup on the hot path.
-        self.counter_get_status_ops.inc(1);
-        self.counter_get_status_latency_us
-            .inc(start.elapsed().as_micros() as i64);
-        result
+        self.get_status_with_load_type(
+            path,
+            Some(self.config.file_metadata_load_type),
+            Some(self.config.file_metadata_sync_interval),
+        )
+        .await
     }
 
     /// `GetStatus` with an explicit `load_metadata_type` / `sync_interval_ms`.
@@ -559,32 +562,39 @@ impl MasterClient {
         load_metadata_type: Option<LoadMetadataPType>,
         sync_interval_ms: Option<i64>,
     ) -> Result<FileInfo> {
-        let load = load_metadata_type.map(|t| t as i32);
+        let start = std::time::Instant::now();
+        // Allocate the owned path exactly once.
+        //
+        // The closure captures `path_owned: Option<String>` by `&mut`. On
+        // the first attempt we `take()` (move) into the request — zero
+        // additional allocation. On a retry attempt (rare) the `Option` is
+        // empty, so we re-allocate from `path` (`&str`) one more time. Since
+        // `with_retry` accepts `FnMut`, this pattern is sound.
+        let options = get_status_p_options(load_metadata_type, sync_interval_ms);
         let mut path_owned: Option<String> = Some(path.to_string());
-        self.with_retry("get_status", |mut client| {
-            let req_path = path_owned.take().unwrap_or_else(|| path.to_string());
-            async move {
-                let req = GetStatusPRequest {
-                    path: Some(req_path),
-                    options: Some(GetStatusPOptions {
-                        load_metadata_type: load,
-                        common_options: sync_interval_ms.map(|ms| FileSystemMasterCommonPOptions {
-                            sync_interval_ms: Some(ms),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    }),
-                    request_id: None,
-                };
-                client
-                    .get_status(req)
-                    .await?
-                    .into_inner()
-                    .file_info
-                    .ok_or_else(|| Error::missing_field("file_info"))
-            }
-        })
-        .await
+        let result = self
+            .with_retry("get_status", |mut client| {
+                let req_path = path_owned.take().unwrap_or_else(|| path.to_string());
+                let options = options.clone();
+                async move {
+                    let req = GetStatusPRequest {
+                        path: Some(req_path),
+                        options: Some(options),
+                        request_id: None,
+                    };
+                    client
+                        .get_status(req)
+                        .await?
+                        .into_inner()
+                        .file_info
+                        .ok_or_else(|| Error::missing_field("file_info"))
+                }
+            })
+            .await;
+        self.counter_get_status_ops.inc(1);
+        self.counter_get_status_latency_us
+            .inc(start.elapsed().as_micros() as i64);
+        result
     }
 
     /// List the contents of a directory. Returns all FileInfo entries.
@@ -1652,6 +1662,55 @@ mod tests {
         assert!(
             Arc::ptr_eq(&picked, &cloned),
             "Arc::clone must share the same MasterClient"
+        );
+    }
+
+    /// Java `getStatusDefaults` always sets `loadMetadataType=ONCE` and
+    /// `syncIntervalMs=-1`. An all-None options struct is proto `NEVER`.
+    #[test]
+    fn get_status_p_options_matches_java_defaults() {
+        use crate::proto::grpc::file::LoadMetadataPType;
+
+        let opts = super::get_status_p_options(Some(LoadMetadataPType::Once), Some(-1));
+        assert_eq!(
+            opts.load_metadata_type,
+            Some(LoadMetadataPType::Once as i32)
+        );
+        assert_eq!(
+            opts.common_options
+                .as_ref()
+                .and_then(|c| c.sync_interval_ms),
+            Some(-1)
+        );
+    }
+
+    #[test]
+    fn get_status_p_options_unset_is_never_on_the_wire() {
+        let opts = super::get_status_p_options(None, None);
+        assert_eq!(
+            opts.load_metadata_type, None,
+            "unset load_metadata_type is proto NEVER (0) on the Master"
+        );
+        assert!(opts.common_options.is_none());
+    }
+
+    #[test]
+    fn get_status_uses_config_load_type_and_sync_interval() {
+        use crate::proto::grpc::file::LoadMetadataPType;
+
+        let cfg = GoosefsConfig::new("localhost:0");
+        assert_eq!(cfg.file_metadata_load_type, LoadMetadataPType::Once);
+        assert_eq!(cfg.file_metadata_sync_interval, -1);
+        let opts = super::get_status_p_options(
+            Some(cfg.file_metadata_load_type),
+            Some(cfg.file_metadata_sync_interval),
+        );
+        assert_eq!(opts.load_metadata_type, Some(1)); // ONCE
+        assert_eq!(
+            opts.common_options
+                .as_ref()
+                .and_then(|c| c.sync_interval_ms),
+            Some(-1)
         );
     }
 }

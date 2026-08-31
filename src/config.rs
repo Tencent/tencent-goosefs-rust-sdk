@@ -1321,8 +1321,9 @@ pub const ENV_FILE_METADATA_SYNC_INTERVAL: &str = "GOOSEFS_FILE_METADATA_SYNC_IN
 
 /// Environment variable: file metadata load type (`ONCE` / `ALWAYS` / `NEVER`).
 ///
-/// Mirrors [`GoosefsConfig::file_metadata_load_type`]. `ALWAYS` skips the
-/// listing cache. Case-insensitive; invalid values keep the default `ONCE`.
+/// Mirrors [`GoosefsConfig::file_metadata_load_type`]. Sent on both
+/// `get_status` and `list_status`. `ALWAYS` skips the listing cache.
+/// Case-insensitive; invalid values keep the default `ONCE`.
 pub const ENV_FILE_METADATA_LOAD_TYPE: &str = "GOOSEFS_FILE_METADATA_LOAD_TYPE";
 
 /// Storage option key for config manager RPC addresses.
@@ -2218,7 +2219,9 @@ pub struct GoosefsConfig {
 
     /// `goosefs.user.file.metadata.load.type` (`ONCE` / `ALWAYS` / `NEVER`).
     ///
-    /// Default `ONCE`. `ALWAYS` skips the listing cache.
+    /// Default `ONCE`. Sent on both `get_status` and `list_status` (Java
+    /// `FileSystemOptions.getStatusDefaults` / `listStatusDefaults`).
+    /// `ALWAYS` skips the listing cache.
     #[serde(default = "default_file_metadata_load_type")]
     #[serde(with = "load_metadata_type_serde")]
     pub file_metadata_load_type: LoadMetadataPType,

@@ -8,6 +8,13 @@ This document records all notable changes to the `goosefs` Python binding. The f
 
 ## [Unreleased]
 
+### Fixed
+
+- **`get_status` / `open_file` now load UFS metadata like the Java SDK**
+  (`loadMetadataType=ONCE` by default). Files written directly to COS and
+  not yet in the GooseFS namespace no longer fail OpenDAL `stat` with
+  `NotFound`. Override with `GOOSEFS_FILE_METADATA_LOAD_TYPE`.
+
 ---
 
 ## [0.1.9] — 2026-08-04
