@@ -259,11 +259,14 @@ impl FileSystem for BaseFileSystem {
         let sync = opts
             .sync_interval_ms
             .unwrap_or(self.config.file_metadata_sync_interval);
+        let load = opts
+            .load_metadata_type
+            .unwrap_or(self.config.file_metadata_load_type);
         let master = self.master();
         let cache = self.ctx.acquire_metadata_cache();
         let mut fi =
             crate::metadata_cache::get_status_through_cache(cache.as_deref(), path, sync, || {
-                master.get_status(path)
+                master.get_status_with_load_type(path, Some(load), Some(sync))
             })
             .await?;
         // Mirror Java getStatus when checkBlockReplicas > 0: probe workers and
@@ -328,7 +331,7 @@ impl FileSystem for BaseFileSystem {
             // at every BFS level — Java recursive listStatus does not force Always;
             // the default is goosefs.user.file.metadata.load.type (ONCE).
             let items = master
-                .list_status_with_load_type(path, true, Some(load))
+                .list_status_with_options(path, true, Some(load), Some(sync))
                 .await?;
             return Ok(items.into_iter().map(URIStatus::from_proto).collect());
         }
@@ -344,7 +347,7 @@ impl FileSystem for BaseFileSystem {
             crate::metadata_cache::list_status_through_cache(cache.as_deref(), path, skip, || {
                 // Java `listStatusDefaults()` always sets loadMetadataType
                 // (default ONCE), including non-recursive listings.
-                master.list_status_with_load_type(path, false, Some(load))
+                master.list_status_with_options(path, false, Some(load), Some(sync))
             })
             .await?;
         Ok(items.into_iter().map(URIStatus::from_proto).collect())

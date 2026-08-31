@@ -11,6 +11,47 @@ kept aligned. Python-specific notes also appear in
 
 ## [Unreleased]
 
+### Fixed
+
+- **`get_status` / OpenDAL `stat` now send `loadMetadataType=ONCE`**, matching
+  Java `FileSystemOptions.getStatusDefaults`. The previous empty
+  `GetStatusPOptions` left the field unset; Master proto default is `NEVER`,
+  so COS/UFS files not yet in the GooseFS namespace returned
+  `NotFound` (`Path "..." does not exist.`). `exists` / `open_file` /
+  `GoosefsFileReader` share this GetStatus path. Per-call override:
+  `GetStatusOptions.load_metadata_type`. Set
+  `GOOSEFS_FILE_METADATA_LOAD_TYPE=NEVER` to keep the old Master behaviour.
+
+- **`MasterClient::list_status` now sends `loadMetadataType` on non-recursive
+  listings too**, matching Java `FileSystemOptions.listStatusDefaults`. Only the
+  recursive BFS resolved a load type before, so a direct
+  `list_status(path, false)` — the call OpenDAL `list` makes — left the field
+  unset. Master reads it as `NEVER`, which forces `loadDescendantType=NONE` and
+  rejects a UFS-only directory, so COS objects missing from the inode tree were
+  silently absent from listings. Both entry points also send `syncIntervalMs`
+  from the config now, instead of letting Master fall back to its own
+  `goosefs.user.file.metadata.sync.interval`. New
+  `MasterClient::list_status_with_options` takes both values explicitly.
+
+- **Write-path RPCs now send Java `commonDefaults`**. `create_file`,
+  `create_directory`, `delete`, `rename`, and `complete_file` carry
+  `commonOptions.syncIntervalMs` from the client config and a per-call
+  `operationId` (generated once and reused across retries, matching
+  `goosefs.user.file.include.operation.id`). `schedule_async_persistence`
+  sends `syncIntervalMs` only, like Java `scheduleAsyncPersistDefaults`.
+  `create_directory` still uses `allowExists=true` (OpenDAL `mkdir -p`);
+  only the missing commonOptions/opId are added.
+
+- **`rename` reads `goosefs.user.file.persist.on.rename`** (default `false`),
+  matching Java `renameDefaults`. Set `GOOSEFS_USER_FILE_PERSIST_ON_RENAME=true`
+  (or the site property / `goosefs_file_persist_on_rename` storage option)
+  to async-persist the destination on rename.
+
+- **`DeleteOptions` default `unchecked` is now `true`**, matching Java
+  `goosefs.user.file.delete.unchecked`. Recursive deletes of persisted
+  directories no longer run the UFS consistency check that Java skips.
+  Pass `unchecked: false` to keep the old checked behaviour.
+
 ### Changed
 
 - **The client metadata cache is now enabled by default** (`metadata_cache_enabled`,

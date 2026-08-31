@@ -432,7 +432,13 @@ impl FileSystemContext {
             self.metadata_cache.as_deref(),
             path,
             self.config.file_metadata_sync_interval,
-            || master.get_status(path),
+            || {
+                master.get_status_with_load_type(
+                    path,
+                    Some(self.config.file_metadata_load_type),
+                    Some(self.config.file_metadata_sync_interval),
+                )
+            },
         )
         .await
     }

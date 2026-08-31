@@ -421,6 +421,10 @@ impl PropertiesMap {
             cfg.file_persistence_initial_wait_time_ms = ms;
         }
 
+        if let Some(b) = self.get_bool("goosefs.user.file.persist.on.rename") {
+            cfg.file_persist_on_rename = b;
+        }
+
         if let Some(b) =
             self.get_bool("goosefs.user.local.ufs.client.ignore.block.stream.unknown.status")
         {
@@ -644,6 +648,9 @@ impl PropertiesMap {
             if let Some(t) = parse_load_metadata_type(&s) {
                 cfg.file_metadata_load_type = t;
             }
+        }
+        if let Some(b) = self.get_bool(STORAGE_OPT_FILE_PERSIST_ON_RENAME) {
+            cfg.file_persist_on_rename = b;
         }
 
         // ── Short-circuit (local mmap) read path ─────────────────
@@ -1114,6 +1121,15 @@ pub const ENV_FILE_ASYNC_PERSIST_FLUSH_ENABLED: &str =
 pub const ENV_FILE_PERSISTENCE_INITIAL_WAIT_TIME: &str =
     "GOOSEFS_USER_FILE_PERSISTENCE_INITIAL_WAIT_TIME";
 
+/// Environment variable: `goosefs.user.file.persist.on.rename`.
+///
+/// Mirrors [`GoosefsConfig::file_persist_on_rename`]. Default is `false`.
+/// When `true`, rename asynchronously persists the destination (used by
+/// compute frameworks that commit via rename).
+///
+/// Example: `export GOOSEFS_USER_FILE_PERSIST_ON_RENAME=true`.
+pub const ENV_FILE_PERSIST_ON_RENAME: &str = "GOOSEFS_USER_FILE_PERSIST_ON_RENAME";
+
 /// Environment variable:
 /// `goosefs.user.local.ufs.client.ignore.block.stream.unknown.status`.
 ///
@@ -1321,8 +1337,9 @@ pub const ENV_FILE_METADATA_SYNC_INTERVAL: &str = "GOOSEFS_FILE_METADATA_SYNC_IN
 
 /// Environment variable: file metadata load type (`ONCE` / `ALWAYS` / `NEVER`).
 ///
-/// Mirrors [`GoosefsConfig::file_metadata_load_type`]. `ALWAYS` skips the
-/// listing cache. Case-insensitive; invalid values keep the default `ONCE`.
+/// Mirrors [`GoosefsConfig::file_metadata_load_type`]. Sent on both
+/// `get_status` and `list_status`. `ALWAYS` skips the listing cache.
+/// Case-insensitive; invalid values keep the default `ONCE`.
 pub const ENV_FILE_METADATA_LOAD_TYPE: &str = "GOOSEFS_FILE_METADATA_LOAD_TYPE";
 
 /// Storage option key for config manager RPC addresses.
@@ -1405,6 +1422,9 @@ pub const STORAGE_OPT_FILE_METADATA_SYNC_INTERVAL: &str = "goosefs_file_metadata
 
 /// Storage option key for `goosefs.user.file.metadata.load.type`.
 pub const STORAGE_OPT_FILE_METADATA_LOAD_TYPE: &str = "goosefs_file_metadata_load_type";
+
+/// Storage option key for `goosefs.user.file.persist.on.rename`.
+pub const STORAGE_OPT_FILE_PERSIST_ON_RENAME: &str = "goosefs_file_persist_on_rename";
 
 // ── Short-circuit (local mmap) read env vars (SHORT_CIRCUIT_DESIGN ) ─
 /// Environment variable: master kill switch for the short-circuit local read path.
@@ -1778,6 +1798,14 @@ pub struct GoosefsConfig {
     /// `Constants.NO_AUTO_PERSIST`.
     #[serde(default = "default_file_persistence_initial_wait_time_ms")]
     pub file_persistence_initial_wait_time_ms: i64,
+
+    /// Whether rename asynchronously persists the destination
+    /// (`goosefs.user.file.persist.on.rename`, Java default `false`).
+    ///
+    /// Sent as `RenamePOptions.persist`. Compute frameworks that commit
+    /// results via rename set this to `true`.
+    #[serde(default)]
+    pub file_persist_on_rename: bool,
 
     /// Whether a *first* block-open failure may degrade to a UFS-only write
     /// (`goosefs.user.local.ufs.client.ignore.block.stream.unknown.status`,
@@ -2218,7 +2246,9 @@ pub struct GoosefsConfig {
 
     /// `goosefs.user.file.metadata.load.type` (`ONCE` / `ALWAYS` / `NEVER`).
     ///
-    /// Default `ONCE`. `ALWAYS` skips the listing cache.
+    /// Default `ONCE`. Sent on both `get_status` and `list_status` (Java
+    /// `FileSystemOptions.getStatusDefaults` / `listStatusDefaults`).
+    /// `ALWAYS` skips the listing cache.
     #[serde(default = "default_file_metadata_load_type")]
     #[serde(with = "load_metadata_type_serde")]
     pub file_metadata_load_type: LoadMetadataPType,
@@ -2577,6 +2607,7 @@ impl Default for GoosefsConfig {
             worker_read_cache_min_ratio: default_worker_read_cache_min_ratio(),
             file_async_persist_flush_enabled: default_file_async_persist_flush_enabled(),
             file_persistence_initial_wait_time_ms: default_file_persistence_initial_wait_time_ms(),
+            file_persist_on_rename: false,
             local_ufs_client_ignore_block_stream_unknown_status:
                 default_ignore_block_stream_unknown_status(),
             check_block_replicas: default_check_block_replicas(),
@@ -2881,6 +2912,14 @@ impl GoosefsConfig {
     /// disables automatic persistence altogether. Default is `0`.
     pub fn with_file_persistence_initial_wait_time_ms(mut self, ms: i64) -> Self {
         self.file_persistence_initial_wait_time_ms = ms;
+        self
+    }
+
+    /// Set [`file_persist_on_rename`](Self::file_persist_on_rename).
+    ///
+    /// Default is `false`, matching Java `goosefs.user.file.persist.on.rename`.
+    pub fn with_file_persist_on_rename(mut self, persist: bool) -> Self {
+        self.file_persist_on_rename = persist;
         self
     }
 
@@ -3373,6 +3412,12 @@ impl GoosefsConfig {
         if let Ok(val) = env::var(ENV_FILE_PERSISTENCE_INITIAL_WAIT_TIME) {
             if let Ok(ms) = val.parse::<i64>() {
                 self.file_persistence_initial_wait_time_ms = ms;
+            }
+        }
+
+        if let Ok(val) = env::var(ENV_FILE_PERSIST_ON_RENAME) {
+            if let Some(b) = parse_bool_loose(&val) {
+                self.file_persist_on_rename = b;
             }
         }
 
@@ -4096,6 +4141,7 @@ mod tests {
         assert_eq!(config.worker_read_cache_min_ratio, 0.1);
         assert!(config.file_async_persist_flush_enabled);
         assert_eq!(config.file_persistence_initial_wait_time_ms, 0);
+        assert!(!config.file_persist_on_rename);
         assert!(config.local_ufs_client_ignore_block_stream_unknown_status);
         assert_eq!(config.check_block_replicas, 0);
         assert_eq!(config.file_read_max_node_retry, 3);
@@ -4444,6 +4490,32 @@ mod tests {
     }
 
     #[test]
+    fn test_persist_on_rename_java_key_env_builder_and_storage_opt() {
+        assert!(
+            !GoosefsConfig::default().file_persist_on_rename,
+            "Java default is false"
+        );
+
+        let cfg = GoosefsConfig::from_properties_str(
+            "goosefs.user.file.persist.on.rename=true\n\
+             goosefs.master.rpc.addresses=127.0.0.1:9200\n",
+        );
+        assert!(cfg.file_persist_on_rename);
+
+        let cfg = GoosefsConfig::from_properties_str(
+            "goosefs_file_persist_on_rename=true\n\
+             goosefs.master.rpc.addresses=127.0.0.1:9200\n",
+        );
+        assert!(cfg.file_persist_on_rename);
+
+        assert!(
+            GoosefsConfig::new("127.0.0.1:9200")
+                .with_file_persist_on_rename(true)
+                .file_persist_on_rename
+        );
+    }
+
+    #[test]
     fn test_file_replication_number_builder_and_properties() {
         let config = GoosefsConfig::new("127.0.0.1:9200").with_file_replication_number(3);
         assert_eq!(config.file_replication_number, 3);
@@ -4698,6 +4770,10 @@ mod tests {
         assert_eq!(
             ENV_FILE_PERSISTENCE_INITIAL_WAIT_TIME,
             "GOOSEFS_USER_FILE_PERSISTENCE_INITIAL_WAIT_TIME"
+        );
+        assert_eq!(
+            ENV_FILE_PERSIST_ON_RENAME,
+            "GOOSEFS_USER_FILE_PERSIST_ON_RENAME"
         );
         assert_eq!(
             ENV_IGNORE_BLOCK_STREAM_UNKNOWN_STATUS,
@@ -5215,6 +5291,10 @@ goosefs.user.network.data.transfer.chunk.size=1MB
             STORAGE_OPT_FILE_METADATA_LOAD_TYPE,
             "goosefs_file_metadata_load_type"
         );
+        assert_eq!(
+            STORAGE_OPT_FILE_PERSIST_ON_RENAME,
+            "goosefs_file_persist_on_rename"
+        );
     }
 
     #[test]
@@ -5372,6 +5452,15 @@ goosefs.user.network.data.transfer.chunk.size=1MB
     }
 
     #[test]
+    fn test_apply_env_file_persist_on_rename() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GOOSEFS_USER_FILE_PERSIST_ON_RENAME", "true");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var("GOOSEFS_USER_FILE_PERSIST_ON_RENAME");
+        assert!(cfg.file_persist_on_rename);
+    }
+
+    #[test]
     fn test_from_properties_str_perf_tuning_knobs() {
         let props = "\
 goosefs.user.worker.connection.pool.size=6
@@ -5403,6 +5492,10 @@ goosefs.user.metadata.cache.max.size=1000000
         assert_eq!(cfg.metadata_cache_max_size, 100_000);
         assert_eq!(cfg.file_metadata_sync_interval, -1);
         assert_eq!(cfg.file_metadata_load_type, LoadMetadataPType::Once);
+        assert!(
+            !cfg.file_persist_on_rename,
+            "Java USER_FILE_PERSIST_ON_RENAME default is false"
+        );
     }
 
     #[test]

@@ -47,6 +47,7 @@ Common environment variables:
 | `GOOSEFS_METADATA_CACHE_MAX_SIZE` | Metadata cache LRU capacity (default `100000`) |
 | `GOOSEFS_FILE_METADATA_SYNC_INTERVAL` | Metadata sync interval (`parseTimeSize`; default `-1`. `0` skips cache on every get/list) |
 | `GOOSEFS_FILE_METADATA_LOAD_TYPE` | `ONCE` / `ALWAYS` / `NEVER` (default `ONCE`. `ALWAYS` skips listing cache) |
+| `GOOSEFS_USER_FILE_PERSIST_ON_RENAME` | Async-persist destination on rename (default `false`) |
 
 ## Write / Read Types
 

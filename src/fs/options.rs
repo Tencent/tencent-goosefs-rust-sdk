@@ -241,9 +241,11 @@ impl CreateFileOptions {
 ///
 /// Verified against `DefaultFileSystemMaster.delete()`:
 /// - `recursive`    — delete directory tree recursively.
-/// - `unchecked`    — skip the "directory must be empty" check and also allow
-///   deletion of **INCOMPLETE** files (files still being written).  Required
-///   for `cancel()` to clean up an in-progress write.
+/// - `unchecked`    — skip the UFS-vs-namespace consistency check on
+///   recursive deletes of persisted directories, skip the "directory must
+///   be empty" check, and allow deleting **INCOMPLETE** files. Java
+///   `FileSystemOptions.deleteDefaults` sets this from
+///   `goosefs.user.file.delete.unchecked` (default **true**).
 /// - `goosefs_only` — remove the path only from the Goosefs namespace; do NOT
 ///   propagate the delete to the underlying UFS.  Used in CACHE_THROUGH error
 ///   recovery: when `completeFile` fails after UFS `close` succeeded, we
@@ -255,19 +257,32 @@ impl CreateFileOptions {
 /// The Go SDK's `DeleteOptions` struct does **not** expose `goosefs_only`.
 /// The field exists in the proto and is read by the Java server.  Rust must
 /// pass it correctly.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DeleteOptions {
     /// Delete directories recursively.  Required when the target is a
     /// non-empty directory.
     pub recursive: bool,
 
-    /// Skip safety checks (empty-directory enforcement) and allow deleting
-    /// files in INCOMPLETE state.  Needed by `GoosefsFileWriter::cancel()`.
+    /// Skip the UFS consistency check on persisted directory trees (Java
+    /// `goosefs.user.file.delete.unchecked`, default true). Also skips the
+    /// empty-directory check and allows deleting INCOMPLETE files.
     pub unchecked: bool,
 
     /// Restrict deletion to the Goosefs namespace only; do not propagate to
     /// the underlying storage (UFS).  Used during CACHE_THROUGH error recovery.
     pub goosefs_only: bool,
+}
+
+impl Default for DeleteOptions {
+    /// Matches Java `deleteDefaults`: non-recursive, `unchecked=true`,
+    /// propagate to UFS.
+    fn default() -> Self {
+        Self {
+            recursive: false,
+            unchecked: true,
+            goosefs_only: false,
+        }
+    }
 }
 
 impl DeleteOptions {
@@ -317,6 +332,9 @@ pub struct GetStatusOptions {
     /// `None` = `GoosefsConfig::file_metadata_sync_interval`.
     /// `Some(0)` = this call skips the metadata cache.
     pub sync_interval_ms: Option<i64>,
+    /// `None` = `GoosefsConfig::file_metadata_load_type` (default `ONCE`).
+    /// Sent on the Master `GetStatus` RPC (Java `getStatusDefaults`).
+    pub load_metadata_type: Option<crate::proto::grpc::file::LoadMetadataPType>,
 }
 
 impl GetStatusOptions {
@@ -324,6 +342,7 @@ impl GetStatusOptions {
     pub fn always_sync() -> Self {
         Self {
             sync_interval_ms: Some(0),
+            load_metadata_type: None,
         }
     }
 }
@@ -384,7 +403,10 @@ mod tests {
     fn test_default_delete_options() {
         let opts = DeleteOptions::default();
         assert!(!opts.recursive);
-        assert!(!opts.unchecked);
+        assert!(
+            opts.unchecked,
+            "Java USER_FILE_DELETE_UNCHECKED default is true"
+        );
         assert!(!opts.goosefs_only);
     }
 
@@ -392,7 +414,10 @@ mod tests {
     fn test_recursive_helper() {
         let opts = DeleteOptions::recursive();
         assert!(opts.recursive);
-        assert!(!opts.unchecked);
+        assert!(
+            opts.unchecked,
+            "recursive() inherits Default.unchecked = true"
+        );
         assert!(!opts.goosefs_only);
     }
 
@@ -485,6 +510,7 @@ mod tests {
     fn test_get_status_options_always_sync() {
         let opts = GetStatusOptions::always_sync();
         assert_eq!(opts.sync_interval_ms, Some(0));
+        assert!(opts.load_metadata_type.is_none());
     }
 
     #[test]

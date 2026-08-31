@@ -23,12 +23,12 @@ It replaces the earlier `FileInfo` open cache (`goosefs.user.file.info.cache.*`)
 | Situation | Effect |
 | --- | --- |
 | `ListStatusOptions.recursive = true` | Listing never cached (client-side BFS each time). |
-| `load_metadata_type = ALWAYS` (`file_metadata_load_type`) | **Listing** cache skipped (no read/write). Does **not** skip `get_status` / `exists` / `open`. |
+| `load_metadata_type = ALWAYS` (`file_metadata_load_type`) | **Listing** cache skipped (no read/write). Does **not** skip `get_status` / `exists` / `open` client cache. Master still re-loads from UFS on those RPCs. |
 | `ListStatusOptions.load_metadata_only = true` | Listing cache skipped (no read/write). Per-call only. |
 | `sync_interval_ms == 0` (`file_metadata_sync_interval`) | `get_status`: skip read, still write back. `list_status`: skip read **and** write. Per-call: `GetStatusOptions::always_sync()` or `ListStatusOptions.sync_interval_ms = Some(0)`. |
 | `metadata_cache_expiration <= 0` | Cache is not constructed at all, even when enabled. |
 
-`ALWAYS` is a listing-only flag. To force every **status** lookup to the Master, set `file_metadata_sync_interval=0` (or `GetStatusOptions::always_sync()`).
+`ALWAYS` is a listing-cache skip flag. To force every **status** lookup to skip the client cache, set `file_metadata_sync_interval=0` (or `GetStatusOptions::always_sync()`). `load_metadata_type` is still sent on `get_status` (default `ONCE`) so the Master can load missing UFS paths.
 
 ## Configuration
 
@@ -44,7 +44,7 @@ It replaces the earlier `FileInfo` open cache (`goosefs.user.file.info.cache.*`)
 
 ### `file_metadata_load_type` values
 
-The value is sent as `ListStatusPOptions.load_metadata_type` on every `list_status` RPC, so it has **two** effects: one on the client cache, one on how the Master treats the under file system (UFS). It is not sent on `get_status`, so it never affects `get_status` / `exists` / `open_file`.
+The value is sent as `load_metadata_type` on every `get_status` **and** `list_status` RPC (Java `getStatusDefaults` / `listStatusDefaults`). It has two effects: one on the client listing cache, one on how the Master treats the under file system (UFS). An unset `get_status` field is proto `NEVER`, so the default `ONCE` must be sent or COS-only files fail OpenDAL `stat` with `NotFound`.
 
 | Value | Client listing cache | Master behaviour | Use when |
 | --- | --- | --- | --- |
