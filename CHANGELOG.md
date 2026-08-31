@@ -22,6 +22,17 @@ kept aligned. Python-specific notes also appear in
   `GetStatusOptions.load_metadata_type`. Set
   `GOOSEFS_FILE_METADATA_LOAD_TYPE=NEVER` to keep the old Master behaviour.
 
+- **`MasterClient::list_status` now sends `loadMetadataType` on non-recursive
+  listings too**, matching Java `FileSystemOptions.listStatusDefaults`. Only the
+  recursive BFS resolved a load type before, so a direct
+  `list_status(path, false)` — the call OpenDAL `list` makes — left the field
+  unset. Master reads it as `NEVER`, which forces `loadDescendantType=NONE` and
+  rejects a UFS-only directory, so COS objects missing from the inode tree were
+  silently absent from listings. Both entry points also send `syncIntervalMs`
+  from the config now, instead of letting Master fall back to its own
+  `goosefs.user.file.metadata.sync.interval`. New
+  `MasterClient::list_status_with_options` takes both values explicitly.
+
 ### Changed
 
 - **The client metadata cache is now enabled by default** (`metadata_cache_enabled`,

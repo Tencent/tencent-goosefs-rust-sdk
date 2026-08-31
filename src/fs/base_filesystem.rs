@@ -331,7 +331,7 @@ impl FileSystem for BaseFileSystem {
             // at every BFS level — Java recursive listStatus does not force Always;
             // the default is goosefs.user.file.metadata.load.type (ONCE).
             let items = master
-                .list_status_with_load_type(path, true, Some(load))
+                .list_status_with_options(path, true, Some(load), Some(sync))
                 .await?;
             return Ok(items.into_iter().map(URIStatus::from_proto).collect());
         }
@@ -347,7 +347,7 @@ impl FileSystem for BaseFileSystem {
             crate::metadata_cache::list_status_through_cache(cache.as_deref(), path, skip, || {
                 // Java `listStatusDefaults()` always sets loadMetadataType
                 // (default ONCE), including non-recursive listings.
-                master.list_status_with_load_type(path, false, Some(load))
+                master.list_status_with_options(path, false, Some(load), Some(sync))
             })
             .await?;
         Ok(items.into_iter().map(URIStatus::from_proto).collect())

@@ -197,6 +197,29 @@ pub(crate) fn get_status_p_options(
     }
 }
 
+/// Build `ListStatusPOptions` matching Java `FileSystemOptions.listStatusDefaults`.
+///
+/// Same Master-side hazard as [`get_status_p_options`]: `ListStatusContext.create`
+/// does not merge server defaults, and `DefaultFileSystemMaster.listStatus` reads
+/// `getLoadMetadataType()` without a `hasLoadMetadataType()` fallback. An unset
+/// value is protobuf enum `0` (`NEVER`), which both forces `loadDescendantType`
+/// to `NONE` and makes `checkLoadMetadataOptions` reject a UFS-only directory
+/// with `Path "..." does not exist.` — so OpenDAL `list` would silently miss
+/// COS objects that are not in the inode tree yet.
+pub(crate) fn list_status_p_options(
+    load_metadata_type: Option<LoadMetadataPType>,
+    sync_interval_ms: Option<i64>,
+) -> ListStatusPOptions {
+    ListStatusPOptions {
+        load_metadata_type: load_metadata_type.map(|t| t as i32),
+        common_options: sync_interval_ms.map(|ms| FileSystemMasterCommonPOptions {
+            sync_interval_ms: Some(ms),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
 /// Client for Goosefs `FileSystemMasterClientService` (Master:9200).
 ///
 /// In HA mode, the client holds a reference to the [`MasterInquireClient`]
@@ -605,33 +628,28 @@ impl MasterClient {
     /// `BaseFileSystem.iterateStatusInternal` and the historical SDK contract
     /// that `list_status(path, true)` returns the full subtree.
     ///
-    /// Recursive walks default to `load_metadata_type = Once` on each level,
-    /// matching Java `FileSystemOptions.listStatusDefaults` /
-    /// `goosefs.user.file.metadata.load.type` (default `ONCE`). Recursion does
-    /// not switch the load type to `Always`; callers that need `Never` /
-    /// `Always` should use [`Self::list_status_with_load_type`]. The BFS skips
-    /// a child whose path is the directory currently being listed (`/foo` and
-    /// `/foo/` are the same node), so a server that echoes `self` cannot loop
-    /// forever.
+    /// Every level — recursive or not — sends Java
+    /// `FileSystemOptions.listStatusDefaults`: `loadMetadataType` from
+    /// [`GoosefsConfig::file_metadata_load_type`] (default `ONCE`) and
+    /// `syncIntervalMs` from [`GoosefsConfig::file_metadata_sync_interval`]
+    /// (default `-1`). Callers that need `Never` / `Always` should use
+    /// [`Self::list_status_with_load_type`]. The BFS skips a child whose path
+    /// is the directory currently being listed (`/foo` and `/foo/` are the
+    /// same node), so a server that echoes `self` cannot loop forever.
     ///
     /// Each level wraps a **server-side streaming** RPC — the server sends
     /// multiple `ListStatusPResponse` messages, each containing a batch
     /// of `FileInfo`.
     #[instrument(skip(self), fields(path = %path, recursive))]
     pub async fn list_status(&self, path: &str, recursive: bool) -> Result<Vec<FileInfo>> {
-        let load = if recursive {
-            Some(LoadMetadataPType::Once)
-        } else {
-            None
-        };
-        self.list_status_with_load_type(path, recursive, load).await
+        self.list_status_with_load_type(path, recursive, None).await
     }
 
     /// List a directory, applying `load_metadata_type` on every Master RPC.
     ///
-    /// When `recursive` is `true` and `load_metadata_type` is `None`, each BFS
-    /// level uses [`LoadMetadataPType::Once`] (same as [`Self::list_status`]
-    /// and Java `listStatusDefaults`).
+    /// `None` resolves to [`GoosefsConfig::file_metadata_load_type`] (default
+    /// `ONCE`), and `syncIntervalMs` comes from the config — same as
+    /// [`Self::list_status`].
     #[instrument(skip(self), fields(path = %path, recursive, ?load_metadata_type))]
     pub async fn list_status_with_load_type(
         &self,
@@ -639,13 +657,35 @@ impl MasterClient {
         recursive: bool,
         load_metadata_type: Option<LoadMetadataPType>,
     ) -> Result<Vec<FileInfo>> {
-        let load_rpc = match load_metadata_type {
-            Some(t) => Some(t as i32),
-            None if recursive => Some(LoadMetadataPType::Once as i32),
-            None => None,
-        };
+        self.list_status_with_options(
+            path,
+            recursive,
+            load_metadata_type,
+            Some(self.config.file_metadata_sync_interval),
+        )
+        .await
+    }
+
+    /// `ListStatus` with an explicit `load_metadata_type` / `sync_interval_ms`.
+    ///
+    /// Mirrors [`Self::get_status_with_load_type`] so that a `FileSystem`
+    /// layer which resolved both values from `ListStatusOptions` can pass
+    /// them straight through.
+    #[instrument(
+        skip(self),
+        fields(path = %path, recursive, ?load_metadata_type, ?sync_interval_ms)
+    )]
+    pub async fn list_status_with_options(
+        &self,
+        path: &str,
+        recursive: bool,
+        load_metadata_type: Option<LoadMetadataPType>,
+        sync_interval_ms: Option<i64>,
+    ) -> Result<Vec<FileInfo>> {
+        let load = load_metadata_type.unwrap_or(self.config.file_metadata_load_type);
+        let options = list_status_p_options(Some(load), sync_interval_ms);
         if !recursive {
-            return self.list_status_one_level(path, load_rpc).await;
+            return self.list_status_one_level(path, options).await;
         }
 
         // Client-side BFS: Master no longer accepts a recursive ListStatus option.
@@ -656,7 +696,7 @@ impl MasterClient {
         visited.insert(start.clone());
         queue.push_back(start);
         while let Some(cur) = queue.pop_front() {
-            let items = self.list_status_one_level(&cur, load_rpc).await?;
+            let items = self.list_status_one_level(&cur, options.clone()).await?;
             for fi in items {
                 if let Some(child) =
                     list_status_bfs_child_dir(&cur, fi.path.as_deref(), fi.folder.unwrap_or(false))
@@ -676,20 +716,18 @@ impl MasterClient {
     async fn list_status_one_level(
         &self,
         path: &str,
-        load_metadata_type: Option<i32>,
+        options: ListStatusPOptions,
     ) -> Result<Vec<FileInfo>> {
         let start = std::time::Instant::now();
         let path = path.to_string();
         let result = self
             .with_retry("list_status", |mut client| {
                 let path = path.clone();
+                let options = options.clone();
                 async move {
                     let req = ListStatusPRequest {
                         path: Some(path),
-                        options: Some(ListStatusPOptions {
-                            load_metadata_type,
-                            ..Default::default()
-                        }),
+                        options: Some(options),
                         request_id: None,
                     };
                     let mut stream = client.list_status(req).await?.into_inner();
@@ -1706,6 +1744,59 @@ mod tests {
             Some(cfg.file_metadata_sync_interval),
         );
         assert_eq!(opts.load_metadata_type, Some(1)); // ONCE
+        assert_eq!(
+            opts.common_options
+                .as_ref()
+                .and_then(|c| c.sync_interval_ms),
+            Some(-1)
+        );
+    }
+
+    /// Java `listStatusDefaults` sets the same two fields as
+    /// `getStatusDefaults`, for recursive and non-recursive listings alike.
+    #[test]
+    fn list_status_p_options_matches_java_defaults() {
+        use crate::proto::grpc::file::LoadMetadataPType;
+
+        let opts = super::list_status_p_options(Some(LoadMetadataPType::Once), Some(-1));
+        assert_eq!(
+            opts.load_metadata_type,
+            Some(LoadMetadataPType::Once as i32)
+        );
+        assert_eq!(
+            opts.common_options
+                .as_ref()
+                .and_then(|c| c.sync_interval_ms),
+            Some(-1)
+        );
+    }
+
+    /// A non-recursive `list_status` used to send no `loadMetadataType` at
+    /// all, which the Master reads as `NEVER` — OpenDAL `list` then missed
+    /// UFS-only entries. Pin the resolved default instead.
+    #[test]
+    fn list_status_p_options_unset_is_never_on_the_wire() {
+        let opts = super::list_status_p_options(None, None);
+        assert_eq!(
+            opts.load_metadata_type, None,
+            "unset load_metadata_type is proto NEVER (0) on the Master"
+        );
+        assert!(opts.common_options.is_none());
+    }
+
+    #[test]
+    fn list_status_uses_config_load_type_and_sync_interval() {
+        use crate::proto::grpc::file::LoadMetadataPType;
+
+        let cfg = GoosefsConfig::new("localhost:0");
+        let opts = super::list_status_p_options(
+            Some(cfg.file_metadata_load_type),
+            Some(cfg.file_metadata_sync_interval),
+        );
+        assert_eq!(
+            opts.load_metadata_type,
+            Some(LoadMetadataPType::Once as i32)
+        );
         assert_eq!(
             opts.common_options
                 .as_ref()
