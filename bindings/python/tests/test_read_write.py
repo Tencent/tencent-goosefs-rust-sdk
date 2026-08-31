@@ -44,6 +44,7 @@ For each combination we assert:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 
 import pytest
 from goosefs import AsyncGoosefs, Goosefs, WriteType
@@ -256,6 +257,46 @@ def test_sync_must_cache_get_status_reports_in_goosefs_percentage(
     assert st.cacheable is True
     assert st.is_persisted() is False
     assert st.in_goose_fs_percentage > 0
+
+
+def test_sync_oneshot_read_same_path_twice_does_not_hang(
+    sync_fs: Goosefs, sync_tmp_dir: str
+) -> None:
+    """CACHE-05: a second one-shot read of the same path must not hang.
+
+    ``read_file`` / ``read_range`` used to leave the worker ``ReadBlock``
+    session open, so the next call on that path blocked forever in native
+    code. ``Through`` is the write type that reproduced on the test cluster.
+    """
+    path = f"{sync_tmp_dir}/same-path-twice.bin"
+    payload = _make_payload("same-path-twice", 64 * 1024)
+    sync_fs.write_file(path, payload, write_type=WriteType.Through)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(sync_fs.read_file, path).result(timeout=20)
+        second = pool.submit(sync_fs.read_file, path).result(timeout=20)
+        ranged_a = pool.submit(sync_fs.read_range, path, 0, len(payload)).result(timeout=20)
+        ranged_b = pool.submit(sync_fs.read_range, path, 0, len(payload)).result(timeout=20)
+
+    assert first == payload
+    assert second == payload
+    assert ranged_a == payload
+    assert ranged_b == payload
+
+
+@pytest.mark.asyncio
+async def test_async_oneshot_read_same_path_twice_does_not_hang(
+    async_fs: AsyncGoosefs, tmp_dir: str
+) -> None:
+    """Async counterpart of CACHE-05: two ``read_file`` calls on one path."""
+    path = f"{tmp_dir}/same-path-twice-async.bin"
+    payload = _make_payload("same-path-twice-async", 64 * 1024)
+    await async_fs.write_file(path, payload, write_type=WriteType.Through)
+
+    first = await asyncio.wait_for(async_fs.read_file(path), timeout=20)
+    second = await asyncio.wait_for(async_fs.read_file(path), timeout=20)
+    assert first == payload
+    assert second == payload
 
 
 def test_sync_read_range_arbitrary_offsets(sync_fs: Goosefs, sync_tmp_dir: str) -> None:

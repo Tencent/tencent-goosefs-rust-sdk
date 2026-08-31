@@ -124,7 +124,13 @@ pub struct GrpcBlockReader {
     /// Total bytes received so far.
     bytes_received: i64,
     /// Sender for client → server requests (ACK messages).
-    request_tx: mpsc::Sender<ReadRequest>,
+    ///
+    /// Wrapped in `Option` so [`Self::half_close`] / [`Drop`] can close the
+    /// client→server half *before* the response `Streaming` is dropped.
+    /// Dropping the response stream first CANCELS the RPC; the Worker then
+    /// keeps the block lock, and the next `ReadBlock` of the same path hangs
+    /// (CACHE-05 / TAPD 1010099441163277744).
+    request_tx: Option<mpsc::Sender<ReadRequest>>,
     /// Source of server → client responses (data chunks).
     source: ChunkSource,
     /// Bytes received since the last flow-control ACK was emitted.
@@ -255,7 +261,7 @@ impl GrpcBlockReader {
             offset,
             length,
             bytes_received: 0,
-            request_tx,
+            request_tx: Some(request_tx),
             source: ChunkSource::Direct(response_rx),
             bytes_since_last_ack: 0,
             chunks_since_last_ack: 0,
@@ -347,7 +353,7 @@ impl GrpcBlockReader {
             offset,
             length,
             bytes_received: 0,
-            request_tx,
+            request_tx: Some(request_tx),
             source: ChunkSource::Buffered { rx: chunk_rx, task },
             bytes_since_last_ack: 0,
             chunks_since_last_ack: 0,
@@ -363,6 +369,7 @@ impl GrpcBlockReader {
     /// or once per coalescing window (Buffered).
     pub async fn read_chunk(&mut self) -> Result<Option<Bytes>> {
         if self.bytes_received >= self.length {
+            self.half_close();
             return Ok(None);
         }
 
@@ -438,6 +445,9 @@ impl GrpcBlockReader {
                     crate::metrics::counter(name::CLIENT_BYTES_READ_LOCAL).inc(len);
 
                     self.maybe_send_ack(len);
+                    if self.bytes_received >= self.length {
+                        self.half_close();
+                    }
 
                     return Ok(Some(data));
                 }
@@ -475,7 +485,10 @@ impl GrpcBlockReader {
             offset_received: Some(self.offset + self.bytes_received),
             ..Default::default()
         };
-        match self.request_tx.try_send(ack) {
+        let Some(tx) = self.request_tx.as_ref() else {
+            return;
+        };
+        match tx.try_send(ack) {
             Ok(()) => {
                 self.bytes_since_last_ack = 0;
                 self.chunks_since_last_ack = 0;
@@ -489,6 +502,22 @@ impl GrpcBlockReader {
                     "ACK channel closed (read may be complete)"
                 );
             }
+        }
+    }
+
+    /// Close the client→server half of the bidi `ReadBlock` stream.
+    ///
+    /// The Worker holds the block lock until it observes `onCompleted`.
+    /// Dropping the response `Streaming` first CANCELS the RPC instead,
+    /// so the lock is never released and the next read of the same path
+    /// hangs. Idempotent: subsequent calls are a no-op.
+    fn half_close(&mut self) {
+        if self.request_tx.take().is_some() {
+            debug!(
+                block_id = self.block_id,
+                bytes_received = self.bytes_received,
+                "half-closed ReadBlock request stream (Worker will unlock)"
+            );
         }
     }
 
@@ -592,7 +621,7 @@ impl GrpcBlockReader {
             offset,
             length,
             bytes_received: 0,
-            request_tx,
+            request_tx: Some(request_tx),
             source: ChunkSource::Direct(response_rx),
             bytes_since_last_ack: 0,
             chunks_since_last_ack: 0,
@@ -607,8 +636,14 @@ impl GrpcBlockReader {
 
 impl Drop for GrpcBlockReader {
     fn drop(&mut self) {
+        // Half-close the client→server half FIRST. The Worker holds the
+        // block lock until it observes `onCompleted`. Dropping `source`
+        // (the response `Streaming`) first would CANCEL the RPC instead,
+        // leaving the lock held — the next ReadBlock of the same path then
+        // waits forever (CACHE-05 / TAPD 1010099441163277744).
+        self.half_close();
         // Abort the background drain task (if any) so it does not keep
-        // draining the stream after the consumer goes away().
+        // draining the stream after the consumer goes away.
         if let ChunkSource::Buffered { task, .. } = &self.source {
             task.abort();
         }

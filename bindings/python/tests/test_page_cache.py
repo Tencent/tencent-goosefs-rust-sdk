@@ -212,24 +212,26 @@ def test_sequential_read_bypasses_cache_by_default() -> None:
 def test_read_file_bypasses_page_cache_and_does_not_hang() -> None:
     """One-shot ``read_file`` must stay worker-direct when the page cache is on.
 
-    CACHE-05 / related Bug 162900390: with cache enabled, ``read_file`` of a
-    file spanning 2+ pages used to hang on the 2nd page (and even a 1-page
-    file incorrectly wrote page files). Contract: only ``open_file`` consults
-    the cache; ``read_file`` / ``read_range`` go worker-direct.
+    CACHE-05: ``read_file`` of the same path twice used to hang on the 2nd
+    call (native ``ReadBlock`` left the worker block lock held). Contract:
+    only ``open_file`` consults the cache; ``read_file`` / ``read_range`` go
+    worker-direct; a second one-shot read of the same path must return.
     """
     cache_dir = tempfile.mkdtemp(prefix="pygfs_cache_")
     fs = Goosefs(_cache_config(cache_dir, enabled=True))
     path = _scratch_path()
     try:
         fs.mkdir("/tmp/pygoosefs-cache-tests", recursive=True)
-        # 4 × 64 KiB pages — the size that used to hang (1 page did not).
+        # 4 × 64 KiB pages — the size that used to hang on the 2nd page too.
         payload = _make_payload(4 * PAGE_SIZE)
         fs.write_file(path, payload, write_type=WriteType.Through)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            got = pool.submit(fs.read_file, path).result(timeout=20)
+            first = pool.submit(fs.read_file, path).result(timeout=20)
+            second = pool.submit(fs.read_file, path).result(timeout=20)
 
-        assert got == payload, "read_file mismatch on multi-page file with cache on"
+        assert first == payload, "read_file mismatch on first read"
+        assert second == payload, "read_file mismatch on second read of the same path"
         assert _count_files(cache_dir) == 0, (
             "read_file must bypass the page cache and not write page files"
         )
