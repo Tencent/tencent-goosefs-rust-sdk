@@ -42,6 +42,11 @@ kept aligned. Python-specific notes also appear in
   `create_directory` still uses `allowExists=true` (OpenDAL `mkdir -p`);
   only the missing commonOptions/opId are added.
 
+- **`rename` reads `goosefs.user.file.persist.on.rename`** (default `false`),
+  matching Java `renameDefaults`. Set `GOOSEFS_USER_FILE_PERSIST_ON_RENAME=true`
+  (or the site property / `goosefs_file_persist_on_rename` storage option)
+  to async-persist the destination on rename.
+
 - **`DeleteOptions` default `unchecked` is now `true`**, matching Java
   `goosefs.user.file.delete.unchecked`. Recursive deletes of persisted
   directories no longer run the UFS consistency check that Java skips.

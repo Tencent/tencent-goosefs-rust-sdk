@@ -270,6 +270,7 @@ never affect correctness). Mirrors Java's `goosefs.user.client.cache.*`.
 | `metadata_cache_expiration` | `Duration` | `10min` | Java `goosefs.user.metadata.cache.expiration.time` (`parseTimeSize`: `10min`, `30s`, `2day`, or raw milliseconds). `<= 0` skips construction even when enabled. |
 | `file_metadata_sync_interval` | `i64` | `-1` | Java `goosefs.user.file.metadata.sync.interval` in milliseconds (`parseTimeSize` when set as a string). Affects **both** `get_status` and `list_status`. `-1` (default) does not skip the cache. `0` skips the cache on every call: `get_status` re-reads from the Master but still writes the result back, `list_status` neither reads nor writes the listing cache. Positive values are parsed and stored, but the skip check only tests for `0`, so they currently behave like `-1`. |
 | `file_metadata_load_type` | `LoadMetadataPType` | `ONCE` | Java `goosefs.user.file.metadata.load.type` (`ONCE` / `ALWAYS` / `NEVER`, case-insensitive; unrecognised values keep the default). Sent on every `get_status` **and** `list_status` RPC (Java `getStatusDefaults` / `listStatusDefaults`). Controls whether the Master loads missing paths from the UFS. `ALWAYS` also skips the client listing cache. See [`file_metadata_load_type` values](#file_metadata_load_type-values). |
+| `file_persist_on_rename` | `bool` | `false` | Java `goosefs.user.file.persist.on.rename`. Sent as `RenamePOptions.persist`. When `true`, rename asynchronously persists the destination (Spark/Hive-style commit-via-rename). |
 | `range_coalesce_enabled` | `bool` | `false` (**disabled**) | Whether [`GoosefsFileReader::read_ranges_with_context`] merges adjacent input ranges into fewer, larger `read_range` calls. **Opt-in per FLAMEGRAPH_OPTIMIZATION_PLAN §B2.** When off (default), the multi-range API serves each input verbatim — behaviour is bit-identical to a caller-side loop. When on, adjacent ranges within `range_coalesce_gap_bytes` are merged (subject to `range_coalesce_max_bytes`) and the payload is spliced back so each output slice is byte-identical to a standalone `read_range`. Trades small over-read (`≤ Σ gap_i` bytes) for a large drop in H2 stream count on Lance / DuckDB scan patterns. **Failure semantics.** Because a merged fetch shares one transport with all its constituent input ranges, a fetch failure fails **all** those ranges together (this matches the failure model the underlying H2 layer would produce anyway, but it does enlarge the blast radius compared with per-range independent reads — enable per-workload if failure isolation between adjacent small ranges matters). |
 | `range_coalesce_gap_bytes` | `u64` | `65536` (64 KiB) | Maximum permitted gap between two adjacent input ranges for them to be merged. Consulted only when `range_coalesce_enabled = true`. |
 | `range_coalesce_max_bytes` | `u64` | `4194304` (4 MiB) | Upper bound on any single **merged** fetch. A caller-requested range whose own length already exceeds this cap is served as one fetch of that size (splitting a single caller request would violate the byte-equivalence contract) — the cap only prevents *merging* from ballooning the request. Values `< 1` are clamped to `1`. |
@@ -509,6 +510,7 @@ properties file values and built-in defaults.
 | `GOOSEFS_METADATA_CACHE_EXPIRATION` | `metadata_cache_expiration` | `10min` | TTL in Java `parseTimeSize` form (`10min`, `30s`, `2day`, or raw milliseconds). |
 | `GOOSEFS_FILE_METADATA_SYNC_INTERVAL` | `file_metadata_sync_interval` | `-1` | Sync interval (`parseTimeSize`; a bare number is milliseconds). `0` skips the cache on every get/list; `-1` does not. |
 | `GOOSEFS_FILE_METADATA_LOAD_TYPE` | `file_metadata_load_type` | `ONCE` | `ONCE` / `ALWAYS` / `NEVER` (case-insensitive). Sent on `get_status` and `list_status`. `ALWAYS` skips the listing cache and makes the Master re-load from the UFS; `NEVER` never touches the UFS. See [`file_metadata_load_type` values](#file_metadata_load_type-values). |
+| `GOOSEFS_USER_FILE_PERSIST_ON_RENAME` | `file_persist_on_rename` | `false` | Async-persist the destination on rename (`true`/`false`). Java `goosefs.user.file.persist.on.rename`. |
 | `GOOSEFS_SHORT_CIRCUIT_ENABLED` | `short_circuit_enabled` | `false` | Master kill switch for the short-circuit local-mmap read path (`true`/`false`). **Disabled by default** since 0.1.6 (see §2.9 and `../../goosefs-lance-tests/docs/design/FLAMEGRAPH_OPTIMIZATION_PLAN.md` §C6). |
 | `GOOSEFS_SHORT_CIRCUIT_CACHE_CAPACITY` | `short_circuit_cache_capacity` | `64` | Per-task LRU capacity for hot-block SC readers (plain integer). |
 | `GOOSEFS_SHORT_CIRCUIT_CACHE_TTL_MS` | `short_circuit_cache_ttl` | `30000` (30s) | Idle TTL of a cached SC reader in **milliseconds**. |
@@ -650,6 +652,7 @@ These keys are used in `goosefs-site.properties` files (Java-style `key=value` f
 | `goosefs.user.metadata.cache.expiration.time` | `metadata_cache_expiration` | `parseTimeSize` | `10min` | TTL (`10min`, `30s`, `2day`, or raw milliseconds). |
 | `goosefs.user.file.metadata.sync.interval` | `file_metadata_sync_interval` | `parseTimeSize` | `-1` | `0` skips the cache on every get/list; `-1` does not. Positive values currently behave like `-1`. |
 | `goosefs.user.file.metadata.load.type` | `file_metadata_load_type` | `ONCE`/`ALWAYS`/`NEVER` | `ONCE` | Sent on `get_status` and `list_status`. `ALWAYS` skips the listing cache and makes the Master re-load from the UFS; `NEVER` never touches the UFS. See [`file_metadata_load_type` values](#file_metadata_load_type-values). |
+| `goosefs.user.file.persist.on.rename` | `file_persist_on_rename` | `true` / `false` | `false` | Async-persist the destination on rename. |
 | `goosefs.user.short.circuit.enabled` | `short_circuit_enabled` | `true` / `false` | `false` | Master kill switch for the short-circuit local-mmap read path. **Disabled by default** since 0.1.6 (see §2.9). |
 | `goosefs.client.short.circuit.cache.capacity` | `short_circuit_cache_capacity` | integer | `64` | Per-task LRU capacity for hot-block SC readers. |
 | `goosefs.client.short.circuit.cache.ttl.ms` | `short_circuit_cache_ttl` | integer (milliseconds) | `30000` (30s) | Idle TTL of a cached SC reader. |
@@ -1169,6 +1172,7 @@ export GOOSEFS_METADATA_CACHE_EXPIRATION=10min
 export GOOSEFS_METADATA_CACHE_MAX_SIZE=100000
 export GOOSEFS_FILE_METADATA_SYNC_INTERVAL=-1
 export GOOSEFS_FILE_METADATA_LOAD_TYPE=ONCE
+export GOOSEFS_USER_FILE_PERSIST_ON_RENAME=false
 ```
 
 #### Properties file
@@ -1184,6 +1188,7 @@ goosefs.user.metadata.cache.expiration.time=10min
 goosefs.user.metadata.cache.max.size=100000
 goosefs.user.file.metadata.sync.interval=-1
 goosefs.user.file.metadata.load.type=ONCE
+goosefs.user.file.persist.on.rename=false
 ```
 
 #### Storage options (Lance / OpenDAL)
@@ -1202,6 +1207,7 @@ ds = lance.dataset(
         "goosefs_metadata_cache_enabled": "true",
         "goosefs_file_metadata_sync_interval": "-1",
         "goosefs_file_metadata_load_type": "ONCE",
+        "goosefs_file_persist_on_rename": "false",
     },
 )
 ```

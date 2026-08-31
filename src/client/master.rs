@@ -207,6 +207,16 @@ fn write_common_p_options(sync_interval_ms: i64) -> FileSystemMasterCommonPOptio
     common_p_options(sync_interval_ms, Some(new_fs_op_id()))
 }
 
+/// Java `FileSystemOptions.renameDefaults`: `persist` from
+/// `goosefs.user.file.persist.on.rename` (default `false`) plus write-path
+/// `commonOptions`.
+pub(crate) fn rename_p_options(sync_interval_ms: i64, persist: bool) -> RenamePOptions {
+    RenamePOptions {
+        common_options: Some(write_common_p_options(sync_interval_ms)),
+        persist: Some(persist),
+    }
+}
+
 /// Fill missing `common_options` fields on a mutating RPC, matching Java
 /// `defaults.mergeFrom(caller)`: caller-set values win, unset ones take the
 /// config default / a fresh operation id.
@@ -1040,9 +1050,10 @@ impl MasterClient {
     pub async fn rename(&self, src: &str, dst: &str) -> Result<()> {
         let src = src.to_string();
         let dst = dst.to_string();
-        let common_options = Some(write_common_p_options(
+        let options = rename_p_options(
             self.config.file_metadata_sync_interval,
-        ));
+            self.config.file_persist_on_rename,
+        );
         let result = self
             .with_retry("rename", |mut client| {
                 let src = src.clone();
@@ -1051,10 +1062,7 @@ impl MasterClient {
                     let req = RenamePRequest {
                         path: Some(src),
                         dst_path: Some(dst),
-                        options: Some(RenamePOptions {
-                            common_options,
-                            persist: Some(false),
-                        }),
+                        options: Some(options),
                     };
                     client.rename(req).await?;
                     Ok(())
@@ -1923,5 +1931,30 @@ mod tests {
         let filled = slot.expect("empty slot is filled");
         assert_eq!(filled.sync_interval_ms, Some(-1));
         assert!(filled.operation_id.is_some());
+    }
+
+    /// Java `renameDefaults` reads `goosefs.user.file.persist.on.rename`
+    /// (default false). The config default and an explicit true must both
+    /// reach `RenamePOptions.persist`.
+    #[test]
+    fn rename_p_options_persist_follows_config() {
+        let cfg = GoosefsConfig::new("localhost:0");
+        let opts =
+            super::rename_p_options(cfg.file_metadata_sync_interval, cfg.file_persist_on_rename);
+        assert_eq!(opts.persist, Some(false));
+        assert_eq!(
+            opts.common_options
+                .as_ref()
+                .and_then(|c| c.sync_interval_ms),
+            Some(-1)
+        );
+        assert!(opts
+            .common_options
+            .as_ref()
+            .and_then(|c| c.operation_id)
+            .is_some());
+
+        let opts = super::rename_p_options(-1, true);
+        assert_eq!(opts.persist, Some(true));
     }
 }
