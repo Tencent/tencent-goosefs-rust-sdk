@@ -33,6 +33,20 @@ kept aligned. Python-specific notes also appear in
   `goosefs.user.file.metadata.sync.interval`. New
   `MasterClient::list_status_with_options` takes both values explicitly.
 
+- **Write-path RPCs now send Java `commonDefaults`**. `create_file`,
+  `create_directory`, `delete`, `rename`, and `complete_file` carry
+  `commonOptions.syncIntervalMs` from the client config and a per-call
+  `operationId` (generated once and reused across retries, matching
+  `goosefs.user.file.include.operation.id`). `schedule_async_persistence`
+  sends `syncIntervalMs` only, like Java `scheduleAsyncPersistDefaults`.
+  `create_directory` still uses `allowExists=true` (OpenDAL `mkdir -p`);
+  only the missing commonOptions/opId are added.
+
+- **`DeleteOptions` default `unchecked` is now `true`**, matching Java
+  `goosefs.user.file.delete.unchecked`. Recursive deletes of persisted
+  directories no longer run the UFS consistency check that Java skips.
+  Pass `unchecked: false` to keep the old checked behaviour.
+
 ### Changed
 
 - **The client metadata cache is now enabled by default** (`metadata_cache_enabled`,

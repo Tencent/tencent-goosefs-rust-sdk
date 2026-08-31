@@ -356,8 +356,8 @@ impl PyGoosefs {
         })
     }
 
-    /// `fs.batch_delete(paths, *, recursive=False, unchecked=False, goosefs_only=False)`.
-    #[pyo3(signature = (paths, *, recursive=false, unchecked=false, goosefs_only=false))]
+    /// `fs.batch_delete(paths, *, recursive=False, unchecked=True, goosefs_only=False)`.
+    #[pyo3(signature = (paths, *, recursive=false, unchecked=true, goosefs_only=false))]
     fn batch_delete(
         &self,
         py: Python<'_>,
@@ -472,8 +472,8 @@ impl PyGoosefs {
         })
     }
 
-    /// `fs.delete(path, *, recursive=False, unchecked=False, goosefs_only=False)`.
-    #[pyo3(signature = (path, *, recursive=false, unchecked=false, goosefs_only=false))]
+    /// `fs.delete(path, *, recursive=False, unchecked=True, goosefs_only=False)`.
+    #[pyo3(signature = (path, *, recursive=false, unchecked=true, goosefs_only=false))]
     fn delete(
         &self,
         py: Python<'_>,

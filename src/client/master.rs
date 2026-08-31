@@ -176,6 +176,57 @@ fn list_status_bfs_child_dir<'a>(
     Some(child)
 }
 
+/// Split a UUID into the `FsOpPId` wire layout Java uses
+/// (`UUID.getMostSignificantBits` / `getLeastSignificantBits`).
+pub(crate) fn new_fs_op_id() -> FsOpPId {
+    let (high, low) = uuid::Uuid::new_v4().as_u64_pair();
+    FsOpPId {
+        most_significant_bits: Some(high as i64),
+        least_significant_bits: Some(low as i64),
+    }
+}
+
+/// Java `FileSystemOptions.commonDefaults(conf, withOpId)`.
+///
+/// Master `Context.create` does not merge server defaults. Mutating RPCs
+/// (create / delete / rename) pass a fresh `operation_id` generated **once
+/// per call** and reused across `with_retry` attempts so Master exactly-once
+/// semantics work. Read RPCs pass `None`.
+pub(crate) fn common_p_options(
+    sync_interval_ms: i64,
+    operation_id: Option<FsOpPId>,
+) -> FileSystemMasterCommonPOptions {
+    FileSystemMasterCommonPOptions {
+        sync_interval_ms: Some(sync_interval_ms),
+        operation_id,
+    }
+}
+
+/// `commonDefaults(conf, true)` — sync interval plus a fresh operation id.
+fn write_common_p_options(sync_interval_ms: i64) -> FileSystemMasterCommonPOptions {
+    common_p_options(sync_interval_ms, Some(new_fs_op_id()))
+}
+
+/// Fill missing `common_options` fields on a mutating RPC, matching Java
+/// `defaults.mergeFrom(caller)`: caller-set values win, unset ones take the
+/// config default / a fresh operation id.
+fn fill_write_common_options(
+    slot: &mut Option<FileSystemMasterCommonPOptions>,
+    sync_interval_ms: i64,
+) {
+    match slot {
+        None => *slot = Some(write_common_p_options(sync_interval_ms)),
+        Some(existing) => {
+            if existing.sync_interval_ms.is_none() {
+                existing.sync_interval_ms = Some(sync_interval_ms);
+            }
+            if existing.operation_id.is_none() {
+                existing.operation_id = Some(new_fs_op_id());
+            }
+        }
+    }
+}
+
 /// Java `FileSystemOptions.getStatusDefaults` wire shape.
 ///
 /// Master `GetStatusContext.create` does **not** merge server defaults. An
@@ -189,10 +240,7 @@ pub(crate) fn get_status_p_options(
 ) -> GetStatusPOptions {
     GetStatusPOptions {
         load_metadata_type: load_metadata_type.map(|t| t as i32),
-        common_options: sync_interval_ms.map(|ms| FileSystemMasterCommonPOptions {
-            sync_interval_ms: Some(ms),
-            ..Default::default()
-        }),
+        common_options: sync_interval_ms.map(|ms| common_p_options(ms, None)),
         ..Default::default()
     }
 }
@@ -212,10 +260,7 @@ pub(crate) fn list_status_p_options(
 ) -> ListStatusPOptions {
     ListStatusPOptions {
         load_metadata_type: load_metadata_type.map(|t| t as i32),
-        common_options: sync_interval_ms.map(|ms| FileSystemMasterCommonPOptions {
-            sync_interval_ms: Some(ms),
-            ..Default::default()
-        }),
+        common_options: sync_interval_ms.map(|ms| common_p_options(ms, None)),
         ..Default::default()
     }
 }
@@ -747,7 +792,15 @@ impl MasterClient {
 
     /// Create a new file. Returns the `FileInfo` of the created file.
     #[instrument(skip(self, options), fields(path = %path))]
-    pub async fn create_file(&self, path: &str, options: CreateFilePOptions) -> Result<FileInfo> {
+    pub async fn create_file(
+        &self,
+        path: &str,
+        mut options: CreateFilePOptions,
+    ) -> Result<FileInfo> {
+        fill_write_common_options(
+            &mut options.common_options,
+            self.config.file_metadata_sync_interval,
+        );
         let path = path.to_string();
         let result = self
             .with_retry("create_file", |mut client| {
@@ -832,16 +885,12 @@ impl MasterClient {
         opts: CompleteFileOptions,
     ) -> Result<()> {
         let path = path.to_string();
+        let sync_interval_ms = self.config.file_metadata_sync_interval;
         self.with_retry("complete_file", |mut client| {
             let path = path.clone();
             let opts = opts.clone();
             async move {
-                let common_options =
-                    opts.operation_id
-                        .map(|op_id| FileSystemMasterCommonPOptions {
-                            operation_id: Some(op_id),
-                            ..Default::default()
-                        });
+                let common_options = Some(common_p_options(sync_interval_ms, opts.operation_id));
                 let req = CompleteFilePRequest {
                     path: Some(path),
                     options: Some(CompleteFilePOptions {
@@ -943,6 +992,9 @@ impl MasterClient {
     #[instrument(skip(self, opts), fields(path = %path))]
     pub async fn delete_with_options(&self, path: &str, opts: DeleteOptions) -> Result<()> {
         let path = path.to_string();
+        let common_options = Some(write_common_p_options(
+            self.config.file_metadata_sync_interval,
+        ));
         self.with_retry("delete_with_options", |mut client| {
             let path = path.clone();
             let opts = opts.clone();
@@ -953,6 +1005,7 @@ impl MasterClient {
                         recursive: Some(opts.recursive),
                         unchecked: Some(opts.unchecked),
                         goosefs_only: Some(opts.goosefs_only),
+                        common_options,
                         ..Default::default()
                     }),
                 };
@@ -987,6 +1040,9 @@ impl MasterClient {
     pub async fn rename(&self, src: &str, dst: &str) -> Result<()> {
         let src = src.to_string();
         let dst = dst.to_string();
+        let common_options = Some(write_common_p_options(
+            self.config.file_metadata_sync_interval,
+        ));
         let result = self
             .with_retry("rename", |mut client| {
                 let src = src.clone();
@@ -995,7 +1051,10 @@ impl MasterClient {
                     let req = RenamePRequest {
                         path: Some(src),
                         dst_path: Some(dst),
-                        options: Some(RenamePOptions::default()),
+                        options: Some(RenamePOptions {
+                            common_options,
+                            persist: Some(false),
+                        }),
                     };
                     client.rename(req).await?;
                     Ok(())
@@ -1013,6 +1072,12 @@ impl MasterClient {
     #[instrument(skip(self), fields(path = %path))]
     pub async fn create_directory(&self, path: &str, recursive: bool) -> Result<()> {
         let path = path.to_string();
+        // `allow_exists=true` is an intentional OpenDAL mkdir -p divergence
+        // from Java `createDirectoryDefaults` (`allowExists=false`). commonOptions
+        // still match Java: syncIntervalMs from config + a fresh operation id.
+        let common_options = Some(write_common_p_options(
+            self.config.file_metadata_sync_interval,
+        ));
         let result = self
             .with_retry("create_directory", |mut client| {
                 let path = path.clone();
@@ -1023,6 +1088,7 @@ impl MasterClient {
                             recursive: Some(recursive),
                             allow_exists: Some(true),
                             mode: Some(default_dir_mode()),
+                            common_options,
                             ..Default::default()
                         }),
                     };
@@ -1044,13 +1110,19 @@ impl MasterClient {
         persistence_wait_time: Option<i64>,
     ) -> Result<()> {
         let path = path.to_string();
+        // Java `scheduleAsyncPersistDefaults` uses `commonDefaults(conf)` —
+        // sync interval, no operation id.
+        let common_options = Some(common_p_options(
+            self.config.file_metadata_sync_interval,
+            None,
+        ));
         self.with_retry("schedule_async_persistence", |mut client| {
             let path = path.clone();
             async move {
                 let req = ScheduleAsyncPersistencePRequest {
                     path: Some(path),
                     options: Some(ScheduleAsyncPersistencePOptions {
-                        common_options: None,
+                        common_options,
                         persistence_wait_time,
                     }),
                 };
@@ -1803,5 +1875,53 @@ mod tests {
                 .and_then(|c| c.sync_interval_ms),
             Some(-1)
         );
+    }
+
+    /// Java `commonDefaults(conf, true)` always sets `syncIntervalMs` and a
+    /// non-empty `operationId`.
+    #[test]
+    fn write_common_p_options_matches_java_mutating_defaults() {
+        let opts = super::write_common_p_options(-1);
+        assert_eq!(opts.sync_interval_ms, Some(-1));
+        let op = opts
+            .operation_id
+            .expect("mutating RPCs must send operationId");
+        assert!(
+            op.most_significant_bits.is_some() && op.least_significant_bits.is_some(),
+            "FsOpPId must carry both UUID halves"
+        );
+    }
+
+    /// Java `commonDefaults(conf)` (getStatus / listStatus / scheduleAsyncPersist)
+    /// sets only `syncIntervalMs`.
+    #[test]
+    fn common_p_options_read_path_has_no_operation_id() {
+        let opts = super::common_p_options(-1, None);
+        assert_eq!(opts.sync_interval_ms, Some(-1));
+        assert!(opts.operation_id.is_none());
+    }
+
+    /// Caller-supplied common_options win; only unset fields are filled.
+    #[test]
+    fn fill_write_common_options_preserves_caller_values() {
+        let caller_id = super::new_fs_op_id();
+        let mut slot = Some(super::common_p_options(0, Some(caller_id)));
+        super::fill_write_common_options(&mut slot, -1);
+        let filled = slot.expect("slot stays Some");
+        assert_eq!(
+            filled.sync_interval_ms,
+            Some(0),
+            "caller syncIntervalMs must not be overwritten"
+        );
+        assert_eq!(filled.operation_id, Some(caller_id));
+    }
+
+    #[test]
+    fn fill_write_common_options_fills_empty_slot() {
+        let mut slot = None;
+        super::fill_write_common_options(&mut slot, -1);
+        let filled = slot.expect("empty slot is filled");
+        assert_eq!(filled.sync_interval_ms, Some(-1));
+        assert!(filled.operation_id.is_some());
     }
 }

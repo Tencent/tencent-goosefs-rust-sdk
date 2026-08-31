@@ -187,9 +187,10 @@ impl PyCreateFileOptions {
 
 /// Options controlling a `delete()` call.
 ///
-/// Defaults match `DeleteOptions::default()` in the SDK: no recursion, no
-/// `unchecked`, no `goosefs_only`. The most common case — recursively
-/// deleting a directory tree — can be expressed as `DeleteOptions(recursive=True)`.
+/// Defaults match Java `FileSystemOptions.deleteDefaults`: no recursion,
+/// `unchecked=True` (`goosefs.user.file.delete.unchecked`), no `goosefs_only`.
+/// The most common case — recursively deleting a directory tree — can be
+/// expressed as `DeleteOptions(recursive=True)`.
 #[pyclass(module = "goosefs._goosefs", name = "DeleteOptions", from_py_object)]
 #[derive(Clone)]
 pub struct PyDeleteOptions {
@@ -201,7 +202,7 @@ pub struct PyDeleteOptions {
 #[pymethods]
 impl PyDeleteOptions {
     #[new]
-    #[pyo3(signature = (*, recursive=false, unchecked=false, goosefs_only=false))]
+    #[pyo3(signature = (*, recursive=false, unchecked=true, goosefs_only=false))]
     fn new(recursive: bool, unchecked: bool, goosefs_only: bool) -> Self {
         Self {
             recursive,

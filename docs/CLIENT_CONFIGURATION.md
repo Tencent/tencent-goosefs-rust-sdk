@@ -707,14 +707,14 @@ Options controlling how a file or directory is deleted. Passed to `FileSystem::d
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `recursive` | `bool` | `false` | Delete directories recursively. Required for non-empty directories. |
-| `unchecked` | `bool` | `false` | Skip safety checks (empty-directory enforcement) and allow deleting INCOMPLETE files. Needed by `GoosefsFileWriter::cancel()`. |
+| `unchecked` | `bool` | `true` | Skip the UFS-vs-namespace consistency check on recursive deletes of persisted directories (Java `goosefs.user.file.delete.unchecked`). Also skips empty-directory enforcement and allows deleting INCOMPLETE files. |
 | `goosefs_only` | `bool` | `false` | Restrict deletion to Goosefs namespace only; do not propagate to UFS. Used during CACHE_THROUGH error recovery. |
 
 **Factory methods:**
 
 | Method | Description |
 |--------|-------------|
-| `DeleteOptions::default()` | Non-recursive, checked, propagate to UFS. |
+| `DeleteOptions::default()` | Non-recursive, `unchecked=true`, propagate to UFS (Java `deleteDefaults`). |
 | `DeleteOptions::recursive()` | Simple recursive delete (most common case). |
 | `DeleteOptions::for_cancel()` | For cancelling an in-progress file write (`unchecked = true`). |
 | `DeleteOptions::goosefs_only_unchecked()` | For CACHE_THROUGH error recovery (`unchecked + goosefs_only`). |

@@ -538,13 +538,13 @@ impl PyAsyncGoosefs {
         })
     }
 
-    /// `await fs.batch_delete(paths, *, recursive=False, unchecked=False, goosefs_only=False)` → `None`.
+    /// `await fs.batch_delete(paths, *, recursive=False, unchecked=True, goosefs_only=False)` → `None`.
     ///
     /// Deletes every path with bounded concurrency (at most
     /// `BATCH_CONCURRENCY_LIMIT` RPCs in flight).
     ///
     /// The whole batch fails on the first error.
-    #[pyo3(signature = (paths, *, recursive=false, unchecked=false, goosefs_only=false))]
+    #[pyo3(signature = (paths, *, recursive=false, unchecked=true, goosefs_only=false))]
     fn batch_delete<'py>(
         &self,
         py: Python<'py>,
@@ -672,11 +672,11 @@ impl PyAsyncGoosefs {
         })
     }
 
-    /// `await fs.delete(path, *, recursive=False, unchecked=False, goosefs_only=False)`.
+    /// `await fs.delete(path, *, recursive=False, unchecked=True, goosefs_only=False)`.
     ///
     /// All keyword flags map 1:1 to the SDK's `DeleteOptions`. To pass an
     /// already-built `DeleteOptions` instance, call `.delete_with_options()`.
-    #[pyo3(signature = (path, *, recursive=false, unchecked=false, goosefs_only=false))]
+    #[pyo3(signature = (path, *, recursive=false, unchecked=true, goosefs_only=false))]
     fn delete<'py>(
         &self,
         py: Python<'py>,
