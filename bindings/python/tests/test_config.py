@@ -35,10 +35,17 @@ _CONFIG_ADDR_ENV = (
     "GOOSEFS_MASTER_ADDRESSES",
 )
 
+# Env keys that overlay the fields under test (precedence: env wins).
+_CONFIG_TIMEOUT_ENV = (
+    "GOOSEFS_USER_NETWORK_RPC_CONNECT_TIMEOUT",
+    "GOOSEFS_USER_NETWORK_RPC_TIMEOUT",
+    "GOOSEFS_USER_NETWORK_VPC_MAPPING_ENABLED",
+)
+
 
 @pytest.fixture(autouse=True)
 def _clear_master_addr_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for key in _CONFIG_ADDR_ENV:
+    for key in _CONFIG_ADDR_ENV + _CONFIG_TIMEOUT_ENV:
         monkeypatch.delenv(key, raising=False)
 
 
@@ -134,3 +141,44 @@ def test_uri_wrong_scheme_treated_as_bare_list_and_rejected() -> None:
     # We only assert construction does not misinterpret it as HA form.
     cfg = Config("http://a:9200/x")
     assert cfg.master_addr == "http://a:9200/x"
+
+
+# ── CFG-17 / CFG-20 / CFG-21: timeouts + VPC via properties ──────────────
+
+
+def test_timeout_and_vpc_defaults() -> None:
+    cfg = Config("m:9200")
+    assert cfg.connect_timeout_ms == 30_000
+    assert cfg.request_timeout_ms == 300_000
+    assert cfg.use_vpc_mapping is False
+
+
+@pytest.mark.parametrize("value", ["5000", "5000ms", "5sec"])
+def test_connect_timeout_via_properties(value: str) -> None:
+    cfg = Config(
+        "m:9200",
+        properties={"goosefs.user.network.rpc.connect.timeout": value},
+    )
+    assert cfg.connect_timeout_ms == 5_000
+
+
+@pytest.mark.parametrize("value", ["7000", "7000ms", "7sec"])
+def test_request_timeout_via_properties(value: str) -> None:
+    cfg = Config(
+        "m:9200",
+        properties={"goosefs.user.network.rpc.timeout": value},
+    )
+    assert cfg.request_timeout_ms == 7_000
+
+
+def test_use_vpc_mapping_via_properties() -> None:
+    cfg = Config(
+        "m:9200",
+        properties={"goosefs.user.network.vpc.mapping.enabled": "true"},
+    )
+    assert cfg.use_vpc_mapping is True
+    cfg = Config(
+        "m:9200",
+        properties={"goosefs.user.network.vpc.mapping.enabled": "false"},
+    )
+    assert cfg.use_vpc_mapping is False

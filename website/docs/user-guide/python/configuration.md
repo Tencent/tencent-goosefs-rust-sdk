@@ -42,6 +42,9 @@ cfg = Config.from_uri("gfs://127.0.0.1:9200/data")
 | `GOOSEFS_MASTER_CONNECTION_POOL_SIZE` | Master gRPC channel pool size (default 1)     |
 | `GOOSEFS_MASTER_POOL_SCHEDULE`        | `roundrobin` / `p2c`                          |
 | `GOOSEFS_WORKER_CONNECTION_POOL_SIZE` | Per-worker gRPC channel pool size              |
+| `GOOSEFS_USER_NETWORK_RPC_CONNECT_TIMEOUT` | gRPC connect timeout (`5sec` / `5000ms` / `5000`) |
+| `GOOSEFS_USER_NETWORK_RPC_TIMEOUT`     | Per-RPC request timeout (same time format)  |
+| `GOOSEFS_USER_NETWORK_VPC_MAPPING_ENABLED` | Use VPC mapping addresses (`true`/`false`) |
 | `GOOSEFS_METADATA_CACHE_ENABLED`      | Client metadata cache switch (default `true`) |
 | `GOOSEFS_METADATA_CACHE_EXPIRATION`   | Metadata cache TTL (`10min`, `30s`, raw ms)    |
 | `GOOSEFS_METADATA_CACHE_MAX_SIZE`     | Metadata cache LRU capacity (default `100000`) |
@@ -82,6 +85,29 @@ The master connection pool spreads concurrent metadata RPCs across multiple HTTP
 
 # Via storage options (OpenDAL / Lance)
 # storage_options={"goosefs_master_connection_pool_size": "8", ...}
+```
+
+## Connection Timeouts and VPC Mapping
+
+These fields are readable on `Config` (`connect_timeout_ms`, `request_timeout_ms`, `use_vpc_mapping`) and can be set via properties, env, or a properties file:
+
+| Property key | Env var | Default |
+| --- | --- | --- |
+| `goosefs.user.network.rpc.connect.timeout` | `GOOSEFS_USER_NETWORK_RPC_CONNECT_TIMEOUT` | `30s` |
+| `goosefs.user.network.rpc.timeout` | `GOOSEFS_USER_NETWORK_RPC_TIMEOUT` | `5min` |
+| `goosefs.user.network.vpc.mapping.enabled` | `GOOSEFS_USER_NETWORK_VPC_MAPPING_ENABLED` | `false` |
+
+Timeouts accept Java `parseTimeSize` (`5sec`, `5000ms`, `5000`).
+
+```python
+cfg = Config("127.0.0.1:9200", properties={
+    "goosefs.user.network.rpc.connect.timeout": "5sec",
+    "goosefs.user.network.rpc.timeout": "7000",
+    "goosefs.user.network.vpc.mapping.enabled": "true",
+})
+assert cfg.connect_timeout_ms == 5000
+assert cfg.request_timeout_ms == 7000
+assert cfg.use_vpc_mapping is True
 ```
 
 ## Client Local Page Cache (opt-in)
