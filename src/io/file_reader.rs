@@ -591,10 +591,11 @@ impl GoosefsFileReader {
     /// `positioned = true` uses `GrpcBlockReader::positioned_read`
     /// (`position_short`). Page-cache fills issue many small reads against the
     /// **same** block; the streaming `ReadBlock` verb holds the worker-side
-    /// block lock until the bidi stream is fully closed, so a second page open
-    /// on the same connection can wait forever (Python `read_file` hang on the
-    /// 2nd page). `position_short` completes and unlocks after exactly
-    /// `length` bytes, matching `GoosefsFileInStream`.
+    /// block lock until the client half-closes the bidi stream. A second
+    /// open on the same block (2nd page, or a 2nd `read_file` of the same
+    /// path) waits forever if that close is skipped or the RPC is cancelled
+    /// instead. `position_short` completes and unlocks after
+    /// exactly `length` bytes, matching `GoosefsFileInStream`.
     async fn read_segment(
         &self,
         block_id: i64,
@@ -1246,9 +1247,10 @@ impl GoosefsFileReader {
 /// from within [`GoosefsFileReader::read_next_block`].
 ///
 /// Misses use `positioned_read` (`position_short`): streaming `ReadBlock`
-/// holds the worker block lock until the bidi stream closes, so a 2nd-page
-/// fill of the same block can hang. `read_file_range` is stateless (`&self`),
-/// so re-entry here does not perturb `read_next_block` iteration state.
+/// holds the worker block lock until the client half-closes, so a 2nd
+/// open of the same block (page fill or a later `read_file`) can hang.
+/// `read_file_range` is stateless (`&self`), so re-entry here does not
+/// perturb `read_next_block` iteration state.
 #[async_trait::async_trait]
 impl ExternalRangeReader for GoosefsFileReader {
     async fn read_range(&mut self, offset: i64, end: i64) -> Result<Bytes> {

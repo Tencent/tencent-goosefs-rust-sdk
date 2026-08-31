@@ -127,9 +127,9 @@ When auto-discovering the properties file, the client searches in this order
 |-------|------|---------|-------------|
 | `master_addr` | `String` | `"127.0.0.1:9200"` | Primary master address in `host:port` format. For single-master deployments. |
 | `master_addrs` | `Vec<String>` | `[]` (empty) | Multiple master addresses for HA deployments. When >1 address, the client uses `PollingMasterInquireClient` to discover the Primary Master. If empty, `master_addr` is used. |
-| `connect_timeout` | `Duration` | `30s` | Connect timeout for gRPC channels. |
-| `request_timeout` | `Duration` | `5min` (300s) | Request timeout for individual RPCs. |
-| `use_vpc_mapping` | `bool` | `false` | Whether to use VPC mapping addresses from `WorkerNetAddress`. |
+| `connect_timeout` | `Duration` | `30s` | Connect timeout for gRPC channels. Configurable via `goosefs.user.network.rpc.connect.timeout` (Java `parseTimeSize`: `5sec`, `5000ms`, `5000`), `GOOSEFS_USER_NETWORK_RPC_CONNECT_TIMEOUT`, or `with_connect_timeout()`. |
+| `request_timeout` | `Duration` | `5min` (300s) | Request timeout for individual RPCs. Configurable via `goosefs.user.network.rpc.timeout`, `GOOSEFS_USER_NETWORK_RPC_TIMEOUT`, or `with_request_timeout()`. |
+| `use_vpc_mapping` | `bool` | `false` | Whether to use VPC mapping addresses from `WorkerNetAddress`. Configurable via `goosefs.user.network.vpc.mapping.enabled`, `GOOSEFS_USER_NETWORK_VPC_MAPPING_ENABLED`, or `with_use_vpc_mapping()`. |
 | `root` | `String` | `""` (empty) | Root path prefix for all operations (e.g. `/goosefs-data`). All paths are prepended with this prefix. |
 | `master_connection_pool_size` | `usize` | `1` | Number of independent Master gRPC channels to pool. `1` = legacy single-channel. Raising it (e.g. `4`/`8`) spreads concurrent metadata RPCs across multiple HTTP/2 connections, avoiding `SETTINGS_MAX_CONCURRENT_STREAMS` queueing under high concurrency / remote RTT. All pooled clients share one inquire client so HA failover stays consistent. Also configurable via the `GOOSEFS_MASTER_CONNECTION_POOL_SIZE` env var, the `goosefs.user.master.connection.pool.size` properties key, or the `goosefs_master_connection_pool_size` storage option (see §3, §4, §5). |
 | `master_connection_pool_schedule` | `MasterPoolSchedule` | `RoundRobin` | Scheduling strategy for the master connection pool (see §7.6). `RoundRobin` = cycle through pooled channels in order (zero overhead). `P2C` = Power of Two Choices — sample two channels at random and pick the one with fewer in-flight RPCs; only effective when `master_connection_pool_size > 1`. Also configurable via the `GOOSEFS_MASTER_POOL_SCHEDULE` env var, the `goosefs.user.master.pool.schedule` properties key, or the `goosefs_master_pool_schedule` storage option. All three accept `roundrobin` / `round_robin` / `round-robin` / `RoundRobin` (case-insensitive, separators ignored) and `p2c` / `P2C`. |
@@ -477,6 +477,9 @@ properties file values and built-in defaults.
 | `GOOSEFS_USER_FILE_CHECK_BLOCK_REPLICAS` | `check_block_replicas` | `0` | CheckBlocks probe count when enriching locations (`goosefs.user.file.check.block.replicas`). `0` disables. |
 | `GOOSEFS_BLOCK_SIZE` | `block_size` | `67108864` (64 MiB) | Block size in bytes (plain integer). |
 | `GOOSEFS_CHUNK_SIZE` | `chunk_size` | `1048576` (1 MiB) | Chunk size in bytes (plain integer). |
+| `GOOSEFS_USER_NETWORK_RPC_CONNECT_TIMEOUT` | `connect_timeout` | `30s` | gRPC connect timeout. Java `parseTimeSize` (`5sec`, `5000ms`, `5000`). Values `<= 0` / unparseable keep the default. |
+| `GOOSEFS_USER_NETWORK_RPC_TIMEOUT` | `request_timeout` | `5min` (300s) | Per-RPC request timeout. Java `parseTimeSize`. Values `<= 0` / unparseable keep the default. |
+| `GOOSEFS_USER_NETWORK_VPC_MAPPING_ENABLED` | `use_vpc_mapping` | `false` | Use VPC mapping addresses from `WorkerNetAddress` (`true`/`false`/`1`/`0`). |
 | `GOOSEFS_AUTH_TYPE` | `auth_type` | `Simple` | Authentication type. Accepted: `nosasl`, `simple` (case-insensitive). |
 | `GOOSEFS_AUTH_USERNAME` | `auth_username` | current OS user (`$USER`) | Authentication username. |
 | `GOOSEFS_CONFIG_FILE` | — | — | Explicit path to a config file (Rust-only convenience, highest priority). |
@@ -550,6 +553,9 @@ These constants are used in `storage_options` maps (e.g. Lance's
 | `STORAGE_OPT_WRITE_TYPE` | `goosefs_write_type` | `None` (server default, typically `MustCache`) | Default write type (case-insensitive). |
 | `STORAGE_OPT_BLOCK_SIZE` | `goosefs_block_size` | `67108864` (64 MiB) | Block size in bytes. |
 | `STORAGE_OPT_CHUNK_SIZE` | `goosefs_chunk_size` | `1048576` (1 MiB) | Chunk size in bytes. |
+| `STORAGE_OPT_CONNECT_TIMEOUT` | `goosefs_connect_timeout` | `30s` | gRPC connect timeout (`parseTimeSize`). |
+| `STORAGE_OPT_REQUEST_TIMEOUT` | `goosefs_request_timeout` | `5min` (300s) | Per-RPC request timeout (`parseTimeSize`). |
+| `STORAGE_OPT_USE_VPC_MAPPING` | `goosefs_use_vpc_mapping` | `false` | Use VPC mapping addresses (`true`/`false`). |
 | `STORAGE_OPT_AUTH_TYPE` | `goosefs_auth_type` | `Simple` | Authentication type (case-insensitive). |
 | `STORAGE_OPT_AUTH_USERNAME` | `goosefs_auth_username` | current OS user (`$USER`) | Authentication username. |
 | `STORAGE_OPT_CONFIG_MANAGER_RPC_ADDRESSES` | `goosefs_config_manager_rpc_addresses` | `[]` (empty) | Config manager RPC addresses. |
@@ -628,6 +634,9 @@ These keys are used in `goosefs-site.properties` files (Java-style `key=value` f
 | `goosefs.user.file.check.block.replicas` | `check_block_replicas` | integer `>= 0` | `0` | Workers to probe via `CheckBlocks` when enriching file locations. `0` disables (matches Java open/default getStatus). |
 | `goosefs.user.block.size.bytes.default` | `block_size` | byte size (e.g. `64MB`, `512KB`, `134217728`) | `67108864` (64 MiB) | Default block size. Supports `KB`/`MB`/`GB` suffixes. |
 | `goosefs.user.network.data.transfer.chunk.size` | `chunk_size` | byte size (e.g. `1MB`, `512KB`) | `1048576` (1 MiB) | Streaming chunk size. Supports `KB`/`MB`/`GB` suffixes. |
+| `goosefs.user.network.rpc.connect.timeout` | `connect_timeout` | `parseTimeSize` (`5sec`, `5000ms`, `5000`) | `30s` | gRPC connect timeout. Values `<= 0` / unparseable keep the default. |
+| `goosefs.user.network.rpc.timeout` | `request_timeout` | `parseTimeSize` | `5min` (300s) | Per-RPC request timeout. Values `<= 0` / unparseable keep the default. |
+| `goosefs.user.network.vpc.mapping.enabled` | `use_vpc_mapping` | `true` / `false` | `false` | Use VPC mapping addresses from `WorkerNetAddress`. |
 | `goosefs.user.client.transparent_acceleration.enabled` | `transparent_acceleration_enabled` | `true` / `false` | `true` | Transparent acceleration. |
 | `goosefs.user.client.transparent_acceleration.cosranger.enabled` | `transparent_acceleration_cosranger_enabled` | `true` / `false` | `false` | Transparent acceleration cosranger. |
 | `goosefs.user.client.cache.enabled` | `client_cache_enabled` | `true` / `false` | `false` | Enable the local page cache. |

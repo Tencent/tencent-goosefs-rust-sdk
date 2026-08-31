@@ -288,6 +288,16 @@ fn duration_from_time_size_ms(ms: i64) -> Duration {
     }
 }
 
+/// Overlay `field` when `raw` is a positive Java `parseTimeSize` duration.
+/// Non-positive / unparseable values keep the existing field (the default).
+fn overlay_positive_duration(field: &mut Duration, raw: &str) {
+    if let Some(ms) = parse_time_size(raw) {
+        if ms > 0 {
+            *field = duration_from_time_size_ms(ms);
+        }
+    }
+}
+
 impl PropertiesMap {
     /// Convert the parsed properties into a `GoosefsConfig`.
     fn into_goosefs_config(self) -> GoosefsConfig {
@@ -461,6 +471,31 @@ impl PropertiesMap {
                     cfg.chunk_size = cs;
                 }
             }
+        }
+
+        // Connect timeout: goosefs.user.network.rpc.connect.timeout
+        // Java `parseTimeSize` (`5sec`, `5000ms`, `5000`).
+        if let Some(s) = self.get("goosefs.user.network.rpc.connect.timeout") {
+            overlay_positive_duration(&mut cfg.connect_timeout, s);
+        }
+        if let Some(s) = self.get(STORAGE_OPT_CONNECT_TIMEOUT) {
+            overlay_positive_duration(&mut cfg.connect_timeout, s);
+        }
+
+        // Request timeout: goosefs.user.network.rpc.timeout.
+        if let Some(s) = self.get("goosefs.user.network.rpc.timeout") {
+            overlay_positive_duration(&mut cfg.request_timeout, s);
+        }
+        if let Some(s) = self.get(STORAGE_OPT_REQUEST_TIMEOUT) {
+            overlay_positive_duration(&mut cfg.request_timeout, s);
+        }
+
+        // VPC mapping: goosefs.user.network.vpc.mapping.enabled.
+        if let Some(b) = self.get_bool("goosefs.user.network.vpc.mapping.enabled") {
+            cfg.use_vpc_mapping = b;
+        }
+        if let Some(b) = self.get_bool(STORAGE_OPT_USE_VPC_MAPPING) {
+            cfg.use_vpc_mapping = b;
         }
 
         // Metrics enabled: goosefs.user.metrics.collection.enabled
@@ -1175,6 +1210,21 @@ pub const ENV_BLOCK_SIZE: &str = "GOOSEFS_BLOCK_SIZE";
 /// Environment variable: chunk size.
 pub const ENV_CHUNK_SIZE: &str = "GOOSEFS_CHUNK_SIZE";
 
+/// Environment variable: gRPC connect timeout (Java `parseTimeSize`).
+///
+/// Example: `export GOOSEFS_USER_NETWORK_RPC_CONNECT_TIMEOUT=5sec`.
+pub const ENV_CONNECT_TIMEOUT: &str = "GOOSEFS_USER_NETWORK_RPC_CONNECT_TIMEOUT";
+
+/// Environment variable: per-RPC request timeout (Java `parseTimeSize`).
+///
+/// Example: `export GOOSEFS_USER_NETWORK_RPC_TIMEOUT=7000`.
+pub const ENV_REQUEST_TIMEOUT: &str = "GOOSEFS_USER_NETWORK_RPC_TIMEOUT";
+
+/// Environment variable: use VPC mapping addresses from `WorkerNetAddress`.
+///
+/// Example: `export GOOSEFS_USER_NETWORK_VPC_MAPPING_ENABLED=true`.
+pub const ENV_USE_VPC_MAPPING: &str = "GOOSEFS_USER_NETWORK_VPC_MAPPING_ENABLED";
+
 /// Environment variable: authentication type.
 pub const ENV_AUTH_TYPE: &str = "GOOSEFS_AUTH_TYPE";
 
@@ -1425,6 +1475,15 @@ pub const STORAGE_OPT_FILE_METADATA_LOAD_TYPE: &str = "goosefs_file_metadata_loa
 
 /// Storage option key for `goosefs.user.file.persist.on.rename`.
 pub const STORAGE_OPT_FILE_PERSIST_ON_RENAME: &str = "goosefs_file_persist_on_rename";
+
+/// Storage option key for the gRPC connect timeout (`parseTimeSize`).
+pub const STORAGE_OPT_CONNECT_TIMEOUT: &str = "goosefs_connect_timeout";
+
+/// Storage option key for the per-RPC request timeout (`parseTimeSize`).
+pub const STORAGE_OPT_REQUEST_TIMEOUT: &str = "goosefs_request_timeout";
+
+/// Storage option key for VPC mapping (`true`/`false`).
+pub const STORAGE_OPT_USE_VPC_MAPPING: &str = "goosefs_use_vpc_mapping";
 
 // ── Short-circuit (local mmap) read env vars (SHORT_CIRCUIT_DESIGN ) ─
 /// Environment variable: master kill switch for the short-circuit local read path.
@@ -1692,12 +1751,22 @@ pub struct GoosefsConfig {
     pub chunk_size: u64,
 
     /// Connect timeout for gRPC channels.
+    ///
+    /// Configurable via `goosefs.user.network.rpc.connect.timeout`
+    /// (Java `parseTimeSize`: `5sec`, `5000ms`, `5000`) or
+    /// [`ENV_CONNECT_TIMEOUT`].
     pub connect_timeout: Duration,
 
     /// Request timeout for individual RPCs.
+    ///
+    /// Configurable via `goosefs.user.network.rpc.timeout`
+    /// (Java `parseTimeSize`) or [`ENV_REQUEST_TIMEOUT`].
     pub request_timeout: Duration,
 
     /// Whether to use VPC mapping addresses from WorkerNetAddress.
+    ///
+    /// Configurable via `goosefs.user.network.vpc.mapping.enabled` or
+    /// [`ENV_USE_VPC_MAPPING`].
     pub use_vpc_mapping: bool,
 
     /// Root path prefix for all operations (e.g. `/goosefs-data`).
@@ -3025,6 +3094,24 @@ impl GoosefsConfig {
         self
     }
 
+    /// Set the gRPC connect timeout.
+    pub fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+
+    /// Set the per-RPC request timeout.
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    /// Use VPC mapping addresses from `WorkerNetAddress` when `true`.
+    pub fn with_use_vpc_mapping(mut self, enabled: bool) -> Self {
+        self.use_vpc_mapping = enabled;
+        self
+    }
+
     /// Enable or disable the Java-aligned client metadata cache.
     ///
     /// Default `false`. When true, TTL defaults to `10min` and capacity to
@@ -3288,6 +3375,9 @@ impl GoosefsConfig {
     /// | `GOOSEFS_WRITE_TYPE` | `write_type` |
     /// | `GOOSEFS_BLOCK_SIZE` | `block_size` |
     /// | `GOOSEFS_CHUNK_SIZE` | `chunk_size` |
+    /// | `GOOSEFS_USER_NETWORK_RPC_CONNECT_TIMEOUT` | `connect_timeout` |
+    /// | `GOOSEFS_USER_NETWORK_RPC_TIMEOUT` | `request_timeout` |
+    /// | `GOOSEFS_USER_NETWORK_VPC_MAPPING_ENABLED` | `use_vpc_mapping` |
     /// | `GOOSEFS_AUTH_TYPE` | `auth_type` |
     /// | `GOOSEFS_AUTH_USERNAME` | `auth_username` |
     ///
@@ -3456,6 +3546,19 @@ impl GoosefsConfig {
         if let Ok(cs_str) = env::var(ENV_CHUNK_SIZE) {
             if let Ok(cs) = cs_str.parse::<u64>() {
                 self.chunk_size = cs;
+            }
+        }
+
+        // gRPC connect / request timeouts (Java parseTimeSize).
+        if let Ok(val) = env::var(ENV_CONNECT_TIMEOUT) {
+            overlay_positive_duration(&mut self.connect_timeout, &val);
+        }
+        if let Ok(val) = env::var(ENV_REQUEST_TIMEOUT) {
+            overlay_positive_duration(&mut self.request_timeout, &val);
+        }
+        if let Ok(val) = env::var(ENV_USE_VPC_MAPPING) {
+            if let Some(b) = parse_bool_loose(&val) {
+                self.use_vpc_mapping = b;
             }
         }
 
@@ -4789,6 +4892,18 @@ mod tests {
         );
         assert_eq!(ENV_BLOCK_SIZE, "GOOSEFS_BLOCK_SIZE");
         assert_eq!(ENV_CHUNK_SIZE, "GOOSEFS_CHUNK_SIZE");
+        assert_eq!(
+            ENV_CONNECT_TIMEOUT,
+            "GOOSEFS_USER_NETWORK_RPC_CONNECT_TIMEOUT"
+        );
+        assert_eq!(ENV_REQUEST_TIMEOUT, "GOOSEFS_USER_NETWORK_RPC_TIMEOUT");
+        assert_eq!(
+            ENV_USE_VPC_MAPPING,
+            "GOOSEFS_USER_NETWORK_VPC_MAPPING_ENABLED"
+        );
+        assert_eq!(STORAGE_OPT_CONNECT_TIMEOUT, "goosefs_connect_timeout");
+        assert_eq!(STORAGE_OPT_REQUEST_TIMEOUT, "goosefs_request_timeout");
+        assert_eq!(STORAGE_OPT_USE_VPC_MAPPING, "goosefs_use_vpc_mapping");
     }
 
     #[test]
@@ -4825,6 +4940,75 @@ goosefs.user.network.data.transfer.chunk.size=1MB
         assert_eq!(cfg.get_write_type(), Some(WritePType::CacheThrough));
         assert_eq!(cfg.block_size, 64 * 1024 * 1024);
         assert_eq!(cfg.chunk_size, 1024 * 1024);
+    }
+
+    /// `connect_timeout`, `request_timeout`, and `use_vpc_mapping` must be
+    /// settable via properties. `parseTimeSize` accepts `5sec` / `5000ms`
+    /// / `5000`; bools accept `true`/`false`.
+    #[test]
+    fn test_from_properties_str_timeouts_and_vpc_mapping() {
+        let cfg = GoosefsConfig::from_properties_str(
+            "\
+goosefs.user.network.rpc.connect.timeout=5sec
+goosefs.user.network.rpc.timeout=7000
+goosefs.user.network.vpc.mapping.enabled=true
+",
+        );
+        assert_eq!(cfg.connect_timeout, Duration::from_millis(5_000));
+        assert_eq!(cfg.request_timeout, Duration::from_millis(7_000));
+        assert!(cfg.use_vpc_mapping);
+
+        let cfg = GoosefsConfig::from_properties_str(
+            "goosefs.user.network.rpc.connect.timeout=5000ms\n\
+             goosefs.user.network.rpc.timeout=7000ms\n",
+        );
+        assert_eq!(cfg.connect_timeout, Duration::from_millis(5_000));
+        assert_eq!(cfg.request_timeout, Duration::from_millis(7_000));
+
+        let cfg = GoosefsConfig::from_properties_str(
+            "goosefs.user.network.rpc.connect.timeout=5000\n\
+             goosefs.user.network.rpc.timeout=7000\n\
+             goosefs.user.network.vpc.mapping.enabled=false\n",
+        );
+        assert_eq!(cfg.connect_timeout, Duration::from_millis(5_000));
+        assert_eq!(cfg.request_timeout, Duration::from_millis(7_000));
+        assert!(!cfg.use_vpc_mapping);
+
+        // Storage-option aliases.
+        let cfg = GoosefsConfig::from_properties_str(
+            "goosefs_connect_timeout=5sec\n\
+             goosefs_request_timeout=7000\n\
+             goosefs_use_vpc_mapping=true\n",
+        );
+        assert_eq!(cfg.connect_timeout, Duration::from_millis(5_000));
+        assert_eq!(cfg.request_timeout, Duration::from_millis(7_000));
+        assert!(cfg.use_vpc_mapping);
+    }
+
+    #[test]
+    fn test_apply_env_timeouts_and_vpc_mapping() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(ENV_CONNECT_TIMEOUT, "5sec");
+        std::env::set_var(ENV_REQUEST_TIMEOUT, "7000");
+        std::env::set_var(ENV_USE_VPC_MAPPING, "true");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var(ENV_CONNECT_TIMEOUT);
+        std::env::remove_var(ENV_REQUEST_TIMEOUT);
+        std::env::remove_var(ENV_USE_VPC_MAPPING);
+        assert_eq!(cfg.connect_timeout, Duration::from_millis(5_000));
+        assert_eq!(cfg.request_timeout, Duration::from_millis(7_000));
+        assert!(cfg.use_vpc_mapping);
+    }
+
+    #[test]
+    fn test_with_connect_request_timeout_and_vpc_builders() {
+        let cfg = GoosefsConfig::default()
+            .with_connect_timeout(Duration::from_millis(5_000))
+            .with_request_timeout(Duration::from_millis(7_000))
+            .with_use_vpc_mapping(true);
+        assert_eq!(cfg.connect_timeout, Duration::from_millis(5_000));
+        assert_eq!(cfg.request_timeout, Duration::from_millis(7_000));
+        assert!(cfg.use_vpc_mapping);
     }
 
     #[test]
