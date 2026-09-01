@@ -174,6 +174,27 @@ async def test_async_read_range_rejects_negative_offset_and_length(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("length", [-2, -100, -(1 << 31)])
+async def test_async_positioned_read_rejects_length_below_minus_one(
+    async_fs: AsyncGoosefs, tmp_dir: str, length: int
+) -> None:
+    """Only ``-1`` means "read to end"; other negatives are caller bugs.
+
+    Treating e.g. ``-2`` (a miscomputed ``end - start``) as "read to end"
+    silently returns the whole block — potentially tens of MiB the caller
+    never asked for. ``ValueError`` matches the sibling checks on this same
+    method (``offset``, ``chunk_size``) and the lower-level
+    ``read_block_positioned`` it wraps; note ``read_range`` reports its own
+    negatives as ``InvalidArgument``, which is *not* a ``ValueError``.
+    """
+    path = f"{tmp_dir}/pread-neg-len.bin"
+    await async_fs.write_file(path, b"x" * 4096)
+
+    with pytest.raises(ValueError, match=r"length must be -1 .* or non-negative"):
+        await async_fs.positioned_read(path, offset=0, length=length)
+
+
+@pytest.mark.asyncio
 async def test_async_write_accepts_bytes_like_objects(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     """``write_file`` should accept ``bytes`` / ``bytearray`` / ``memoryview``
     interchangeably (PyO3's ``&[u8]`` extractor handles the buffer protocol)."""
@@ -488,6 +509,31 @@ def test_sync_read_range_rejects_negative_offset_and_length(
         sync_fs.read_range(path, 0, -1)
     with pytest.raises(InvalidArgument, match="non-negative"):
         sync_fs.read_range(path, -1, 1)
+
+
+@pytest.mark.parametrize("length", [-2, -100, -(1 << 31)])
+def test_sync_positioned_read_rejects_length_below_minus_one(
+    sync_fs: Goosefs, sync_tmp_dir: str, length: int
+) -> None:
+    """Sync counterpart — see the async test for the rationale."""
+    path = f"{sync_tmp_dir}/sync-pread-neg-len.bin"
+    sync_fs.write_file(path, b"x" * 4096)
+
+    with pytest.raises(ValueError, match=r"length must be -1 .* or non-negative"):
+        sync_fs.positioned_read(path, offset=0, length=length)
+
+
+def test_sync_positioned_read_keeps_minus_one_and_zero_semantics(
+    sync_fs: Goosefs, sync_tmp_dir: str
+) -> None:
+    """Rejecting ``length < -1`` must not disturb the two legal edge values."""
+    path = f"{sync_tmp_dir}/sync-pread-len-edges.bin"
+    payload = _make_payload("sync-pread-len-edges", 4096)
+    sync_fs.write_file(path, payload)
+
+    assert sync_fs.positioned_read(path, offset=0, length=-1) == payload
+    assert sync_fs.positioned_read(path, offset=0, length=0) == b""
+    assert sync_fs.positioned_read(path, offset=0, length=16) == payload[:16]
 
 
 def test_sync_read_file_on_directory_raises_is_a_directory(

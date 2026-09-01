@@ -26,6 +26,10 @@ async with await AsyncGoosefs.connect(cfg) as fs:
 For the last block of a file, the actual block size may be smaller than `block_size_bytes` reported by master. `length=-1` returns only the remaining bytes of that block.
 :::
 
+:::caution
+`-1` is the only negative `length` accepted. Any other negative — most often a miscomputed `end - start` — raises `ValueError` instead of being treated as "read to the end", which would quietly return the whole block.
+:::
+
 ## Low-Level API: `acquire_worker_for_block`
 
 ```python

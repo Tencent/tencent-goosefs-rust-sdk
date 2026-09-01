@@ -10,6 +10,15 @@ This document records all notable changes to the `goosefs` Python binding. The f
 
 ### Fixed
 
+- **`positioned_read` now rejects `length < -1` instead of silently reading
+  the whole block.** Only `-1` is documented as "read to the end of the
+  block", but any negative was accepted as the same sentinel, so a
+  miscomputed `end - start` of, say, `-2` returned the entire block —
+  potentially tens of MiB the caller never asked for — rather than failing.
+  Those now raise `ValueError`, matching the `offset` and `chunk_size` checks
+  on the same method and the `read_block_positioned` it wraps. `length=-1`
+  and `length=0` are unchanged.
+
 - **Reading the same path twice no longer hangs.** The second read blocked
   forever inside the native extension for any verb combination (`read_file`,
   `read_range`, `positioned_read`, `open_file`), with or without the page

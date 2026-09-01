@@ -997,7 +997,8 @@ impl PyAsyncGoosefs {
     ///                 For the **last block** of a file, the actual block size
     ///                 may be smaller than `block_size_bytes`, so `length=-1`
     ///                 returns only the remaining bytes of that block (which
-    ///                 may be < `block_size_bytes`).
+    ///                 may be < `block_size_bytes`). `-1` is the *only* legal
+    ///                 negative; anything below it raises `ValueError`.
     ///   chunk_size  — gRPC chunk size, default 1 MiB. Smaller values give
     ///                 finer flow-control granularity at the cost of more
     ///                 ACK round-trips.
@@ -1006,7 +1007,8 @@ impl PyAsyncGoosefs {
     /// at end-of-block.
     ///
     /// Raises:
-    ///   ValueError — invalid block_index / negative offset / chunk_size <= 0.
+    ///   ValueError — invalid block_index / negative offset / `length < -1` /
+    ///                chunk_size <= 0.
     ///   NotFound   — `path` does not exist.
     ///   IoError / RpcError — block I/O or gRPC failures.
     #[pyo3(signature = (path, *, block_index=0, offset=0, length=-1, chunk_size=DEFAULT_CHUNK_SIZE))]
@@ -1023,6 +1025,15 @@ impl PyAsyncGoosefs {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "offset must be non-negative",
             ));
+        }
+        // `-1` is the documented sentinel; every other negative is a caller
+        // bug (typically a botched `end - start`). Reading the whole block
+        // for those would silently return megabytes the caller never asked
+        // for, so reject them the way `read_block_positioned` does.
+        if length < -1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "length must be -1 (read to end of block) or non-negative, got {length}"
+            )));
         }
         if chunk_size <= 0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -1045,7 +1056,8 @@ impl PyAsyncGoosefs {
                     offset, block_size
                 )));
             }
-            // -1 ⇒ "read to end of block" (clamped at actual block length).
+            // -1 (the only negative that survives validation) ⇒ "read to end
+            // of block", clamped at the actual block length.
             let effective_length = if length < 0 {
                 block_size - offset
             } else {

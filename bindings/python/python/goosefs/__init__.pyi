@@ -799,6 +799,10 @@ class AsyncGoosefs:
         returns only the remaining bytes of that block (which may be
         < ``block_size_bytes``).
 
+        ``-1`` is the only legal negative ``length``. Any other negative
+        (e.g. ``-2`` from a miscomputed ``end - start``) raises
+        ``ValueError`` rather than reading the whole block.
+
         Mirrors the Rust SDK's ``examples/lowlevel_block_read.rs``.
         """
         ...
@@ -989,6 +993,9 @@ class Goosefs:
         ``block_size_bytes`` reported by master, so ``length=-1``
         returns only the remaining bytes of that block (which may be
         < ``block_size_bytes``).
+
+        ``-1`` is the only legal negative ``length``; ``length < -1``
+        raises ``ValueError``.
         """
         ...
 

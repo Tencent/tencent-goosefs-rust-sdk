@@ -706,7 +706,8 @@ impl PyGoosefs {
     /// **Note on last-block `length=-1`**: for the last block of a file
     /// the actual block size may be smaller than `block_size_bytes`
     /// reported by master, so `length=-1` returns only the remaining
-    /// bytes of that block (which may be < `block_size_bytes`).
+    /// bytes of that block (which may be < `block_size_bytes`). `-1` is
+    /// the only legal negative `length`; `length < -1` is a `ValueError`.
     #[pyo3(signature = (path, *, block_index=0, offset=0, length=-1, chunk_size=crate::positioned_read::DEFAULT_CHUNK_SIZE))]
     fn positioned_read<'py>(
         &self,
@@ -721,6 +722,14 @@ impl PyGoosefs {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "offset must be non-negative",
             ));
+        }
+        // See `PyAsyncGoosefs::positioned_read`: `-1` is the documented
+        // sentinel, every other negative is a caller bug and must not be
+        // silently promoted to "read the whole block".
+        if length < -1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "length must be -1 (read to end of block) or non-negative, got {length}"
+            )));
         }
         if chunk_size <= 0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -742,6 +751,7 @@ impl PyGoosefs {
                     offset, block_size
                 )));
             }
+            // -1 (the only negative that survives validation) ⇒ read to end.
             let effective_length = if length < 0 {
                 block_size - offset
             } else {
