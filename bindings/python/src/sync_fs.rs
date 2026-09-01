@@ -333,7 +333,10 @@ impl PyGoosefs {
                 let opts = proto_opts.clone();
                 async move {
                     goosefs_sdk::io::GoosefsFileWriter::write_file_with_context_and_options(
-                        ctx, &p, empty, opts,
+                        ctx,
+                        &p,
+                        empty,
+                        Some(opts),
                     )
                     .await
                     .map_err(map_err)
@@ -637,7 +640,7 @@ impl PyGoosefs {
                 h.ctx.clone(),
                 &path,
                 &payload,
-                proto_opts,
+                Some(proto_opts),
             )
             .await
             .map_err(map_err)

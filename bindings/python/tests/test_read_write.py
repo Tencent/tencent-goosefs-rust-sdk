@@ -693,6 +693,87 @@ def test_sync_batch_open_file_missing_path_fails_whole_batch(
             readers[0].close()
 
 
+# ---------------------------------------------------------------------------
+# recursive= on the create/write path
+#
+# `recursive` is a plain bool at the Python layer, so the options builder has
+# no way to encode "unset". It used to return no options at all when
+# write_type and block_size_bytes were both defaulted, and the writer reads
+# absent options as recursive=True — so recursive=False was honoured only when
+# some *other* argument happened to be non-default.
+# ---------------------------------------------------------------------------
+
+
+_MISSING_PARENT_CREATORS = {
+    "write_file": lambda fs, path, **kw: fs.write_file(path, b"x", **kw),
+    "create_file": lambda fs, path, **kw: fs.create_file(path, **kw).close(),
+    "batch_create_file": lambda fs, path, **kw: fs.batch_create_file([path], **kw),
+}
+
+
+@pytest.mark.parametrize("verb", sorted(_MISSING_PARENT_CREATORS))
+@pytest.mark.parametrize(
+    "extra",
+    [{}, {"write_type": WriteType.Through}, {"block_size_bytes": 64 * 1024 * 1024}],
+    ids=["no-other-args", "with-write-type", "with-block-size"],
+)
+def test_sync_create_without_recursive_rejects_missing_parent(
+    sync_fs: Goosefs, sync_tmp_dir: str, verb: str, extra: dict
+) -> None:
+    """``recursive=False`` must fail regardless of the other arguments.
+
+    The ``no-other-args`` case is the one from the report: it used to create
+    the parent silently, while the other two already raised.
+    """
+    path = f"{sync_tmp_dir}/norec-{verb}-{len(extra)}-{list(extra)}/f.bin"
+    with pytest.raises(GoosefsError):
+        _MISSING_PARENT_CREATORS[verb](sync_fs, path, recursive=False, **extra)
+
+    assert not sync_fs.exists(path.rsplit("/", 1)[0]), "parent must not have been created"
+
+
+@pytest.mark.parametrize("verb", sorted(_MISSING_PARENT_CREATORS))
+def test_sync_create_defaults_to_non_recursive(
+    sync_fs: Goosefs, sync_tmp_dir: str, verb: str
+) -> None:
+    """Omitting ``recursive`` means ``False``, as the signature says.
+
+    This is the behaviour change that came with the fix: the default used to
+    create parents because the builder dropped the flag entirely.
+    """
+    path = f"{sync_tmp_dir}/default-norec-{verb}/f.bin"
+    with pytest.raises(GoosefsError):
+        _MISSING_PARENT_CREATORS[verb](sync_fs, path)
+
+
+@pytest.mark.parametrize("verb", sorted(_MISSING_PARENT_CREATORS))
+def test_sync_create_with_recursive_builds_deep_parents(
+    sync_fs: Goosefs, sync_tmp_dir: str, verb: str
+) -> None:
+    """``recursive=True`` still creates the whole missing chain."""
+    parent = f"{sync_tmp_dir}/rec-{verb}/a/b/c"
+    path = f"{parent}/f.bin"
+    _MISSING_PARENT_CREATORS[verb](sync_fs, path, recursive=True)
+
+    assert sync_fs.exists(path)
+    assert sync_fs.exists(parent)
+
+
+@pytest.mark.asyncio
+async def test_async_create_without_recursive_rejects_missing_parent(
+    async_fs: AsyncGoosefs, tmp_dir: str
+) -> None:
+    """Async counterpart of the reported case (no other arguments passed)."""
+    path = f"{tmp_dir}/async-norec/f.bin"
+    with pytest.raises(GoosefsError):
+        await async_fs.write_file(path, b"x", recursive=False)
+
+    assert not await async_fs.exists(f"{tmp_dir}/async-norec")
+
+    await async_fs.write_file(path, b"x", recursive=True)
+    assert await async_fs.read_file(path) == b"x"
+
+
 def test_sync_batch_open_file_inside_asyncio_loop_is_refused(
     sync_fs: Goosefs, sync_tmp_dir: str
 ) -> None:

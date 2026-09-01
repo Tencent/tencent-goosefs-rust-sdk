@@ -8,6 +8,24 @@ This document records all notable changes to the `goosefs` Python binding. The f
 
 ## [Unreleased]
 
+### Changed
+
+- **`recursive=False` is now honoured on `write_file` / `create_file` /
+  `batch_create_file`, and it is the default.** The options builder returned
+  no options at all when `write_type` and `block_size_bytes` were both left
+  at their defaults, and the writer reads absent options as `recursive=True`.
+  So `write_file(path, data, recursive=False)` created missing parents, while
+  the same call carrying an explicit `write_type` correctly raised `NotFound`
+  — the behaviour depended on unrelated arguments.
+
+  **This changes the default.** `write_file(path, data)` with a missing parent
+  directory used to create it and now raises `NotFound`. That matches what the
+  signature has always said (`recursive: bool = False`), what the Rust
+  `CreateFileOptions` documents ("Whether to create intermediate directories.
+  Defaults to `false`"), and what `mkdir(path, recursive=False)` already did.
+  Callers relying on the implicit creation should pass `recursive=True` or
+  `mkdir` the parent first.
+
 ### Added
 
 - **`Goosefs.batch_open_file(paths)` → `list[FileReader]`.** The sync client

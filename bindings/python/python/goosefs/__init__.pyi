@@ -744,7 +744,13 @@ class AsyncGoosefs:
         write_type: WriteType | None = ...,
         block_size_bytes: int | None = ...,
         recursive: bool = ...,
-    ) -> Awaitable[int]: ...
+    ) -> Awaitable[int]:
+        """Create ``path`` and write ``data`` to it in one call.
+
+        ``recursive`` defaults to ``False``: missing parent directories are
+        an error (``NotFound``), never created implicitly. Pass
+        ``recursive=True`` to create the whole chain, like ``mkdir``."""
+        ...
 
     # ── Streaming
     def open_file(self, path: str) -> Awaitable[AsyncFileReader]: ...
@@ -755,7 +761,11 @@ class AsyncGoosefs:
         write_type: WriteType | None = ...,
         block_size_bytes: int | None = ...,
         recursive: bool = ...,
-    ) -> Awaitable[AsyncFileWriter]: ...
+    ) -> Awaitable[AsyncFileWriter]:
+        """Open a streaming writer for a new file at ``path``.
+
+        ``recursive`` defaults to ``False`` — see :meth:`write_file`."""
+        ...
 
     # ── Worker block direct-read (P6 stage B)
     def acquire_worker_for_block(
@@ -955,7 +965,12 @@ class Goosefs:
         write_type: WriteType | None = ...,
         block_size_bytes: int | None = ...,
         recursive: bool = ...,
-    ) -> int: ...
+    ) -> int:
+        """Create ``path`` and write ``data`` to it in one call.
+
+        ``recursive`` defaults to ``False``: missing parent directories are
+        an error (``NotFound``), never created implicitly."""
+        ...
 
     # ── Streaming
     def open_file(self, path: str) -> FileReader: ...
@@ -966,7 +981,11 @@ class Goosefs:
         write_type: WriteType | None = ...,
         block_size_bytes: int | None = ...,
         recursive: bool = ...,
-    ) -> FileWriter: ...
+    ) -> FileWriter:
+        """Open a streaming writer for a new file at ``path``.
+
+        ``recursive`` defaults to ``False`` — see :meth:`write_file`."""
+        ...
 
     # ── Worker block direct-read (P6 stage B)
     def acquire_worker_for_block(

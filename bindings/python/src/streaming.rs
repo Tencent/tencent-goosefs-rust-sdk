@@ -856,7 +856,7 @@ pub(crate) async fn sdk_create_writer(
     recursive: bool,
 ) -> PyResult<GoosefsFileWriter> {
     let proto_opts = build_create_file_options(write_type, block_size_bytes, recursive);
-    GoosefsFileWriter::create_with_context(ctx, &path, proto_opts)
+    GoosefsFileWriter::create_with_context(ctx, &path, Some(proto_opts))
         .await
         .map_err(map_err)
 }
