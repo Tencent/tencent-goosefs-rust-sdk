@@ -157,22 +157,27 @@ impl AsRef<[u8]> for PyBufferOwner {
 
 /// Build a `CreateFilePOptions` from binding-level parameters.
 ///
-/// Returns `None` only if the caller passed *no* override at all — letting
-/// the SDK fall back to its full default path (parent xattr inheritance for
-/// `WriteType`, cluster default block size). This is also why we expose
-/// the helper as `pub(crate)`: the synchronous wrapper in `sync_fs.rs`
-/// reuses the exact same construction logic.
+/// Always produces options, because `recursive` has no "unset" encoding at
+/// the Python layer: it is a plain `bool`, so returning `None` when the other
+/// two happen to be defaults would drop the caller's `recursive=False` on the
+/// floor. `GoosefsFileWriter::create_with_context` reads an absent `recursive`
+/// as `true`, which is how `write_file(path, data, recursive=False)` used to
+/// create parent directories while the same call with an explicit
+/// `write_type` correctly raised `NotFound`.
+///
+/// Leaving `write_type` / `block_size_bytes` as `None` inside the returned
+/// options is equivalent to omitting the options entirely:
+/// `create_with_context` backfills every unset field from config, so only
+/// `recursive` behaves differently now.
+///
+/// `pub(crate)` because the synchronous wrapper in `sync_fs.rs` reuses the
+/// exact same construction logic.
 pub(crate) fn build_create_file_options(
     write_type: Option<crate::types::PyWriteType>,
     block_size_bytes: Option<i64>,
     recursive: bool,
-) -> Option<goosefs_sdk::proto::grpc::file::CreateFilePOptions> {
-    // If every field is at its "no override" value, return None so the SDK
-    // takes the fully-default path (which itself does parent-xattr inheritance).
-    if write_type.is_none() && block_size_bytes.is_none() && !recursive {
-        return None;
-    }
-    Some(goosefs_sdk::proto::grpc::file::CreateFilePOptions {
+) -> goosefs_sdk::proto::grpc::file::CreateFilePOptions {
+    goosefs_sdk::proto::grpc::file::CreateFilePOptions {
         block_size_bytes,
         recursive: Some(recursive),
         write_type: write_type.map(|wt| {
@@ -180,7 +185,7 @@ pub(crate) fn build_create_file_options(
             goosefs_sdk::proto::grpc::file::WritePType::from(sdk_wt) as i32
         }),
         ..Default::default()
-    })
+    }
 }
 
 /// Async Goosefs filesystem client.
@@ -454,7 +459,10 @@ impl PyAsyncGoosefs {
                 let opts = proto_opts.clone();
                 async move {
                     goosefs_sdk::io::GoosefsFileWriter::write_file_with_context_and_options(
-                        ctx, &p, empty, opts,
+                        ctx,
+                        &p,
+                        empty,
+                        Some(opts),
                     )
                     .await
                     .map_err(map_err)
@@ -834,7 +842,7 @@ impl PyAsyncGoosefs {
                 h.ctx.clone(),
                 &path,
                 &payload,
-                proto_opts,
+                Some(proto_opts),
             )
             .await
             .map_err(map_err)?;
@@ -997,7 +1005,8 @@ impl PyAsyncGoosefs {
     ///                 For the **last block** of a file, the actual block size
     ///                 may be smaller than `block_size_bytes`, so `length=-1`
     ///                 returns only the remaining bytes of that block (which
-    ///                 may be < `block_size_bytes`).
+    ///                 may be < `block_size_bytes`). `-1` is the *only* legal
+    ///                 negative; anything below it raises `ValueError`.
     ///   chunk_size  — gRPC chunk size, default 1 MiB. Smaller values give
     ///                 finer flow-control granularity at the cost of more
     ///                 ACK round-trips.
@@ -1006,7 +1015,8 @@ impl PyAsyncGoosefs {
     /// at end-of-block.
     ///
     /// Raises:
-    ///   ValueError — invalid block_index / negative offset / chunk_size <= 0.
+    ///   ValueError — invalid block_index / negative offset / `length < -1` /
+    ///                chunk_size <= 0.
     ///   NotFound   — `path` does not exist.
     ///   IoError / RpcError — block I/O or gRPC failures.
     #[pyo3(signature = (path, *, block_index=0, offset=0, length=-1, chunk_size=DEFAULT_CHUNK_SIZE))]
@@ -1023,6 +1033,15 @@ impl PyAsyncGoosefs {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "offset must be non-negative",
             ));
+        }
+        // `-1` is the documented sentinel; every other negative is a caller
+        // bug (typically a botched `end - start`). Reading the whole block
+        // for those would silently return megabytes the caller never asked
+        // for, so reject them the way `read_block_positioned` does.
+        if length < -1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "length must be -1 (read to end of block) or non-negative, got {length}"
+            )));
         }
         if chunk_size <= 0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -1045,7 +1064,8 @@ impl PyAsyncGoosefs {
                     offset, block_size
                 )));
             }
-            // -1 ⇒ "read to end of block" (clamped at actual block length).
+            // -1 (the only negative that survives validation) ⇒ "read to end
+            // of block", clamped at the actual block length.
             let effective_length = if length < 0 {
                 block_size - offset
             } else {
@@ -1151,6 +1171,41 @@ impl PyAsyncGoosefs {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    /// **Regression**: `recursive` must survive even when the other two
+    /// parameters are at their defaults.
+    ///
+    /// The helper used to return `None` in that case, and
+    /// `create_with_context` reads absent options as `recursive = true`, so
+    /// `write_file(path, data, recursive=False)` created parent directories
+    /// while the same call carrying an explicit `write_type` raised
+    /// `NotFound`. The behaviour depended on unrelated arguments.
+    #[test]
+    fn create_file_options_always_carry_recursive() {
+        for recursive in [false, true] {
+            let opts = super::build_create_file_options(None, None, recursive);
+            assert_eq!(
+                opts.recursive,
+                Some(recursive),
+                "recursive must be sent even with write_type / block_size_bytes defaulted"
+            );
+            assert_eq!(
+                opts.write_type, None,
+                "no write_type override was requested"
+            );
+            assert_eq!(opts.block_size_bytes, None, "no block size was requested");
+        }
+
+        // …and it must keep surviving when the others *are* set.
+        let opts = super::build_create_file_options(
+            Some(crate::types::PyWriteType::Through),
+            Some(4 << 20),
+            false,
+        );
+        assert_eq!(opts.recursive, Some(false));
+        assert_eq!(opts.block_size_bytes, Some(4 << 20));
+        assert!(opts.write_type.is_some());
+    }
 
     /// A minimal stand-in for `Py<PyAsyncFileReader>` whose `Drop` bumps a
     /// shared counter so we can verify that *all* accumulated items are

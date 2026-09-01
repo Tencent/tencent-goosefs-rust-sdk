@@ -744,7 +744,13 @@ class AsyncGoosefs:
         write_type: WriteType | None = ...,
         block_size_bytes: int | None = ...,
         recursive: bool = ...,
-    ) -> Awaitable[int]: ...
+    ) -> Awaitable[int]:
+        """Create ``path`` and write ``data`` to it in one call.
+
+        ``recursive`` defaults to ``False``: missing parent directories are
+        an error (``NotFound``), never created implicitly. Pass
+        ``recursive=True`` to create the whole chain, like ``mkdir``."""
+        ...
 
     # ── Streaming
     def open_file(self, path: str) -> Awaitable[AsyncFileReader]: ...
@@ -755,7 +761,11 @@ class AsyncGoosefs:
         write_type: WriteType | None = ...,
         block_size_bytes: int | None = ...,
         recursive: bool = ...,
-    ) -> Awaitable[AsyncFileWriter]: ...
+    ) -> Awaitable[AsyncFileWriter]:
+        """Open a streaming writer for a new file at ``path``.
+
+        ``recursive`` defaults to ``False`` — see :meth:`write_file`."""
+        ...
 
     # ── Worker block direct-read (P6 stage B)
     def acquire_worker_for_block(
@@ -798,6 +808,10 @@ class AsyncGoosefs:
         ``block_size_bytes`` reported by master, so ``length=-1``
         returns only the remaining bytes of that block (which may be
         < ``block_size_bytes``).
+
+        ``-1`` is the only legal negative ``length``. Any other negative
+        (e.g. ``-2`` from a miscomputed ``end - start``) raises
+        ``ValueError`` rather than reading the whole block.
 
         Mirrors the Rust SDK's ``examples/lowlevel_block_read.rs``.
         """
@@ -862,6 +876,17 @@ class Goosefs:
         """Concurrent ``exists`` for every path; booleans in input order.
 
         Concurrency is bounded internally (at most 64 RPCs in flight)."""
+        ...
+    def batch_open_file(self, paths: list[str]) -> list[FileReader]:
+        """Concurrent ``open_file`` for every path (single GIL release).
+
+        Returns readers in input order. Concurrency is bounded internally
+        (at most `MAX_BATCH_RPC_IN_FLIGHT` opens in flight). These are the
+        same synchronous :class:`FileReader` objects that :meth:`open_file`
+        returns.
+
+        The whole batch fails on the first error; streams opened before it
+        are closed so their worker connections are not leaked."""
         ...
     def batch_create_file(
         self,
@@ -940,7 +965,12 @@ class Goosefs:
         write_type: WriteType | None = ...,
         block_size_bytes: int | None = ...,
         recursive: bool = ...,
-    ) -> int: ...
+    ) -> int:
+        """Create ``path`` and write ``data`` to it in one call.
+
+        ``recursive`` defaults to ``False``: missing parent directories are
+        an error (``NotFound``), never created implicitly."""
+        ...
 
     # ── Streaming
     def open_file(self, path: str) -> FileReader: ...
@@ -951,7 +981,11 @@ class Goosefs:
         write_type: WriteType | None = ...,
         block_size_bytes: int | None = ...,
         recursive: bool = ...,
-    ) -> FileWriter: ...
+    ) -> FileWriter:
+        """Open a streaming writer for a new file at ``path``.
+
+        ``recursive`` defaults to ``False`` — see :meth:`write_file`."""
+        ...
 
     # ── Worker block direct-read (P6 stage B)
     def acquire_worker_for_block(
@@ -989,6 +1023,9 @@ class Goosefs:
         ``block_size_bytes`` reported by master, so ``length=-1``
         returns only the remaining bytes of that block (which may be
         < ``block_size_bytes``).
+
+        ``-1`` is the only legal negative ``length``; ``length < -1``
+        raises ``ValueError``.
         """
         ...
 

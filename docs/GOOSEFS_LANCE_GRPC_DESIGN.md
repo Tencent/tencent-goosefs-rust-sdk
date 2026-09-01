@@ -868,9 +868,13 @@ struct ActiveBlockWriter {
 **`create_with_options` medium initialization strategy**:
 
 ```rust
-// The derivation is effective write_type: priority use CreateFilePOptions in, otherwise use config of
-let effective_write_type = create_options.write_type.or(config.write_type);
-let write_strategy = resolve_write_strategy(effective_write_type, &file_info);
+// The derivation is effective write_type: priority use CreateFilePOptions in, otherwise use config of.
+// The config fallback is applied to create_options before the CreateFile RPC, so
+// the Master and the local strategy always see the same write type.
+if create_options.write_type.is_none() {
+    create_options.write_type = config.write_type;
+}
+let write_strategy = resolve_write_strategy(create_options.write_type, &file_info);
 ```
 
 **`open_next_block` Use connection pool in + fail Worker exclude**:

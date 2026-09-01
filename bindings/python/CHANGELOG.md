@@ -8,7 +8,55 @@ This document records all notable changes to the `goosefs` Python binding. The f
 
 ## [Unreleased]
 
+### Changed
+
+- **`recursive=False` is now honoured on `write_file` / `create_file` /
+  `batch_create_file`, and it is the default.** The options builder returned
+  no options at all when `write_type` and `block_size_bytes` were both left
+  at their defaults, and the writer reads absent options as `recursive=True`.
+  So `write_file(path, data, recursive=False)` created missing parents, while
+  the same call carrying an explicit `write_type` correctly raised `NotFound`
+  — the behaviour depended on unrelated arguments.
+
+  **This changes the default.** `write_file(path, data)` with a missing parent
+  directory used to create it and now raises `NotFound`. That matches what the
+  signature has always said (`recursive: bool = False`), what the Rust
+  `CreateFileOptions` documents ("Whether to create intermediate directories.
+  Defaults to `false`"), and what `mkdir(path, recursive=False)` already did.
+  Callers relying on the implicit creation should pass `recursive=True` or
+  `mkdir` the parent first.
+
+### Added
+
+- **`Goosefs.batch_open_file(paths)` → `list[FileReader]`.** The sync client
+  was the only one of the nine batch APIs missing from `Goosefs`, so sync
+  callers had to loop over `open_file`, giving up the bounded fan-out and the
+  single GIL release. It now mirrors `AsyncGoosefs.batch_open_file`, returning
+  the same synchronous `FileReader` objects that `open_file` returns, and
+  closing already-opened streams if a later path in the batch fails.
+
+  The batch-API guide previously described this as a deliberate omission
+  "because it returns `AsyncFileReader` objects that require an asyncio
+  runtime"; that never applied to a sync implementation, and the note is gone.
+
 ### Fixed
+
+- **`positioned_read` now rejects `length < -1` instead of silently reading
+  the whole block.** Only `-1` is documented as "read to the end of the
+  block", but any negative was accepted as the same sentinel, so a
+  miscomputed `end - start` of, say, `-2` returned the entire block —
+  potentially tens of MiB the caller never asked for — rather than failing.
+  Those now raise `ValueError`, matching the `offset` and `chunk_size` checks
+  on the same method and the `read_block_positioned` it wraps. `length=-1`
+  and `length=0` are unchanged.
+
+- **Reading the same path twice no longer hangs.** The second read blocked
+  forever inside the native extension for any verb combination (`read_file`,
+  `read_range`, `positioned_read`, `open_file`), with or without the page
+  cache, and even from a freshly constructed `Goosefs`. `read_file` /
+  `read_range` were not sending `maxUfsReadConcurrency`, which the worker read
+  as `0`, so it refused to admit a second UFS read of a block it had already
+  served. See the root crate's changelog for details.
 
 - **`get_status` / `open_file` now load UFS metadata like the Java SDK**
   (`loadMetadataType=ONCE` by default). Files written directly to COS and

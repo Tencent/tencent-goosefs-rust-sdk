@@ -47,7 +47,7 @@ import asyncio
 import concurrent.futures
 
 import pytest
-from goosefs import AsyncGoosefs, Goosefs, WriteType
+from goosefs import AsyncGoosefs, Config, Goosefs, WriteType
 from goosefs.exceptions import GoosefsError, InvalidArgument, IsADirectory
 
 # ---------------------------------------------------------------------------
@@ -174,6 +174,27 @@ async def test_async_read_range_rejects_negative_offset_and_length(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("length", [-2, -100, -(1 << 31)])
+async def test_async_positioned_read_rejects_length_below_minus_one(
+    async_fs: AsyncGoosefs, tmp_dir: str, length: int
+) -> None:
+    """Only ``-1`` means "read to end"; other negatives are caller bugs.
+
+    Treating e.g. ``-2`` (a miscomputed ``end - start``) as "read to end"
+    silently returns the whole block — potentially tens of MiB the caller
+    never asked for. ``ValueError`` matches the sibling checks on this same
+    method (``offset``, ``chunk_size``) and the lower-level
+    ``read_block_positioned`` it wraps; note ``read_range`` reports its own
+    negatives as ``InvalidArgument``, which is *not* a ``ValueError``.
+    """
+    path = f"{tmp_dir}/pread-neg-len.bin"
+    await async_fs.write_file(path, b"x" * 4096)
+
+    with pytest.raises(ValueError, match=r"length must be -1 .* or non-negative"):
+        await async_fs.positioned_read(path, offset=0, length=length)
+
+
+@pytest.mark.asyncio
 async def test_async_write_accepts_bytes_like_objects(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     """``write_file`` should accept ``bytes`` / ``bytearray`` / ``memoryview``
     interchangeably (PyO3's ``&[u8]`` extractor handles the buffer protocol)."""
@@ -259,44 +280,212 @@ def test_sync_must_cache_get_status_reports_in_goosefs_percentage(
     assert st.in_goose_fs_percentage > 0
 
 
-def test_sync_oneshot_read_same_path_twice_does_not_hang(
-    sync_fs: Goosefs, sync_tmp_dir: str
-) -> None:
-    """A second one-shot read of the same path must not hang.
+# --------------------------------------------------------------------------
+# Repeated reads of one path
+#
+# The worker admits a UFS block read only while that block's session count is
+# below ``maxUfsReadConcurrency``. ``read_file`` / ``read_range`` used to leave
+# that option unset, which decodes as 0, so the first read of a block worked
+# (no session entry yet) and every later one blocked forever waiting for a
+# permit. The trigger is the path, not the verb: reads that did send the option
+# (``positioned_read``, ``open_file``) still left the entry behind and wedged
+# the next ``read_file``, in the same process or a fresh one.
+# --------------------------------------------------------------------------
 
-    ``read_file`` / ``read_range`` used to leave the worker ``ReadBlock``
-    session open, so the next call on that path blocked forever in native
-    code. ``Through`` is the write type that reproduced on the test cluster.
+_ONESHOT_READS = {
+    "read_file": lambda fs, path, n: fs.read_file(path),
+    "read_range": lambda fs, path, n: fs.read_range(path, 0, n),
+    "read_range_small": lambda fs, path, n: fs.read_range(path, 0, min(n, 4096)),
+    "positioned_read": lambda fs, path, n: fs.positioned_read(
+        path, block_index=0, offset=0, length=-1
+    ),
+}
+
+# Ordered pairs covering the reported hangs plus their mirror images. The
+# positioned→positioned pair is the one combination that always worked (both
+# sides sent the option), kept here as the control.
+_SECOND_READ_PAIRS = [
+    ("read_file", "read_file"),
+    ("read_file", "read_range"),
+    ("read_file", "positioned_read"),
+    ("read_range", "read_range"),
+    ("read_range", "read_file"),
+    ("read_range_small", "read_range"),
+    ("positioned_read", "read_file"),
+    ("positioned_read", "read_range"),
+    ("positioned_read", "positioned_read"),
+]
+
+
+@pytest.mark.parametrize(
+    "first,second",
+    _SECOND_READ_PAIRS,
+    ids=[f"{first}-then-{second}" for first, second in _SECOND_READ_PAIRS],
+)
+def test_sync_second_oneshot_read_of_same_path_does_not_hang(
+    sync_fs: Goosefs, sync_tmp_dir: str, first: str, second: str
+) -> None:
+    """Reading one path twice must work for every pair of one-shot verbs.
+
+    ``Through`` is the write type that reproduced on the test cluster. The
+    reads run on a worker thread so a native hang surfaces as a timeout
+    instead of wedging the whole session.
     """
-    path = f"{sync_tmp_dir}/same-path-twice.bin"
-    payload = _make_payload("same-path-twice", 64 * 1024)
+    path = f"{sync_tmp_dir}/twice-{first}-then-{second}.bin"
+    payload = _make_payload(f"{first}-{second}", 64 * 1024)
+    n = len(payload)
     sync_fs.write_file(path, payload, write_type=WriteType.Through)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        first = pool.submit(sync_fs.read_file, path).result(timeout=20)
-        second = pool.submit(sync_fs.read_file, path).result(timeout=20)
-        ranged_a = pool.submit(sync_fs.read_range, path, 0, len(payload)).result(timeout=20)
-        ranged_b = pool.submit(sync_fs.read_range, path, 0, len(payload)).result(timeout=20)
+        got_first = pool.submit(_ONESHOT_READS[first], sync_fs, path, n).result(timeout=20)
+        got_second = pool.submit(_ONESHOT_READS[second], sync_fs, path, n).result(timeout=20)
 
-    assert first == payload
-    assert second == payload
-    assert ranged_a == payload
-    assert ranged_b == payload
+    assert got_first == payload[: len(got_first)]
+    assert got_second == payload[: len(got_second)]
+
+
+def test_sync_second_reader_instance_can_read_an_already_read_path(
+    sync_fs: Goosefs, sync_tmp_dir: str, config: Config
+) -> None:
+    """The stuck state lives on the worker, so a fresh instance must work too.
+
+    Reading a brand-new path from a new instance always worked; reading one
+    that another instance had already read is what hung, which is what pins
+    this to worker-side state rather than anything in the client.
+    """
+    path = f"{sync_tmp_dir}/read-by-two-instances.bin"
+    payload = _make_payload("read-by-two-instances", 64 * 1024)
+    sync_fs.write_file(path, payload, write_type=WriteType.Through)
+    assert sync_fs.read_file(path) == payload
+
+    other = Goosefs(config)
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            assert pool.submit(other.read_file, path).result(timeout=20) == payload
+    finally:
+        other.close()
+
+
+# Cycled by the repeated-read tests so each round trips a different verb.
+_READ_CYCLE = ["read_file", "read_range", "positioned_read", "read_range_small"]
+
+
+@pytest.mark.parametrize("label,write_type", WRITE_TYPES, ids=[label for label, _ in WRITE_TYPES])
+def test_sync_many_reads_of_same_path_stay_healthy(
+    sync_fs: Goosefs, sync_tmp_dir: str, label: str, write_type: WriteType
+) -> None:
+    """One path, many reads, every write type.
+
+    Reading twice is not enough to prove this fixed. The worker allows
+    ``maxUfsReadConcurrency`` (8) sessions per block, so a client that sends
+    the option but still leaked one session per read would pass every 2-read
+    test here and only wedge on the 9th. This walks well past the limit.
+
+    The payload is 4 x 64 KiB, the multi-page shape from the report, and the
+    verbs rotate so the leak would show up whichever one is responsible.
+
+    Only ``Through`` reproduces the original hang: the other write types leave
+    the block in the worker's cache, so reads never open a UFS block session
+    and never take a permit. They are kept as coverage of the ordinary
+    repeated-read path (and they would start reproducing it once a cached
+    block is evicted and has to be re-read from UFS).
+    """
+    path = f"{sync_tmp_dir}/many-reads-{label}.bin"
+    payload = _make_payload(f"many-reads-{label}", 4 * 64 * 1024)
+    n = len(payload)
+    sync_fs.write_file(path, payload, write_type=write_type)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        for i in range(12):
+            verb = _READ_CYCLE[i % len(_READ_CYCLE)]
+            got = pool.submit(_ONESHOT_READS[verb], sync_fs, path, n).result(timeout=20)
+            assert got == payload[: len(got)], f"read #{i + 1} via {verb} returned wrong bytes"
+
+
+def test_sync_many_reads_of_multi_chunk_file(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
+    """Same, for a payload spanning several gRPC chunks.
+
+    The default chunk size is 1 MiB, so 4 MiB exercises the chunked streaming
+    path instead of the single-frame one the smaller payloads take.
+    """
+    path = f"{sync_tmp_dir}/many-reads-multi-chunk.bin"
+    payload = _make_payload("many-reads-multi-chunk", 4 * 1024 * 1024)
+    sync_fs.write_file(path, payload, write_type=WriteType.Through)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        for i in range(10):
+            got = pool.submit(sync_fs.read_file, path).result(timeout=30)
+            assert got == payload, f"read #{i + 1} returned wrong bytes"
+
+
+def test_sync_streaming_and_oneshot_reads_interleave(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
+    """``open_file`` repeatedly, interleaved with one-shot reads.
+
+    ``open_file`` with an explicit close is the one path that kept working
+    throughout the report, so it doubles as the control: it must keep working,
+    and it must not wedge the one-shot reads that follow it.
+    """
+    path = f"{sync_tmp_dir}/streaming-interleave.bin"
+    payload = _make_payload("streaming-interleave", 64 * 1024)
+    n = len(payload)
+    sync_fs.write_file(path, payload, write_type=WriteType.Through)
+
+    def _stream() -> bytes:
+        with sync_fs.open_file(path) as reader:
+            return reader.read()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        assert pool.submit(_stream).result(timeout=20) == payload
+        assert pool.submit(_stream).result(timeout=20) == payload
+        assert pool.submit(sync_fs.read_file, path).result(timeout=20) == payload
+        assert pool.submit(_stream).result(timeout=20) == payload
+        assert pool.submit(sync_fs.read_range, path, 0, n).result(timeout=20) == payload
+        assert pool.submit(_stream).result(timeout=20) == payload
 
 
 @pytest.mark.asyncio
-async def test_async_oneshot_read_same_path_twice_does_not_hang(
+async def test_async_second_oneshot_read_of_same_path_does_not_hang(
     async_fs: AsyncGoosefs, tmp_dir: str
 ) -> None:
-    """Async counterpart: two ``read_file`` calls on one path."""
+    """Async counterpart, including the cross-verb ``read_file`` → ``read_range``."""
     path = f"{tmp_dir}/same-path-twice-async.bin"
     payload = _make_payload("same-path-twice-async", 64 * 1024)
     await async_fs.write_file(path, payload, write_type=WriteType.Through)
 
     first = await asyncio.wait_for(async_fs.read_file(path), timeout=20)
     second = await asyncio.wait_for(async_fs.read_file(path), timeout=20)
+    ranged = await asyncio.wait_for(async_fs.read_range(path, 0, len(payload)), timeout=20)
     assert first == payload
     assert second == payload
+    assert ranged == payload
+
+
+@pytest.mark.asyncio
+async def test_async_streaming_read_then_oneshot_read_same_path(
+    async_fs: AsyncGoosefs, tmp_dir: str
+) -> None:
+    """``open_file`` and the one-shot verbs must not wedge each other.
+
+    Both take the same worker-side block, so whichever reads it first decides
+    whether the other can get in.
+    """
+    path = f"{tmp_dir}/streaming-then-oneshot.bin"
+    payload = _make_payload("streaming-then-oneshot", 64 * 1024)
+    await async_fs.write_file(path, payload, write_type=WriteType.Through)
+
+    reader = await async_fs.open_file(path)
+    try:
+        assert await asyncio.wait_for(reader.read(), timeout=20) == payload
+    finally:
+        await reader.close()
+
+    assert await asyncio.wait_for(async_fs.read_file(path), timeout=20) == payload
+
+    reader = await async_fs.open_file(path)
+    try:
+        assert await asyncio.wait_for(reader.read(), timeout=20) == payload
+    finally:
+        await reader.close()
 
 
 def test_sync_read_range_arbitrary_offsets(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
@@ -320,6 +509,31 @@ def test_sync_read_range_rejects_negative_offset_and_length(
         sync_fs.read_range(path, 0, -1)
     with pytest.raises(InvalidArgument, match="non-negative"):
         sync_fs.read_range(path, -1, 1)
+
+
+@pytest.mark.parametrize("length", [-2, -100, -(1 << 31)])
+def test_sync_positioned_read_rejects_length_below_minus_one(
+    sync_fs: Goosefs, sync_tmp_dir: str, length: int
+) -> None:
+    """Sync counterpart — see the async test for the rationale."""
+    path = f"{sync_tmp_dir}/sync-pread-neg-len.bin"
+    sync_fs.write_file(path, b"x" * 4096)
+
+    with pytest.raises(ValueError, match=r"length must be -1 .* or non-negative"):
+        sync_fs.positioned_read(path, offset=0, length=length)
+
+
+def test_sync_positioned_read_keeps_minus_one_and_zero_semantics(
+    sync_fs: Goosefs, sync_tmp_dir: str
+) -> None:
+    """Rejecting ``length < -1`` must not disturb the two legal edge values."""
+    path = f"{sync_tmp_dir}/sync-pread-len-edges.bin"
+    payload = _make_payload("sync-pread-len-edges", 4096)
+    sync_fs.write_file(path, payload)
+
+    assert sync_fs.positioned_read(path, offset=0, length=-1) == payload
+    assert sync_fs.positioned_read(path, offset=0, length=0) == b""
+    assert sync_fs.positioned_read(path, offset=0, length=16) == payload[:16]
 
 
 def test_sync_read_file_on_directory_raises_is_a_directory(
@@ -399,3 +613,176 @@ async def test_batch_open_file_missing_path_fails_whole_batch(
 
     with pytest.raises(GoosefsError):
         await async_fs.batch_open_file([good, missing])
+
+
+def test_sync_and_async_expose_the_same_batch_api() -> None:
+    """``Goosefs`` claims to be the "same API surface" as ``AsyncGoosefs``.
+
+    ``batch_open_file`` was missing from the sync class while the stub and
+    the sync module docs both promised the pair was symmetric, because
+    nothing compared the two sets. This guards the claim rather than any one
+    method.
+    """
+    import goosefs
+
+    def batch_methods(cls: type) -> set[str]:
+        return {name for name in dir(cls) if name.startswith("batch_")}
+
+    sync_only = batch_methods(goosefs.Goosefs) - batch_methods(goosefs.AsyncGoosefs)
+    async_only = batch_methods(goosefs.AsyncGoosefs) - batch_methods(goosefs.Goosefs)
+    assert not sync_only, f"Goosefs has batch methods AsyncGoosefs lacks: {sorted(sync_only)}"
+    assert not async_only, f"AsyncGoosefs has batch methods Goosefs lacks: {sorted(async_only)}"
+
+
+def test_sync_batch_open_file_reads_all_in_order(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
+    """Sync counterpart: readers come back in input order and are readable.
+
+    The readers must be plain synchronous ``FileReader`` objects — the whole
+    point is that this works without an asyncio runtime.
+    """
+    paths = [f"{sync_tmp_dir}/sync-bof-{i}.bin" for i in range(3)]
+    payloads = [f"sync-payload-{i}".encode() for i in range(3)]
+    for p, data in zip(paths, payloads):
+        sync_fs.write_file(p, data, write_type=WriteType.MustCache)
+
+    readers = sync_fs.batch_open_file(paths)
+    try:
+        assert len(readers) == len(paths)
+        assert [type(r).__name__ for r in readers] == ["FileReader"] * len(paths)
+        assert [r.read() for r in readers] == payloads
+    finally:
+        for r in readers:
+            r.close()
+
+
+def test_sync_batch_open_file_edge_sizes(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
+    """An empty batch is a no-op; a one-element batch still returns a list."""
+    assert sync_fs.batch_open_file([]) == []
+
+    path = f"{sync_tmp_dir}/sync-bof-solo.bin"
+    sync_fs.write_file(path, b"solo", write_type=WriteType.MustCache)
+    readers = sync_fs.batch_open_file([path])
+    try:
+        assert len(readers) == 1
+        assert readers[0].read() == b"solo"
+    finally:
+        readers[0].close()
+
+
+def test_sync_batch_open_file_missing_path_fails_whole_batch(
+    sync_fs: Goosefs, sync_tmp_dir: str
+) -> None:
+    """First error fails the batch; streams opened before it must be closed.
+
+    The follow-up reads check the cleanup actually happened: a leaked worker
+    stream on ``good`` would wedge the next open of that path.
+    """
+    good = f"{sync_tmp_dir}/sync-bof-exists.bin"
+    missing = f"{sync_tmp_dir}/sync-bof-missing.bin"
+    sync_fs.write_file(good, b"x", write_type=WriteType.MustCache)
+
+    with pytest.raises(GoosefsError):
+        sync_fs.batch_open_file([good, missing])
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        assert pool.submit(sync_fs.read_file, good).result(timeout=20) == b"x"
+        readers = pool.submit(sync_fs.batch_open_file, [good]).result(timeout=20)
+        try:
+            assert readers[0].read() == b"x"
+        finally:
+            readers[0].close()
+
+
+# ---------------------------------------------------------------------------
+# recursive= on the create/write path
+#
+# `recursive` is a plain bool at the Python layer, so the options builder has
+# no way to encode "unset". It used to return no options at all when
+# write_type and block_size_bytes were both defaulted, and the writer reads
+# absent options as recursive=True — so recursive=False was honoured only when
+# some *other* argument happened to be non-default.
+# ---------------------------------------------------------------------------
+
+
+_MISSING_PARENT_CREATORS = {
+    "write_file": lambda fs, path, **kw: fs.write_file(path, b"x", **kw),
+    "create_file": lambda fs, path, **kw: fs.create_file(path, **kw).close(),
+    "batch_create_file": lambda fs, path, **kw: fs.batch_create_file([path], **kw),
+}
+
+
+@pytest.mark.parametrize("verb", sorted(_MISSING_PARENT_CREATORS))
+@pytest.mark.parametrize(
+    "extra",
+    [{}, {"write_type": WriteType.Through}, {"block_size_bytes": 64 * 1024 * 1024}],
+    ids=["no-other-args", "with-write-type", "with-block-size"],
+)
+def test_sync_create_without_recursive_rejects_missing_parent(
+    sync_fs: Goosefs, sync_tmp_dir: str, verb: str, extra: dict
+) -> None:
+    """``recursive=False`` must fail regardless of the other arguments.
+
+    The ``no-other-args`` case is the one from the report: it used to create
+    the parent silently, while the other two already raised.
+    """
+    path = f"{sync_tmp_dir}/norec-{verb}-{len(extra)}-{list(extra)}/f.bin"
+    with pytest.raises(GoosefsError):
+        _MISSING_PARENT_CREATORS[verb](sync_fs, path, recursive=False, **extra)
+
+    assert not sync_fs.exists(path.rsplit("/", 1)[0]), "parent must not have been created"
+
+
+@pytest.mark.parametrize("verb", sorted(_MISSING_PARENT_CREATORS))
+def test_sync_create_defaults_to_non_recursive(
+    sync_fs: Goosefs, sync_tmp_dir: str, verb: str
+) -> None:
+    """Omitting ``recursive`` means ``False``, as the signature says.
+
+    This is the behaviour change that came with the fix: the default used to
+    create parents because the builder dropped the flag entirely.
+    """
+    path = f"{sync_tmp_dir}/default-norec-{verb}/f.bin"
+    with pytest.raises(GoosefsError):
+        _MISSING_PARENT_CREATORS[verb](sync_fs, path)
+
+
+@pytest.mark.parametrize("verb", sorted(_MISSING_PARENT_CREATORS))
+def test_sync_create_with_recursive_builds_deep_parents(
+    sync_fs: Goosefs, sync_tmp_dir: str, verb: str
+) -> None:
+    """``recursive=True`` still creates the whole missing chain."""
+    parent = f"{sync_tmp_dir}/rec-{verb}/a/b/c"
+    path = f"{parent}/f.bin"
+    _MISSING_PARENT_CREATORS[verb](sync_fs, path, recursive=True)
+
+    assert sync_fs.exists(path)
+    assert sync_fs.exists(parent)
+
+
+@pytest.mark.asyncio
+async def test_async_create_without_recursive_rejects_missing_parent(
+    async_fs: AsyncGoosefs, tmp_dir: str
+) -> None:
+    """Async counterpart of the reported case (no other arguments passed)."""
+    path = f"{tmp_dir}/async-norec/f.bin"
+    with pytest.raises(GoosefsError):
+        await async_fs.write_file(path, b"x", recursive=False)
+
+    assert not await async_fs.exists(f"{tmp_dir}/async-norec")
+
+    await async_fs.write_file(path, b"x", recursive=True)
+    assert await async_fs.read_file(path) == b"x"
+
+
+def test_sync_batch_open_file_inside_asyncio_loop_is_refused(
+    sync_fs: Goosefs, sync_tmp_dir: str
+) -> None:
+    """The sync deadlock guard must cover the new method too."""
+    path = f"{sync_tmp_dir}/sync-bof-guard.bin"
+    sync_fs.write_file(path, b"x", write_type=WriteType.MustCache)
+
+    async def attempt() -> None:
+        with pytest.raises(RuntimeError):
+            sync_fs.batch_open_file([path])
+
+    asyncio.run(attempt())

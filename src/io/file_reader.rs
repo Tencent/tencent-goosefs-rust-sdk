@@ -370,7 +370,18 @@ impl GoosefsFileReader {
                     // offset_in_file is per-segment; set to 0 as placeholder.
                     offset_in_file: Some(0),
                     block_size: Some(block_size),
-                    max_ufs_read_concurrency: None,
+                    // Must be sent. The Worker admits a UFS block read only
+                    // while `sessions_for(block) < maxUfsReadConcurrency`, and
+                    // an absent field decodes as 0 — so once a block has any
+                    // session entry, every later read of it waits on a permit
+                    // that can never come. The first read of a block succeeds
+                    // (no entry yet), which is why leaving this unset surfaced
+                    // as "the *second* read of a path hangs forever".
+                    // `GoosefsFileInStream` and the binding's `positioned_read`
+                    // already send the Java default; match them.
+                    max_ufs_read_concurrency: Some(
+                        crate::fs::options::InStreamOptions::default().max_ufs_read_concurrency,
+                    ),
                     mount_id: file_info.mount_id,
                     no_cache: Some(!file_info.cacheable.unwrap_or(true)),
                     user: None,
@@ -589,13 +600,10 @@ impl GoosefsFileReader {
     /// re-entered as the cache-miss source.
     ///
     /// `positioned = true` uses `GrpcBlockReader::positioned_read`
-    /// (`position_short`). Page-cache fills issue many small reads against the
-    /// **same** block; the streaming `ReadBlock` verb holds the worker-side
-    /// block lock until the client half-closes the bidi stream. A second
-    /// open on the same block (2nd page, or a 2nd `read_file` of the same
-    /// path) waits forever if that close is skipped or the RPC is cancelled
-    /// instead. `position_short` completes and unlocks after
-    /// exactly `length` bytes, matching `GoosefsFileInStream`.
+    /// (`position_short`), which serves exactly `length` bytes and ends the
+    /// stream — the right shape for page-cache fills, which issue many small
+    /// reads against the **same** block. `positioned = false` opens the
+    /// streaming `ReadBlock` verb for the whole segment.
     async fn read_segment(
         &self,
         block_id: i64,
@@ -1246,10 +1254,8 @@ impl GoosefsFileReader {
 /// source, so [`crate::cache::read_through_cache`] can drive page fills
 /// from within [`GoosefsFileReader::read_next_block`].
 ///
-/// Misses use `positioned_read` (`position_short`): streaming `ReadBlock`
-/// holds the worker block lock until the client half-closes, so a 2nd
-/// open of the same block (page fill or a later `read_file`) can hang.
-/// `read_file_range` is stateless (`&self`), so re-entry here does not
+/// Misses use `positioned_read` (`position_short`), one short-lived stream per
+/// page. `read_file_range` is stateless (`&self`), so re-entry here does not
 /// perturb `read_next_block` iteration state.
 #[async_trait::async_trait]
 impl ExternalRangeReader for GoosefsFileReader {
@@ -1263,6 +1269,7 @@ impl ExternalRangeReader for GoosefsFileReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs::options::InStreamOptions;
     use crate::proto::grpc::WorkerNetAddress;
 
     /// Build a cache-disabled reader over a synthetic file for pure-logic tests.
@@ -1294,6 +1301,51 @@ mod tests {
             length as u64,
         )
         .expect("build reader")
+    }
+
+    /// **Regression**: `OpenUfsBlockOptions.max_ufs_read_concurrency` must be
+    /// sent on the one-shot read path.
+    ///
+    /// The Worker admits a UFS block read only while the block's session count
+    /// is below this limit, and an absent `optional int32` decodes as `0`.
+    /// Leaving it unset therefore let the first read of a block through and
+    /// wedged every read after it — the "second `read_file` of a path hangs
+    /// forever" report. `GoosefsFileInStream` and the Python binding's
+    /// `positioned_read` always sent the Java default of 8; this path did not.
+    #[test]
+    fn ufs_read_options_carry_max_read_concurrency() {
+        let bs = 64 * 1024 * 1024i64;
+        let file_info = FileInfo {
+            length: Some(bs / 2),
+            block_size_bytes: Some(bs),
+            block_ids: vec![1001],
+            completed: Some(true),
+            folder: Some(false),
+            ufs_path: Some("cosn://bucket/blob.bin".to_string()),
+            mount_id: Some(7),
+            ..Default::default()
+        };
+        let reader = GoosefsFileReader::build(
+            &GoosefsConfig::new("127.0.0.1:9200"),
+            "/blob.bin",
+            Arc::new(file_info),
+            WorkerRouterView::empty(),
+            None,
+            None,
+            0,
+            (bs / 2) as u64,
+        )
+        .expect("build reader");
+
+        let opts = reader
+            .build_ufs_read_options(&reader.plans[0])
+            .expect("a file with a ufs_path must produce OpenUfsBlockOptions");
+        assert_eq!(
+            opts.max_ufs_read_concurrency,
+            Some(InStreamOptions::default().max_ufs_read_concurrency),
+            "unset (or 0) makes the Worker refuse every read after the first"
+        );
+        assert!(opts.max_ufs_read_concurrency.unwrap() > 0);
     }
 
     /// `block_logical_size` returns the full block size for interior blocks, the
