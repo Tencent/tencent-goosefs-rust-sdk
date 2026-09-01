@@ -166,8 +166,9 @@ impl AsRef<[u8]> for PyBufferOwner {
 /// `write_type` correctly raised `NotFound`.
 ///
 /// Leaving `write_type` / `block_size_bytes` as `None` inside the returned
-/// options is equivalent to omitting the options entirely — the writer fills
-/// both from config — so only `recursive` behaves differently now.
+/// options is equivalent to omitting the options entirely:
+/// `create_with_context` backfills every unset field from config, so only
+/// `recursive` behaves differently now.
 ///
 /// `pub(crate)` because the synchronous wrapper in `sync_fs.rs` reuses the
 /// exact same construction logic.

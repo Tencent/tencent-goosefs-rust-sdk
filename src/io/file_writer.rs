@@ -338,31 +338,26 @@ impl GoosefsFileWriter {
         // Reuse the shared Master client (zero TCP+SASL handshake).
         let master_arc = ctx.acquire_master();
 
-        let create_options = options.unwrap_or_else(|| {
-            let mut opts = CreateFilePOptions {
-                block_size_bytes: Some(config.block_size as i64),
-                mode: Some(default_file_mode()),
-                recursive: Some(true),
-                ..Default::default()
-            };
-            if config.write_type.is_some() {
-                opts.write_type = config.write_type;
-            }
-            opts
-        });
+        let mut create_options = options.unwrap_or_default();
 
-        let mut create_options = create_options;
+        // Every unset field falls back to the same config-derived default,
+        // whether the caller passed nothing at all or a partial message. A
+        // caller overriding one field must not silently lose the others:
+        // dropping block_size_bytes gets "Invalid block size 0" back from the
+        // Master, and dropping write_type makes the Master pick its own
+        // persistence semantics while `write_strategy` below still follows
+        // `config.write_type` — the two then disagree about the same file.
         if create_options.recursive.is_none() {
             create_options.recursive = Some(true);
         }
-        // Always ensure block_size_bytes and mode are set — callers that pass a
-        // partial CreateFilePOptions (e.g. only overriding write_type) would
-        // otherwise get "Invalid block size 0" from the Master.
         if create_options.block_size_bytes.is_none() || create_options.block_size_bytes == Some(0) {
             create_options.block_size_bytes = Some(config.block_size as i64);
         }
         if create_options.mode.is_none() {
             create_options.mode = Some(default_file_mode());
+        }
+        if create_options.write_type.is_none() {
+            create_options.write_type = config.write_type;
         }
 
         let file_info = master_arc.create_file(path, create_options).await?;
@@ -380,8 +375,9 @@ impl GoosefsFileWriter {
         // opt-in cache is disabled.
         ctx.invalidate_file_info(path);
 
-        let effective_write_type = create_options.write_type.or(config.write_type);
-        let write_strategy = resolve_write_strategy(effective_write_type, &file_info);
+        // Already backfilled from `config.write_type` above, so this is the
+        // same value the Master was told about.
+        let write_strategy = resolve_write_strategy(create_options.write_type, &file_info);
 
         // Reuse shared router and pool from context (zero additional RPCs).
         // For cache-only write types the worker list is NOT snapshotted here —
