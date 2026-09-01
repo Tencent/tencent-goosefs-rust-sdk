@@ -10,6 +10,14 @@ This document records all notable changes to the `goosefs` Python binding. The f
 
 ### Fixed
 
+- **Reading the same path twice no longer hangs.** The second read blocked
+  forever inside the native extension for any verb combination (`read_file`,
+  `read_range`, `positioned_read`, `open_file`), with or without the page
+  cache, and even from a freshly constructed `Goosefs`. `read_file` /
+  `read_range` were not sending `maxUfsReadConcurrency`, which the worker read
+  as `0`, so it refused to admit a second UFS read of a block it had already
+  served. See the root crate's changelog for details.
+
 - **`get_status` / `open_file` now load UFS metadata like the Java SDK**
   (`loadMetadataType=ONCE` by default). Files written directly to COS and
   not yet in the GooseFS namespace no longer fail OpenDAL `stat` with

@@ -13,6 +13,27 @@ kept aligned. Python-specific notes also appear in
 
 ### Fixed
 
+- **`GoosefsFileReader` now sends `maxUfsReadConcurrency`, fixing the hang on
+  the second read of a path.** `GoosefsFileInStream` and the Python binding's
+  `positioned_read` already sent the Java default of `8`; the one-shot reader
+  behind `read_file` / `read_range` left `OpenUfsBlockOptions.max_ufs_read_concurrency`
+  unset. An absent `optional int32` decodes as `0`, and the Worker admits a UFS
+  block read only while that block's session count is *below* the limit — so
+  the first read of a block succeeded (no session entry yet) and every read
+  after it waited forever on a permit that could never be granted.
+
+  This is why the failure looked like a lock leak: it keyed on the block rather
+  than the client, survived process restarts, and crossed verbs — a
+  `positioned_read` or `open_file` (both of which sent `8`) would leave the
+  session entry behind and the next `read_file` of that path would wedge.
+  Reads of a not-yet-read path always worked, which is what kept it out of the
+  single-read test paths.
+
+  Scope: only reads served from UFS are affected — `THROUGH`-written files, and
+  any block that is no longer in the worker's cache. A block still cached on
+  the worker never opens a UFS block session, so freshly written
+  `MUST_CACHE` / `CACHE_THROUGH` / `ASYNC_THROUGH` files read back fine.
+
 - **`get_status` / OpenDAL `stat` now send `loadMetadataType=ONCE`**, matching
   Java `FileSystemOptions.getStatusDefaults`. The previous empty
   `GetStatusPOptions` left the field unset; Master proto default is `NEVER`,
