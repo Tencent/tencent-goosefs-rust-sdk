@@ -267,6 +267,50 @@ impl PyGoosefs {
         })
     }
 
+    /// `fs.batch_open_file(paths)` → `list[FileReader]`.
+    ///
+    /// Synchronous counterpart of [`crate::filesystem::PyAsyncGoosefs::batch_open_file`].
+    /// Opens every path with bounded concurrency (at most
+    /// `RESOURCE_BATCH_CONCURRENCY_LIMIT` opens in flight) and returns the
+    /// readers in input order, releasing the GIL once for the whole batch
+    /// instead of once per `open_file`.
+    ///
+    /// The readers are the same [`crate::streaming::PyFileReader`] that
+    /// `open_file` returns, so they are usable from plain synchronous code —
+    /// the async variant's `AsyncFileReader` is not involved.
+    ///
+    /// The whole batch fails on the first error. Streams opened before that
+    /// point are dropped, which closes them and releases their worker
+    /// connections.
+    fn batch_open_file(
+        &self,
+        py: Python<'_>,
+        paths: Vec<String>,
+    ) -> PyResult<Vec<crate::streaming::PyFileReader>> {
+        let h = self.handle()?;
+        let streams = Self::guarded_block_on(py, async move {
+            use futures::stream::{self, StreamExt};
+            let ctx = h.ctx.clone();
+            stream::iter(paths.into_iter().map(move |p| {
+                let ctx = ctx.clone();
+                async move { crate::streaming::sdk_open_in_stream(ctx, p).await }
+            }))
+            .buffered(crate::context::RESOURCE_BATCH_CONCURRENCY_LIMIT)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            // Collecting into `PyResult<Vec<_>>` stops at the first error and
+            // drops every stream it has already taken, plus the untaken rest
+            // of the buffer — the leak-avoidance the async variant spells out
+            // with an explicit `drop(readers)`.
+            .collect::<PyResult<Vec<_>>>()
+        })?;
+        Ok(streams
+            .into_iter()
+            .map(crate::streaming::PyFileReader::from_sdk)
+            .collect())
+    }
+
     /// `fs.batch_create_file(paths, *, write_type=None, block_size_bytes=None, recursive=False)` → `list[int]`.
     #[pyo3(signature = (paths, *, write_type=None, block_size_bytes=None, recursive=false))]
     fn batch_create_file(

@@ -613,3 +613,95 @@ async def test_batch_open_file_missing_path_fails_whole_batch(
 
     with pytest.raises(GoosefsError):
         await async_fs.batch_open_file([good, missing])
+
+
+def test_sync_and_async_expose_the_same_batch_api() -> None:
+    """``Goosefs`` claims to be the "same API surface" as ``AsyncGoosefs``.
+
+    ``batch_open_file`` was missing from the sync class while the stub and
+    the sync module docs both promised the pair was symmetric, because
+    nothing compared the two sets. This guards the claim rather than any one
+    method.
+    """
+    import goosefs
+
+    def batch_methods(cls: type) -> set[str]:
+        return {name for name in dir(cls) if name.startswith("batch_")}
+
+    sync_only = batch_methods(goosefs.Goosefs) - batch_methods(goosefs.AsyncGoosefs)
+    async_only = batch_methods(goosefs.AsyncGoosefs) - batch_methods(goosefs.Goosefs)
+    assert not sync_only, f"Goosefs has batch methods AsyncGoosefs lacks: {sorted(sync_only)}"
+    assert not async_only, f"AsyncGoosefs has batch methods Goosefs lacks: {sorted(async_only)}"
+
+
+def test_sync_batch_open_file_reads_all_in_order(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
+    """Sync counterpart: readers come back in input order and are readable.
+
+    The readers must be plain synchronous ``FileReader`` objects — the whole
+    point is that this works without an asyncio runtime.
+    """
+    paths = [f"{sync_tmp_dir}/sync-bof-{i}.bin" for i in range(3)]
+    payloads = [f"sync-payload-{i}".encode() for i in range(3)]
+    for p, data in zip(paths, payloads):
+        sync_fs.write_file(p, data, write_type=WriteType.MustCache)
+
+    readers = sync_fs.batch_open_file(paths)
+    try:
+        assert len(readers) == len(paths)
+        assert [type(r).__name__ for r in readers] == ["FileReader"] * len(paths)
+        assert [r.read() for r in readers] == payloads
+    finally:
+        for r in readers:
+            r.close()
+
+
+def test_sync_batch_open_file_edge_sizes(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
+    """An empty batch is a no-op; a one-element batch still returns a list."""
+    assert sync_fs.batch_open_file([]) == []
+
+    path = f"{sync_tmp_dir}/sync-bof-solo.bin"
+    sync_fs.write_file(path, b"solo", write_type=WriteType.MustCache)
+    readers = sync_fs.batch_open_file([path])
+    try:
+        assert len(readers) == 1
+        assert readers[0].read() == b"solo"
+    finally:
+        readers[0].close()
+
+
+def test_sync_batch_open_file_missing_path_fails_whole_batch(
+    sync_fs: Goosefs, sync_tmp_dir: str
+) -> None:
+    """First error fails the batch; streams opened before it must be closed.
+
+    The follow-up reads check the cleanup actually happened: a leaked worker
+    stream on ``good`` would wedge the next open of that path.
+    """
+    good = f"{sync_tmp_dir}/sync-bof-exists.bin"
+    missing = f"{sync_tmp_dir}/sync-bof-missing.bin"
+    sync_fs.write_file(good, b"x", write_type=WriteType.MustCache)
+
+    with pytest.raises(GoosefsError):
+        sync_fs.batch_open_file([good, missing])
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        assert pool.submit(sync_fs.read_file, good).result(timeout=20) == b"x"
+        readers = pool.submit(sync_fs.batch_open_file, [good]).result(timeout=20)
+        try:
+            assert readers[0].read() == b"x"
+        finally:
+            readers[0].close()
+
+
+def test_sync_batch_open_file_inside_asyncio_loop_is_refused(
+    sync_fs: Goosefs, sync_tmp_dir: str
+) -> None:
+    """The sync deadlock guard must cover the new method too."""
+    path = f"{sync_tmp_dir}/sync-bof-guard.bin"
+    sync_fs.write_file(path, b"x", write_type=WriteType.MustCache)
+
+    async def attempt() -> None:
+        with pytest.raises(RuntimeError):
+            sync_fs.batch_open_file([path])
+
+    asyncio.run(attempt())

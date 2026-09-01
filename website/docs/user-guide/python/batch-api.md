@@ -123,17 +123,23 @@ for r in readers:
 
 ## Sync API
 
-All batch APIs are also available on the synchronous `Goosefs` wrapper:
+Every batch API is available on the synchronous `Goosefs` wrapper, with the
+same names and argument shapes:
 
 ```python
 with Goosefs(cfg) as fs:
     results = fs.batch_exists(["/data/a", "/data/b"])
     fs.batch_create_dir(["/data/d1", "/data/d2"])
-```
 
-:::note
-`batch_open_file` is **async-only** — the synchronous `Goosefs` wrapper does not expose it because it returns `AsyncFileReader` objects that require an asyncio runtime. All other batch APIs are available on both `AsyncGoosefs` and `Goosefs`.
-:::
+    # Returns synchronous FileReader objects — no asyncio runtime needed.
+    readers = fs.batch_open_file(["/data/a", "/data/b"])
+    try:
+        for r in readers:
+            print(len(r.read()))
+    finally:
+        for r in readers:
+            r.close()
+```
 
 ## Performance Characteristics
 

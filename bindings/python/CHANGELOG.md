@@ -8,6 +8,19 @@ This document records all notable changes to the `goosefs` Python binding. The f
 
 ## [Unreleased]
 
+### Added
+
+- **`Goosefs.batch_open_file(paths)` → `list[FileReader]`.** The sync client
+  was the only one of the nine batch APIs missing from `Goosefs`, so sync
+  callers had to loop over `open_file`, giving up the bounded fan-out and the
+  single GIL release. It now mirrors `AsyncGoosefs.batch_open_file`, returning
+  the same synchronous `FileReader` objects that `open_file` returns, and
+  closing already-opened streams if a later path in the batch fails.
+
+  The batch-API guide previously described this as a deliberate omission
+  "because it returns `AsyncFileReader` objects that require an asyncio
+  runtime"; that never applied to a sync implementation, and the note is gone.
+
 ### Fixed
 
 - **`positioned_read` now rejects `length < -1` instead of silently reading

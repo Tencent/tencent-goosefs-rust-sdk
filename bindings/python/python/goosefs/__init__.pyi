@@ -867,6 +867,17 @@ class Goosefs:
 
         Concurrency is bounded internally (at most 64 RPCs in flight)."""
         ...
+    def batch_open_file(self, paths: list[str]) -> list[FileReader]:
+        """Concurrent ``open_file`` for every path (single GIL release).
+
+        Returns readers in input order. Concurrency is bounded internally
+        (at most `MAX_BATCH_RPC_IN_FLIGHT` opens in flight). These are the
+        same synchronous :class:`FileReader` objects that :meth:`open_file`
+        returns.
+
+        The whole batch fails on the first error; streams opened before it
+        are closed so their worker connections are not leaked."""
+        ...
     def batch_create_file(
         self,
         paths: list[str],
