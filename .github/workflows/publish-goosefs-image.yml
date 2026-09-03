@@ -1,0 +1,126 @@
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Manual-only publish of the GooseFS fixture image to GHCR.
+#
+# GITHUB_TOKEN on this Tencent repo can create ghcr.io/tencent/... packages;
+# a personal PAT from a fork cannot (create_package is denied).
+#
+# Required repo secrets:
+#   TENCENT_CR_USERNAME
+#   TENCENT_CR_PASSWORD
+#
+# After the first successful run, set the GHCR package visibility to public.
+
+name: Publish GooseFS image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: "TCR source tag, e.g. v2.0.0"
+        required: true
+        type: string
+        default: "v2.0.0"
+      dest_tag:
+        description: "GHCR tag (empty = same as source_tag)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Login to Tencent CR
+        run: |
+          echo "${{ secrets.TENCENT_CR_PASSWORD }}" | docker login goosefs.tencentcloudcr.com \
+            -u "${{ secrets.TENCENT_CR_USERNAME }}" --password-stdin
+
+      - name: Login to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin
+
+      - name: Pull, bake site.properties, push
+        env:
+          SOURCE_TAG: ${{ inputs.source_tag }}
+          DEST_TAG: ${{ inputs.dest_tag }}
+        run: |
+          set -euo pipefail
+          TAG="${DEST_TAG:-$SOURCE_TAG}"
+          SRC="goosefs.tencentcloudcr.com/goosefs/repo:${SOURCE_TAG}"
+          DEST="ghcr.io/tencent/tencent-goosefs-rust-sdk/goosefs:${TAG}"
+          export TAG
+
+          docker pull "${SRC}"
+          docker tag "${SRC}" "goosefs:${TAG}"
+
+          python3 <<'PY'
+          import os
+          from pathlib import Path
+
+          d = Path("/tmp/goosefs-site")
+          d.mkdir(parents=True, exist_ok=True)
+          props = [
+              "goosefs.master.hostname=localhost",
+              "goosefs.master.mount.table.root.ufs=/opt/goosefs/underFSStorage",
+              "goosefs.security.authorization.permission.enabled=false",
+              "goosefs.security.authentication.type=SIMPLE",
+              "goosefs.security.group.mapping.class=com.qcloud.cos.goosefs.security.group.provider.IdentityUserGroupsMapping",
+              "goosefs.worker.file.store.dirs.path=/data/goosefs-data/mono-block",
+              "goosefs.worker.file.store.dirs.quota=2GB",
+              "goosefs.worker.page.store.dirs=/data/goosefs-data/paged-block",
+              "goosefs.worker.page.store.page.size=1MB",
+              "goosefs.worker.page.store.size=2GB",
+              "goosefs.worker.page.store.overhead=0",
+              "goosefs.worker.network.reader.buffer.size=1MB",
+              "goosefs.user.short.circuit.enabled=false",
+              "goosefs.user.short.circuit.preferred=false",
+              "goosefs.user.file.readtype.default=CACHE",
+              "goosefs.user.file.writetype.default=CACHE_THROUGH",
+              "goosefs.user.block.size.bytes.default=4MB",
+              "goosefs.user.streaming.reader.buffer.size.messages=1",
+              "goosefs.user.metrics.collection.enabled=true",
+              "goosefs.user.metrics.heartbeat.interval=10s",
+              "goosefs.worker.heartbeat.timeout=10s",
+              "goosefs.worker.heartbeat.interval=1s",
+              "goosefs.master.worker.register.lease.count=4",
+              "goosefs.master.worker.register.lease.timeout=30s",
+              "goosefs.underfs.allow.set.owner.failure=true",
+          ]
+          (d / "goosefs-site.properties").write_text("\n".join(props) + "\n")
+          tag = os.environ["TAG"]
+          (d / "Dockerfile").write_text(
+              "FROM goosefs:{tag}\n"
+              "USER root\n"
+              "COPY goosefs-site.properties /opt/goosefs/conf/goosefs-site.properties\n"
+              "RUN mkdir -p /opt/goosefs/underFSStorage"
+              " /data/goosefs-data/mono-block /data/goosefs-data/paged-block"
+              " && chown -R 1000:1000 /opt/goosefs/conf/goosefs-site.properties"
+              " /opt/goosefs/underFSStorage /data/goosefs-data\n"
+              "USER 1000\n".format(tag=tag)
+          )
+          PY
+
+          docker build -t "${DEST}" /tmp/goosefs-site
+          docker push "${DEST}"
+          echo "pushed ${DEST}"
