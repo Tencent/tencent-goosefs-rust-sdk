@@ -13,6 +13,11 @@ kept aligned. Python-specific notes also appear in
 
 ### Fixed
 
+- **`$GOOSEFS_CONF_DIR/goosefs-site.properties` is discovered again.**
+  `discover_config_file()` looked up the Java property name `goosefs.conf.dir`
+  as an environment variable instead of `GOOSEFS_CONF_DIR`, so the documented
+  conf-dir env var was ignored. `$GOOSEFS_CONFIG_FILE` was unaffected.
+
 - **`GoosefsFileReader` now sends `maxUfsReadConcurrency`, fixing the hang on
   the second read of a path.** `GoosefsFileInStream` and the Python binding's
   `positioned_read` already sent the Java default of `8`; the one-shot reader

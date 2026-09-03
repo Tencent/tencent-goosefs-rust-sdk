@@ -780,7 +780,7 @@ pub fn discover_config_file() -> Option<std::path::PathBuf> {
     }
 
     // 2. $GOOSEFS_CONF_DIR/goosefs-site.properties (≈ Java `goosefs.conf.dir`)
-    if let Ok(conf_dir) = std::env::var(CONF_DIR) {
+    if let Ok(conf_dir) = std::env::var(ENV_CONF_DIR) {
         let p = PathBuf::from(&conf_dir).join(PROPERTIES_FILENAME);
         if p.exists() {
             return Some(p);
@@ -5225,6 +5225,88 @@ goosefs.master.rpc.port=9200
         std::env::remove_var(ENV_FILE_REPLICATION_NUMBER);
         std::env::remove_var(ENV_CONFIG_FILE);
         let _ = std::fs::remove_file(&props_path);
+    }
+
+    /// `$GOOSEFS_CONF_DIR/goosefs-site.properties` must be discovered.
+    ///
+    /// Regression: `discover_config_file` used to call `std::env::var(CONF_DIR)`
+    /// (`"goosefs.conf.dir"`, the Java *property* name) instead of
+    /// `ENV_CONF_DIR` (`"GOOSEFS_CONF_DIR"`), so the documented environment
+    /// variable was ignored.
+    #[test]
+    fn test_discover_config_file_from_goosefs_conf_dir() {
+        use std::io::Write;
+
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let dir =
+            std::env::temp_dir().join(format!("goosefs_conf_dir_discover_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let props_path = dir.join(PROPERTIES_FILENAME);
+        {
+            let mut f = std::fs::File::create(&props_path).unwrap();
+            writeln!(
+                f,
+                "goosefs.master.rpc.addresses=10.0.0.1:9200,10.0.0.2:9200,10.0.0.3:9200"
+            )
+            .unwrap();
+        }
+
+        std::env::remove_var(ENV_CONFIG_FILE);
+        std::env::remove_var(ENV_HOME);
+        std::env::remove_var(ENV_MASTER_ADDR);
+        std::env::set_var(ENV_CONF_DIR, dir.to_str().unwrap());
+
+        let discovered = discover_config_file().expect("GOOSEFS_CONF_DIR must be searched");
+        assert_eq!(discovered, props_path);
+
+        let cfg = GoosefsConfig::from_properties_auto().unwrap();
+        assert_eq!(cfg.master_addr, "10.0.0.1:9200");
+        assert_eq!(
+            cfg.master_addrs,
+            vec![
+                "10.0.0.1:9200".to_string(),
+                "10.0.0.2:9200".to_string(),
+                "10.0.0.3:9200".to_string(),
+            ]
+        );
+
+        std::env::remove_var(ENV_CONF_DIR);
+        let _ = std::fs::remove_file(&props_path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// The Java property name `goosefs.conf.dir` is not an environment
+    /// variable and must not be treated as one.
+    #[test]
+    fn test_discover_config_file_ignores_java_conf_dir_property_name() {
+        use std::io::Write;
+
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let dir =
+            std::env::temp_dir().join(format!("goosefs_conf_dir_java_prop_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let props_path = dir.join(PROPERTIES_FILENAME);
+        {
+            let mut f = std::fs::File::create(&props_path).unwrap();
+            writeln!(f, "goosefs.master.rpc.addresses=192.0.2.1:9200").unwrap();
+        }
+
+        std::env::remove_var(ENV_CONFIG_FILE);
+        std::env::remove_var(ENV_CONF_DIR);
+        std::env::remove_var(ENV_HOME);
+        std::env::set_var(CONF_DIR, dir.to_str().unwrap());
+
+        let discovered = discover_config_file();
+        assert!(
+            discovered.as_ref() != Some(&props_path),
+            "goosefs.conf.dir must not be read as an env var, got {discovered:?}"
+        );
+
+        std::env::remove_var(CONF_DIR);
+        let _ = std::fs::remove_file(&props_path);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]
