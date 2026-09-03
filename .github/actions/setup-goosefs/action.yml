@@ -23,7 +23,8 @@ runs:
       working-directory: fixtures/goosefs
       run: |
         set -euo pipefail
-        IMAGE="${GOOSEFS_IMAGE:-goosefs.tencentcloudcr.com/goosefs/repo:v2.1.0.1}"
+        IMAGE="${GOOSEFS_IMAGE:-ghcr.io/tencent/tencent-goosefs-rust-sdk/goosefs:v2.0.0}"
+        export GOOSEFS_IMAGE="${IMAGE}"
         echo "GOOSEFS_IMAGE=${IMAGE}"
         # Bound the wait so an unhealthy fixture (e.g. master never listening on
         # 9200) fails fast instead of hanging the job indefinitely. Matches the

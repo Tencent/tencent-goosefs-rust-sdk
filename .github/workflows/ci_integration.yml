@@ -47,6 +47,10 @@ env:
   GOOSEFS_MASTER_ADDR: 127.0.0.1:9200
   GOOSEFS_AUTH_TYPE: simple
   GFS_ADDR: 127.0.0.1:9200
+  # Public GHCR mirror of the GooseFS fixture. GitHub-hosted runners often
+  # time out pulling goosefs.tencentcloudcr.com. Override locally with
+  # GOOSEFS_IMAGE if needed.
+  GOOSEFS_IMAGE: ghcr.io/tencent/tencent-goosefs-rust-sdk/goosefs:v2.0.0
 
 # Default Docker GooseFS IT: Linux amd64 rust + python.
 # Apple Silicon unit coverage remains in ci.yml (macos-14). Optional macOS

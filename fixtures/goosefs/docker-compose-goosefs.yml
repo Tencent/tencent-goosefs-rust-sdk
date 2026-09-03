@@ -23,14 +23,13 @@
 #   GOOSEFS_MASTER_ADDR=127.0.0.1:9200
 #   GOOSEFS_AUTH_TYPE=simple
 #
-# Default image: goosefs.tencentcloudcr.com/goosefs/repo:v2.1.0.1
-# Multi-arch (linux/amd64 + linux/arm64), public, no auth required.
-# Override with GOOSEFS_IMAGE when mirroring to GHCR / Docker Hub / a private registry
-# (GitHub-hosted runners may time out reaching TCR).
+# Default image: ghcr.io/tencent/tencent-goosefs-rust-sdk/goosefs:v2.0.0
+# linux/amd64, public, no auth required. Override with GOOSEFS_IMAGE
+# (TCR fallback: goosefs.tencentcloudcr.com/goosefs/repo:v2.1.0.1).
 
 services:
   goosefs:
-    image: ${GOOSEFS_IMAGE:-goosefs.tencentcloudcr.com/goosefs/repo:v2.1.0.1}
+    image: ${GOOSEFS_IMAGE:-ghcr.io/tencent/tencent-goosefs-rust-sdk/goosefs:v2.0.0}
     container_name: goosefs-sdk-goosefs
     profiles: ["", "local"]
     entrypoint: ["/bin/bash", "/opt/opendal/bin/start-default.sh"]
