@@ -536,7 +536,7 @@ mod tests {
 
     /// **Regression**: `OpenUfsBlockOptions.block_size` is the real length of
     /// the block, not the file's nominal block size. The Worker asks the UFS for
-    /// exactly this many bytes when back-filling the page cache, so a
+    /// exactly this many bytes when back-filling the page cache, so an
     /// over-reported partial tail block is never cached:
     ///
     /// ```text
