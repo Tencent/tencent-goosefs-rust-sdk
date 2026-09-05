@@ -324,6 +324,9 @@ async fn heartbeat_real_cluster() -> goosefs_sdk::error::Result<()> {
     let config = GoosefsConfig::new("127.0.0.1:9200")
         .with_metrics_enabled(true)
         .with_metrics_heartbeat_interval(Duration::from_secs(2))
+        // The 5 s default would exceed this interval, which `validate()` rejects;
+        // 1 s is the smallest timeout the builder accepts.
+        .with_metrics_heartbeat_timeout(Duration::from_secs(1))
         .with_app_id("integ-test-node");
 
     let ctx = FileSystemContext::connect(config).await?;

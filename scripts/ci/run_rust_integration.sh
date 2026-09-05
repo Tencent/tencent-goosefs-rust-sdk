@@ -48,8 +48,15 @@ cd "$ROOT"
 export GOOSEFS_MASTER_ADDR="${GOOSEFS_MASTER_ADDR:-127.0.0.1:9200}"
 export GOOSEFS_AUTH_TYPE="${GOOSEFS_AUTH_TYPE:-simple}"
 
-# Suites that cannot pass against the Docker fixture, e.g. because they need
-# host-filesystem access to a co-located worker block store. Currently empty.
+# Default features are empty; page-cache / metadata-cache tests declare
+# `required-features`. Keep one feature set so cargo does not rebuild
+# between targets.
+FEATURES=(--features full-client)
+
+# Suites that cannot pass against the Docker fixture, e.g. because they need a
+# co-located worker block store on the host filesystem, which the containerised
+# worker does not give the test process access to. Empty today: the only such
+# suites were the short-circuit ones, removed with that read path.
 SKIP=""
 
 skipped() {
@@ -74,7 +81,7 @@ targets=""
 while IFS= read -r file; do
   name="$(basename "$file" .rs)"
   if skipped "$name"; then
-    echo "==> skipping $name (needs a co-located worker block store)"
+    echo "==> skipping $name (listed in SKIP)"
     continue
   fi
   targets="$targets $name"
@@ -91,7 +98,7 @@ fi
 failed=""
 for name in $targets; do
   echo "==> integration: $name"
-  if ! cargo test --test "$name" -- --ignored --nocapture --test-threads=1; then
+  if ! cargo test --test "$name" "${FEATURES[@]}" -- --ignored --nocapture --test-threads=1; then
     # Keep going so one broken suite does not mask the state of the rest;
     # the script still exits non-zero below.
     echo "!!! integration suite failed: $name" >&2

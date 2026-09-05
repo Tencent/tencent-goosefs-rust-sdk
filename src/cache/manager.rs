@@ -83,7 +83,7 @@ use crate::cache::allocator::{Allocator, HashAllocator};
 use crate::cache::metric_name as mn;
 use crate::cache::options::CacheManagerOptions;
 use crate::cache::page_id::{CacheScope, PageId, PageInfo};
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "page-cache-io-uring"))]
 use crate::cache::store::UringPageStore;
 use crate::cache::store::{init_uring_config, is_uring_available, LocalPageStore, PageStore};
 use crate::cache::{CacheManager, CacheState, PageReadRequest};
@@ -323,7 +323,7 @@ impl LocalCacheManager {
         let mut caches: Vec<Cache<PageId, PageInfo>> = Vec::with_capacity(dir_paths.len());
         for dir in &dir_paths {
             let store: Arc<dyn PageStore> = if use_uring {
-                #[cfg(target_os = "linux")]
+                #[cfg(all(target_os = "linux", feature = "page-cache-io-uring"))]
                 {
                     match UringPageStore::create_with_pread(
                         dir,
@@ -339,7 +339,7 @@ impl LocalCacheManager {
                         }
                     }
                 }
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(all(target_os = "linux", feature = "page-cache-io-uring")))]
                 {
                     Arc::new(LocalPageStore::create(dir, options.page_size).await?)
                 }

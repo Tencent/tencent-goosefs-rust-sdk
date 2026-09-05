@@ -50,7 +50,7 @@ abi3-py311 = ["pyo3/abi3-py311"]
 # Note (Review ): we deliberately omit `version = "="` here because path
 # dependencies always win locally; CI will instead enforce that this crate's
 # version matches the root `Cargo.toml` (see DEPENDENCIES.rust.tsv in P8).
-goosefs-sdk = { path = "../.." }
+goosefs-sdk = { path = "../..", default-features = false, features = ["full-client"] }
 
 # Floor is 0.29.0 for RUSTSEC-2026-0176 / RUSTSEC-2026-0177.
 pyo3 = { version = "0.29", features = ["generate-import-lib"] }

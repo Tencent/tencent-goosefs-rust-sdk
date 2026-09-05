@@ -60,6 +60,12 @@ jobs:
       - name: cargo check (workspace)
         run: cargo check --workspace --all-targets
 
+      - name: cargo check (minimal SDK)
+        run: cargo check -p goosefs-sdk --no-default-features --all-targets
+
+      - name: cargo check (full SDK)
+        run: cargo check -p goosefs-sdk --no-default-features --features full-client --all-targets
+
       # Existing crate has clippy debt; keep clippy visible but do not
       # fail the job on pedantic lints until they are cleaned up.
       - name: cargo clippy (sdk)
@@ -99,6 +105,9 @@ jobs:
           # module comment in src/cache/store/uring/store.rs before assuming
           # that code is covered.
           cargo nextest run --workspace --no-fail-fast --lib --tests
+
+      - name: Unit tests (minimal SDK)
+        run: cargo nextest run -p goosefs-sdk --no-default-features --no-fail-fast --lib --tests
 
       - name: Doc tests
         run: cargo test --workspace --doc --no-fail-fast

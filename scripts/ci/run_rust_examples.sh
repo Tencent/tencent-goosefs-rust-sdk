@@ -45,21 +45,26 @@ EXAMPLES=(
   verify_checkblocks_locations
 )
 
+# Default features are empty; page-cache / pushgateway examples declare
+# `required-features`. Build and run against full-client so gated examples
+# are not skipped then failed at `cargo run`.
+FEATURES=(--features full-client)
+
 echo "==> Building examples"
-cargo build --examples
+cargo build --examples "${FEATURES[@]}"
 
 for name in "${EXAMPLES[@]}"; do
   echo "==> example: ${name}"
-  cargo run --example "${name}"
+  cargo run --example "${name}" "${FEATURES[@]}"
 done
 
 echo "==> example: ha_multi_master (single master)"
-cargo run --example ha_multi_master -- "${GOOSEFS_MASTER_ADDR}"
+cargo run --example ha_multi_master "${FEATURES[@]}" -- "${GOOSEFS_MASTER_ADDR}"
 
 # metrics_pushgateway needs a Pushgateway on :9091; only run when present.
 if python3 -c 'import socket; socket.create_connection(("127.0.0.1", 9091), 1).close()'; then
   echo "==> example: metrics_pushgateway"
-  cargo run --example metrics_pushgateway
+  cargo run --example metrics_pushgateway "${FEATURES[@]}"
 else
   echo "==> skip metrics_pushgateway (no Pushgateway on 127.0.0.1:9091)"
 fi
