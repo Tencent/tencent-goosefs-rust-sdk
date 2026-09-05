@@ -234,3 +234,47 @@ def test_sync_writer_large_payload_roundtrip(sync_fs: Goosefs, sync_tmp_dir: str
                 break
             out += piece
         assert bytes(out) == expected
+
+
+# ---------------------------------------------------------------------------
+# Last-block close must not send gRPC flush:true (PAGE PagedBlockWriter)
+# ---------------------------------------------------------------------------
+
+_LAST_BLOCK_CLOSE_WRITE_TYPES = [
+    ("must_cache", WriteType.MustCache),
+    ("cache_through", WriteType.CacheThrough),
+    ("async_through", WriteType.AsyncThrough),
+    ("through", WriteType.Through),
+]
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize(
+    "wt_label,wt",
+    _LAST_BLOCK_CLOSE_WRITE_TYPES,
+    ids=[w[0] for w in _LAST_BLOCK_CLOSE_WRITE_TYPES],
+)
+def test_sync_streaming_last_block_close_does_not_require_flush(
+    sync_fs: Goosefs,
+    sync_tmp_dir: str,
+    wt_label: str,
+    wt: WriteType,
+) -> None:
+    """Sync counterpart of the AsyncGoosefs last-block close regression.
+
+    Same Rust ``GoosefsFileWriter::close`` path: last cache block closes
+    without ``flush:true``. PAGE workers throw if the client still flushes.
+    """
+    path = f"{sync_tmp_dir}/last-block-close-{wt_label}.bin"
+    payload = b"x" * (8 * 1024 * 1024)
+
+    w = sync_fs.create_file(path, recursive=True, write_type=wt)
+    n = w.write(payload)
+    assert n == len(payload)
+    w.close()
+
+    got = sync_fs.read_file(path)
+    assert got == payload
+    st = sync_fs.get_status(path)
+    assert st.length == len(payload)
+    assert st.is_completed()

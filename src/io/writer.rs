@@ -27,6 +27,15 @@
 //! 3. Master: CompleteFile(path)
 //! ```
 //!
+//! TODO(worker-page-flush): PAGE-store workers currently implement
+//! `PagedBlockWriter.flush()` as `throw new UnsupportedOperationException(
+//! "PagedBlockWriter does not support flush")`. This SDK still sends
+//! `flush:true` for (1) explicit [`GoosefsFileWriter::flush`] under
+//! ASYNC_THROUGH and (2) mid-file full-block switches (Java `getNextBlock()`).
+//! Last-block file close does **not** send flush — it only closes the stream,
+//! matching Java `GrpcDataWriter.close()`. tonic WriteBlock unblocks on flush
+//! *or* stream close. Do not delete this flush protocol to paper over PAGE.
+//!
 //! ## Goosefs Write Protocol Detail
 //!
 //! The Worker's `WriteBlock` RPC is bidirectional streaming, but the server
@@ -171,6 +180,11 @@ impl GrpcBlockWriter {
     ///
     /// This triggers the server to send its first response (including
     /// HTTP/2 headers), which unblocks the background gRPC task.
+    ///
+    /// TODO(worker-page-flush): PAGE `PagedBlockWriter.flush()` still throws
+    /// `"PagedBlockWriter does not support flush"`. Used by explicit
+    /// `GoosefsFileWriter::flush` (ASYNC_THROUGH) and mid-file block switches.
+    /// Last-block `close()` no longer calls this (Java-aligned).
     pub async fn flush(&mut self) -> Result<i64> {
         // Send flush command
         let flush_req = WriteRequest {

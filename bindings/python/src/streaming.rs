@@ -485,6 +485,14 @@ impl PyAsyncFileWriter {
     }
 
     /// `await writer.close()` — finalise the file. Idempotent.
+    ///
+    /// Last cache block closes **without** gRPC `flush:true` (Java
+    /// `GrpcDataWriter.close()`). Sync [`FileWriter.close`](PyFileWriter::close)
+    /// and `write_file` share this path.
+    ///
+    /// TODO(worker-page-flush): PAGE `PagedBlockWriter.flush()` still throws.
+    /// Remaining hits: `await writer.flush()` under AsyncThrough, and files
+    /// that fill a cache block mid-write (Java `getNextBlock()` still flushes).
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
         future_into_py(py, async move {
@@ -783,6 +791,10 @@ impl PyFileWriter {
         })
     }
 
+    /// Same close path as [`AsyncFileWriter.close`](PyAsyncFileWriter::close).
+    /// Last cache block does not send `flush:true`.
+    ///
+    /// TODO(worker-page-flush): see `PyAsyncFileWriter::close`.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         let inner = Arc::clone(&self.inner);
         guarded_block_on(py, async move {

@@ -305,3 +305,52 @@ async def test_writer_large_payload_roundtrip(async_fs: AsyncGoosefs, tmp_dir: s
                 break
             buf += piece
         assert bytes(buf) == expected
+
+
+# ---------------------------------------------------------------------------
+# Last-block close must not send gRPC flush:true (PAGE PagedBlockWriter)
+# ---------------------------------------------------------------------------
+
+# Matches the Python SDK repro: create_file → write 8 MiB → close.
+# SDK default block size is 64 MiB, so 8 MiB is a single cache block.
+_LAST_BLOCK_CLOSE_WRITE_TYPES = [
+    ("must_cache", WriteType.MustCache),
+    ("cache_through", WriteType.CacheThrough),
+    ("async_through", WriteType.AsyncThrough),
+    ("through", WriteType.Through),
+]
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize(
+    "wt_label,wt",
+    _LAST_BLOCK_CLOSE_WRITE_TYPES,
+    ids=[w[0] for w in _LAST_BLOCK_CLOSE_WRITE_TYPES],
+)
+async def test_async_streaming_last_block_close_does_not_require_flush(
+    async_fs: AsyncGoosefs,
+    tmp_dir: str,
+    wt_label: str,
+    wt: WriteType,
+) -> None:
+    """Regression for PAGE ``PagedBlockWriter.flush()`` throwing.
+
+    Java ``GrpcDataWriter.close()`` does not send ``flush:true``; only
+    ``getNextBlock()`` and explicit ASYNC_THROUGH ``flush()`` do. The SDK
+    last-block close path must match that, otherwise MustCache /
+    CacheThrough / AsyncThrough ``await writer.close()`` fails on PAGE
+    workers with ``PagedBlockWriter does not support flush``.
+    """
+    path = f"{tmp_dir}/last-block-close-{wt_label}.bin"
+    payload = b"x" * (8 * 1024 * 1024)
+
+    w = await async_fs.create_file(path, recursive=True, write_type=wt)
+    n = await w.write(payload)
+    assert n == len(payload)
+    await w.close()
+
+    got = await async_fs.read_file(path)
+    assert got == payload
+    st = await async_fs.get_status(path)
+    assert st.length == len(payload)
+    assert st.is_completed()
