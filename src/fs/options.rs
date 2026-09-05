@@ -145,6 +145,61 @@ impl InStreamOptions {
 }
 
 // ---------------------------------------------------------------------------
+// UFS block geometry
+// ---------------------------------------------------------------------------
+
+/// Length of the block at `block_index`, clamped to what the file actually
+/// holds.
+///
+/// The result belongs in `OpenUfsBlockOptions.block_size`, which despite its
+/// name carries the *real* length of that one block, not the file's nominal
+/// block size. The two differ for the trailing partial block of every file —
+/// and for anything smaller than one block, the trailing block is the whole
+/// file.
+///
+/// # Java authority
+///
+/// `InStreamOptions.getOpenUfsBlockOptions`:
+///
+/// ```java
+/// long blockSize = Math.min(
+///     mStatus.getLength() - mStatus.getBlockSizeBytes() * BlockId.getSequenceNumber(blockId),
+///     mStatus.getBlockSizeBytes());
+/// BlockInfo info = new BlockInfo().setBlockId(blockId).setLength(blockSize);
+/// ... .setBlockSize(info.getLength())
+/// ```
+///
+/// # Why the nominal size is not good enough
+///
+/// The Worker takes this field as the block length. `PagedBlockStore.cacheBlock`
+/// builds `BlockPageId{FileId=paged_block_<id>_size_<block_size>}` and then asks
+/// the UFS for that many bytes. Over-reporting makes the read come up short:
+///
+/// ```text
+/// ERROR LocalCacheManager - Failed to read page
+///   BlockPageId{FileId=paged_block_503316480_size_1048576, PageIndex=0}:
+///   supposed to read 1048576 bytes, 13 bytes actually read
+/// WARN  PagedBlockStore - Failed to cache block 503316480 in page mode
+/// ```
+///
+/// Reads still return correct data — the served byte range comes from
+/// `ReadRequest.offset` / `length`, not from this field — but the async-cache
+/// task gives up, so the tail block never enters the page cache and every read
+/// of it goes back to the UFS.
+pub fn ufs_block_length(file_length: i64, block_size_bytes: i64, block_index: u64) -> i64 {
+    if block_size_bytes <= 0 {
+        return 0;
+    }
+    let block_start = i64::try_from(block_index)
+        .ok()
+        .and_then(|idx| idx.checked_mul(block_size_bytes))
+        .unwrap_or(i64::MAX);
+    file_length
+        .saturating_sub(block_start)
+        .clamp(0, block_size_bytes)
+}
+
+// ---------------------------------------------------------------------------
 // OpenFileOptions
 // ---------------------------------------------------------------------------
 
@@ -471,6 +526,50 @@ mod tests {
     fn test_in_stream_positioned() {
         let opts = InStreamOptions::default().positioned();
         assert!(opts.position_short);
+    }
+
+    // ── ufs_block_length ───────────────────────────────────────────────────
+
+    /// Java `InStreamOptions.getOpenUfsBlockOptions` clamps the advertised
+    /// block length with `Math.min(length - blockSize * seq, blockSize)`.
+    /// Sending the nominal size instead makes the Worker's async-cache task
+    /// read past the end of the object and drop the block
+    /// ("Failed to cache block <id> in page mode").
+    #[test]
+    fn ufs_block_length_clamps_the_tail_block() {
+        let bs = 1 << 20;
+
+        // Full interior blocks report the nominal size.
+        assert_eq!(ufs_block_length(3 * bs, bs, 0), bs);
+        assert_eq!(ufs_block_length(3 * bs, bs, 1), bs);
+
+        // A file that is an exact multiple has no partial tail.
+        assert_eq!(ufs_block_length(3 * bs, bs, 2), bs);
+
+        // Partial tail: 2 MiB + 100 B over 1 MiB blocks.
+        assert_eq!(ufs_block_length(2 * bs + 100, bs, 0), bs);
+        assert_eq!(ufs_block_length(2 * bs + 100, bs, 2), 100);
+    }
+
+    /// The Lance metadata files that surfaced this bug are far smaller than one
+    /// block, so block 0 *is* the tail: a 13-byte `latest_version_hint.json`
+    /// was advertised as 1048576 bytes.
+    #[test]
+    fn ufs_block_length_reports_actual_length_for_sub_block_files() {
+        let bs = 1 << 20;
+        assert_eq!(ufs_block_length(13, bs, 0), 13);
+        assert_eq!(ufs_block_length(447, bs, 0), 447);
+        assert_eq!(ufs_block_length(0, bs, 0), 0);
+    }
+
+    /// Out-of-range indices and a missing block size must not produce a
+    /// negative length — the field is sent to the Worker as-is.
+    #[test]
+    fn ufs_block_length_never_goes_negative() {
+        let bs = 1 << 20;
+        assert_eq!(ufs_block_length(13, bs, 5), 0);
+        assert_eq!(ufs_block_length(13, 0, 0), 0);
+        assert_eq!(ufs_block_length(13, -1, 0), 0);
     }
 
     // ── OpenFileOptions ────────────────────────────────────────────────────

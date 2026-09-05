@@ -24,9 +24,16 @@
 //!   → for each block:
 //!       → WorkerRouterView.select_worker()
 //!       → WorkerClient.connect()        (pooled — zero new TCP+SASL)
-//!       → GrpcBlockWriter.open() → write_all() → flush() → close()
+//!       → GrpcBlockWriter.open() → write_all()
+//!           → (full block) flush() → close()     // Java getNextBlock()
+//!           → (last block / file close) close()  // Java BlockOutStream.close(): no flush:true
 //!   → MasterClient.complete_file()
 //! ```
+//!
+//! TODO(worker-page-flush): PAGE-store `PagedBlockWriter.flush()` still throws.
+//! Last-block file close no longer sends `flush:true` (Java-aligned). Remaining
+//! callers of gRPC flush are explicit [`GoosefsFileWriter::flush`] (ASYNC_THROUGH)
+//! and mid-file full-block switches. Do not drop that protocol.
 //!
 //! # Example
 //!
@@ -165,6 +172,39 @@ fn resolve_write_strategy(write_type: Option<i32>, file_info: &FileInfo) -> Writ
             need_async_persist: false,
         },
     }
+}
+
+/// Whether the cache-write loop must open a fresh block before placing more
+/// bytes.
+///
+/// `None` means no block is open — the first block of the file, or one that a
+/// previous iteration closed. `Some(0)` means the open block has no room left,
+/// so [`GoosefsFileWriter::open_next_block`] will flush and close it on the way
+/// (Java `getNextBlock()`).
+///
+/// This is only ever consulted while bytes remain to be placed, and that is
+/// precisely what keeps a block which filled on the file's last byte from being
+/// flushed: the loop exits before asking again, leaving the block for
+/// `close_current_block(false)`. Java relies on the same structure via
+/// `while (tLen > 0)`.
+fn needs_fresh_block(remaining_in_current: Option<u64>) -> bool {
+    match remaining_in_current {
+        None => true,
+        Some(remaining) => remaining == 0,
+    }
+}
+
+/// Whether closing the current cache block should send gRPC `flush:true`.
+///
+/// Java `GooseFSFileOutStream.getNextBlock()` (`commit_location = true`)
+/// flushes then closes. Java file close of the last block
+/// (`GrpcDataWriter.close()`, `commit_location = false`) only closes the
+/// stream — Worker `onCompleted` still runs `commitBlock`. PAGE-store
+/// `PagedBlockWriter.flush()` throws; skipping flush on the last block is
+/// what lets Python `write`+`close` succeed there. Mid-file switches and
+/// explicit [`GoosefsFileWriter::flush`] still send `flush:true`.
+fn should_flush_cache_block_on_close(commit_location: bool) -> bool {
+    commit_location
 }
 
 /// Convert a [`Uuid`] to the `FsOpPId` proto message expected by Goosefs Master.
@@ -647,14 +687,33 @@ impl GoosefsFileWriter {
 
         let mut offset = 0usize;
         while offset < data.len() {
-            // Ensure we have an active block writer
-            if self.current_block_writer.is_none()
-                || self.current_block_writer.as_ref().unwrap().remaining() == 0
-            {
+            // A filled block is closed here — on the way to placing more data —
+            // and never at the moment it fills. `open_next_block` performs the
+            // `close_current_block(true)` that sends `flush:true`, so reaching
+            // it only from inside this loop is what makes the flush conditional
+            // on "there is more data to write".
+            //
+            // Java `GooseFSFileOutStream.writeInternal` has the same shape:
+            //
+            // ```java
+            // while (tLen > 0) {
+            //   if (mCurrentBlockOutStream == null || mCurrentBlockOutStream.remaining() == 0) {
+            //     getNextBlock();   // flush() + close()
+            //   }
+            //   ...
+            // }
+            // ```
+            //
+            // A block that fills exactly on the file's last byte therefore stays
+            // open: `tLen` hits zero, the loop exits, and `close()` commits it
+            // without `flush:true`. Closing eagerly on `remaining() == 0` instead
+            // made a file whose length is an exact multiple of `block_size` send
+            // a flush that PAGE-store `PagedBlockWriter` cannot serve — Java
+            // accepted such a file, this SDK did not.
+            if needs_fresh_block(self.current_block_writer.as_ref().map(|w| w.remaining())) {
                 self.open_next_block(block_size).await?;
             }
 
-            let block_full;
             let emit_result;
             {
                 let writer = self.current_block_writer.as_mut().unwrap();
@@ -664,15 +723,11 @@ impl GoosefsFileWriter {
                 let slice = &data[offset..offset + to_accept];
                 writer.bytes_written += to_accept as u64;
                 offset += to_accept;
-                block_full = writer.remaining() == 0;
                 emit_result = emit_aligned_chunks(writer, slice, chunk_size).await;
             }
             // Raw error on purpose: only `write()` knows whether a degrade is
             // permitted, so the classification happens there.
             emit_result?;
-            if block_full {
-                self.close_current_block(true).await?;
-            }
         }
 
         Ok(())
@@ -916,11 +971,23 @@ impl GoosefsFileWriter {
         })
     }
 
-    /// Close the current block writer: flush, close, and record the committed block ID.
+    /// Close the current cache-block writer and record the committed block ID.
     ///
-    /// When `commit_location` is true (next-block transition), ASYNC_THROUGH
-    /// reports succeed-worker IDs via `CommitLocation`. The last block of the
-    /// file is reported on `completeFile` instead (`commit_location = false`).
+    /// When `commit_location` is true this is a mid-file block switch (Java
+    /// `getNextBlock()`): flush then close, then ASYNC_THROUGH reports
+    /// succeed-worker IDs via `CommitLocation`. When `commit_location` is
+    /// false this is the last block of `close()` (Java
+    /// `BlockOutStream.close()` / `GrpcDataWriter.close()`): drain any
+    /// trailing chunk and close the stream **without** `flush:true`. Worker
+    /// `onCompleted` still runs `commitBlock`. The last block's locations
+    /// travel with `completeFile`.
+    ///
+    /// TODO(worker-page-flush): PAGE `PagedBlockWriter.flush()` still throws.
+    /// Skipping flush on the last block unblocks typical Python
+    /// `write`+`close` (one cache block). Do **not** drop `flush:true` on
+    /// `commit_location=true` or on explicit [`Self::flush`] — that is the
+    /// WriteBlock protocol, matching Java `getNextBlock()` / ASYNC_THROUGH
+    /// `FileOutStream.flush()`.
     async fn close_current_block(&mut self, commit_location: bool) -> Result<Option<FileLocation>> {
         let Some(mut active) = self.current_block_writer.take() else {
             return Ok(None);
@@ -938,21 +1005,34 @@ impl GoosefsFileWriter {
                 }
             }
 
-            if let Err(e) = active.flush_replicas().await {
-                warn!(
+            // Java `getNextBlock()`: flush then close. Java file close of the
+            // last block: close only (`GrpcDataWriter.close()` does not send
+            // flush:true). Stream close still unblocks the tonic WriteBlock
+            // task (Worker sends HTTP/2 headers on flush *or* onCompleted).
+            if should_flush_cache_block_on_close(commit_location) {
+                if let Err(e) = active.flush_replicas().await {
+                    warn!(
+                        block_id = block_id,
+                        error = %e,
+                        "flush failed during close_current_block; cancelling replica streams"
+                    );
+                    active.cancel_replicas().await;
+                    return Err(e);
+                }
+                debug!(
                     block_id = block_id,
-                    error = %e,
-                    "flush failed during close_current_block; cancelling replica streams"
+                    bytes_written = bytes_written,
+                    replicas = active.replicas.len(),
+                    "cache block flushed (mid-file switch)"
                 );
-                active.cancel_replicas().await;
-                return Err(e);
+            } else {
+                debug!(
+                    block_id = block_id,
+                    bytes_written = bytes_written,
+                    replicas = active.replicas.len(),
+                    "cache last-block close without flush:true (Java-aligned)"
+                );
             }
-            debug!(
-                block_id = block_id,
-                bytes_written = bytes_written,
-                replicas = active.replicas.len(),
-                "cache block flushed"
-            );
 
             let loc = active.file_location(block_offset);
             if let Err(e) = active.close_replicas().await {
@@ -1392,13 +1472,14 @@ impl GoosefsFileWriter {
 
     /// Close the file writer, finalizing the file on the Master.
     ///
-    /// This flushes both streams (if any), then calls `CompleteFile` to mark
-    /// the file as fully written. After calling `close()`, the writer cannot
-    /// be used again.
+    /// Closes the UFS stream (flush + close) and the current cache block
+    /// (close only — no `flush:true`), then calls `CompleteFile`. After
+    /// `close()`, the writer cannot be used again.
     ///
     /// Matches Java's `GoosefsFileOutStream.close()` — note the order:
     /// 1. close UFS stream (flush + close, triggers Worker-side `OutputStream.close()`);
-    /// 2. close current cache block (flush + commitBlock);
+    /// 2. close current cache block (no `flush:true`; Worker `commitBlock` on
+    ///    stream close — Java `BlockOutStream.close()` / `GrpcDataWriter.close()`);
     /// 3. `completeFile` on Master, including last-block locations and
     ///    (for ASYNC_THROUGH) `asyncPersistOptions`.
     ///
@@ -1449,8 +1530,9 @@ impl GoosefsFileWriter {
             self.ufs_worker_addr = None;
         }
 
-        // 2) Close the current in-progress cache block (flush + commitBlock).
-        //    Last-block locations travel with completeFile (Java close()).
+        // 2) Close the current in-progress cache block (last block: close
+        //    only, no flush:true). Last-block locations travel with
+        //    completeFile (Java close()).
         let last_location = match self.close_current_block(false).await {
             Ok(loc) => loc,
             Err(e) => {
@@ -1749,8 +1831,12 @@ struct ReplicaWriter {
 /// only at safe boundaries:
 ///
 /// 1. an explicit user `flush()` call;
-/// 2. the block becomes full (`remaining == 0`);
-/// 3. `close_current_block()` (end of block / file close).
+/// 2. a later write needs a new block, so the full one is closed on the way —
+///    this also sends gRPC `flush:true` (Java `getNextBlock()`). Note the
+///    trigger is "more data to place", not "the block just filled": a block
+///    that fills on the file's last byte is left open for case 3;
+/// 3. last-block `close_current_block(false)` — drain the tail and close
+///    the stream, no `flush:true` (Java `BlockOutStream.close()`).
 struct ActiveBlockWriter {
     replicas: Vec<ReplicaWriter>,
     block_id: i64,
@@ -2208,6 +2294,99 @@ mod tests {
             mount_id: Some(42),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn last_block_close_does_not_send_flush_mid_file_switch_does() {
+        // PAGE `PagedBlockWriter.flush()` throws. Last-block file close must
+        // match Java `GrpcDataWriter.close()` (no flush:true). Full-block
+        // switches must keep sending flush like Java `getNextBlock()`.
+        assert!(
+            should_flush_cache_block_on_close(true),
+            "mid-file getNextBlock() must still send flush:true"
+        );
+        assert!(
+            !should_flush_cache_block_on_close(false),
+            "last-block close() must not send flush:true"
+        );
+    }
+
+    /// Replay `write_to_cache_stream`'s block stepping using the real
+    /// [`needs_fresh_block`] predicate, counting the filled blocks that
+    /// `open_next_block` would flush and close.
+    fn simulate_mid_file_switches(writes: &[u64], block_size: u64) -> u32 {
+        let mut remaining: Option<u64> = None;
+        let mut switches = 0;
+        for &len in writes {
+            let mut offset = 0u64;
+            while offset < len {
+                if needs_fresh_block(remaining) {
+                    if remaining.is_some() {
+                        // A block was open with no room left: open_next_block
+                        // closes it with commit_location = true → flush:true.
+                        switches += 1;
+                    }
+                    remaining = Some(block_size);
+                }
+                let room = remaining.unwrap();
+                let accept = room.min(len - offset);
+                offset += accept;
+                remaining = Some(room - accept);
+            }
+        }
+        switches
+    }
+
+    /// **Regression**: a file whose length is an exact multiple of `block_size`
+    /// must not flush.
+    ///
+    /// The loop used to close a block the moment `remaining() == 0`, so writing
+    /// exactly `block_size` bytes sent `flush:true` on a block that was really
+    /// the file's last — which PAGE-store `PagedBlockWriter` cannot serve. Java
+    /// only reaches `getNextBlock()` from `while (tLen > 0)`, so it accepted
+    /// such a file. Verified on a live PAGE cluster: 4 MiB at `block_size`
+    /// 4 MiB succeeded through the Java CLI and failed through this SDK.
+    #[test]
+    fn block_filled_by_last_byte_is_not_a_mid_file_switch() {
+        let bs = 4 * 1024 * 1024u64;
+
+        assert_eq!(
+            simulate_mid_file_switches(&[bs], bs),
+            0,
+            "exactly one block"
+        );
+        assert_eq!(
+            simulate_mid_file_switches(&[2 * bs], bs),
+            1,
+            "two full blocks"
+        );
+        assert_eq!(
+            simulate_mid_file_switches(&[bs + 1], bs),
+            1,
+            "one byte over"
+        );
+        assert_eq!(simulate_mid_file_switches(&[2 * bs + 1], bs), 2);
+
+        // Sub-block and empty writes never switch.
+        assert_eq!(simulate_mid_file_switches(&[bs - 1], bs), 0);
+        assert_eq!(simulate_mid_file_switches(&[0], bs), 0);
+    }
+
+    /// The deferral has to survive across `write()` calls: a block filled by
+    /// one call stays open, and only a *later* call that still has bytes to
+    /// place turns it into a flush.
+    #[test]
+    fn filled_block_defers_across_write_calls() {
+        let bs = 4 * 1024 * 1024u64;
+
+        // Two halves exactly fill one block — the file ends there, no switch.
+        assert_eq!(simulate_mid_file_switches(&[bs / 2, bs / 2], bs), 0);
+
+        // A second full write means the first block must be flushed and closed.
+        assert_eq!(simulate_mid_file_switches(&[bs, bs], bs), 1);
+
+        // A trailing byte after an exactly-filled block is still one switch.
+        assert_eq!(simulate_mid_file_switches(&[bs, 1], bs), 1);
     }
 
     #[test]

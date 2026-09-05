@@ -777,8 +777,10 @@ class AsyncGoosefs:
 
         When ``path`` is provided, routing prefers Master
         ``BlockInfo.locations`` for that block (locations-first, same as
-        Rust / Java read selection). Without ``path``, falls back to
-        consistent-hash only.
+        Rust / Java read selection) and the handle keeps
+        ``OpenUfsBlockOptions`` for a later ``read_block_positioned``.
+        PAGE workers need ``mount_id`` on that RPC. Without ``path``,
+        falls back to consistent-hash only and sends no UFS options.
 
         Returns a binding-level wrapper around the *pooled*
         ``WorkerClient`` — closing it only releases the wrapper, the
@@ -996,8 +998,9 @@ class Goosefs:
         """Pick the responsible Worker for ``block_id``.
 
         When ``path`` is provided, routing prefers Master
-        ``BlockInfo.locations`` (locations-first). Without ``path``,
-        falls back to consistent-hash only.
+        ``BlockInfo.locations`` (locations-first) and the handle keeps
+        ``OpenUfsBlockOptions`` for a later ``read_block_positioned``.
+        Without ``path``, falls back to consistent-hash only.
 
         The returned object is still an :class:`AsyncWorkerClient` — its
         ``read_block_positioned`` method must be ``await``-ed from an

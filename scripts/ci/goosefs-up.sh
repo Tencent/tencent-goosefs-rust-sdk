@@ -38,6 +38,12 @@ diagnose() {
   echo "=== docker compose ps ==="
   docker compose -f "$COMPOSE_FILE" ps || true
   echo
+  echo "=== effective worker store config ==="
+  docker exec "$CONTAINER_NAME" bash -c \
+    'grep -E "^goosefs\.worker\.(block\.store\.type|file\.store\.dirs\.path|page\.store\.dirs)=" \
+       /opt/goosefs/conf/goosefs-site.properties' 2>/dev/null \
+    || echo "(could not read goosefs-site.properties)"
+  echo
   echo "=== docker inspect: OOMKilled / Health / ExitCode ==="
   docker inspect "$CONTAINER_NAME" --format '
 State.Status:    {{.State.Status}}
@@ -88,7 +94,14 @@ Health.Status:  {{if .State.Health}}{{.State.Health.Status}} (failing streak: {{
 # listening on 9200) hangs the job indefinitely and the diagnostics branch
 # below never runs. Bound it so we fail fast and dump diagnostics instead.
 GOOSEFS_WAIT_TIMEOUT="${GOOSEFS_WAIT_TIMEOUT:-300}"
-echo "Waiting up to ${GOOSEFS_WAIT_TIMEOUT}s for the GooseFS fixture to become healthy..."
+
+# Worker block store mode, FILE or PAGE. Exported so `docker compose`
+# interpolates it into the service environment; the test suites read the same
+# variable to pick their per-mode expectations.
+export GOOSEFS_WORKER_BLOCK_STORE_TYPE="${GOOSEFS_WORKER_BLOCK_STORE_TYPE:-FILE}"
+
+echo "Waiting up to ${GOOSEFS_WAIT_TIMEOUT}s for the GooseFS fixture" \
+     "(block.store.type=${GOOSEFS_WORKER_BLOCK_STORE_TYPE}) to become healthy..."
 if ! docker compose -f "$COMPOSE_FILE" up -d --wait --wait-timeout "$GOOSEFS_WAIT_TIMEOUT"; then
   diagnose
   echo "ERROR: GooseFS fixture did not become healthy within ${GOOSEFS_WAIT_TIMEOUT}s."
@@ -99,6 +112,7 @@ docker compose -f "$COMPOSE_FILE" ps
 echo
 echo "export GOOSEFS_MASTER_ADDR=127.0.0.1:9200"
 echo "export GOOSEFS_AUTH_TYPE=simple"
+echo "export GOOSEFS_WORKER_BLOCK_STORE_TYPE=${GOOSEFS_WORKER_BLOCK_STORE_TYPE}"
 if [[ -n "${GOOSEFS_IMAGE:-}" ]]; then
   echo "# used GOOSEFS_IMAGE=${GOOSEFS_IMAGE}"
 fi

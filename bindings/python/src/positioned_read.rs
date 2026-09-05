@@ -47,7 +47,7 @@ use std::sync::Arc;
 
 use goosefs_sdk::client::WorkerClient;
 use goosefs_sdk::context::FileSystemContext;
-use goosefs_sdk::fs::{InStreamOptions, URIStatus};
+use goosefs_sdk::fs::{ufs_block_length, InStreamOptions, URIStatus};
 use goosefs_sdk::io::GrpcBlockReader;
 use goosefs_sdk::proto::proto::dataserver::OpenUfsBlockOptions;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -201,7 +201,13 @@ pub(crate) fn open_ufs_block_options(
     Some(OpenUfsBlockOptions {
         ufs_path: Some(status.ufs_path.clone()),
         offset_in_file: Some(offset_in_file),
-        block_size: Some(block_size),
+        // The real length of *this* block, not the file's nominal block size —
+        // see [`ufs_block_length`].
+        block_size: Some(ufs_block_length(
+            status.length,
+            block_size,
+            block_index as u64,
+        )),
         max_ufs_read_concurrency: Some(InStreamOptions::default().max_ufs_read_concurrency),
         mount_id: Some(status.mount_id),
         no_cache: Some(!status.cacheable),
@@ -209,6 +215,21 @@ pub(crate) fn open_ufs_block_options(
         caller_type: None,
         file_length: Some(status.length),
     })
+}
+
+/// [`open_ufs_block_options`] for the block whose id is `block_id`.
+///
+/// `None` when the id is not in `status.block_ids`, or when the file has no
+/// UFS path. Used by `acquire_worker_for_block(path=...)` so a subsequent
+/// low-level `read_block_positioned` can send the same `OpenUfsBlockOptions`
+/// the high-level path already does. PAGE workers refuse a read that lacks
+/// `mount_id` (`PagedBlockReader` leaves `pagedUfsBlockReader` unset).
+pub(crate) fn open_ufs_block_options_for_block_id(
+    status: &URIStatus,
+    block_id: i64,
+) -> Option<OpenUfsBlockOptions> {
+    let block_index = status.block_ids.iter().position(|&id| id == block_id)?;
+    open_ufs_block_options(status, block_index)
 }
 
 /// Master `BlockInfo.locations` for `block_id`, or empty when unavailable.
@@ -501,6 +522,61 @@ mod tests {
         })
     }
 
+    fn status_with_ufs_path(length: i64, block_size_bytes: i64, num_blocks: i64) -> URIStatus {
+        URIStatus::from_proto(FileInfo {
+            length: Some(length),
+            block_size_bytes: Some(block_size_bytes),
+            block_ids: (1001..1001 + num_blocks).collect(),
+            completed: Some(true),
+            ufs_path: Some("cosn://bucket/tail.lance".to_string()),
+            mount_id: Some(7),
+            ..Default::default()
+        })
+    }
+
+    /// **Regression**: `OpenUfsBlockOptions.block_size` is the real length of
+    /// the block, not the file's nominal block size. The Worker asks the UFS for
+    /// exactly this many bytes when back-filling the page cache, so an
+    /// over-reported partial tail block is never cached:
+    ///
+    /// ```text
+    /// ERROR LocalCacheManager - Failed to read page
+    ///   BlockPageId{FileId=paged_block_503316480_size_1048576, PageIndex=0}:
+    ///   supposed to read 1048576 bytes, 13 bytes actually read
+    /// ```
+    ///
+    /// Java sends `Math.min(length - blockSize * seq, blockSize)`.
+    #[test]
+    fn open_ufs_block_options_carry_actual_tail_block_length() {
+        let bs = 1 << 20i64;
+        let status = status_with_ufs_path(2 * bs + 100, bs, 3);
+
+        let seen: Vec<(i64, i64)> = (0..3)
+            .map(|idx| {
+                let opts = open_ufs_block_options(&status, idx)
+                    .expect("a file with a ufs_path must produce OpenUfsBlockOptions");
+                (opts.offset_in_file.unwrap(), opts.block_size.unwrap())
+            })
+            .collect();
+
+        assert_eq!(
+            seen,
+            vec![(0, bs), (bs, bs), (2 * bs, 100)],
+            "the tail block must advertise 100 bytes, not the nominal {bs}"
+        );
+    }
+
+    /// A file smaller than one block: block 0 is the tail. Shape of the Lance
+    /// manifest / version-hint files that surfaced the bug.
+    #[test]
+    fn open_ufs_block_options_sub_block_file_reports_file_length() {
+        let status = status_with_ufs_path(13, 1 << 20, 1);
+        let opts = open_ufs_block_options(&status, 0)
+            .expect("a file with a ufs_path must produce OpenUfsBlockOptions");
+        assert_eq!(opts.block_size, Some(13));
+        assert_eq!(opts.offset_in_file, Some(0));
+    }
+
     #[test]
     fn resolve_block_id_uses_actual_length_for_short_file() {
         // 1 MiB file with 64 MiB configured block size — CI positioned_read
@@ -567,11 +643,30 @@ mod tests {
         let opts = open_ufs_block_options(&status, 1).expect("ufs path present");
         assert_eq!(opts.ufs_path.as_deref(), Some("cosn://bucket/file.bin"));
         assert_eq!(opts.offset_in_file, Some(64 << 20));
-        assert_eq!(opts.block_size, Some(64 << 20));
+        // Block 1 is the 100-byte tail, as the fixture's own `FileBlockInfo`
+        // says. This used to assert the nominal 64 MiB, which made the Worker
+        // read past the end of the object while back-filling the page cache.
+        assert_eq!(opts.block_size, Some(100));
         assert_eq!(opts.mount_id, Some(7));
         assert_eq!(opts.no_cache, Some(true));
         assert_eq!(opts.file_length, Some((64 << 20) + 100));
         assert_eq!(opts.max_ufs_read_concurrency, Some(8));
+    }
+
+    #[test]
+    fn open_ufs_block_options_for_block_id_uses_that_block_index() {
+        let mut status = status_with_blocks(
+            (64 << 20) + 100,
+            64 << 20,
+            &[(1, 0, 64 << 20), (2, 64 << 20, 100)],
+        );
+        status.ufs_path = "cosn://bucket/file.bin".into();
+        status.mount_id = 7;
+
+        let opts = open_ufs_block_options_for_block_id(&status, 2).expect("block 2 present");
+        assert_eq!(opts.offset_in_file, Some(64 << 20));
+        assert_eq!(opts.block_size, Some(100));
+        assert!(open_ufs_block_options_for_block_id(&status, 99).is_none());
     }
 
     // ── Helper: fabricate a WorkerClient from a never-connected channel ────

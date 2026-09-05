@@ -40,7 +40,7 @@ use goosefs_sdk::config::GoosefsConfig;
 use goosefs_sdk::context::FileSystemContext;
 use goosefs_sdk::error::{Error, Result};
 use goosefs_sdk::io::{GoosefsFileReader, GoosefsFileWriter};
-use goosefs_sdk::proto::grpc::file::FileInfo;
+use goosefs_sdk::proto::grpc::file::{CreateFilePOptions, FileInfo};
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -399,7 +399,23 @@ async fn opendal_multi_block_read_next_block() -> Result<()> {
     let path = format!("{root}/two-blocks.bin");
     let payload: Vec<u8> = (0..(64 * 1024 + 1024)).map(|i| (i % 251) as u8).collect();
 
-    let mut w = GoosefsFileWriter::create_with_context(ctx.clone(), &path, None).await?;
+    // CACHE_THROUGH for the fixture only, overriding the MUST_CACHE that
+    // `opendal_style_config` mirrors from OpenDAL. The payload spans two blocks,
+    // and switching blocks mid-file flushes the one being left behind, which a
+    // PAGE worker cannot do (`PagedBlockWriter.flush()` throws) — so a cache-only
+    // write type cannot even lay the file down there. This test asserts per-block
+    // *read* streaming, so the write type is incidental to it; the write-side
+    // matrix is pinned by
+    // bindings/python/tests/test_block_boundary_write_types.py instead.
+    let mut w = GoosefsFileWriter::create_with_context(
+        ctx.clone(),
+        &path,
+        Some(CreateFilePOptions {
+            write_type: Some(3),
+            ..Default::default()
+        }),
+    )
+    .await?;
     w.write(&payload).await?;
     w.close().await?;
 

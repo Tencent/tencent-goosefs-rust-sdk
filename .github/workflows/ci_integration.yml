@@ -60,20 +60,41 @@ env:
 # GooseFS image.
 
 jobs:
+  # The `store` dimension is not redundant coverage. A cache write that switches
+  # blocks mid-file flushes the block it leaves behind (Java
+  # `GooseFSFileOutStream.getNextBlock()` does the same), and `PAGE`'s
+  # `PagedBlockWriter.flush()` throws `UnsupportedOperationException` where
+  # `FILE`'s is implemented. So the same write can succeed on one worker and fail
+  # on the other. This matrix used to run only the fixture's default `FILE`,
+  # which is how that difference reached users unnoticed.
   goosefs-integration:
-    name: ${{ matrix.kind }}-it (${{ matrix.os }})
+    name: ${{ matrix.kind }}-it (${{ matrix.os }}, ${{ matrix.store }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      max-parallel: 2
       matrix:
+        # Combinations are listed out rather than expressed as a `store` axis
+        # crossed with `include`: an `include` entry that only *adds* keys is
+        # merged into every existing combination, so `kind` would collapse to
+        # whichever entry came last.
         include:
           - os: ubuntu-latest
             kind: rust
+            store: FILE
+          - os: ubuntu-latest
+            kind: rust
+            store: PAGE
           - os: ubuntu-latest
             kind: python
             python-version: "3.11"
+            store: FILE
+          - os: ubuntu-latest
+            kind: python
+            python-version: "3.11"
+            store: PAGE
+    env:
+      GOOSEFS_WORKER_BLOCK_STORE_TYPE: ${{ matrix.store }}
     steps:
       - uses: actions/checkout@v7
 

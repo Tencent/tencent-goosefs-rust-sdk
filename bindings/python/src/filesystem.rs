@@ -923,7 +923,10 @@ impl PyAsyncGoosefs {
     ///
     /// Pass `path` whenever possible so routing can prefer Master
     /// locations for that block (avoids sending reads to a worker that
-    /// does not hold the cached block).
+    /// does not hold the cached block). `path` also attaches
+    /// `OpenUfsBlockOptions` to the handle: PAGE workers need `mount_id`
+    /// on a positioned read even when the bytes already sit in the page
+    /// store, and THROUGH blocks have nowhere else to go.
     ///
     /// The returned [`AsyncWorkerClient`] wraps the same pooled
     /// [`goosefs_sdk::client::WorkerClient`] used internally by
@@ -942,11 +945,16 @@ impl PyAsyncGoosefs {
     ) -> PyResult<Bound<'py, PyAny>> {
         let h = self.handle()?;
         future_into_py(py, async move {
-            let locations = if let Some(ref p) = path {
+            let (locations, ufs_opts_for_block) = if let Some(ref p) = path {
                 let status = h.fs.get_status(p).await.map_err(map_err)?;
-                crate::positioned_read::block_locations_from_status(&status, block_id)
+                let locations =
+                    crate::positioned_read::block_locations_from_status(&status, block_id);
+                let ufs_opts =
+                    crate::positioned_read::open_ufs_block_options_for_block_id(&status, block_id)
+                        .map(|opts| (block_id, opts));
+                (locations, ufs_opts)
             } else {
-                Vec::new()
+                (Vec::new(), None)
             };
             // Locations-first when path provided; empty → hash fallback.
             let replication = h.ctx.config().file_replication_number;
@@ -974,7 +982,7 @@ impl PyAsyncGoosefs {
             //    `connect` factory) so we don't perform another TCP+SASL
             //    handshake on top of the already-pooled channel.
             Python::attach(|py| {
-                let wrapper = PyAsyncWorkerClient::from_sdk(client);
+                let wrapper = PyAsyncWorkerClient::from_sdk(client, ufs_opts_for_block);
                 Ok(Py::new(py, wrapper)?.into_any())
             })
         })

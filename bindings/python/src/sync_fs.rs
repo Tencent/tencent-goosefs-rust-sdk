@@ -714,11 +714,16 @@ impl PyGoosefs {
     ) -> PyResult<crate::worker::PyAsyncWorkerClient> {
         let h = self.handle()?;
         Self::guarded_block_on(py, async move {
-            let locations = if let Some(ref p) = path {
+            let (locations, ufs_opts_for_block) = if let Some(ref p) = path {
                 let status = h.fs.get_status(p).await.map_err(map_err)?;
-                crate::positioned_read::block_locations_from_status(&status, block_id)
+                let locations =
+                    crate::positioned_read::block_locations_from_status(&status, block_id);
+                let ufs_opts =
+                    crate::positioned_read::open_ufs_block_options_for_block_id(&status, block_id)
+                        .map(|opts| (block_id, opts));
+                (locations, ufs_opts)
             } else {
-                Vec::new()
+                (Vec::new(), None)
             };
             let replication = h.ctx.config().file_replication_number;
             let max_retry_node = h.ctx.config().file_read_max_node_retry;
@@ -739,7 +744,10 @@ impl PyGoosefs {
                 .acquire(&worker_addr)
                 .await
                 .map_err(map_err)?;
-            Ok(crate::worker::PyAsyncWorkerClient::from_sdk(client))
+            Ok(crate::worker::PyAsyncWorkerClient::from_sdk(
+                client,
+                ufs_opts_for_block,
+            ))
         })
     }
 

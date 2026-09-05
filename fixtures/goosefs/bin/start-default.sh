@@ -97,6 +97,18 @@ export GOOSEFS_JAVA_OPTS="${GOOSEFS_JAVA_OPTS:-} -Djava.net.preferIPv4Stack=true
 # the long comment in docker-compose-goosefs.yml for why this must be
 # the IPv4 literal and not the `localhost` name.
 : "${GOOSEFS_WORKER_HOSTNAME:=127.0.0.1}"
+# Worker block store implementation: `FILE` (a local file per block) or
+# `PAGE` (the paged block store). `FILE` is GooseFS's own default for
+# `goosefs.worker.block.store.type`, and the image ships no explicit value, so
+# defaulting here keeps an unset variable behaving exactly as before.
+#
+# The modes are not interchangeable as far as a client can tell: PAGE's
+# `PagedBlockWriter.flush()` throws `UnsupportedOperationException`, so a write
+# that flushes mid-file — a block switch under MUST_CACHE or ASYNC_THROUGH —
+# fails on PAGE and succeeds on FILE. The image configures both
+# `goosefs.worker.file.store.dirs.path` and `goosefs.worker.page.store.dirs`,
+# so either mode boots without further changes.
+: "${GOOSEFS_WORKER_BLOCK_STORE_TYPE:=FILE}"
 
 SITE_FILE="${GOOSEFS_HOME}/conf/goosefs-site.properties"
 
@@ -116,8 +128,18 @@ upsert_prop() {
 }
 
 apply_runtime_config() {
+  case "${GOOSEFS_WORKER_BLOCK_STORE_TYPE}" in
+    FILE | PAGE) ;;
+    *)
+      echo "[start-default] ERROR: GOOSEFS_WORKER_BLOCK_STORE_TYPE must be FILE or PAGE" \
+           "(got '${GOOSEFS_WORKER_BLOCK_STORE_TYPE}')" >&2
+      exit 1
+      ;;
+  esac
+
   upsert_prop "goosefs.master.hostname"        "${GOOSEFS_MASTER_HOSTNAME}"
   upsert_prop "goosefs.worker.hostname"        "${GOOSEFS_WORKER_HOSTNAME}"
+  upsert_prop "goosefs.worker.block.store.type" "${GOOSEFS_WORKER_BLOCK_STORE_TYPE}"
   # Bind on 0.0.0.0 so the container's published ports are reachable
   # from the host namespace. Without this the JVM binds on the
   # container hostname only and `127.0.0.1:9203` on the host drops
@@ -188,7 +210,8 @@ disable_incompatible_jemalloc() {
 }
 
 main() {
-  echo "[start-default] applying runtime config ..."
+  echo "[start-default] applying runtime config" \
+       "(block.store.type=${GOOSEFS_WORKER_BLOCK_STORE_TYPE}) ..."
   apply_runtime_config
   ensure_dirs
   disable_incompatible_jemalloc

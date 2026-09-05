@@ -72,6 +72,7 @@ use crate::client::WorkerClient;
 use crate::config::GoosefsConfig;
 use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
+use crate::fs::options::ufs_block_length;
 use crate::io::reader::GrpcBlockReader;
 use crate::proto::grpc::block::WorkerInfo;
 use crate::proto::grpc::file::FileInfo;
@@ -347,20 +348,21 @@ impl GoosefsFileReader {
         );
 
         // S4: pre-build the UFS read options template once. Per-segment
-        // `build_ufs_read_options` now clones this and updates only
-        // `offset_in_file`, avoiding a `ufs_path.clone()` + field
+        // `build_ufs_read_options` now clones this and updates only the two
+        // block-geometry fields, avoiding a `ufs_path.clone()` + field
         // re-derivation on every `read_segment`.
         let ufs_read_options = {
             let ufs_path = file_info.ufs_path.as_ref();
             if ufs_path.map_or(true, |p| p.is_empty()) {
                 None
             } else {
-                let block_size = file_info.block_size_bytes.unwrap_or(64 * 1024 * 1024);
                 Some(OpenUfsBlockOptions {
                     ufs_path: file_info.ufs_path.clone(),
-                    // offset_in_file is per-segment; set to 0 as placeholder.
+                    // offset_in_file and block_size are per-segment; set to 0
+                    // as placeholders, both overwritten by
+                    // `build_ufs_read_options`.
                     offset_in_file: Some(0),
-                    block_size: Some(block_size),
+                    block_size: Some(0),
                     // Must be sent. The Worker admits a UFS block read only
                     // while `sessions_for(block) < maxUfsReadConcurrency`, and
                     // an absent field decodes as 0 — so once a block has any
@@ -882,20 +884,26 @@ impl GoosefsFileReader {
     /// Returns `None` if the file has no UFS path (i.e. data is cache-only).
     ///
     /// clones the pre-built `self.ufs_read_options` template and updates only
-    /// `offset_in_file`. The old path re-cloned `ufs_path: String` +
-    /// re-derived `mount_id` / `no_cache` / `block_size` on every
-    /// `read_segment` call. Now the per-segment cost is one `OpenUfsBlockOptions::clone`
-    /// (which clones `ufs_path: Option<String>` — still a String clone, but
-    /// only one field instead of re-deriving all fields) plus one `offset_in_file`
-    /// assignment. The `ufs_path` clone is unavoidable because the proto
-    /// type owns its string.
+    /// the block-geometry fields. The old path re-cloned `ufs_path: String` +
+    /// re-derived `mount_id` / `no_cache` on every `read_segment` call. Now the
+    /// per-segment cost is one `OpenUfsBlockOptions::clone` (which clones
+    /// `ufs_path: Option<String>` — still a String clone, but only one field
+    /// instead of re-deriving all fields) plus two assignments. The `ufs_path`
+    /// clone is unavoidable because the proto type owns its string.
     fn build_ufs_read_options(&self, plan: &BlockReadPlan) -> Option<OpenUfsBlockOptions> {
         let template = self.ufs_read_options.as_ref()?;
-        let block_size = template.block_size.unwrap_or(64 * 1024 * 1024);
-        let offset_in_file = plan.block_index as i64 * block_size;
+        let nominal_block_size = self.file_info.block_size_bytes.unwrap_or(64 * 1024 * 1024);
+        let offset_in_file = (plan.block_index as i64).saturating_mul(nominal_block_size);
 
         let mut opts = template.clone();
         opts.offset_in_file = Some(offset_in_file);
+        // The real length of *this* block, not the nominal block size — see
+        // [`ufs_block_length`]. A `FileInfo` without a length cannot be
+        // clamped against anything, so fall back to the nominal size.
+        opts.block_size = Some(match self.file_info.length {
+            Some(len) => ufs_block_length(len, nominal_block_size, plan.block_index),
+            None => nominal_block_size,
+        });
         Some(opts)
     }
 
@@ -1218,6 +1226,100 @@ mod tests {
             "unset (or 0) makes the Worker refuse every read after the first"
         );
         assert!(opts.max_ufs_read_concurrency.unwrap() > 0);
+    }
+
+    /// **Regression**: `OpenUfsBlockOptions.block_size` must carry the real
+    /// length of the block, not the file's nominal block size.
+    ///
+    /// The Worker treats it as the block length and asks the UFS for that many
+    /// bytes when back-filling the page cache, so over-reporting a partial tail
+    /// block makes the read come up short and the block is never cached:
+    ///
+    /// ```text
+    /// ERROR LocalCacheManager - Failed to read page
+    ///   BlockPageId{FileId=paged_block_503316480_size_1048576, PageIndex=0}:
+    ///   supposed to read 1048576 bytes, 13 bytes actually read
+    /// WARN  PagedBlockStore - Failed to cache block 503316480 in page mode
+    /// ```
+    ///
+    /// Java sends `Math.min(length - blockSize * seq, blockSize)`.
+    #[test]
+    fn ufs_read_options_carry_actual_tail_block_length() {
+        let bs = 1 << 20i64;
+        let length = 2 * bs + 100;
+        let file_info = FileInfo {
+            length: Some(length),
+            block_size_bytes: Some(bs),
+            block_ids: vec![1001, 1002, 1003],
+            completed: Some(true),
+            folder: Some(false),
+            ufs_path: Some("cosn://bucket/tail.lance".to_string()),
+            mount_id: Some(7),
+            ..Default::default()
+        };
+        let reader = GoosefsFileReader::build(
+            &GoosefsConfig::new("127.0.0.1:9200"),
+            "/tail.lance",
+            Arc::new(file_info),
+            WorkerRouterView::empty(),
+            None,
+            None,
+            0,
+            length as u64,
+        )
+        .expect("build reader");
+
+        let seen: Vec<(i64, i64)> = reader
+            .plans
+            .iter()
+            .map(|plan| {
+                let opts = reader
+                    .build_ufs_read_options(plan)
+                    .expect("a file with a ufs_path must produce OpenUfsBlockOptions");
+                (opts.offset_in_file.unwrap(), opts.block_size.unwrap())
+            })
+            .collect();
+
+        assert_eq!(
+            seen,
+            vec![(0, bs), (bs, bs), (2 * bs, 100)],
+            "the tail block must advertise 100 bytes, not the nominal {bs}"
+        );
+    }
+
+    /// A file smaller than one block has no full block at all — block 0 is the
+    /// tail. This is the shape of the Lance manifest / version-hint files that
+    /// surfaced the bug.
+    #[test]
+    fn ufs_read_options_sub_block_file_reports_file_length() {
+        let bs = 1 << 20i64;
+        let file_info = FileInfo {
+            length: Some(13),
+            block_size_bytes: Some(bs),
+            block_ids: vec![1001],
+            completed: Some(true),
+            folder: Some(false),
+            ufs_path: Some("cosn://bucket/latest_version_hint.json".to_string()),
+            mount_id: Some(7),
+            ..Default::default()
+        };
+        let reader = GoosefsFileReader::build(
+            &GoosefsConfig::new("127.0.0.1:9200"),
+            "/latest_version_hint.json",
+            Arc::new(file_info),
+            WorkerRouterView::empty(),
+            None,
+            None,
+            0,
+            13,
+        )
+        .expect("build reader");
+
+        let opts = reader
+            .build_ufs_read_options(&reader.plans[0])
+            .expect("a file with a ufs_path must produce OpenUfsBlockOptions");
+        assert_eq!(opts.block_size, Some(13));
+        assert_eq!(opts.offset_in_file, Some(0));
     }
 
     /// `read_file` / `read_range` must reject directories (Java

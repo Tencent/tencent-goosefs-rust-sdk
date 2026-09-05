@@ -48,6 +48,7 @@ use goosefs_sdk::context::FileSystemContext;
 use goosefs_sdk::error::Result;
 use goosefs_sdk::io::{GoosefsFileReader, GoosefsFileWriter};
 use goosefs_sdk::proto::grpc::file::CreateFilePOptions;
+use goosefs_sdk::WritePType;
 
 /// Path of the test file inside Goosefs.
 const TEST_PATH: &str = "/streaming-test/data.bin";
@@ -111,9 +112,14 @@ async fn main() -> Result<()> {
     );
     let payload = make_payload(PAYLOAD_SIZE);
     // Override block_size_bytes so the file is split into multiple blocks
-    // and the streaming demo iterates more than once.
+    // and the streaming demo iterates more than once. CACHE_THROUGH is
+    // required for the write itself: switching blocks mid-file flushes the
+    // one being left behind, and PAGE `PagedBlockWriter.flush()` throws.
+    // This example is about *reading* those blocks; the write-type matrix
+    // lives in bindings/python/tests/test_block_boundary_write_types.py.
     let create_opts = CreateFilePOptions {
         block_size_bytes: Some(BLOCK_SIZE),
+        write_type: Some(WritePType::CacheThrough as i32),
         recursive: Some(true),
         ..Default::default()
     };
