@@ -12,7 +12,7 @@ This site documents the **GooseFS client libraries** for Rust and Python, develo
 
 - **Manage** files and directories (create, list, rename, delete, get status)
 - **Read and write** data with high-level streaming APIs
-- **Accelerate** hot reads with client local page cache, metadata cache, and short-circuit mmap
+- **Accelerate** hot reads with client local page cache and metadata cache
 - **Observe** client behavior via Master heartbeat and Prometheus Pushgateway metrics
 
 ## Architecture
@@ -30,7 +30,7 @@ The Rust crate (`goosefs-sdk`) is Layer 3 in the **Lance → OpenDAL → GooseFS
 │  FileSystem / BaseFileSystem / FileSystemContext               │
 │  GoosefsFileInStream / GoosefsFileWriter / GoosefsFileReader   │
 │  MasterClient / WorkerClient / WorkerRouter                    │
-│  Page cache · Metadata cache · Short-circuit · Metrics         │
+│  Page cache · Metadata cache · Metrics                         │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -58,7 +58,7 @@ export GOOSEFS_AUTH_TYPE=simple
 
 ## How This Guide Is Organised
 
-- **Rust** — installation, FileSystem API, configuration, page cache, metadata cache, short-circuit, metrics, and examples
+- **Rust** — installation, FileSystem API, configuration, page cache, metadata cache, metrics, and examples
 - **Python** — installation, sync/async quickstart, batch APIs, caching, and binding examples
 - **Contributing** — build, test, and PR conventions
 - **Release** — publishing `goosefs-sdk` and the Python wheel

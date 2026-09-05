@@ -8,6 +8,17 @@ This document records all notable changes to the `goosefs` Python binding. The f
 
 ## [Unreleased]
 
+### Removed
+
+- **Short-circuit (local mmap) read path**, following its removal from the
+  underlying `goosefs-sdk` crate. The binding never exposed it as a Python
+  API, so no Python code changes are required: `GOOSEFS_SHORT_CIRCUIT_*` env
+  vars, `goosefs.{user,client}.short.circuit.*` properties and
+  `goosefs_short_circuit_*` storage options are now simply ignored. Reads that
+  previously took the local mmap path use the gRPC data plane, which was
+  already the fallback whenever short-circuit was off or a block was not
+  local — byte-level behaviour is unchanged.
+
 ### Changed
 
 - **`recursive=False` is now honoured on `write_file` / `create_file` /
@@ -196,12 +207,12 @@ improvements transparently — most require no API change.
   RPC + `OpenLocalBlockGuard` for block-lock lifecycle. Ships with an
   `sc_pr_ab` benchmark comparing local mmap vs gRPC positioned-read,
   gated E2E integration tests, and an INV-S3 / INV-D1 / INV-D2 /
-  INV-S1 / INV-S2 / INV-S5 consistency regression suite. See
-  [`docs/SHORT_CIRCUIT_DESIGN.md`](../../docs/SHORT_CIRCUIT_DESIGN.md).
+  INV-S1 / INV-S2 / INV-S5 consistency regression suite.
   Python inherits this transparently — every `open_file` / `read_file`
   / `read_range` / `positioned_read` call automatically prefers the
   local mmap path when the target block resides on the co-located
-  worker.
+  worker. (Removed again in a later release; see the `Unreleased`
+  section above.)
 
 - **Batch metadata / lifecycle APIs.** `BaseFileSystem` gains a full
   batch surface (`batch_open_file`, `batch_create_file`,

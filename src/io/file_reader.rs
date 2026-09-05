@@ -64,7 +64,6 @@ use tracing::{debug, warn};
 
 use crate::block::mapper::{BlockMapper, BlockReadPlan};
 use crate::block::router::WorkerRouterView;
-use crate::block::short_circuit::{ShortCircuitError, ShortCircuitFactory};
 use crate::cache::{
     page_cache_eligible, read_through_cache, CacheManager, ExternalRangeReader, FillMode,
 };
@@ -143,14 +142,6 @@ pub struct GoosefsFileReader {
     cache_fill: bool,
     /// Whether back-fill uses the bounded async write-back pool.
     cache_async_write: bool,
-
-    // ── Short-circuit (local mmap) read path ─────────────────────────────────
-    /// Shared short-circuit factory when SC is enabled and the reader was built
-    /// in context mode. `None` disables SC (legacy path / kill switch off).
-    /// When `Some`, the per-block read convergence (`read_segment`) first attempts a
-    /// local mmap read and transparently falls back to gRPC on any recoverable
-    /// failure.
-    short_circuit: Option<Arc<ShortCircuitFactory>>,
 
     // ── S4: pre-built UFS read options ───────────────────────────────────────
     /// Pre-built `OpenUfsBlockOptions` template for the UFS path, built once
@@ -403,26 +394,24 @@ impl GoosefsFileReader {
             total_bytes_read: 0,
             offset,
             length,
-            // Cache/SC are disabled by default here; `attach_cache()` enables
-            // them in the async opener when a shared context is present.
+            // The cache is disabled by default here; `attach_cache()` enables
+            // it in the async opener when a shared context is present.
             cache: None,
             cache_file_id: Arc::from(""),
             cache_page_size: config.client_cache_page_size,
             cache_fill: false,
             cache_async_write: false,
-            short_circuit: None,
             ufs_read_options,
         })
     }
 
-    /// Inject the shared short-circuit factory and (optionally) the local page
-    /// cache from a shared [`FileSystemContext`] (best-effort).
+    /// Inject the local page cache from a shared [`FileSystemContext`]
+    /// (best-effort).
     ///
     /// `use_page_cache` is `false` for the one-shot `read_file` / `read_range`
     /// helpers: those stay on the worker-direct path (Python binding contract
     /// and `docs/CLIENT_PAGE_CACHE_DESIGN.md` §14.1). Streaming
     /// `open_with_context` still attaches the cache for OpenDAL / Lance.
-    /// Short-circuit is independent of that flag.
     ///
     /// `build()` is synchronous, but `on_file_open` is async, so cache
     /// activation is deferred to this async opener helper. The `file_id`,
@@ -430,10 +419,6 @@ impl GoosefsFileReader {
     /// `URIStatus::from_proto` (all `unwrap_or(0)`), so this reader hits exactly
     /// the same on-disk pages as `GoosefsFileInStream`.
     async fn attach_cache(&mut self, ctx: &Arc<FileSystemContext>, use_page_cache: bool) {
-        // Short-circuit is independent of the page cache: it can accelerate the
-        // worker read even when the page cache is disabled.
-        self.short_circuit = ctx.acquire_short_circuit();
-
         if !use_page_cache {
             self.cache = None;
             self.cache_fill = false;
@@ -593,8 +578,6 @@ impl GoosefsFileReader {
     ///      failed and retries once on a different worker;
     ///   ② auth failure during the RPC → single-flight reconnect + re-read
     ///      (same `open + read_all` verb, byte-equivalent — HR-3).
-    /// It also attempts the short-circuit (local mmap) path first, falling back
-    /// transparently to gRPC on any recoverable failure().
     ///
     /// Uses only `&self` — it never touches iterator state, so it is safe to be
     /// re-entered as the cache-miss source.
@@ -610,12 +593,6 @@ impl GoosefsFileReader {
         plan: &BlockReadPlan,
         positioned: bool,
     ) -> Result<Bytes> {
-        // Try the short-circuit (local mmap) path first; a recoverable failure
-        // returns `None` and we fall through to the gRPC path below().
-        if let Some(sc_result) = self.try_short_circuit_read(block_id, plan).await {
-            return sc_result;
-        }
-
         let ufs_options = self.build_ufs_read_options(plan);
 
         // ① Select worker + connection failover (mirrors the old read_next_block).
@@ -737,111 +714,6 @@ impl GoosefsFileReader {
             buf.extend_from_slice(&data);
         }
         Ok(buf.freeze())
-    }
-
-    /// Attempt a short-circuit (local mmap) read of a single block segment.
-    ///
-    /// Returns:
-    /// - `Some(Ok(bytes))` — SC served the read (zero-copy).
-    /// - `Some(Err(e))`   — a **semantic** error (`OutOfRange`) that must be
-    ///   surfaced unchanged; the caller must NOT fall back.
-    /// - `None`           — SC was not used, or hit a recoverable failure; the
-    ///   caller transparently falls back to gRPC.
-    ///
-    /// TODO(java-parity): align SC gating/open with Java (locations-first read
-    /// target must be local). Deferred; this PR does not change the SC path.
-    async fn try_short_circuit_read(
-        &self,
-        block_id: i64,
-        plan: &BlockReadPlan,
-    ) -> Option<Result<Bytes>> {
-        // : `self.short_circuit == None` means the SC factory was never
-        // built (SC disabled by config, or the reader was constructed
-        // without a `FileSystemContext`). Count it as SKIPPED so
-        //     hit_rate = HIT / (HIT + SKIPPED + FALLBACK_OPEN + FALLBACK_READ)
-        // has a stable denominator across `short_circuit_enabled` toggles.
-        let factory = match self.short_circuit.as_ref() {
-            Some(f) => f,
-            None => {
-                crate::metrics::counter(crate::metrics::name::CLIENT_SC_DECISION_SKIPPED).inc(1);
-                return None;
-            }
-        };
-        let block_size = self.block_logical_size(plan.block_index);
-
-        if !factory.should_use(block_id, block_size).await {
-            // : SC disabled / pre-filter rejected the block. This is the
-            // hit-rate denominator's "skipped" bucket (see registry docs).
-            crate::metrics::counter(crate::metrics::name::CLIENT_SC_DECISION_SKIPPED).inc(1);
-            return None;
-        }
-
-        let reader = match factory.get_or_open(block_id, block_size).await {
-            Ok(r) => r,
-            Err(e) => {
-                debug!(
-                    block_id = block_id,
-                    error = %e,
-                    "short-circuit open failed, falling back to gRPC"
-                );
-                // : SC attempted but the open step failed. The specific
-                // cause is exposed via `ShortCircuitOpenLocalFail` /
-                // `ShortCircuitFileOpenFail` / `ShortCircuitMmapFail`.
-                crate::metrics::counter(crate::metrics::name::CLIENT_SC_DECISION_FALLBACK_OPEN)
-                    .inc(1);
-                return None;
-            }
-        };
-
-        match reader.read_bytes(plan.offset_in_block as usize, plan.length as usize) {
-            Ok(bytes) => {
-                // : SC actually served this read.
-                crate::metrics::counter(crate::metrics::name::CLIENT_SC_DECISION_HIT).inc(1);
-                Some(Ok(bytes))
-            }
-            Err(ShortCircuitError::OutOfRange {
-                off,
-                len,
-                file_size,
-            }) => {
-                // : semantic error — propagates rather than falls back.
-                crate::metrics::counter(crate::metrics::name::CLIENT_SC_DECISION_SEMANTIC_ERROR)
-                    .inc(1);
-                Some(Err(Error::InvalidArgument {
-                    message: format!(
-                        "short-circuit read out of range on block {block_id}: \
-                         off={off} len={len} block_size={file_size}"
-                    ),
-                }))
-            }
-            Err(e) => {
-                debug!(
-                    block_id = block_id,
-                    error = %e,
-                    "short-circuit read failed, falling back to gRPC"
-                );
-                // : SC opened OK but read failed recoverably; falling back.
-                crate::metrics::counter(crate::metrics::name::CLIENT_SC_DECISION_FALLBACK_READ)
-                    .inc(1);
-                factory.invalidate(block_id).await;
-                None
-            }
-        }
-    }
-
-    /// Logical (on-disk) byte size of the block at `block_index`.
-    ///
-    /// Full blocks are `block_size_bytes`; the trailing block is the file
-    /// remainder. This is the value the short-circuit factory expects (matching
-    /// the Worker's `OpenLocalBlock` response `block_size`).
-    fn block_logical_size(&self, block_index: u64) -> i64 {
-        let bs = self.file_info.block_size_bytes.unwrap_or(64 * 1024 * 1024);
-        let file_length = self.file_length() as i64;
-        if bs <= 0 {
-            return file_length.max(0);
-        }
-        let start = block_index as i64 * bs;
-        (file_length - start).clamp(0, bs)
     }
 
     /// Format a `WorkerInfo`'s address as `host:rpc_port`.
@@ -1348,22 +1220,6 @@ mod tests {
         assert!(opts.max_ufs_read_concurrency.unwrap() > 0);
     }
 
-    /// `block_logical_size` returns the full block size for interior blocks, the
-    /// remainder for the trailing block, and clamps to `0` past EOF.
-    #[test]
-    fn test_block_logical_size() {
-        let bs = 64 * 1024 * 1024i64;
-        // 2.5 blocks: 0 and 1 are full; block 2 is a half-block remainder.
-        let len = 2 * bs + bs / 2;
-        let reader = make_reader(len, bs);
-
-        assert_eq!(reader.block_logical_size(0), bs);
-        assert_eq!(reader.block_logical_size(1), bs);
-        assert_eq!(reader.block_logical_size(2), bs / 2);
-        // Past EOF clamps to 0 (never negative).
-        assert_eq!(reader.block_logical_size(99), 0);
-    }
-
     /// `read_file` / `read_range` must reject directories (Java
     /// `openFile` / `OpenDirectoryException`). Without this, a directory's
     /// length-0 metadata would return empty bytes.
@@ -1387,17 +1243,13 @@ mod tests {
         assert!(GoosefsFileReader::reject_directory(&info, "/f").is_ok());
     }
 
-    /// A freshly-built reader (no context) has caching and short-circuit off,
-    /// so its read path is byte-for-byte the legacy worker-direct path.
+    /// A freshly-built reader (no context) has caching off, so its read path is
+    /// byte-for-byte the legacy worker-direct path.
     #[test]
-    fn test_build_defaults_disable_cache_and_sc() {
+    fn test_build_defaults_disable_cache() {
         let reader = make_reader(1024, 1024);
         assert!(reader.cache.is_none(), "cache must default to disabled");
         assert!(!reader.cache_fill, "fill must default to false");
-        assert!(
-            reader.short_circuit.is_none(),
-            "short-circuit must default to disabled"
-        );
     }
 
     /// HR-1: missing / non-positive `file_id` must keep the page cache off.

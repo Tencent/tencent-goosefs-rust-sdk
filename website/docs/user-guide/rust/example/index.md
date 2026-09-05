@@ -15,7 +15,6 @@ cargo run --example metadata_crud
 cargo run --example context_file_rw
 cargo run --example highlevel_file_rw
 cargo run --example page_cache_demo
-cargo run --example short_circuit_demo
 ```
 
 | Example               | Topic                                           |
@@ -28,7 +27,6 @@ cargo run --example short_circuit_demo
 | `write_types`         | `WriteType` variants                            |
 | `ha_multi_master`     | Multi-master HA discovery                       |
 | `page_cache_demo`     | Local page cache cold/warm hit                  |
-| `short_circuit_demo`  | Local mmap short-circuit path                   |
 | `metrics_heartbeat`   | Master metrics heartbeat                        |
 | `metrics_pushgateway` | Prometheus Pushgateway export                   |
 | `auth_demo`           | SASL / SIMPLE auth                              |

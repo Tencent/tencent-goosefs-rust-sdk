@@ -11,6 +11,26 @@ kept aligned. Python-specific notes also appear in
 
 ## [Unreleased]
 
+### Removed
+
+- **Short-circuit (local mmap) read path.** The `goosefs_sdk::block::short_circuit`
+  module, the `OpenLocalBlock` client wrapper (`WorkerClient::open_local_block`
+  and `OpenLocalBlockGuard`), `WorkerRouter::is_block_source_local`, all eleven
+  `short_circuit_*` config fields with their builders, `GOOSEFS_SHORT_CIRCUIT_*`
+  env vars, `goosefs.{user,client}.short.circuit.*` properties and
+  `goosefs_short_circuit_*` storage options, and every `Client.ShortCircuit*`
+  metric are gone. The path was disabled by default and unused in practice.
+
+  **Impact:** reads that previously took the local mmap path now always use the
+  gRPC data plane, which was already the fallback whenever short-circuit was
+  off or a block was not local — so byte-level behaviour is unchanged. Code
+  setting a `short_circuit_*` field or calling a `with_short_circuit_*` builder
+  no longer compiles; delete the call. Unknown env vars, properties and storage
+  options are ignored, so configuration files need no change. The
+  `OpenLocalBlock` / `CreateLocalBlock` RPCs remain in the generated protobuf
+  because they are part of the upstream GooseFS `BlockWorker` service; the SDK
+  simply no longer calls them. Drops the `memmap2` dependency.
+
 ### Fixed
 
 - **`$GOOSEFS_CONF_DIR/goosefs-site.properties` is discovered again.**

@@ -70,9 +70,9 @@ always observe the exact bytes the worker / UFS would have served. The
 following hard invariants make that contract testable and gate every
 release.
 
-They mirror the structure used by `SHORT_CIRCUIT_DESIGN.md` §1.3
-(`INV-D*` data-plane / `INV-S*` semantic). Every invariant maps to a
-gating-grade test case in `tests/page_cache_consistency.rs` (§12.5).
+They are split into `INV-PC-D*` (data-plane) and `INV-PC-S*` (semantic).
+Every invariant maps to a gating-grade test case in
+`tests/page_cache_consistency.rs` (§12.5).
 
 | ID | Invariant | Test case |
 |---|---|---|
@@ -823,8 +823,7 @@ Recognizable property keys: `enabled` / `page.size` / `size` / `dirs` / `evictio
 
 ### 12.5 Gating-grade consistency suite (`page_cache_consistency`)
 
-This is the page-cache analogue of `tests/sc_consistency.rs`. Every
-invariant from §1.4 maps to exactly one `#[tokio::test] #[ignore]` case
+Every invariant from §1.4 maps to exactly one `#[tokio::test] #[ignore]` case
 that asserts a hard byte-equality contract (not a perf metric); a
 failure here is a release blocker. Run them explicitly:
 
@@ -842,7 +841,7 @@ Coverage map:
 | `inv_pc_s1_failed_fill_does_not_poison_cache` | INV-PC-S1 | Cache directory is pointed at an unwritable path, so every fill fails. The reader must still return bytes equal to the source for both whole-file and boundary-spanning ranges, and the `Client.CacheBytesReadCache` counter must stay flat (no torn data is ever served from the cache). |
 | `inv_pc_s2_restart_byte_parity` | INV-PC-S2 | Two phases. Phase A: cache-on context, write payload v1, read it warm, drop the context. Phase B: a fresh context backed by the same on-disk cache directory reads the file again and must return v1 byte-for-byte. Then the file is overwritten as v2 (different length); a third context reading after the overwrite must observe v2 bytes (no stale v1 from disk). |
 
-Design notes (parity with `sc_consistency.rs`):
+Design notes:
 
 - `block_size = 4 MiB` and a 10 MiB payload force every test to cross at
   least two block boundaries on a single-worker dev cluster.
@@ -1005,11 +1004,10 @@ Client.AsyncThroughThreadsActive
 
 # Client Page Cache — io_uring Client Development Design Document
 
-> Status: **In implementation** · Branch: `feature/reader-page-cache-short-circuit`
+> Status: **In implementation**
 > Date: 2026-07-08
 > Prerequisite documents:
 > - [`CLIENT_PAGE_CACHE_DESIGN.md`](CLIENT_PAGE_CACHE_DESIGN.md) — full design of the existing `tokio::fs` backend
-> - [`SHORT_CIRCUIT_IO_URING_FEASIBILITY.md`](SHORT_CIRCUIT_IO_URING_FEASIBILITY.md) — io_uring feasibility analysis for the SC path
 > - [`perf/2026-07-08-oncpu3-cache-hotspots/CACHE_VS_NOCACHE_ANALYSIS.md`](perf/2026-07-08-oncpu3-cache-hotspots/CACHE_VS_NOCACHE_ANALYSIS.md) — flame-graph root-cause analysis
 > Reference implementation:
 > - `lance `rust/lance-io/src/uring/` ` — Lance's io_uring implementation (thread pool + Future waker pattern)
@@ -2323,7 +2321,7 @@ LANCE_URING_POLL_TIMEOUT_MS=10
 | Rolling upgrade | the io_uring backend and the tokio::fs backend share an identical on-disk format, the client can switch freely; server version is independent |
 | Protocol compatibility | zero proto changes; zero Master/Worker code changes; zero config changes |
 
-**Comparison with the SC io_uring feasibility analysis**: [`SHORT_CIRCUIT_IO_URING_FEASIBILITY.md`](SHORT_CIRCUIT_IO_URING_FEASIBILITY.md) §5 also confirms zero server-side changes on the SC path. The page-cache path of this design is the same — `PageStore` is a pure local-file-operation abstraction, involving no network protocol.
+`PageStore` is a pure local-file-operation abstraction, involving no network protocol, so no server-side change is required.
 
 ### 9.2 Change scope
 
@@ -2536,7 +2534,6 @@ async fn bench_cache_hit_concurrent_uring() { /* 32 concurrent */ }
 ## 13. Cross-references
 
 - [`CLIENT_PAGE_CACHE_DESIGN.md`](CLIENT_PAGE_CACHE_DESIGN.md) — existing cache design (P0-P3 implemented)
-- [`SHORT_CIRCUIT_IO_URING_FEASIBILITY.md`](SHORT_CIRCUIT_IO_URING_FEASIBILITY.md) — io_uring analysis for the SC path
 - [`../../goosefs-lance-tests/docs/design/FLAMEGRAPH_OPTIMIZATION_PLAN.md`](../../goosefs-lance-tests/docs/design/FLAMEGRAPH_OPTIMIZATION_PLAN.md) — A/B/C series optimizations (router/transport layer)
 - [`perf/2026-07-08-oncpu3-cache-hotspots/CACHE_VS_NOCACHE_ANALYSIS.md`](perf/2026-07-08-oncpu3-cache-hotspots/CACHE_VS_NOCACHE_ANALYSIS.md) — D series optimization items
 - Lance reference: `lance `rust/lance-io/src/uring/` ` — `thread.rs`, `reader.rs`, `future.rs`, `requests.rs`

@@ -62,8 +62,7 @@ use crate::worker::PyAsyncWorkerClient;
 /// streaming paths.
 ///
 /// **Note**: Worker `BlockWorker` gRPC service listens on `rpc_port` (9203
-/// by default); `data_port` is only used by the Netty short-circuit path,
-/// which the Rust SDK does not implement.
+/// by default); `data_port` is unused by the Rust SDK's gRPC client.
 pub(crate) fn format_worker_addr(addr: &goosefs_sdk::proto::grpc::WorkerNetAddress) -> String {
     format!(
         "{}:{}",

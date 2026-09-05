@@ -96,16 +96,6 @@ println!("received {} bytes total", reader.bytes_received());
 
 `GrpcBlockReader::open` internally calls `WorkerClient::read_block` with `position_short = false` (sequential streaming). For positioned reads, `GrpcBlockReader` includes `read_chunk` which incrementally ACKs received bytes to maintain flow control.
 
-### Step 5: Short-circuit (same-host optimization)
-
-If the client and worker are on the same host and [short-circuit](./short-circuit) is enabled, use `WorkerClient::open_local_block` to obtain an `OpenLocalBlockResponse` (containing the local file path) + an `OpenLocalBlockGuard`. The response can then be used to `mmap` the local block file, bypassing gRPC for data transfer:
-
-```rust
-// worker is a WorkerClient from Step 3.
-let (response, _guard) = worker.open_local_block(block_ids[0], block_size as i64, None).await?;
-// response.path contains the local file path for mmap-based reads.
-```
-
 ## `GrpcBlockReader` API
 
 | Method | Description |
@@ -126,7 +116,6 @@ let (response, _guard) = worker.open_local_block(block_ids[0], block_size as i64
 | `connect_simple(addr, timeout)` | Deprecated, unauthenticated escape hatch (test-only) |
 | `read_block(block_id, offset, length, ...)` | Start a streaming read (returns `(Sender<ReadRequest>, Streaming<ReadResponse>)` — use `GrpcBlockReader::open` instead) |
 | `read_block_positioned(block_id, offset, length, ...)` | Start a positioned read (returns channel pair — use `GrpcBlockReader::positioned_read` instead) |
-| `open_local_block(block_id, block_size, capability)` | Short-circuit `mmap` read (returns `(OpenLocalBlockResponse, OpenLocalBlockGuard)`) |
 | `write_block(...)` | Block write (for streaming writers) |
 | `addr()` | Worker `host:port` |
 | `generation()` | Monotonic connection-generation tag used by pooled reconnect logic |
@@ -143,7 +132,6 @@ let (response, _guard) = worker.open_local_block(block_ids[0], block_size as i64
 | `select_worker(block_id)` | Pick the worker holding this block |
 | `get_workers()` | Snapshot of all known workers |
 | `mark_failed(addr)` | Mark a worker as temporarily unavailable |
-| `is_block_source_local(block_id)` | Check if the block is on the local host (short-circuit eligible) |
 | `needs_refresh()` | Whether the worker list is stale |
 
 ## When to use

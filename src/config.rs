@@ -688,68 +688,6 @@ impl PropertiesMap {
             cfg.file_persist_on_rename = b;
         }
 
-        // ── Short-circuit (local mmap) read path ─────────────────
-        // Master kill switch:
-        // goosefs.user.short.circuit.enabled
-        if let Some(enabled) = self.get_bool("goosefs.user.short.circuit.enabled") {
-            cfg.short_circuit_enabled = enabled;
-        }
-        // Per-task hot-block LRU capacity:
-        // goosefs.client.short.circuit.cache.capacity
-        if let Some(n) = self.get_parsed::<usize>("goosefs.client.short.circuit.cache.capacity") {
-            cfg.short_circuit_cache_capacity = n;
-        }
-        // Cached SC reader idle TTL (milliseconds):
-        // goosefs.client.short.circuit.cache.ttl.ms
-        if let Some(ms) = self.get_parsed::<u64>("goosefs.client.short.circuit.cache.ttl.ms") {
-            cfg.short_circuit_cache_ttl = Duration::from_millis(ms);
-        }
-        // Negative-cache TTL for blocks that failed SC (milliseconds):
-        // goosefs.client.short.circuit.neg.cache.ttl.ms
-        if let Some(ms) = self.get_parsed::<u64>("goosefs.client.short.circuit.neg.cache.ttl.ms") {
-            cfg.short_circuit_neg_cache_ttl = Duration::from_millis(ms);
-        }
-        // L1 kernel readahead hint (`sequential`/`random`/`normal`/`none`):
-        // goosefs.client.short.circuit.advise
-        if let Some(hint) = self.get("goosefs.client.short.circuit.advise") {
-            if !hint.is_empty() {
-                cfg.short_circuit_advise = hint.to_string();
-            }
-        }
-        // L2 application-level prefetch master switch:
-        // goosefs.client.short.circuit.prefetch.enabled
-        if let Some(enabled) = self.get_bool("goosefs.client.short.circuit.prefetch.enabled") {
-            cfg.short_circuit_prefetch_enabled = enabled;
-        }
-        // Max gap between adjacent ranges merged by `prefetch_many` (bytes):
-        // goosefs.client.short.circuit.prefetch.coalesce.gap
-        if let Some(n) =
-            self.get_parsed::<usize>("goosefs.client.short.circuit.prefetch.coalesce.gap")
-        {
-            cfg.short_circuit_prefetch_coalesce_gap = n;
-        }
-        // Max `madvise` calls per `prefetch_many`:
-        // goosefs.client.short.circuit.prefetch.max.batch
-        if let Some(n) = self.get_parsed::<usize>("goosefs.client.short.circuit.prefetch.max.batch")
-        {
-            cfg.short_circuit_prefetch_max_batch = n;
-        }
-        // Minimum block size (bytes) required to attempt SC (`0` = no minimum):
-        // goosefs.client.short.circuit.min.block.size
-        if let Some(n) = self.get_parsed::<i64>("goosefs.client.short.circuit.min.block.size") {
-            cfg.short_circuit_min_block_size = n;
-        }
-        // Install a process-global SIGBUS diagnostic handler (Linux/macOS):
-        // goosefs.client.short.circuit.sigbus.handler
-        if let Some(enabled) = self.get_bool("goosefs.client.short.circuit.sigbus.handler") {
-            cfg.short_circuit_sigbus_handler = enabled;
-        }
-        // Request Transparent Huge Pages via `madvise(MADV_HUGEPAGE)` (Linux):
-        // goosefs.client.short.circuit.thp
-        if let Some(enabled) = self.get_bool("goosefs.client.short.circuit.thp") {
-            cfg.short_circuit_thp = enabled;
-        }
-
         cfg
     }
 }
@@ -1484,87 +1422,6 @@ pub const STORAGE_OPT_REQUEST_TIMEOUT: &str = "goosefs_request_timeout";
 
 /// Storage option key for VPC mapping (`true`/`false`).
 pub const STORAGE_OPT_USE_VPC_MAPPING: &str = "goosefs_use_vpc_mapping";
-
-// ── Short-circuit (local mmap) read env vars (SHORT_CIRCUIT_DESIGN ) ─
-/// Environment variable: master kill switch for the short-circuit local read path.
-///
-/// Mirrors [`GoosefsConfig::short_circuit_enabled`]. Accepts `true`/`false`
-/// (case-insensitive). Malformed values are ignored (default kept).
-pub const ENV_SHORT_CIRCUIT_ENABLED: &str = "GOOSEFS_SHORT_CIRCUIT_ENABLED";
-
-/// Environment variable: per-task LRU capacity for hot-block SC readers.
-pub const ENV_SHORT_CIRCUIT_CACHE_CAPACITY: &str = "GOOSEFS_SHORT_CIRCUIT_CACHE_CAPACITY";
-
-/// Environment variable: idle TTL (**milliseconds**) after which a cached SC
-/// reader is dropped.
-pub const ENV_SHORT_CIRCUIT_CACHE_TTL_MS: &str = "GOOSEFS_SHORT_CIRCUIT_CACHE_TTL_MS";
-
-/// Environment variable: negative-cache TTL (**milliseconds**) for blocks
-/// that failed SC (client falls back to gRPC for this long before retrying SC).
-pub const ENV_SHORT_CIRCUIT_NEG_CACHE_TTL_MS: &str = "GOOSEFS_SHORT_CIRCUIT_NEG_CACHE_TTL_MS";
-
-/// Environment variable: L1 kernel readahead hint issued via `madvise`.
-///
-/// Accepted values (case-insensitive): `sequential` / `random` / `normal` /
-/// `none`. Validation is deferred to [`ShortCircuitFactory`]; a bad value
-/// keeps the previous string in place rather than aborting startup.
-pub const ENV_SHORT_CIRCUIT_ADVISE: &str = "GOOSEFS_SHORT_CIRCUIT_ADVISE";
-
-/// Environment variable: L2 application-level prefetch master switch.
-///
-/// When `false`, `ShortCircuitReader::prefetch{,_many}` degrade to no-ops.
-pub const ENV_SHORT_CIRCUIT_PREFETCH_ENABLED: &str = "GOOSEFS_SHORT_CIRCUIT_PREFETCH_ENABLED";
-
-/// Environment variable: maximum gap (bytes) between adjacent ranges that
-/// `prefetch_many` will merge into a single `madvise` call.
-pub const ENV_SHORT_CIRCUIT_PREFETCH_COALESCE_GAP: &str =
-    "GOOSEFS_SHORT_CIRCUIT_PREFETCH_COALESCE_GAP";
-
-/// Environment variable: upper bound on how many `madvise` calls a single
-/// `prefetch_many` may issue.
-pub const ENV_SHORT_CIRCUIT_PREFETCH_MAX_BATCH: &str = "GOOSEFS_SHORT_CIRCUIT_PREFETCH_MAX_BATCH";
-
-/// Environment variable: minimum block size (bytes) required to attempt SC.
-///
-/// Blocks smaller than this go through gRPC. `0` (default) means "no minimum".
-pub const ENV_SHORT_CIRCUIT_MIN_BLOCK_SIZE: &str = "GOOSEFS_SHORT_CIRCUIT_MIN_BLOCK_SIZE";
-
-/// Environment variable: install a process-global SIGBUS diagnostic handler.
-///
-/// Linux / macOS only; a no-op elsewhere.
-pub const ENV_SHORT_CIRCUIT_SIGBUS_HANDLER: &str = "GOOSEFS_SHORT_CIRCUIT_SIGBUS_HANDLER";
-
-/// Environment variable: request Transparent Huge Pages for the SC mapping
-/// via `madvise(MADV_HUGEPAGE)` (**experimental**, Linux only).
-pub const ENV_SHORT_CIRCUIT_THP: &str = "GOOSEFS_SHORT_CIRCUIT_THP";
-
-// ── Short-circuit storage-option keys ────────────────────────
-/// Storage option key for the short-circuit master kill switch.
-pub const STORAGE_OPT_SHORT_CIRCUIT_ENABLED: &str = "goosefs_short_circuit_enabled";
-/// Storage option key for the per-task hot-block SC reader LRU capacity.
-pub const STORAGE_OPT_SHORT_CIRCUIT_CACHE_CAPACITY: &str = "goosefs_short_circuit_cache_capacity";
-/// Storage option key for the idle TTL of cached SC readers (**milliseconds**).
-pub const STORAGE_OPT_SHORT_CIRCUIT_CACHE_TTL_MS: &str = "goosefs_short_circuit_cache_ttl_ms";
-/// Storage option key for the SC negative-cache TTL (**milliseconds**).
-pub const STORAGE_OPT_SHORT_CIRCUIT_NEG_CACHE_TTL_MS: &str =
-    "goosefs_short_circuit_neg_cache_ttl_ms";
-/// Storage option key for the L1 `madvise` readahead hint.
-pub const STORAGE_OPT_SHORT_CIRCUIT_ADVISE: &str = "goosefs_short_circuit_advise";
-/// Storage option key for the L2 application-level prefetch master switch.
-pub const STORAGE_OPT_SHORT_CIRCUIT_PREFETCH_ENABLED: &str =
-    "goosefs_short_circuit_prefetch_enabled";
-/// Storage option key for `prefetch_many` adjacent-range coalesce gap (bytes).
-pub const STORAGE_OPT_SHORT_CIRCUIT_PREFETCH_COALESCE_GAP: &str =
-    "goosefs_short_circuit_prefetch_coalesce_gap";
-/// Storage option key for the upper bound on `madvise` calls per `prefetch_many`.
-pub const STORAGE_OPT_SHORT_CIRCUIT_PREFETCH_MAX_BATCH: &str =
-    "goosefs_short_circuit_prefetch_max_batch";
-/// Storage option key for the minimum block size (bytes) required to attempt SC.
-pub const STORAGE_OPT_SHORT_CIRCUIT_MIN_BLOCK_SIZE: &str = "goosefs_short_circuit_min_block_size";
-/// Storage option key for the process-global SIGBUS diagnostic handler switch.
-pub const STORAGE_OPT_SHORT_CIRCUIT_SIGBUS_HANDLER: &str = "goosefs_short_circuit_sigbus_handler";
-/// Storage option key for the Transparent Huge Pages hint (experimental).
-pub const STORAGE_OPT_SHORT_CIRCUIT_THP: &str = "goosefs_short_circuit_thp";
 
 // ── WriteType: ergonomic Rust enum wrapping WritePType ───────
 
@@ -2350,75 +2207,6 @@ pub struct GoosefsConfig {
     /// Only consulted when `range_coalesce_enabled`.
     #[serde(default = "default_range_coalesce_max_bytes")]
     pub range_coalesce_max_bytes: u64,
-
-    // ── Short-circuit (local mmap) read path (SHORT_CIRCUIT_DESIGN ) ──
-    /// Master kill switch for the short-circuit local read path (default:
-    /// `false`, **disabled**). Mirrors Java
-    /// `goosefs.user.short.circuit.enabled`. See
-    ///
-    /// the default. Set to `true` (via env var, storage option, property,
-    /// or the `.with_short_circuit_enabled(true)` builder) to opt back into
-    /// the local mmap fast path on deployments that genuinely benefit
-    /// from it (e.g. co-located small-object reads with a warm block
-    /// cache).
-    #[serde(default = "default_false_bool")]
-    pub short_circuit_enabled: bool,
-
-    /// Per-task LRU capacity for hot-block readers (default: 64).
-    /// `goosefs.client.short.circuit.cache.capacity`.
-    #[serde(default = "default_short_circuit_cache_capacity")]
-    pub short_circuit_cache_capacity: usize,
-
-    /// Idle TTL after which a cached SC reader is dropped (default: 30 s).
-    /// `goosefs.client.short.circuit.cache.ttl`.
-    #[serde(default = "default_short_circuit_cache_ttl")]
-    pub short_circuit_cache_ttl: Duration,
-
-    /// Negative-cache TTL: a block that failed SC is not retried for this long
-    /// (default: 5 s). `goosefs.client.short.circuit.neg.cache.ttl`.
-    #[serde(default = "default_short_circuit_neg_cache_ttl")]
-    pub short_circuit_neg_cache_ttl: Duration,
-
-    /// L1 kernel-readahead hint: `sequential | random | normal | none`
-    /// (default: `random`). `goosefs.client.short.circuit.advise`.
-    #[serde(default = "default_short_circuit_advise")]
-    pub short_circuit_advise: String,
-
-    /// L2 application-level prefetch master switch (default: `true`). When
-    /// `false`, `prefetch` / `prefetch_many` degrade to no-ops.
-    /// `goosefs.client.short.circuit.prefetch.enabled`.
-    #[serde(default = "default_true_bool")]
-    pub short_circuit_prefetch_enabled: bool,
-
-    /// Max gap (bytes) between adjacent ranges merged by `prefetch_many`
-    /// (default: 64 KiB). `goosefs.client.short.circuit.prefetch.coalesce.gap`.
-    #[serde(default = "default_short_circuit_prefetch_coalesce_gap")]
-    pub short_circuit_prefetch_coalesce_gap: usize,
-
-    /// Max number of `madvise` calls issued per `prefetch_many` (default:
-    /// 1024). `goosefs.client.short.circuit.prefetch.max.batch`.
-    #[serde(default = "default_short_circuit_prefetch_max_batch")]
-    pub short_circuit_prefetch_max_batch: usize,
-
-    /// Minimum block size (bytes) to attempt SC; smaller blocks skip SC
-    /// (default: 0 = no minimum). `goosefs.client.short.circuit.min.block.size`.
-    #[serde(default)]
-    pub short_circuit_min_block_size: i64,
-
-    /// Install a process-global SIGBUS handler that diagnoses + `abort`s on a
-    /// mapping fault (default: `true`). A SIGBUS on a committed, locked block
-    /// indicates a protocol violation (INV-D1); aborting surfaces it loudly
-    /// rather than returning torn/stale bytes (design  / ). Linux/macOS
-    /// only; a no-op elsewhere. `goosefs.client.short.circuit.sigbus.handler`.
-    #[serde(default = "default_true_bool")]
-    pub short_circuit_sigbus_handler: bool,
-
-    /// Request Transparent Huge Pages for the block mapping via
-    /// `madvise(MADV_HUGEPAGE)` (default: `false`, **experimental**). Linux
-    /// only and effective only where file-backed THP is supported; a no-op
-    /// elsewhere. `goosefs.client.short.circuit.thp`.
-    #[serde(default)]
-    pub short_circuit_thp: bool,
 }
 
 fn default_master_inquire_max_duration() -> Duration {
@@ -2498,9 +2286,6 @@ fn default_client_cache_uring_thread_count() -> usize {
 fn default_true_bool() -> bool {
     true
 }
-fn default_false_bool() -> bool {
-    false
-}
 
 fn default_metadata_cache_max_size() -> usize {
     100_000
@@ -2540,26 +2325,6 @@ fn default_range_coalesce_gap_bytes() -> u64 {
 }
 fn default_range_coalesce_max_bytes() -> u64 {
     4 * 1024 * 1024 // 4 MiB
-}
-
-// ── Short-circuit (local mmap) read defaults (SHORT_CIRCUIT_DESIGN ) ─
-fn default_short_circuit_cache_capacity() -> usize {
-    64
-}
-fn default_short_circuit_cache_ttl() -> Duration {
-    Duration::from_secs(30)
-}
-fn default_short_circuit_neg_cache_ttl() -> Duration {
-    Duration::from_secs(5)
-}
-fn default_short_circuit_advise() -> String {
-    "random".to_string()
-}
-fn default_short_circuit_prefetch_coalesce_gap() -> usize {
-    64 * 1024
-}
-fn default_short_circuit_prefetch_max_batch() -> usize {
-    1024
 }
 
 // ── Streaming-read tuning / master pool defaults() ─────
@@ -2733,29 +2498,6 @@ impl Default for GoosefsConfig {
             range_coalesce_enabled: false,
             range_coalesce_gap_bytes: default_range_coalesce_gap_bytes(),
             range_coalesce_max_bytes: default_range_coalesce_max_bytes(),
-            // Short-circuit local-mmap read path is **disabled by default**.
-            // Rationale (2026-07-07 hotspot analysis):
-            // the demo binary reference flame graph (oncpu_4, ~1200 QPS)
-            // contains no short-circuit frames, and flipping this switch
-            // to `false` on the previously-default-`true` build empirically
-            // moved a 32-way Lance/DuckDB workload from ~600 to ~900 QPS
-            // (~50% end-to-end throughput). Callers that want the local
-            // fast path can opt back in via `.with_short_circuit_enabled(true)`,
-            // the `goosefs.user.short.circuit.enabled` property, the
-            // `goosefs_short_circuit_enabled` storage option, or the
-            // `GOOSEFS_SHORT_CIRCUIT_ENABLED=true` environment variable —
-            // the opt-in mechanism is unchanged and fully backwards compatible.
-            short_circuit_enabled: false,
-            short_circuit_cache_capacity: default_short_circuit_cache_capacity(),
-            short_circuit_cache_ttl: default_short_circuit_cache_ttl(),
-            short_circuit_neg_cache_ttl: default_short_circuit_neg_cache_ttl(),
-            short_circuit_advise: default_short_circuit_advise(),
-            short_circuit_prefetch_enabled: true,
-            short_circuit_prefetch_coalesce_gap: default_short_circuit_prefetch_coalesce_gap(),
-            short_circuit_prefetch_max_batch: default_short_circuit_prefetch_max_batch(),
-            short_circuit_min_block_size: 0,
-            short_circuit_sigbus_handler: true,
-            short_circuit_thp: false,
         }
     }
 }
@@ -3144,84 +2886,6 @@ impl GoosefsConfig {
     /// Set `goosefs.user.file.metadata.load.type`. `ALWAYS` skips listing cache.
     pub fn with_file_metadata_load_type(mut self, load_type: LoadMetadataPType) -> Self {
         self.file_metadata_load_type = load_type;
-        self
-    }
-
-    // ── Short-circuit (local mmap) read builder methods ──────────
-    /// Master kill switch for the short-circuit local read path.
-    ///
-    /// `false` forces every read (even to a co-located worker) through the
-    /// gRPC data plane. Useful for A/B comparison. Mirrors Java
-    /// `goosefs.user.short.circuit.enabled` semantically.
-    pub fn with_short_circuit_enabled(mut self, enabled: bool) -> Self {
-        self.short_circuit_enabled = enabled;
-        self
-    }
-
-    /// Set the per-task LRU capacity for hot-block SC readers.
-    pub fn with_short_circuit_cache_capacity(mut self, capacity: usize) -> Self {
-        self.short_circuit_cache_capacity = capacity;
-        self
-    }
-
-    /// Set the idle TTL after which a cached SC reader is dropped.
-    pub fn with_short_circuit_cache_ttl(mut self, ttl: Duration) -> Self {
-        self.short_circuit_cache_ttl = ttl;
-        self
-    }
-
-    /// Set the negative-cache TTL for blocks that failed to open via SC.
-    pub fn with_short_circuit_neg_cache_ttl(mut self, ttl: Duration) -> Self {
-        self.short_circuit_neg_cache_ttl = ttl;
-        self
-    }
-
-    /// Set the L1 `madvise` readahead hint (`sequential` / `random` /
-    /// `normal` / `none`). Validation is deferred to `ShortCircuitFactory`.
-    pub fn with_short_circuit_advise(mut self, advise: impl Into<String>) -> Self {
-        self.short_circuit_advise = advise.into();
-        self
-    }
-
-    /// Toggle the L2 application-level prefetch master switch. When `false`,
-    /// `ShortCircuitReader::prefetch{,_many}` degrade to no-ops.
-    pub fn with_short_circuit_prefetch_enabled(mut self, enabled: bool) -> Self {
-        self.short_circuit_prefetch_enabled = enabled;
-        self
-    }
-
-    /// Set the maximum gap (bytes) between adjacent ranges that
-    /// `prefetch_many` will merge into a single `madvise` call.
-    pub fn with_short_circuit_prefetch_coalesce_gap(mut self, gap: usize) -> Self {
-        self.short_circuit_prefetch_coalesce_gap = gap;
-        self
-    }
-
-    /// Set the upper bound on how many `madvise` calls a single
-    /// `prefetch_many` may issue.
-    pub fn with_short_circuit_prefetch_max_batch(mut self, batch: usize) -> Self {
-        self.short_circuit_prefetch_max_batch = batch;
-        self
-    }
-
-    /// Set the minimum block size (bytes) required to attempt SC. Blocks
-    /// smaller than this skip SC and go through gRPC. `0` = no minimum.
-    pub fn with_short_circuit_min_block_size(mut self, size: i64) -> Self {
-        self.short_circuit_min_block_size = size;
-        self
-    }
-
-    /// Enable / disable the process-global SIGBUS diagnostic handler.
-    /// Linux / macOS only; a no-op elsewhere.
-    pub fn with_short_circuit_sigbus_handler(mut self, enabled: bool) -> Self {
-        self.short_circuit_sigbus_handler = enabled;
-        self
-    }
-
-    /// Request Transparent Huge Pages for the SC mapping via
-    /// `madvise(MADV_HUGEPAGE)`. Linux only, **experimental**.
-    pub fn with_short_circuit_thp(mut self, enabled: bool) -> Self {
-        self.short_circuit_thp = enabled;
         self
     }
 
@@ -3829,65 +3493,6 @@ impl GoosefsConfig {
         if let Ok(val) = env::var(ENV_FILE_METADATA_LOAD_TYPE) {
             if let Some(t) = parse_load_metadata_type(&val) {
                 self.file_metadata_load_type = t;
-            }
-        }
-
-        // ── Short-circuit (local mmap) read path ─────────────────
-        // All parse failures are silently ignored so a typo cannot flip SC
-        // off (or on) at process start; the builder / struct value is kept.
-        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_ENABLED) {
-            if let Ok(b) = val.to_lowercase().parse::<bool>() {
-                self.short_circuit_enabled = b;
-            }
-        }
-        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_CACHE_CAPACITY) {
-            if let Ok(n) = val.parse::<usize>() {
-                self.short_circuit_cache_capacity = n;
-            }
-        }
-        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_CACHE_TTL_MS) {
-            if let Ok(ms) = val.parse::<u64>() {
-                self.short_circuit_cache_ttl = Duration::from_millis(ms);
-            }
-        }
-        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_NEG_CACHE_TTL_MS) {
-            if let Ok(ms) = val.parse::<u64>() {
-                self.short_circuit_neg_cache_ttl = Duration::from_millis(ms);
-            }
-        }
-        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_ADVISE) {
-            if !val.is_empty() {
-                self.short_circuit_advise = val;
-            }
-        }
-        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_PREFETCH_ENABLED) {
-            if let Ok(b) = val.to_lowercase().parse::<bool>() {
-                self.short_circuit_prefetch_enabled = b;
-            }
-        }
-        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_PREFETCH_COALESCE_GAP) {
-            if let Ok(n) = val.parse::<usize>() {
-                self.short_circuit_prefetch_coalesce_gap = n;
-            }
-        }
-        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_PREFETCH_MAX_BATCH) {
-            if let Ok(n) = val.parse::<usize>() {
-                self.short_circuit_prefetch_max_batch = n;
-            }
-        }
-        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_MIN_BLOCK_SIZE) {
-            if let Ok(n) = val.parse::<i64>() {
-                self.short_circuit_min_block_size = n;
-            }
-        }
-        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_SIGBUS_HANDLER) {
-            if let Ok(b) = val.to_lowercase().parse::<bool>() {
-                self.short_circuit_sigbus_handler = b;
-            }
-        }
-        if let Ok(val) = env::var(ENV_SHORT_CIRCUIT_THP) {
-            if let Ok(b) = val.to_lowercase().parse::<bool>() {
-                self.short_circuit_thp = b;
             }
         }
 
@@ -6004,169 +5609,6 @@ goosefs.user.client.cache.ttl.seconds=60
         assert_eq!(cfg.client_cache_uring_thread_count, 4);
         assert!(cfg.client_cache_sync_read_enabled);
         assert_eq!(cfg.client_cache_ttl_secs, 60);
-    }
-
-    // ── Short-circuit (SC) knob parsing coverage ─────────────
-    /// `apply_env` picks up every SC knob and applies it verbatim.
-    #[test]
-    fn test_apply_env_short_circuit_knobs() {
-        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_ENABLED", "false");
-        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_CACHE_CAPACITY", "128");
-        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_CACHE_TTL_MS", "45000");
-        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_NEG_CACHE_TTL_MS", "1500");
-        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_ADVISE", "sequential");
-        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_PREFETCH_ENABLED", "false");
-        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_PREFETCH_COALESCE_GAP", "131072");
-        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_PREFETCH_MAX_BATCH", "512");
-        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_MIN_BLOCK_SIZE", "4194304");
-        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_SIGBUS_HANDLER", "false");
-        std::env::set_var("GOOSEFS_SHORT_CIRCUIT_THP", "true");
-
-        let cfg = GoosefsConfig::default().apply_env();
-
-        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_ENABLED");
-        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_CACHE_CAPACITY");
-        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_CACHE_TTL_MS");
-        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_NEG_CACHE_TTL_MS");
-        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_ADVISE");
-        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_PREFETCH_ENABLED");
-        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_PREFETCH_COALESCE_GAP");
-        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_PREFETCH_MAX_BATCH");
-        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_MIN_BLOCK_SIZE");
-        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_SIGBUS_HANDLER");
-        std::env::remove_var("GOOSEFS_SHORT_CIRCUIT_THP");
-
-        assert!(!cfg.short_circuit_enabled);
-        assert_eq!(cfg.short_circuit_cache_capacity, 128);
-        assert_eq!(cfg.short_circuit_cache_ttl, Duration::from_millis(45000));
-        assert_eq!(cfg.short_circuit_neg_cache_ttl, Duration::from_millis(1500));
-        assert_eq!(cfg.short_circuit_advise, "sequential");
-        assert!(!cfg.short_circuit_prefetch_enabled);
-        assert_eq!(cfg.short_circuit_prefetch_coalesce_gap, 131072);
-        assert_eq!(cfg.short_circuit_prefetch_max_batch, 512);
-        assert_eq!(cfg.short_circuit_min_block_size, 4 * 1024 * 1024);
-        assert!(!cfg.short_circuit_sigbus_handler);
-        assert!(cfg.short_circuit_thp);
-    }
-
-    /// `apply_properties` (via `from_properties_str`) picks up every SC knob.
-    #[test]
-    fn test_from_properties_str_short_circuit_knobs() {
-        let props = "\
-goosefs.user.short.circuit.enabled=false
-goosefs.client.short.circuit.cache.capacity=256
-goosefs.client.short.circuit.cache.ttl.ms=60000
-goosefs.client.short.circuit.neg.cache.ttl.ms=2500
-goosefs.client.short.circuit.advise=none
-goosefs.client.short.circuit.prefetch.enabled=false
-goosefs.client.short.circuit.prefetch.coalesce.gap=262144
-goosefs.client.short.circuit.prefetch.max.batch=2048
-goosefs.client.short.circuit.min.block.size=8388608
-goosefs.client.short.circuit.sigbus.handler=false
-goosefs.client.short.circuit.thp=true
-";
-        let cfg = GoosefsConfig::from_properties_str(props);
-        assert!(!cfg.short_circuit_enabled);
-        assert_eq!(cfg.short_circuit_cache_capacity, 256);
-        assert_eq!(cfg.short_circuit_cache_ttl, Duration::from_millis(60000));
-        assert_eq!(cfg.short_circuit_neg_cache_ttl, Duration::from_millis(2500));
-        assert_eq!(cfg.short_circuit_advise, "none");
-        assert!(!cfg.short_circuit_prefetch_enabled);
-        assert_eq!(cfg.short_circuit_prefetch_coalesce_gap, 262144);
-        assert_eq!(cfg.short_circuit_prefetch_max_batch, 2048);
-        assert_eq!(cfg.short_circuit_min_block_size, 8 * 1024 * 1024);
-        assert!(!cfg.short_circuit_sigbus_handler);
-        assert!(cfg.short_circuit_thp);
-    }
-
-    /// Chained builder methods override the struct defaults.
-    #[test]
-    fn test_builder_short_circuit_chain() {
-        let cfg = GoosefsConfig::new("127.0.0.1:9200")
-            .with_short_circuit_enabled(false)
-            .with_short_circuit_cache_capacity(200)
-            .with_short_circuit_cache_ttl(Duration::from_secs(45))
-            .with_short_circuit_neg_cache_ttl(Duration::from_secs(2))
-            .with_short_circuit_advise("sequential")
-            .with_short_circuit_prefetch_enabled(false)
-            .with_short_circuit_prefetch_coalesce_gap(1024)
-            .with_short_circuit_prefetch_max_batch(64)
-            .with_short_circuit_min_block_size(1_048_576)
-            .with_short_circuit_sigbus_handler(false)
-            .with_short_circuit_thp(true);
-
-        assert!(!cfg.short_circuit_enabled);
-        assert_eq!(cfg.short_circuit_cache_capacity, 200);
-        assert_eq!(cfg.short_circuit_cache_ttl, Duration::from_secs(45));
-        assert_eq!(cfg.short_circuit_neg_cache_ttl, Duration::from_secs(2));
-        assert_eq!(cfg.short_circuit_advise, "sequential");
-        assert!(!cfg.short_circuit_prefetch_enabled);
-        assert_eq!(cfg.short_circuit_prefetch_coalesce_gap, 1024);
-        assert_eq!(cfg.short_circuit_prefetch_max_batch, 64);
-        assert_eq!(cfg.short_circuit_min_block_size, 1_048_576);
-        assert!(!cfg.short_circuit_sigbus_handler);
-        assert!(cfg.short_circuit_thp);
-    }
-
-    /// Regression guard: the short-circuit local-mmap read path must stay
-    /// **disabled** by default across every construction path
-    /// (`Default::default`, `serde` with a missing field, and
-    /// `apply_env` with no env vars set). Rationale documented in
-    ///
-    #[test]
-    fn test_short_circuit_enabled_default_is_false() {
-        // 1. Direct Default impl.
-        assert!(
-            !GoosefsConfig::default().short_circuit_enabled,
-            "Default::default() must ship with short-circuit OFF"
-        );
-
-        // 2. Serde/properties default when the SC field is absent.
-        // `from_properties_str` runs the full serde deserialize path
-        // and any custom `#[serde(default = ...)]` fallbacks; a
-        // properties string without `goosefs.user.short.circuit.enabled`
-        // must therefore still land on `false`.
-        let cfg = GoosefsConfig::from_properties_str("goosefs.master.hostname=127.0.0.1");
-        assert!(
-            !cfg.short_circuit_enabled,
-            "properties default (missing field) must be false"
-        );
-
-        // 3. apply_env with no SC env var set must not flip it back on.
-        // We do not remove pre-existing env vars because other tests in
-        // the same process may set them; instead we only assert the
-        // invariant when the env is genuinely clean.
-        if std::env::var(ENV_SHORT_CIRCUIT_ENABLED).is_err() {
-            let cfg = GoosefsConfig::default().apply_env();
-            assert!(
-                !cfg.short_circuit_enabled,
-                "apply_env with unset GOOSEFS_SHORT_CIRCUIT_ENABLED must keep it false"
-            );
-        }
-    }
-
-    /// Canonical env-var / storage-option key names must not drift.
-    #[test]
-    fn test_short_circuit_canonical_key_names() {
-        assert_eq!(ENV_SHORT_CIRCUIT_ENABLED, "GOOSEFS_SHORT_CIRCUIT_ENABLED");
-        assert_eq!(
-            ENV_SHORT_CIRCUIT_CACHE_TTL_MS,
-            "GOOSEFS_SHORT_CIRCUIT_CACHE_TTL_MS"
-        );
-        assert_eq!(ENV_SHORT_CIRCUIT_ADVISE, "GOOSEFS_SHORT_CIRCUIT_ADVISE");
-        assert_eq!(
-            STORAGE_OPT_SHORT_CIRCUIT_ENABLED,
-            "goosefs_short_circuit_enabled"
-        );
-        assert_eq!(
-            STORAGE_OPT_SHORT_CIRCUIT_CACHE_TTL_MS,
-            "goosefs_short_circuit_cache_ttl_ms"
-        );
-        assert_eq!(
-            STORAGE_OPT_SHORT_CIRCUIT_MIN_BLOCK_SIZE,
-            "goosefs_short_circuit_min_block_size"
-        );
     }
 
     #[test]

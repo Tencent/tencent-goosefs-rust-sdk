@@ -220,8 +220,8 @@ async fn main() -> Result<()> {
     //
     // Consequently, with the default configuration the counters below may
     // stay flat for this step: the sequential path serves data directly from
-    // the worker (or local short-circuit mmap) and does not increment the
-    // `Client.Cache*` counters. Byte-for-byte correctness is still asserted.
+    // the worker and does not increment the `Client.Cache*` counters.
+    // Byte-for-byte correctness is still asserted.
     // We use `>=` (not `>`) so the demo passes on both routing modes.
     println!("\n5. Full-file read_all() — sequential path (cache accounting is opt-in)...");
     let full_before = snapshot();
