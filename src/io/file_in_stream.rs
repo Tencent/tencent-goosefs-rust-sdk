@@ -68,7 +68,7 @@ use crate::client::{WorkerClient, WorkerClientPool, WorkerManagerClient};
 use crate::config::GoosefsConfig;
 use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
-use crate::fs::options::InStreamOptions;
+use crate::fs::options::{ufs_block_length, InStreamOptions};
 use crate::fs::uri_status::URIStatus;
 use crate::io::reader::{GrpcBlockReader, ReadTuning};
 use crate::proto::proto::dataserver::OpenUfsBlockOptions;
@@ -1146,7 +1146,13 @@ impl GoosefsFileInStream {
         Some(OpenUfsBlockOptions {
             ufs_path: Some(ufs_path.to_string()),
             offset_in_file: Some(offset_in_file),
-            block_size: Some(block_size),
+            // The real length of *this* block, not the file's nominal block
+            // size — see [`ufs_block_length`].
+            block_size: Some(ufs_block_length(
+                self.status.length,
+                block_size,
+                block_idx as u64,
+            )),
             max_ufs_read_concurrency: Some(self.options.max_ufs_read_concurrency),
             mount_id: Some(self.status.mount_id),
             no_cache: Some(!self.status.cacheable),
@@ -1306,6 +1312,65 @@ mod tests {
             cache_async_write: false,
             cache_sequential_read: false,
         }
+    }
+
+    /// Same contract as `GoosefsFileReader::build_ufs_read_options`: the
+    /// advertised `block_size` is the real length of that block. Over-reporting
+    /// a partial tail block makes the Worker's async-cache read come up short
+    /// and the block is dropped ("Failed to cache block <id> in page mode").
+    #[test]
+    fn ufs_opts_carry_actual_tail_block_length() {
+        let bs = 1 << 20i64;
+        let length = 2 * bs + 100;
+        let status = URIStatus::from_proto(FileInfo {
+            length: Some(length),
+            block_size_bytes: Some(bs),
+            block_ids: vec![1001, 1002, 1003],
+            completed: Some(true),
+            folder: Some(false),
+            ufs_path: Some("cosn://bucket/tail.lance".to_string()),
+            mount_id: Some(7),
+            ..Default::default()
+        });
+        let stream = make_stream(status);
+
+        let seen: Vec<(i64, i64)> = (0..3)
+            .map(|idx| {
+                let opts = stream
+                    .build_ufs_opts(idx)
+                    .expect("a file with a ufs_path must produce OpenUfsBlockOptions");
+                (opts.offset_in_file.unwrap(), opts.block_size.unwrap())
+            })
+            .collect();
+
+        assert_eq!(
+            seen,
+            vec![(0, bs), (bs, bs), (2 * bs, 100)],
+            "the tail block must advertise 100 bytes, not the nominal {bs}"
+        );
+    }
+
+    /// A file smaller than one block: block 0 is the tail. Shape of the Lance
+    /// manifest / version-hint files that surfaced the bug.
+    #[test]
+    fn ufs_opts_sub_block_file_reports_file_length() {
+        let status = URIStatus::from_proto(FileInfo {
+            length: Some(447),
+            block_size_bytes: Some(1 << 20),
+            block_ids: vec![1001],
+            completed: Some(true),
+            folder: Some(false),
+            ufs_path: Some("cosn://bucket/x.manifest".to_string()),
+            mount_id: Some(7),
+            ..Default::default()
+        });
+        let stream = make_stream(status);
+
+        let opts = stream
+            .build_ufs_opts(0)
+            .expect("a file with a ufs_path must produce OpenUfsBlockOptions");
+        assert_eq!(opts.block_size, Some(447));
+        assert_eq!(opts.offset_in_file, Some(0));
     }
 
     #[test]
