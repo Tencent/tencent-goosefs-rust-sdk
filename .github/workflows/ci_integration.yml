@@ -73,7 +73,6 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      max-parallel: 2
       matrix:
         # Combinations are listed out rather than expressed as a `store` axis
         # crossed with `include`: an `include` entry that only *adds* keys is
