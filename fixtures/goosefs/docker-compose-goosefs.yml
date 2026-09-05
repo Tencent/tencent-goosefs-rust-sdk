@@ -19,9 +19,13 @@
 # Usage:
 #   docker compose -f fixtures/goosefs/docker-compose-goosefs.yml up -d --wait
 #
+# Worker block store mode (FILE is the default):
+#   GOOSEFS_WORKER_BLOCK_STORE_TYPE=PAGE docker compose ... up -d --wait
+#
 # SDK env:
 #   GOOSEFS_MASTER_ADDR=127.0.0.1:9200
 #   GOOSEFS_AUTH_TYPE=simple
+#   GOOSEFS_WORKER_BLOCK_STORE_TYPE=FILE|PAGE   (read by the test suites)
 #
 # Default image: ghcr.io/tencent/tencent-goosefs-rust-sdk/goosefs:v2.0.0
 # linux/amd64, public, no auth required. Override with GOOSEFS_IMAGE
@@ -39,6 +43,10 @@ services:
       # ambiguity. See OpenDAL fixtures/goosefs comments for details.
       GOOSEFS_MASTER_HOSTNAME: 127.0.0.1
       GOOSEFS_WORKER_HOSTNAME: 127.0.0.1
+      # Worker block store: FILE (default, a local file per block) or PAGE (the
+      # paged block store). Client-visible write behaviour differs between the
+      # two — see bin/start-default.sh — so the integration suite runs both.
+      GOOSEFS_WORKER_BLOCK_STORE_TYPE: ${GOOSEFS_WORKER_BLOCK_STORE_TYPE:-FILE}
     ports:
       - "127.0.0.1:9200:9200"   # Master RPC
       - "127.0.0.1:9201:9201"   # Master Web UI

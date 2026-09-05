@@ -26,6 +26,11 @@ runs:
         IMAGE="${GOOSEFS_IMAGE:-ghcr.io/tencent/tencent-goosefs-rust-sdk/goosefs:v2.0.0}"
         export GOOSEFS_IMAGE="${IMAGE}"
         echo "GOOSEFS_IMAGE=${IMAGE}"
+        # Worker block store mode. Exported (not just inherited) so `docker
+        # compose` interpolates it even when the caller left it unset, and so the
+        # value logged here is the one the container actually gets.
+        export GOOSEFS_WORKER_BLOCK_STORE_TYPE="${GOOSEFS_WORKER_BLOCK_STORE_TYPE:-FILE}"
+        echo "GOOSEFS_WORKER_BLOCK_STORE_TYPE=${GOOSEFS_WORKER_BLOCK_STORE_TYPE}"
         # Bound the wait so an unhealthy fixture (e.g. master never listening on
         # 9200) fails fast instead of hanging the job indefinitely. Matches the
         # 5-minute default used by scripts/ci/goosefs-up.sh.
@@ -40,6 +45,7 @@ runs:
         GOOSEFS_AUTH_TYPE=simple
         GOOSEFS_AUTH_USERNAME=${USER:-runner}
         GFS_ADDR=127.0.0.1:9200
+        GOOSEFS_WORKER_BLOCK_STORE_TYPE=${GOOSEFS_WORKER_BLOCK_STORE_TYPE:-FILE}
         EOF
 
     - name: Dump GooseFS diagnostics (on failure)
@@ -49,6 +55,10 @@ runs:
       run: |
         echo "=== docker compose ps ==="
         docker compose -f docker-compose-goosefs.yml ps -a || true
+        echo "=== effective worker store config ==="
+        docker exec goosefs-sdk-goosefs sh -c \
+          'grep -E "^goosefs\.worker\.(block\.store\.type|file\.store\.dirs\.path|page\.store\.dirs)=" \
+             /opt/goosefs/conf/goosefs-site.properties' 2>&1 || true
         echo "=== docker inspect ==="
         docker inspect goosefs-sdk-goosefs --format '{{json .State}}' 2>&1 || true
         echo "=== docker logs (tail 500) ==="

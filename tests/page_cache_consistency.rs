@@ -54,6 +54,7 @@ mod consistency {
     use goosefs_sdk::fs::options::OpenFileOptions;
     use goosefs_sdk::io::{GoosefsFileInStream, GoosefsFileWriter};
     use goosefs_sdk::metrics::counter;
+    use goosefs_sdk::proto::grpc::file::CreateFilePOptions;
 
     // ── Test harness ─────────────────────────────────────────────────────────
 
@@ -123,13 +124,34 @@ mod consistency {
         c
     }
 
+    /// Lay down a blob to read back.
+    ///
+    /// Written CACHE_THROUGH rather than with the config's cache-only default:
+    /// these payloads span several 4 MiB blocks, and switching blocks mid-file
+    /// flushes the block being left behind, which a PAGE worker cannot do
+    /// (`PagedBlockWriter.flush()` throws). CACHE_THROUGH survives because the UFS
+    /// stream carries the same bytes, so the fixture exists in either worker mode
+    /// and these tests get to assert what they are about — the *client-side* page
+    /// cache. The write-side matrix is pinned by
+    /// bindings/python/tests/test_block_boundary_write_types.py.
+    ///
+    /// Only `write_type` is set: `create_with_context` backfills the rest
+    /// (`block_size_bytes` in particular) from the config.
     async fn write_blob(ctx: &Arc<FileSystemContext>, path: &str, payload: &[u8]) -> Result<()> {
         let master = ctx.acquire_master();
         let _ = master
             .create_directory("/page-cache-consistency", true)
             .await;
         let _ = master.delete(path, false).await;
-        let mut w = GoosefsFileWriter::create_with_context(ctx.clone(), path, None).await?;
+        let mut w = GoosefsFileWriter::create_with_context(
+            ctx.clone(),
+            path,
+            Some(CreateFilePOptions {
+                write_type: Some(3),
+                ..Default::default()
+            }),
+        )
+        .await?;
         w.write(payload).await?;
         w.close().await?;
         Ok(())
@@ -592,6 +614,7 @@ mod reader_consistency {
     use goosefs_sdk::error::Result;
     use goosefs_sdk::io::{GoosefsFileReader, GoosefsFileWriter};
     use goosefs_sdk::metrics::counter;
+    use goosefs_sdk::proto::grpc::file::CreateFilePOptions;
 
     // ── Test harness ─────────────────────────────────────────────────────────
 
@@ -654,11 +677,23 @@ mod reader_consistency {
         c
     }
 
+    /// Lay down a blob to read back. CACHE_THROUGH for the same reason as the
+    /// `consistency` module's `write_blob` — a mid-file block switch cannot flush
+    /// on a PAGE worker, and only `write_type` is set so `create_with_context`
+    /// still backfills `block_size_bytes` from the config.
     async fn write_blob(ctx: &Arc<FileSystemContext>, path: &str, payload: &[u8]) -> Result<()> {
         let master = ctx.acquire_master();
         let _ = master.create_directory("/reader-page-cache", true).await;
         let _ = master.delete(path, false).await;
-        let mut w = GoosefsFileWriter::create_with_context(ctx.clone(), path, None).await?;
+        let mut w = GoosefsFileWriter::create_with_context(
+            ctx.clone(),
+            path,
+            Some(CreateFilePOptions {
+                write_type: Some(3),
+                ..Default::default()
+            }),
+        )
+        .await?;
         w.write(payload).await?;
         w.close().await?;
         Ok(())

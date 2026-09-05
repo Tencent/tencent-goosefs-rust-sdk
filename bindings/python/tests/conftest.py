@@ -21,13 +21,16 @@ environments without a deployed cluster.
 
 To run them locally::
 
-    # Terminal 1: start the Docker fixture from the repo root
+    # Terminal 1: start the Docker fixture from the repo root. Pass
+    # GOOSEFS_WORKER_BLOCK_STORE_TYPE=PAGE to boot the paged block store
+    # instead of the default FILE one.
     bash scripts/ci/goosefs-up.sh
 
     # Terminal 2:
     cd bindings/python
     export GOOSEFS_MASTER_ADDR=127.0.0.1:9200
     export GOOSEFS_AUTH_TYPE=simple
+    export GOOSEFS_WORKER_BLOCK_STORE_TYPE=FILE   # or PAGE, must match the cluster
     uv run pytest -v
 """
 
@@ -49,6 +52,12 @@ from goosefs import AsyncGoosefs, Config, Goosefs
 
 GOOSEFS_MASTER_ADDR = os.environ.get("GOOSEFS_MASTER_ADDR")
 
+# Which block store the worker under test runs: ``FILE`` or ``PAGE``. ``FILE`` is
+# both GooseFS's own default for ``goosefs.worker.block.store.type`` and the
+# Docker fixture's, so an unset variable describes the cluster accurately rather
+# than merely guessing at it.
+WORKER_BLOCK_STORE_TYPE = os.environ.get("GOOSEFS_WORKER_BLOCK_STORE_TYPE", "FILE").strip().upper()
+
 # Collection-time skip: avoid even constructing fixtures when unconfigured.
 collect_ignore_glob = (
     []
@@ -63,6 +72,7 @@ collect_ignore_glob = (
         "test_atexit.py",
         "test_page_cache.py",
         "test_write_degrade.py",
+        "test_block_boundary_write_types.py",
     ]
 )
 
@@ -78,6 +88,29 @@ def master_addr() -> str:
     if not GOOSEFS_MASTER_ADDR:
         pytest.skip("GOOSEFS_MASTER_ADDR is not set; skipping integration tests")
     return GOOSEFS_MASTER_ADDR
+
+
+@pytest.fixture(scope="session")
+def worker_block_store_type() -> str:
+    """Which block store the worker under test runs: ``"FILE"`` or ``"PAGE"``.
+
+    Write behaviour genuinely differs between the two, so a test that straddles
+    a block boundary cannot state an expectation without knowing the mode:
+    PAGE's ``PagedBlockWriter.flush()`` throws ``UnsupportedOperationException``,
+    and the SDK sends ``flush:true`` on a mid-file block switch because Java
+    ``GooseFSFileOutStream.getNextBlock()`` does.
+
+    Read from ``$GOOSEFS_WORKER_BLOCK_STORE_TYPE``, which both the Docker
+    fixture and :file:`scripts/ci/goosefs-up.sh` export. It is a declaration
+    about the cluster rather than something probed from it — probing would mean
+    performing the very write these tests exist to pin down, which would make
+    them agree with whatever the worker happens to do.
+    """
+    if WORKER_BLOCK_STORE_TYPE not in ("FILE", "PAGE"):
+        pytest.fail(
+            f"GOOSEFS_WORKER_BLOCK_STORE_TYPE must be FILE or PAGE, got {WORKER_BLOCK_STORE_TYPE!r}"
+        )
+    return WORKER_BLOCK_STORE_TYPE
 
 
 @pytest.fixture(scope="session")
