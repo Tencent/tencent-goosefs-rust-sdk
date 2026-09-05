@@ -41,7 +41,6 @@ exclude = [
     ".DS_Store",
     "**/.DS_Store",
     "docs/CLIENT_PAGE_CACHE_DESIGN.md",
-    "docs/SHORT_CIRCUIT_DESIGN.md",
     "docs/GOOSEFS_LANCE_GRPC_DESIGN.md",
     "docs/release/*",
     "target/*",
@@ -106,14 +105,8 @@ arc-swap = "1"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 serde = { version = "1", features = ["derive"] }
 async-trait = "0.1"
-# Short-circuit (local) block read data plane: whole-block read-only mmap +
-# `madvise` hints (MADV_RANDOM / SEQUENTIAL / WILLNEED). See
-# docs/SHORT_CIRCUIT_DESIGN.md . `Mmap::advise` is unix-only; all advise
-# calls are `cfg(unix)`-gated so the crate still builds on other targets.
-memmap2 = "0.9"
-# Bounded LRU used by `ShortCircuitFactory` for the per-task hot-block reader
-# cache and the (also bounded) negative cache. See SHORT_CIRCUIT_DESIGN.md
-#  / . Floor is 0.16.3 for RUSTSEC-2026-0002 (IterMut Stacked Borrows).
+# Bounded LRU used by the client metadata cache. Floor is 0.16.3 for
+# RUSTSEC-2026-0002 (IterMut Stacked Borrows).
 lru = "0.18.1"
 rand = "0.9.1"
 uuid = { version = "1.2", features = ["v4"] }
@@ -150,9 +143,9 @@ futures = "0.3"
 # not cryptographic strength.
 fastrand = "2"
 
-# Unix-only: raw `sigaction` for the short-circuit SIGBUS diagnostic handler
-# (SHORT_CIRCUIT_DESIGN  / ). Already in the dependency graph
-# transitively; declared directly so the handler can be registered.
+# Unix-only: raw syscall wrappers used by the io_uring page-cache backend.
+# Already in the dependency graph transitively; declared directly so the
+# cache store can call into it.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

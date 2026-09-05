@@ -315,8 +315,7 @@ impl WorkerRouter {
         // skip local-first routing. Probing here — inside the only place
         // the cache is reset — guarantees the shared router is
         // always-probed, so every `WorkerRouterView::from_shared` (to be
-        // introduced in  Step 1) inherits a resolved
-        // `Some(_)` regardless of whether short-circuit is on.
+        // introduced in  Step 1) inherits a resolved `Some(_)`.
         //
         // `detect_local_worker` is off the hot path: `update_workers` is
         // only called by the background refresh task in
@@ -395,7 +394,7 @@ impl WorkerRouter {
     /// name (`localhost` / loopback / this machine's hostname) **or** a local
     /// interface address. The latter is decisive in practice: Goosefs workers
     /// usually register with their LAN IP (e.g. `10.x.x.x`), not loopback or
-    /// hostname (SHORT_CIRCUIT_DESIGN ).
+    /// hostname.
     ///
     /// Returns the worker ID of the local worker, or `0` if none found.
     async fn detect_local_worker(workers: &[WorkerInfo]) -> i64 {
@@ -754,35 +753,6 @@ impl WorkerRouter {
         self.failed_count.store(0, Ordering::Relaxed);
     }
 
-    /// `source_is_local` pre-filter for short-circuit reads
-    /// (SHORT_CIRCUIT_DESIGN ).
-    ///
-    /// Returns `true` iff the worker that would serve `block_id` is the
-    /// detected local worker. This composes the existing local-first routing:
-    /// [`select_worker`](Self::select_worker) already returns the local worker
-    /// (when present & healthy) for *every* block, so a match here means the
-    /// block would be served locally.
-    ///
-    /// **Note (design ):** "worker local" ≠ "block physically local". This
-    /// is only a pre-filter to avoid issuing a pointless `OpenLocalBlock` RPC
-    /// to a remote worker; the final authority on whether the block can be
-    /// mmap'd locally is the `OpenLocalBlock` RPC itself.
-    ///
-    /// TODO(java-parity): align SC locality with Java read selection —
-    /// use [`select_worker_for_read`](Self::select_worker_for_read) (locations-
-    /// first) instead of local-first [`select_worker`](Self::select_worker).
-    /// Deferred; this change set does not modify the SC path.
-    pub async fn is_block_source_local(&self, block_id: i64) -> bool {
-        let Ok(selected) = self.select_worker(block_id).await else {
-            return false;
-        };
-        // `select_worker` has now probed & cached the local worker id.
-        match **self.local_worker_id.load() {
-            Some(Some(local_id)) => selected.id == Some(local_id),
-            _ => false,
-        }
-    }
-
     /// Pick any eligible worker (random selection, not tied to a block ID).
     ///
     /// Matches Java `UnderFileSystemFileOutStream`:
@@ -1118,9 +1088,6 @@ fn ring_ceiling_worker_index(ring: &[(i64, usize)], target: i64) -> Option<usize
 /// `WorkerRouterView` intentionally does **not** provide:
 /// - `update_workers` — mutation belongs on the shared router only
 /// - `refresh_workers` / `needs_refresh` — TTL-driven refresh path
-/// - `is_block_source_local` — short-circuit query (already only called
-///   on the shared router at
-///   [`src/block/short_circuit/factory.rs`](../short_circuit/factory.rs))
 ///
 /// The type system therefore statically prevents a future contributor
 /// from calling shared-router-only APIs on a per-reader view(),
@@ -1776,9 +1743,8 @@ pub(crate) fn worker_addr_key(addr: &WorkerNetAddress) -> String {
 
 /// Build the gRPC endpoint (`host:port`) used by clients to actually dial a
 /// worker.  / table row #2 in the post-`oncpu_8` plan: every
-/// `file_reader.rs` / `file_in_stream.rs` / `file_writer.rs` /
-/// `short_circuit::factory::acquire_worker` call site used to roll its own
-/// `format!("{}:{}", host, port)`; share this one instead so the
+/// `file_reader.rs` / `file_in_stream.rs` / `file_writer.rs` call site used to
+/// roll its own `format!("{}:{}", host, port)`; share this one instead so the
 /// pre-sized `String` + `itoa` win applies everywhere.
 ///
 /// Defaults differ from [`worker_addr_key`] (GooseFS RPC defaults

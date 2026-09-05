@@ -41,7 +41,6 @@ EXAMPLES=(
   auth_demo
   page_cache_demo
   reader_page_cache_demo
-  short_circuit_demo
   metrics_heartbeat
   verify_checkblocks_locations
 )

@@ -146,11 +146,11 @@ pub fn gauge(name: &str) -> std::sync::Arc<Gauge> {
 pub mod name {
     // ── Throughput counters (cluster aggregated) ─────────────────────────────
 
-    /// Local short-circuit read bytes (client reads from local Alluxio worker).
+    /// Bytes read from a co-located (local) worker.
     /// Cluster aggregated: true
     pub const CLIENT_BYTES_READ_LOCAL: &str = "Client.BytesReadLocal";
 
-    /// Local short-circuit write bytes (client writes to local Alluxio worker).
+    /// Bytes written to a co-located (local) worker.
     /// Cluster aggregated: true
     pub const CLIENT_BYTES_WRITTEN_LOCAL: &str = "Client.BytesWrittenLocal";
 
@@ -267,74 +267,6 @@ pub mod name {
 
     /// Total blocks successfully written (counter).
     pub const CLIENT_BLOCKS_WRITTEN_TOTAL: &str = "Client.BlocksWrittenTotal";
-
-    // ── Short-circuit (local mmap) read path (SHORT_CIRCUIT_DESIGN ) ──
-    /// Successful `OpenLocalBlock` + mmap sessions.
-    pub const CLIENT_SC_OPEN_SUCCESS: &str = "Client.ShortCircuitOpenSuccess";
-    /// `OpenLocalBlock` RPC failures (block not local / IO error).
-    pub const CLIENT_SC_OPENLOCAL_FAIL: &str = "Client.ShortCircuitOpenLocalFail";
-    /// `File::open` failures on the local block path (e.g. EACCES).
-    pub const CLIENT_SC_FILE_OPEN_FAIL: &str = "Client.ShortCircuitFileOpenFail";
-    /// `Mmap::map` failures (ENOMEM / EINVAL).
-    pub const CLIENT_SC_MMAP_FAIL: &str = "Client.ShortCircuitMmapFail";
-    /// Total bytes served from the short-circuit (mmap) path.
-    pub const CLIENT_SC_READ_BYTES: &str = "Client.ShortCircuitReadBytes";
-    /// Number of short-circuit `read` / `read_bytes` / `read_to_slice` calls.
-    pub const CLIENT_SC_READ_CALLS: &str = "Client.ShortCircuitReadCalls";
-    /// Factory LRU reader-cache hits.
-    pub const CLIENT_SC_CACHE_HITS: &str = "Client.ShortCircuitCacheHits";
-    /// Factory LRU reader-cache evictions.
-    pub const CLIENT_SC_CACHE_EVICTIONS: &str = "Client.ShortCircuitCacheEvictions";
-    /// Negative-cache hits (block recently failed SC → skipped, went gRPC).
-    pub const CLIENT_SC_NEG_CACHE_HITS: &str = "Client.ShortCircuitNegCacheHits";
-    /// Currently-live short-circuit readers (gauge).
-    pub const CLIENT_SC_ACTIVE_READERS: &str = "Client.ShortCircuitActiveReaders";
-    /// `prefetch` / `prefetch_many` calls.
-    pub const CLIENT_SC_PREFETCH_CALLS: &str = "Client.ShortCircuitPrefetchCalls";
-    /// Cumulative bytes requested for prefetch.
-    pub const CLIENT_SC_PREFETCH_BYTES: &str = "Client.ShortCircuitPrefetchBytes";
-    /// Actual `madvise(WILLNEED)` syscalls issued (after coalescing).
-    pub const CLIENT_SC_PREFETCH_MADVISE: &str = "Client.ShortCircuitPrefetchMadvise";
-
-    // ── SC top-level decision histogram ──
-    //
-    // Enum-tagged counters that expose the **caller-visible** outcome of each
-    // `try_short_circuit_read` invocation on the **positioned / random** read
-    // path (`GoosefsFileReader::next_read_bytes` /
-    // `GoosefsFileInStream::read_at`), which is the workload the flame graph
-    // in  is dominated by. Operators can compute the hit rate directly:
-    //
-    //     hit_rate = HIT / (HIT + SKIPPED + FALLBACK_OPEN + FALLBACK_READ)
-    //
-    // The **sequential** read path (`sc_sequential_read`) is intentionally
-    // NOT counted here — it decides SC once per block and then reuses the
-    // mmap slice for every chunk, so mixing per-chunk sequential counts
-    // with per-read positioned counts would give a misleading denominator.
-    // Sequential SC throughput remains observable via
-    // `Client.ShortCircuitReadCalls` / `Client.ShortCircuitReadBytes`.
-    //
-    // Fine-grained fallback *reasons* remain observable via the pre-existing
-    // `Client.ShortCircuitOpenLocalFail` / `FileOpenFail` / `MmapFail`
-    // counters (they act as the "fallback reason histogram"  asks for).
-    /// SC actually served the read (zero-copy mmap slice). Hit-rate numerator.
-    pub const CLIENT_SC_DECISION_HIT: &str = "Client.ShortCircuitDecisionHit";
-    /// SC not attempted at all — pre-filter (`should_use`) rejected the block.
-    /// Includes: SC disabled by config, block source not local, block size
-    /// under the SC size threshold, block on the negative cache, etc.
-    pub const CLIENT_SC_DECISION_SKIPPED: &str = "Client.ShortCircuitDecisionSkipped";
-    /// SC attempted but the **open** step failed and read fell back to gRPC.
-    /// Break down the specific cause via `ShortCircuitOpenLocalFail` /
-    /// `ShortCircuitFileOpenFail` / `ShortCircuitMmapFail`.
-    pub const CLIENT_SC_DECISION_FALLBACK_OPEN: &str = "Client.ShortCircuitDecisionFallbackOpen";
-    /// SC opened successfully but a subsequent **read** failed with a
-    /// recoverable error and this individual read fell back to gRPC. The
-    /// reader is invalidated; a subsequent read on the same block re-opens.
-    pub const CLIENT_SC_DECISION_FALLBACK_READ: &str = "Client.ShortCircuitDecisionFallbackRead";
-    /// SC read produced a **semantic** error (`OutOfRange`) that must be
-    /// surfaced unchanged (INV-S4) rather than falling back. Should stay at
-    /// zero on healthy deployments; a non-zero value indicates real
-    /// metadata / block-size drift worth investigating.
-    pub const CLIENT_SC_DECISION_SEMANTIC_ERROR: &str = "Client.ShortCircuitDecisionSemanticError";
 }
 
 #[cfg(test)]
@@ -525,82 +457,5 @@ mod tests {
             name::CLIENT_BLOCKS_WRITTEN_TOTAL,
             "Client.BlocksWrittenTotal"
         );
-    }
-
-    // ── B1: SC decision histogram constants ───────────────────────
-
-    /// Five enum-tagged decision
-    /// counters exposing the caller-visible SC outcome. Names follow
-    /// the `Client.ShortCircuitDecision*` convention so operators can
-    /// easily wildcard them in Prometheus / dashboards.
-    #[test]
-    fn name_constants_sc_decision_histogram() {
-        assert_eq!(
-            name::CLIENT_SC_DECISION_HIT,
-            "Client.ShortCircuitDecisionHit"
-        );
-        assert_eq!(
-            name::CLIENT_SC_DECISION_SKIPPED,
-            "Client.ShortCircuitDecisionSkipped"
-        );
-        assert_eq!(
-            name::CLIENT_SC_DECISION_FALLBACK_OPEN,
-            "Client.ShortCircuitDecisionFallbackOpen"
-        );
-        assert_eq!(
-            name::CLIENT_SC_DECISION_FALLBACK_READ,
-            "Client.ShortCircuitDecisionFallbackRead"
-        );
-        assert_eq!(
-            name::CLIENT_SC_DECISION_SEMANTIC_ERROR,
-            "Client.ShortCircuitDecisionSemanticError"
-        );
-    }
-
-    /// The five decision counters are reachable through the registry
-    /// factory (i.e. exported), and repeated `counter(name)` calls
-    /// return the same underlying `Arc<Counter>` — a prerequisite for
-    /// heartbeat / pushgateway to observe them.
-    #[test]
-    fn sc_decision_counters_are_registered_and_shared() {
-        for cname in [
-            name::CLIENT_SC_DECISION_HIT,
-            name::CLIENT_SC_DECISION_SKIPPED,
-            name::CLIENT_SC_DECISION_FALLBACK_OPEN,
-            name::CLIENT_SC_DECISION_FALLBACK_READ,
-            name::CLIENT_SC_DECISION_SEMANTIC_ERROR,
-        ] {
-            let c1 = counter(cname);
-            let c2 = counter(cname);
-            // Same underlying counter (Arc pointer identity is not
-            // guaranteed by the API, but observable state must be).
-            let base = c1.get();
-            c2.inc(1);
-            assert_eq!(
-                c1.get(),
-                base + 1,
-                "counter '{}' must be process-wide shared",
-                cname
-            );
-        }
-    }
-
-    /// The decision counter names must be pairwise distinct — a
-    /// duplicate would silently merge two decision buckets into one
-    /// and destroy the hit-rate calculation.
-    #[test]
-    fn sc_decision_counter_names_are_pairwise_distinct() {
-        let names = [
-            name::CLIENT_SC_DECISION_HIT,
-            name::CLIENT_SC_DECISION_SKIPPED,
-            name::CLIENT_SC_DECISION_FALLBACK_OPEN,
-            name::CLIENT_SC_DECISION_FALLBACK_READ,
-            name::CLIENT_SC_DECISION_SEMANTIC_ERROR,
-        ];
-        for i in 0..names.len() {
-            for j in (i + 1)..names.len() {
-                assert_ne!(names[i], names[j], "duplicate SC decision name");
-            }
-        }
     }
 }

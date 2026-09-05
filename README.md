@@ -25,7 +25,6 @@ A native Rust client library that communicates directly with [Goosefs](https://c
 ### Also in recent releases (v0.1.7)
 
 - **Client-side local page cache** — New opt-in, disk-backed page cache mirroring the GooseFS Java client's `goosefs.user.client.cache.*` semantics. `LocalCacheManager` provides striped page locks, LRU/LFU evictors, multi-directory `HashAllocator`, bounded async write-back, TTL lazy expiry with a background sweeper, restart restore, and overwrite invalidation via `on_file_open`. Integrated into `GoosefsFileInStream::read` / `read_at` through `read_through_cache`; `ReadType::NoCache` still serves hits but skips back-fill. Best-effort by design — misses/errors always fall back to the worker without affecting read correctness. Adds `Client.Cache*` metrics (incl. `HitRate`, `SpaceUsedCount`, external read time). See [`docs/CLIENT_PAGE_CACHE_DESIGN.md`](docs/CLIENT_PAGE_CACHE_DESIGN.md) and [`docs/CLIENT_CONFIGURATION.md`](docs/CLIENT_CONFIGURATION.md).
-- **Short-Circuit local mmap read path** — New `short_circuit` module that bypasses the gRPC data plane when the client and worker are co-located. `LocalBlockReader` performs zero-copy reads via read-only `mmap` with `madvise` prefetch and optional Transparent Huge Pages (THP); `ShortCircuitFactory` provides per-task hot-block caches, negative caching, a `CapabilityProvider` hook, and a context-shared factory. A dedicated `SIGBUS` diagnostic handler surfaces mmap faults with actionable diagnostics and manages process-level signal installation. Local worker is auto-detected by interface bind. Every recoverable error transparently falls back to the standard gRPC path. Wired into both sequential (`read()`) and positioned-read (`read_at()`) paths through `file_in_stream` / `context` / `config`. Ships with gated E2E integration tests and an INV-S3/INV-D1/INV-D2/INV-S1/INV-S2/INV-S5 consistency regression suite (`tests/short_circuit_e2e.rs`, `tests/sc_consistency.rs`, `tests/sc_inv_s3.rs`), plus `examples/short_circuit_demo.rs`. Server-side companion: new `OpenLocalBlock` RPC + `OpenLocalBlockGuard` for block-lock lifecycle. See [`docs/SHORT_CIRCUIT_DESIGN.md`](docs/SHORT_CIRCUIT_DESIGN.md).
 - **Read-path performance optimization (wait-free hot paths)** — `WorkerClientPool.clients` and `WorkerRouter.workers` / `hash_ring` / `local_worker_id` are now `ArcSwap` instead of `RwLock<HashMap>`, mirroring the existing `ArcSwap<AuthedState>` model on `MasterClient`. The acquire and `select_worker` hot paths become a single atomic load + map lookup + cheap clone (no async `RwLock` round-trip); writes use `ArcSwap::rcu` copy-on-write, and same-key reconnects are still single-flighted by the per-key mutex — generation / single-flight / invalidate semantics preserved. Related local micro-benchmarks live under `benchmarks/` (e.g. `master_hotpath.rs`, `cache_uring_bench.rs`, `cache_evictor_bench.rs`).
 - **Batch metadata / lifecycle APIs (Python binding)** — The Python SDK gains batch entry points (`AsyncGoosefs.batch_get_status` / `batch_exists` / `batch_open_file` / `batch_create_file` / `batch_create_dir` / `batch_rename` / `batch_delete` / `batch_list_status`; sync `Goosefs` exposes the same set) that fan out with bounded concurrency (`futures::stream::buffered`), preserving input order. The whole batch completes before results are collected; the first error in input order is returned (other in-flight RPCs are **not** cancelled on failure — use individual calls if you need per-path error isolation). One PyO3 boundary crossing per batch instead of N. The Rust `BaseFileSystem` itself remains single-op; downstream Rust callers can build equivalent fan-out with `tokio::spawn` + `Arc<BaseFileSystem>` directly.
 - **Reliability / robustness** — `PollingMasterInquireClient` HA primary discovery is now cancel-safe via a new RAII `LeaderGuard` (no more infinite recursion when the singleflight leader is cancelled by an outer `timeout` / `select!`). `WriteBlockHandle::Drop` now aborts the background gRPC task on early-error paths instead of leaking a detached future. `GoosefsFileWriter::Drop` performs best-effort cleanup (cancels in-flight cache/UFS streams, calls `master.remove_blocks` or falls back to `delete(unchecked=true)`). `LogSampler` uses monotonic `Instant` (safe under NTP / admin clock jumps). `MetricsMasterClient::with_retry` reconnects at the *top* of the next attempt. `WorkerClient::connect` now sets `request_timeout`. `config::parse_byte_size` overflow is a hard error (previously silently wrapped). `WorkerRouter` consistent-hash ring is pre-built on `update_workers` (O(log N) `binary_search` per request), and `pick_any_worker` uses `rand::Rng::random_range` for proper load spreading.
@@ -508,25 +507,9 @@ Every knob below can also be set without touching Rust code:
 
 **Built-in counter names** (re-exported from `goosefs_sdk::metrics::name`):
 
-- `Client.BytesReadLocal` — bytes read via local short-circuit (auto-incremented by the `io` layer).
-- `Client.BytesWrittenLocal` — bytes written via local short-circuit (auto-incremented).
+- `Client.BytesReadLocal` — bytes read from a co-located (local) worker (auto-incremented by the `io` layer).
+- `Client.BytesWrittenLocal` — bytes written to a co-located (local) worker (auto-incremented).
 - `Client.BytesWrittenUfs` — bytes written directly to UFS (bypassing the cache).
-
-**Short-circuit (local mmap) read counters** (see [`docs/SHORT_CIRCUIT_DESIGN.md`](docs/SHORT_CIRCUIT_DESIGN.md)):
-
-- `Client.ShortCircuitOpenSuccess` — successful `OpenLocalBlock` + mmap sessions.
-- `Client.ShortCircuitOpenLocalFail` — `OpenLocalBlock` RPC failures (block not local / IO error).
-- `Client.ShortCircuitFileOpenFail` — `File::open` failures on the local block path (e.g. EACCES).
-- `Client.ShortCircuitMmapFail` — `mmap` failures (ENOMEM / EINVAL / size mismatch).
-- `Client.ShortCircuitReadBytes` — total bytes served from the local mmap path.
-- `Client.ShortCircuitReadCalls` — number of short-circuit read calls.
-- `Client.ShortCircuitCacheHits` — hot-block reader LRU hits (mmap reused, no new open).
-- `Client.ShortCircuitCacheEvictions` — reader-cache evictions.
-- `Client.ShortCircuitNegCacheHits` — negative-cache hits (recently-failed block skipped → gRPC).
-- `Client.ShortCircuitActiveReaders` — currently-live short-circuit readers (gauge).
-- `Client.ShortCircuitPrefetchCalls` — `prefetch` / `prefetch_many` calls.
-- `Client.ShortCircuitPrefetchBytes` — cumulative bytes requested for prefetch.
-- `Client.ShortCircuitPrefetchMadvise` — actual `madvise(WILLNEED)` syscalls issued (after coalescing).
 
 > **Tip:** Run `cargo run --example metrics_heartbeat` for an end-to-end demo that exercises both `metrics_enabled = true` and `metrics_enabled = false`. Set `RUST_LOG=info` to see the SDK's heartbeat / flush logs.
 
@@ -800,7 +783,6 @@ tencent-goosefs-rust-sdk/
 │   ├── page_cache_demo.rs       # ★ Client local page cache (cold miss → back-fill → warm hit)
 │   ├── reader_page_cache_demo.rs # Reader-level page cache demo
 │   ├── seekable_file_read.rs    # ★ Seekable read via GoosefsFileInStream (seek / read_at)
-│   ├── short_circuit_demo.rs    # Short-circuit local mmap read demo
 │   ├── streaming_file_read.rs   # ★ Streaming read — constant O(block) memory
 │   └── write_types.rs           # ★ WriteType comparison
 ├── tests/

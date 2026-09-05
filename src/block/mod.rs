@@ -18,7 +18,6 @@ pub mod locations;
 pub mod mapper;
 pub(crate) mod murmur3;
 pub mod router;
-pub mod short_circuit;
 
 pub use locations::{
     enrich_file_block_locations, enrich_file_block_locations_with_router,
@@ -27,7 +26,3 @@ pub use locations::{
 };
 pub use mapper::{BlockMapper, BlockReadPlan, BlockWritePlan};
 pub use router::WorkerRouter;
-pub use short_circuit::{
-    should_use_short_circuit, AccessHint, LocalBlockReader, ScDecisionCtx, ShortCircuitConfig,
-    ShortCircuitError, ShortCircuitFactory,
-};

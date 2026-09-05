@@ -17,8 +17,8 @@ The following 3 metrics are aligned with the Java Client's `MetricKey` definitio
 
 | Internal Name | Prometheus Metric Name | Type | Cluster Aggregated | Description |
 |---------|-------------------|------|:--------:|------|
-| `Client.BytesReadLocal` | `goosefs_client_bytes_read_local` | Counter | ✅ | Bytes read via local short-circuit (client reads directly from local worker) |
-| `Client.BytesWrittenLocal` | `goosefs_client_bytes_written_local` | Counter | ✅ | Bytes written via local short-circuit (client writes directly to local worker) |
+| `Client.BytesReadLocal` | `goosefs_client_bytes_read_local` | Counter | ✅ | Bytes read from a co-located (local) worker |
+| `Client.BytesWrittenLocal` | `goosefs_client_bytes_written_local` | Counter | ✅ | Bytes written to a co-located (local) worker |
 | `Client.BytesWrittenUfs` | `goosefs_client_bytes_written_ufs` | Counter | ✅ | Bytes written directly to UFS (bypassing GooseFS cache layer) |
 
 > **Note**: These metrics are reported via `FileSystemMasterClient.heartbeat()` in the Java Client. The Rust Client follows the same mechanism.
@@ -118,65 +118,6 @@ Tracks block-level read/write concurrency and completion counts.
 - `rate(blocks_read_total[5m])` — block reads completed per second (IOPS dimension)
 
 ---
-
-### 2.6 Short-Circuit Read Metrics
-
-Tracks the local-mmap ("short-circuit", SC) read path
-([`docs/SHORT_CIRCUIT_DESIGN.md`](SHORT_CIRCUIT_DESIGN.md)). Two
-disjoint layers:
-
-**(a) Fine-grained per-step counters** (already present, exported here for completeness):
-
-| Internal Name | Type | Description |
-|---|---|---|
-| `Client.ShortCircuitOpenSuccess` | Counter | Successful `OpenLocalBlock` + mmap sessions |
-| `Client.ShortCircuitOpenLocalFail` | Counter | `OpenLocalBlock` RPC failures (block not local / IO / auth) |
-| `Client.ShortCircuitFileOpenFail` | Counter | `File::open` failures on the local block path (e.g. EACCES) |
-| `Client.ShortCircuitMmapFail` | Counter | `Mmap::map` failures (ENOMEM / EINVAL) |
-| `Client.ShortCircuitReadCalls` | Counter | Number of SC `read` / `read_bytes` / `read_to_slice` calls |
-| `Client.ShortCircuitReadBytes` | Counter | Total bytes served from the SC (mmap) path |
-| `Client.ShortCircuitCacheHits` | Counter | Factory LRU reader-cache hits |
-| `Client.ShortCircuitCacheEvictions` | Counter | Factory LRU reader-cache evictions |
-| `Client.ShortCircuitNegCacheHits` | Counter | Negative-cache hits (recently-failed block → SC skipped) |
-| `Client.ShortCircuitActiveReaders` | Gauge | Currently-live SC readers |
-| `Client.ShortCircuitPrefetchCalls` | Counter | `prefetch` / `prefetch_many` calls |
-| `Client.ShortCircuitPrefetchBytes` | Counter | Cumulative bytes requested for prefetch |
-| `Client.ShortCircuitPrefetchMadvise` | Counter | Actual `madvise(WILLNEED)` syscalls issued (after coalescing) |
-
-**(b) Top-level decision histogram** (added per FLAMEGRAPH_OPTIMIZATION_PLAN §B1)
-— five enum-tagged counters exposing the caller-visible SC outcome for each
-positioned/random read attempt:
-
-| Internal Name | Type | Description |
-|---|---|---|
-| `Client.ShortCircuitDecisionHit` | Counter | SC actually served the read (zero-copy mmap slice). Hit-rate numerator. |
-| `Client.ShortCircuitDecisionSkipped` | Counter | SC not attempted — pre-filter (`should_use`) rejected the block: SC disabled by config, block source not local, block size below threshold, block on the negative cache, or the reader has no SC factory attached. |
-| `Client.ShortCircuitDecisionFallbackOpen` | Counter | SC attempted but the **open** step failed and the read fell back to gRPC. Break down the cause via `ShortCircuitOpenLocalFail` / `ShortCircuitFileOpenFail` / `ShortCircuitMmapFail`. |
-| `Client.ShortCircuitDecisionFallbackRead` | Counter | SC opened successfully but a subsequent **read** failed with a recoverable error and this individual read fell back to gRPC. |
-| `Client.ShortCircuitDecisionSemanticError` | Counter | SC read produced a semantic error (`OutOfRange`) that must be surfaced unchanged (INV-S4). Should stay at `0` on healthy deployments. |
-
-**Hit-rate calculation** (Prometheus / PromQL):
-
-```promql
-sum(rate(Client_ShortCircuitDecisionHit[5m]))
-/
-sum(rate(Client_ShortCircuitDecisionHit[5m]))
-+ sum(rate(Client_ShortCircuitDecisionSkipped[5m]))
-+ sum(rate(Client_ShortCircuitDecisionFallbackOpen[5m]))
-+ sum(rate(Client_ShortCircuitDecisionFallbackRead[5m]))
-```
-
-The FLAMEGRAPH_OPTIMIZATION_PLAN §B1 target is `≥ 0.95` on the profiling
-host. If hit-rate is low, use the fine-grained counters in (a) to
-identify the top fallback reason and drive per-cause fixes.
-
-**Scope**: the decision histogram covers the **positioned / random** read
-path (`GoosefsFileReader::next_read_bytes`, `GoosefsFileInStream::read_at`),
-which is the workload the flame graph is dominated by. The **sequential**
-read path decides SC once per block and reuses the mmap slice for every
-chunk, so it is intentionally excluded from this histogram — its throughput
-remains observable via `ShortCircuitReadCalls` / `ShortCircuitReadBytes`.
-
 
 ### 2.x Local page cache — eviction and reaping
 

@@ -19,8 +19,7 @@ supported by the Goosefs Rust Client (`goosefs-sdk`).
    - [Transparent Acceleration Settings](#26-transparent-acceleration-settings)
    - [Authorization Settings](#27-authorization-settings)
    - [Client Local Page Cache Settings](#28-client-local-page-cache-settings)
-   - [Short-Circuit (Local mmap) Read Settings](#29-short-circuit-local-mmap-read-settings)
-   - [Miscellaneous Settings](#210-miscellaneous-settings)
+   - [Miscellaneous Settings](#29-miscellaneous-settings)
 3. [Environment Variables](#3-environment-variables)
 4. [Storage Option Keys](#4-storage-option-keys)
 5. [Properties File Keys](#5-properties-file-keys)
@@ -385,69 +384,7 @@ deployment with non-NVMe cache storage.
 > `positioned_read` helpers use the worker-direct path and bypass the local
 > page cache.
 
-### 2.9 Short-Circuit (Local mmap) Read Settings
-
-When the block being read lives on a **worker co-located with the client**
-(same host), the SDK can skip the gRPC data plane entirely and `mmap` the
-block file from the worker's tiered storage directly (design details in
-[`docs/SHORT_CIRCUIT_DESIGN.md`](SHORT_CIRCUIT_DESIGN.md)). This is called the
-**short-circuit (SC) read path** and is byte-equivalent to the gRPC path
-(regression suite: [`tests/sc_consistency.rs`](../tests/sc_consistency.rs),
-[`tests/short_circuit_e2e.rs`](../tests/short_circuit_e2e.rs)).
-
-> **All three configuration paths are wired up.** Every field below can be set
-> programmatically on `GoosefsConfig`, via a `GOOSEFS_SHORT_CIRCUIT_*`
-> environment variable, via `goosefs.user.short.circuit.*` /
-> `goosefs.client.short.circuit.*` in `goosefs-site.properties`, or via a
-> `goosefs_short_circuit_*` storage option (Lance / OpenDAL). See §3, §4 and
-> §5 for the canonical key names.
->
-> **When does SC engage?** Only when [`block::WorkerRouter`](../src/block/router.rs)
-> resolves the target block to the local host (mirrors Java `LocalFirstPolicy`).
-> Reads served by a remote worker always fall back to the gRPC data plane
-> regardless of these switches. See
-> [`docs/PAGE_CACHE_VS_SHORT_CIRCUIT.md`](PAGE_CACHE_VS_SHORT_CIRCUIT.md) for
-> how SC interacts with the client-side page cache (§2.8).
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `short_circuit_enabled` | `bool` | `false` | Master kill switch for the SC path. **Disabled by default** since 0.1.6 — the 2026-07-07 hotspot analysis showed that enabling this switch materially reduced throughput on Lance/DuckDB high-concurrency vector search (~600 QPS vs ~900 QPS with SC off), and the demo binary reference flame graph contains no SC frames either. Set to `true` to opt back into the local mmap fast path on deployments that genuinely benefit from it (e.g. co-located small-object reads with a warm block cache). Mirrors Java `goosefs.user.short.circuit.enabled` semantically. See `../../goosefs-lance-tests/docs/design/FLAMEGRAPH_OPTIMIZATION_PLAN.md` §C6. |
-| `short_circuit_cache_capacity` | `usize` | `64` | Per-task LRU capacity for hot-block SC readers (kept inside `ShortCircuitFactory`). Raising it reduces `mmap` / `open` churn on workloads that keep re-touching the same blocks; each cached reader holds an `mmap` region so tune against per-process VMA / FD budget. |
-| `short_circuit_cache_ttl` | `Duration` | `30s` | Idle TTL after which a cached SC reader is dropped even if the LRU is not full. Protects against ever-growing mapping tables on long-lived processes. |
-| `short_circuit_neg_cache_ttl` | `Duration` | `5s` | Negative-cache TTL: after a block fails to open via SC (e.g. worker moved it out of its committed tier), the client will not retry SC for that block for this long and falls back to gRPC. Prevents thrashing when a block is genuinely non-SC-eligible. |
-| `short_circuit_advise` | `String` | `"random"` | L1 kernel readahead hint issued via `madvise` on the mapping. Accepted values: `"sequential"` / `"random"` / `"normal"` / `"none"` (case-insensitive). `random` matches the positioned-read workload SC is optimised for; switch to `sequential` for scan-heavy Parquet/Arrow readers. |
-| `short_circuit_prefetch_enabled` | `bool` | `true` | L2 application-level prefetch master switch. When `false`, `ShortCircuitReader::prefetch` / `prefetch_many` degrade to no-ops (mapping still exists, but no proactive `madvise(WILLNEED)` is issued). |
-| `short_circuit_prefetch_coalesce_gap` | `usize` | `65536` (64 KiB) | Maximum gap between adjacent ranges that `prefetch_many` will merge into a single `madvise` call. Only consulted when `short_circuit_prefetch_enabled = true`. |
-| `short_circuit_prefetch_max_batch` | `usize` | `1024` | Upper bound on how many `madvise` calls a single `prefetch_many` may issue. Prevents a pathological caller from spending unbounded time in kernel syscalls when passing thousands of tiny disjoint ranges. |
-| `short_circuit_min_block_size` | `i64` | `0` (disabled) | Minimum block size (bytes) required to attempt SC. Blocks smaller than this skip SC and go through gRPC. `0` means "no lower bound". Useful when SC's fixed per-block `mmap`/`open` cost outweighs the transfer savings on very small blocks. |
-| `short_circuit_sigbus_handler` | `bool` | `true` | Install a process-global `SIGBUS` handler that diagnoses and `abort`s on a mapping fault. A `SIGBUS` on a committed, locked SC block indicates a **protocol violation (INV-D1)** — aborting surfaces it loudly rather than silently returning torn/stale bytes (design §3.2 / §8.1). Linux/macOS only; a no-op elsewhere. Turn off only if the host process already installs its own `SIGBUS` handler and cannot chain. |
-| `short_circuit_thp` | `bool` | `false` (**experimental**) | Request Transparent Huge Pages for the block mapping via `madvise(MADV_HUGEPAGE)`. Linux only and effective only where file-backed THP is supported (recent kernels + specific tmpfs mounts); a no-op elsewhere. |
-
-**Metrics.** `Client.ShortCircuit*` counters expose per-path hit / fallback
-/ bytes counters; the integration tests (`sc_*.rs`, `short_circuit_e2e.rs`)
-assert on them to verify SC actually engages. See
-[`src/metrics/registry.rs`](../src/metrics/registry.rs) §7.3 for the full list.
-
-**Programmatic example.**
-
-```rust
-use std::time::Duration;
-use goosefs_sdk::config::GoosefsConfig;
-
-let mut config = GoosefsConfig::new("127.0.0.1:9200");
-
-// A/B comparison: turn SC off to isolate the gRPC data path.
-config.short_circuit_enabled = false;
-
-// Or: keep SC on but tune it for a scan-heavy Parquet workload.
-config.short_circuit_enabled = true;
-config.short_circuit_advise = "sequential".to_string();
-config.short_circuit_cache_capacity = 256;                // larger hot-block LRU
-config.short_circuit_cache_ttl = Duration::from_secs(60);
-config.short_circuit_min_block_size = 4 * 1024 * 1024;    // skip SC below 4 MiB
-```
-
-### 2.10 Miscellaneous Settings
+### 2.9 Miscellaneous Settings
 
 | Constant | Value | Description |
 |----------|-------|-------------|
@@ -514,18 +451,6 @@ properties file values and built-in defaults.
 | `GOOSEFS_FILE_METADATA_SYNC_INTERVAL` | `file_metadata_sync_interval` | `-1` | Sync interval (`parseTimeSize`; a bare number is milliseconds). `0` skips the cache on every get/list; `-1` does not. |
 | `GOOSEFS_FILE_METADATA_LOAD_TYPE` | `file_metadata_load_type` | `ONCE` | `ONCE` / `ALWAYS` / `NEVER` (case-insensitive). Sent on `get_status` and `list_status`. `ALWAYS` skips the listing cache and makes the Master re-load from the UFS; `NEVER` never touches the UFS. See [`file_metadata_load_type` values](#file_metadata_load_type-values). |
 | `GOOSEFS_USER_FILE_PERSIST_ON_RENAME` | `file_persist_on_rename` | `false` | Async-persist the destination on rename (`true`/`false`). Java `goosefs.user.file.persist.on.rename`. |
-| `GOOSEFS_SHORT_CIRCUIT_ENABLED` | `short_circuit_enabled` | `false` | Master kill switch for the short-circuit local-mmap read path (`true`/`false`). **Disabled by default** since 0.1.6 (see §2.9 and `../../goosefs-lance-tests/docs/design/FLAMEGRAPH_OPTIMIZATION_PLAN.md` §C6). |
-| `GOOSEFS_SHORT_CIRCUIT_CACHE_CAPACITY` | `short_circuit_cache_capacity` | `64` | Per-task LRU capacity for hot-block SC readers (plain integer). |
-| `GOOSEFS_SHORT_CIRCUIT_CACHE_TTL_MS` | `short_circuit_cache_ttl` | `30000` (30s) | Idle TTL of a cached SC reader in **milliseconds**. |
-| `GOOSEFS_SHORT_CIRCUIT_NEG_CACHE_TTL_MS` | `short_circuit_neg_cache_ttl` | `5000` (5s) | Negative-cache TTL in **milliseconds** — how long a block that failed SC is kept off the SC path. |
-| `GOOSEFS_SHORT_CIRCUIT_ADVISE` | `short_circuit_advise` | `"random"` | L1 `madvise` readahead hint: `sequential` / `random` / `normal` / `none` (case-insensitive; validated by `ShortCircuitFactory`). |
-| `GOOSEFS_SHORT_CIRCUIT_PREFETCH_ENABLED` | `short_circuit_prefetch_enabled` | `true` | L2 application-level prefetch master switch (`true`/`false`). |
-| `GOOSEFS_SHORT_CIRCUIT_PREFETCH_COALESCE_GAP` | `short_circuit_prefetch_coalesce_gap` | `65536` (64 KiB) | Max gap (bytes) between adjacent ranges merged by `prefetch_many`. |
-| `GOOSEFS_SHORT_CIRCUIT_PREFETCH_MAX_BATCH` | `short_circuit_prefetch_max_batch` | `1024` | Upper bound on `madvise` calls per `prefetch_many`. |
-| `GOOSEFS_SHORT_CIRCUIT_MIN_BLOCK_SIZE` | `short_circuit_min_block_size` | `0` (no minimum) | Minimum block size (bytes) required to attempt SC. Blocks smaller than this skip SC. |
-| `GOOSEFS_SHORT_CIRCUIT_SIGBUS_HANDLER` | `short_circuit_sigbus_handler` | `true` | Install a process-global SIGBUS diagnostic handler (`true`/`false`). Linux/macOS only. |
-| `GOOSEFS_SHORT_CIRCUIT_THP` | `short_circuit_thp` | `false` | Request Transparent Huge Pages via `madvise(MADV_HUGEPAGE)` (`true`/`false`). Linux only, **experimental**. |
-
 > **Disk usage is a soft bound, not a hard cap.** When a page is evicted its
 > metadata is dropped immediately but the file is deleted by a background
 > reaper, so actual disk usage can briefly run above `dir_capacity` by whatever
@@ -580,18 +505,6 @@ These constants are used in `storage_options` maps (e.g. Lance's
 | `STORAGE_OPT_METADATA_CACHE_EXPIRATION` | `goosefs_metadata_cache_expiration` | `10min` | TTL (`parseTimeSize` string). |
 | `STORAGE_OPT_FILE_METADATA_SYNC_INTERVAL` | `goosefs_file_metadata_sync_interval` | `-1` | Sync interval (`parseTimeSize`). `0` skips the cache on every get/list. |
 | `STORAGE_OPT_FILE_METADATA_LOAD_TYPE` | `goosefs_file_metadata_load_type` | `ONCE` | `ONCE` / `ALWAYS` / `NEVER`. Sent on `get_status` and `list_status`. See [`file_metadata_load_type` values](#file_metadata_load_type-values). |
-| `STORAGE_OPT_SHORT_CIRCUIT_ENABLED` | `goosefs_short_circuit_enabled` | `false` | Master kill switch for the short-circuit local-mmap read path. **Disabled by default** since 0.1.6. |
-| `STORAGE_OPT_SHORT_CIRCUIT_CACHE_CAPACITY` | `goosefs_short_circuit_cache_capacity` | `64` | Per-task LRU capacity for hot-block SC readers. |
-| `STORAGE_OPT_SHORT_CIRCUIT_CACHE_TTL_MS` | `goosefs_short_circuit_cache_ttl_ms` | `30000` (30s) | Idle TTL of a cached SC reader in **milliseconds**. |
-| `STORAGE_OPT_SHORT_CIRCUIT_NEG_CACHE_TTL_MS` | `goosefs_short_circuit_neg_cache_ttl_ms` | `5000` (5s) | Negative-cache TTL in **milliseconds**. |
-| `STORAGE_OPT_SHORT_CIRCUIT_ADVISE` | `goosefs_short_circuit_advise` | `"random"` | L1 `madvise` readahead hint: `sequential` / `random` / `normal` / `none`. |
-| `STORAGE_OPT_SHORT_CIRCUIT_PREFETCH_ENABLED` | `goosefs_short_circuit_prefetch_enabled` | `true` | L2 application-level prefetch master switch. |
-| `STORAGE_OPT_SHORT_CIRCUIT_PREFETCH_COALESCE_GAP` | `goosefs_short_circuit_prefetch_coalesce_gap` | `65536` (64 KiB) | Max gap (bytes) between adjacent ranges merged by `prefetch_many`. |
-| `STORAGE_OPT_SHORT_CIRCUIT_PREFETCH_MAX_BATCH` | `goosefs_short_circuit_prefetch_max_batch` | `1024` | Upper bound on `madvise` calls per `prefetch_many`. |
-| `STORAGE_OPT_SHORT_CIRCUIT_MIN_BLOCK_SIZE` | `goosefs_short_circuit_min_block_size` | `0` (no minimum) | Minimum block size (bytes) required to attempt SC. |
-| `STORAGE_OPT_SHORT_CIRCUIT_SIGBUS_HANDLER` | `goosefs_short_circuit_sigbus_handler` | `true` | Install a process-global SIGBUS diagnostic handler. Linux/macOS only. |
-| `STORAGE_OPT_SHORT_CIRCUIT_THP` | `goosefs_short_circuit_thp` | `false` | Request Transparent Huge Pages via `madvise(MADV_HUGEPAGE)`. Linux only, **experimental**. |
-
 > **Note**: `STORAGE_OPT_*` keys are string constants exposed by the SDK for
 > external consumers such as `opendal_service_goosefs` or Lance's
 > `DatasetBuilder::with_storage_option`. The mapping from a
@@ -662,18 +575,6 @@ These keys are used in `goosefs-site.properties` files (Java-style `key=value` f
 | `goosefs.user.file.metadata.sync.interval` | `file_metadata_sync_interval` | `parseTimeSize` | `-1` | `0` skips the cache on every get/list; `-1` does not. Positive values currently behave like `-1`. |
 | `goosefs.user.file.metadata.load.type` | `file_metadata_load_type` | `ONCE`/`ALWAYS`/`NEVER` | `ONCE` | Sent on `get_status` and `list_status`. `ALWAYS` skips the listing cache and makes the Master re-load from the UFS; `NEVER` never touches the UFS. See [`file_metadata_load_type` values](#file_metadata_load_type-values). |
 | `goosefs.user.file.persist.on.rename` | `file_persist_on_rename` | `true` / `false` | `false` | Async-persist the destination on rename. |
-| `goosefs.user.short.circuit.enabled` | `short_circuit_enabled` | `true` / `false` | `false` | Master kill switch for the short-circuit local-mmap read path. **Disabled by default** since 0.1.6 (see §2.9). |
-| `goosefs.client.short.circuit.cache.capacity` | `short_circuit_cache_capacity` | integer | `64` | Per-task LRU capacity for hot-block SC readers. |
-| `goosefs.client.short.circuit.cache.ttl.ms` | `short_circuit_cache_ttl` | integer (milliseconds) | `30000` (30s) | Idle TTL of a cached SC reader. |
-| `goosefs.client.short.circuit.neg.cache.ttl.ms` | `short_circuit_neg_cache_ttl` | integer (milliseconds) | `5000` (5s) | Negative-cache TTL. |
-| `goosefs.client.short.circuit.advise` | `short_circuit_advise` | `sequential` / `random` / `normal` / `none` | `random` | L1 `madvise` readahead hint. Validated by `ShortCircuitFactory`. |
-| `goosefs.client.short.circuit.prefetch.enabled` | `short_circuit_prefetch_enabled` | `true` / `false` | `true` | L2 application-level prefetch master switch. |
-| `goosefs.client.short.circuit.prefetch.coalesce.gap` | `short_circuit_prefetch_coalesce_gap` | integer (bytes) | `65536` (64 KiB) | Max gap between adjacent ranges merged by `prefetch_many`. |
-| `goosefs.client.short.circuit.prefetch.max.batch` | `short_circuit_prefetch_max_batch` | integer | `1024` | Upper bound on `madvise` calls per `prefetch_many`. |
-| `goosefs.client.short.circuit.min.block.size` | `short_circuit_min_block_size` | integer (bytes) | `0` (no minimum) | Minimum block size required to attempt SC. |
-| `goosefs.client.short.circuit.sigbus.handler` | `short_circuit_sigbus_handler` | `true` / `false` | `true` | Install a process-global SIGBUS diagnostic handler. Linux/macOS only. |
-| `goosefs.client.short.circuit.thp` | `short_circuit_thp` | `true` / `false` | `false` | Request Transparent Huge Pages. Linux only, **experimental**. |
-
 ---
 
 ## 6. Operation Options
@@ -1231,142 +1132,3 @@ ds = lance.dataset(
 | `metadata_cache_enabled` | Repeated opens / get_status / list_status of the same paths | `true` | `true` (default; set `false` only when the file set mutates behind the client) | `GOOSEFS_METADATA_CACHE_ENABLED` | `goosefs.user.metadata.cache.enabled` | `goosefs_metadata_cache_enabled` |
 | `prefetch_window` | Sequential (SR) read throughput | `8` | `16` | *(programmatic only)* | *(programmatic only)* | *(programmatic only)* |
 | `ack_interval_bytes` | SR throughput, **only** on workers honouring prefetch | `0` (ACK every chunk) | `4MB`–`8MB` | *(programmatic only)* | *(programmatic only)* | *(programmatic only)* |
-| `short_circuit_enabled` | Kill switch for the local mmap read path (see §2.9) | `false` | `false` (default; safe for Lance/DuckDB); `true` to opt into the local mmap fast path on co-located workloads that benefit | `GOOSEFS_SHORT_CIRCUIT_ENABLED` | `goosefs.user.short.circuit.enabled` | `goosefs_short_circuit_enabled` |
-
-### 9.7 Short-Circuit (Local mmap) Reads
-
-The short-circuit (SC) path is **on by default** whenever a co-located worker
-is discovered — no configuration required. The knobs below only matter when
-you want to (a) turn SC off for A/B comparison against the gRPC data plane,
-or (b) tune SC for a specific workload profile (scan-heavy vs random /
-positioned reads). See §2.9 for the semantics of each field and
-[`docs/SHORT_CIRCUIT_DESIGN.md`](SHORT_CIRCUIT_DESIGN.md) for the design.
-
-#### Programmatic
-
-```rust
-use std::time::Duration;
-use goosefs_sdk::config::GoosefsConfig;
-
-// A/B: force every read through the gRPC data plane (bypasses SC even on a
-// local worker). Handy for isolating SC-specific regressions.
-let ab_config = GoosefsConfig::new("127.0.0.1:9200")
-    .with_short_circuit_enabled(false);
-
-// Scan-heavy Parquet / Arrow tuning: sequential madvise hint, larger hot-block
-// LRU with a longer idle TTL, skip SC below 4 MiB blocks.
-let scan_config = GoosefsConfig::new("127.0.0.1:9200")
-    .with_short_circuit_enabled(true)
-    .with_short_circuit_advise("sequential")
-    .with_short_circuit_cache_capacity(256)
-    .with_short_circuit_cache_ttl(Duration::from_secs(60))
-    .with_short_circuit_min_block_size(4 * 1024 * 1024);
-
-// Point-lookup / positioned-read tuning (SC's default sweet spot): keep the
-// `random` hint but shorten the negative cache so a briefly non-SC-eligible
-// block gets retried quickly.
-let point_config = GoosefsConfig::new("127.0.0.1:9200")
-    .with_short_circuit_advise("random")
-    .with_short_circuit_neg_cache_ttl(Duration::from_secs(1));
-
-// Experimental Linux-only knobs: request Transparent Huge Pages, disable the
-// process-global SIGBUS handler (only if the host process installs its own).
-let advanced_config = GoosefsConfig::new("127.0.0.1:9200")
-    .with_short_circuit_thp(true)
-    .with_short_circuit_sigbus_handler(false);
-```
-
-#### Environment variables
-
-```bash
-# Kill switch — set to `false` for A/B comparison vs the gRPC data plane.
-export GOOSEFS_SHORT_CIRCUIT_ENABLED=true
-
-# Scan-heavy tuning.
-export GOOSEFS_SHORT_CIRCUIT_ADVISE=sequential
-export GOOSEFS_SHORT_CIRCUIT_CACHE_CAPACITY=256
-export GOOSEFS_SHORT_CIRCUIT_CACHE_TTL_MS=60000
-export GOOSEFS_SHORT_CIRCUIT_MIN_BLOCK_SIZE=4194304
-
-# Prefetch tuning.
-export GOOSEFS_SHORT_CIRCUIT_PREFETCH_ENABLED=true
-export GOOSEFS_SHORT_CIRCUIT_PREFETCH_COALESCE_GAP=131072   # 128 KiB
-export GOOSEFS_SHORT_CIRCUIT_PREFETCH_MAX_BATCH=2048
-
-# Reliability / negative cache.
-export GOOSEFS_SHORT_CIRCUIT_NEG_CACHE_TTL_MS=1000
-
-# Experimental (Linux only).
-export GOOSEFS_SHORT_CIRCUIT_THP=false
-export GOOSEFS_SHORT_CIRCUIT_SIGBUS_HANDLER=true
-```
-
-#### Properties file
-
-Equivalent lines in `goosefs-site.properties` (note the key prefix split:
-`goosefs.user.short.circuit.enabled` mirrors the Java API surface for the
-kill switch; the other 10 keys are Rust-SDK-specific and use the
-`goosefs.client.short.circuit.*` prefix):
-
-```properties
-# Kill switch (Java-compatible key).
-goosefs.user.short.circuit.enabled=true
-
-# Reader LRU & TTLs.
-goosefs.client.short.circuit.cache.capacity=256
-goosefs.client.short.circuit.cache.ttl.ms=60000
-goosefs.client.short.circuit.neg.cache.ttl.ms=1000
-
-# madvise hint + block-size gate.
-goosefs.client.short.circuit.advise=sequential
-goosefs.client.short.circuit.min.block.size=4194304
-
-# Prefetch tuning.
-goosefs.client.short.circuit.prefetch.enabled=true
-goosefs.client.short.circuit.prefetch.coalesce.gap=131072
-goosefs.client.short.circuit.prefetch.max.batch=2048
-
-# Experimental (Linux only).
-goosefs.client.short.circuit.sigbus.handler=true
-goosefs.client.short.circuit.thp=false
-```
-
-#### Storage options (Lance / OpenDAL)
-
-Every SC knob is exposed as a `goosefs_short_circuit_*` storage option; the
-integrating layer (`opendal_service_goosefs`) forwards each key to the
-corresponding `with_short_circuit_*` builder method. All values are passed
-as **strings** — integers included.
-
-```python
-import lance
-
-ds = lance.dataset(
-    "gfs://…",
-    storage_options={
-        # Kill switch: turn SC off to isolate the gRPC data path.
-        "goosefs_short_circuit_enabled": "false",
-
-        # …or keep SC on and tune it (uncomment as needed):
-        # "goosefs_short_circuit_advise": "sequential",
-        # "goosefs_short_circuit_cache_capacity": "256",
-        # "goosefs_short_circuit_cache_ttl_ms": "60000",
-        # "goosefs_short_circuit_min_block_size": "4194304",
-        # "goosefs_short_circuit_prefetch_coalesce_gap": "131072",
-        # "goosefs_short_circuit_prefetch_max_batch": "2048",
-    },
-)
-```
-
-#### Verifying that SC actually engaged
-
-After the process has served some reads, inspect the `Client.ShortCircuit*`
-counters exposed by [`src/metrics/registry.rs`](../src/metrics/registry.rs)
-§7.3 — an increasing byte counter proves SC was on the read path. If those
-counters stay at zero even though `short_circuit_enabled = true`, the block
-was routed to a **remote** worker (SC is physically impossible cross-host);
-see [`docs/PAGE_CACHE_VS_SHORT_CIRCUIT.md`](PAGE_CACHE_VS_SHORT_CIRCUIT.md)
-for the interaction with the client-side page cache. The gating-grade
-regression suites [`tests/sc_consistency.rs`](../tests/sc_consistency.rs)
-and [`tests/short_circuit_e2e.rs`](../tests/short_circuit_e2e.rs) show how
-to assert on these counters programmatically.

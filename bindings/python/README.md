@@ -51,13 +51,6 @@
     affecting read correctness. Enable via config / ENV / properties;
     see `bindings/python/examples/page_cache.py` and
     [`docs/CLIENT_PAGE_CACHE_DESIGN.md`](../../docs/CLIENT_PAGE_CACHE_DESIGN.md).
-  - **Short-Circuit local mmap read** — when the client and worker are
-    co-located, block reads are served via zero-copy `mmap` (with
-    `madvise` prefetch and optional Transparent Huge Pages) instead of
-    the gRPC data plane. Local worker is auto-detected by interface
-    bind; every recoverable error transparently falls back to gRPC.
-    See [`docs/SHORT_CIRCUIT_DESIGN.md`](../../docs/SHORT_CIRCUIT_DESIGN.md).
-
   New Python-side surface:
 
   - **Batch file-lifecycle APIs**: `AsyncGoosefs.batch_open_file` /

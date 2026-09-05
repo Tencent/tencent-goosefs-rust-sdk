@@ -48,10 +48,9 @@ cd "$ROOT"
 export GOOSEFS_MASTER_ADDR="${GOOSEFS_MASTER_ADDR:-127.0.0.1:9200}"
 export GOOSEFS_AUTH_TYPE="${GOOSEFS_AUTH_TYPE:-simple}"
 
-# Suites that cannot pass against the Docker fixture. Each needs a co-located
-# worker block store on the host filesystem, which the containerised worker
-# does not give the test process access to.
-SKIP="short_circuit_e2e sc_consistency sc_inv_s3"
+# Suites that cannot pass against the Docker fixture, e.g. because they need
+# host-filesystem access to a co-located worker block store. Currently empty.
+SKIP=""
 
 skipped() {
   case " $SKIP " in
