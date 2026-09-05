@@ -84,6 +84,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use goosefs_sdk::client::WorkerClient;
 use goosefs_sdk::io::GrpcBlockReader;
+use goosefs_sdk::proto::proto::dataserver::OpenUfsBlockOptions;
 
 use crate::config::PyConfig;
 use crate::errors::map_err;
@@ -119,6 +120,11 @@ use crate::runtime::block_on;
 pub struct PyAsyncWorkerClient {
     inner: Arc<AsyncMutex<Option<WorkerClient>>>,
     addr: String,
+    /// UFS options for the block this handle was acquired for, when the
+    /// caller passed `path` to `acquire_worker_for_block`. Sent on
+    /// `read_block_positioned` for that `block_id` so PAGE workers can
+    /// build `PagedUfsBlockReader` (`mount_id` must be present).
+    ufs_opts_for_block: Option<(i64, OpenUfsBlockOptions)>,
 }
 
 #[pymethods]
@@ -153,6 +159,7 @@ impl PyAsyncWorkerClient {
             let wrapper = PyAsyncWorkerClient {
                 inner: Arc::new(AsyncMutex::new(Some(client))),
                 addr: addr_owned,
+                ufs_opts_for_block: None,
             };
             Python::attach(|py| Ok(Py::new(py, wrapper)?.into_any()))
         })
@@ -198,6 +205,7 @@ impl PyAsyncWorkerClient {
             let wrapper = PyAsyncWorkerClient {
                 inner: Arc::new(AsyncMutex::new(Some(client))),
                 addr,
+                ufs_opts_for_block: None,
             };
             Python::attach(|py| Ok(Py::new(py, wrapper)?.into_any()))
         })
@@ -263,6 +271,11 @@ impl PyAsyncWorkerClient {
         }
 
         let inner = Arc::clone(&self.inner);
+        let ufs_opts = self
+            .ufs_opts_for_block
+            .as_ref()
+            .filter(|(id, _)| *id == block_id)
+            .map(|(_, opts)| opts.clone());
         future_into_py(py, async move {
             // Take the lock only long enough to clone out the inner client.
             // `WorkerClient: Clone` is cheap (Arc-refcount on the SASL
@@ -277,7 +290,7 @@ impl PyAsyncWorkerClient {
             };
 
             let bytes = GrpcBlockReader::positioned_read(
-                &worker, block_id, offset, length, chunk_size, /* ufs_opts */ None,
+                &worker, block_id, offset, length, chunk_size, ufs_opts,
             )
             .await
             .map_err(map_err)?;
@@ -343,11 +356,15 @@ impl PyAsyncWorkerClient {
     /// Not exposed to Python — the only path Python sees is the static
     /// factory `connect` / `connect_simple`.
     #[allow(dead_code)] // wired up in stage B
-    pub(crate) fn from_sdk(client: WorkerClient) -> Self {
+    pub(crate) fn from_sdk(
+        client: WorkerClient,
+        ufs_opts_for_block: Option<(i64, OpenUfsBlockOptions)>,
+    ) -> Self {
         let addr = client.addr().to_string();
         Self {
             inner: Arc::new(AsyncMutex::new(Some(client))),
             addr,
+            ufs_opts_for_block,
         }
     }
 }
@@ -382,6 +399,7 @@ impl PyAsyncWorkerClient {
 pub struct PyWorkerClient {
     inner: Arc<AsyncMutex<Option<WorkerClient>>>,
     addr: String,
+    ufs_opts_for_block: Option<(i64, OpenUfsBlockOptions)>,
 }
 
 #[pymethods]
@@ -407,6 +425,7 @@ impl PyWorkerClient {
         Ok(PyWorkerClient {
             inner: Arc::new(AsyncMutex::new(Some(client))),
             addr,
+            ufs_opts_for_block: None,
         })
     }
 
@@ -442,6 +461,7 @@ impl PyWorkerClient {
         Ok(PyWorkerClient {
             inner: Arc::new(AsyncMutex::new(Some(client))),
             addr,
+            ufs_opts_for_block: None,
         })
     }
 
@@ -472,6 +492,11 @@ impl PyWorkerClient {
         }
 
         let inner = Arc::clone(&self.inner);
+        let ufs_opts = self
+            .ufs_opts_for_block
+            .as_ref()
+            .filter(|(id, _)| *id == block_id)
+            .map(|(_, opts)| opts.clone());
         let bytes = block_on(async move {
             let worker = {
                 let guard = inner.lock().await;
@@ -481,7 +506,7 @@ impl PyWorkerClient {
                     .clone()
             };
             GrpcBlockReader::positioned_read(
-                &worker, block_id, offset, length, chunk_size, /* ufs_opts */ None,
+                &worker, block_id, offset, length, chunk_size, ufs_opts,
             )
             .await
             .map_err(map_err)

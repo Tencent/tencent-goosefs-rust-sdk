@@ -217,6 +217,21 @@ pub(crate) fn open_ufs_block_options(
     })
 }
 
+/// [`open_ufs_block_options`] for the block whose id is `block_id`.
+///
+/// `None` when the id is not in `status.block_ids`, or when the file has no
+/// UFS path. Used by `acquire_worker_for_block(path=...)` so a subsequent
+/// low-level `read_block_positioned` can send the same `OpenUfsBlockOptions`
+/// the high-level path already does. PAGE workers refuse a read that lacks
+/// `mount_id` (`PagedBlockReader` leaves `pagedUfsBlockReader` unset).
+pub(crate) fn open_ufs_block_options_for_block_id(
+    status: &URIStatus,
+    block_id: i64,
+) -> Option<OpenUfsBlockOptions> {
+    let block_index = status.block_ids.iter().position(|&id| id == block_id)?;
+    open_ufs_block_options(status, block_index)
+}
+
 /// Master `BlockInfo.locations` for `block_id`, or empty when unavailable.
 ///
 /// Empty → [`WorkerRouter::select_worker_for_read`] falls back to consistent
@@ -636,6 +651,22 @@ mod tests {
         assert_eq!(opts.no_cache, Some(true));
         assert_eq!(opts.file_length, Some((64 << 20) + 100));
         assert_eq!(opts.max_ufs_read_concurrency, Some(8));
+    }
+
+    #[test]
+    fn open_ufs_block_options_for_block_id_uses_that_block_index() {
+        let mut status = status_with_blocks(
+            (64 << 20) + 100,
+            64 << 20,
+            &[(1, 0, 64 << 20), (2, 64 << 20, 100)],
+        );
+        status.ufs_path = "cosn://bucket/file.bin".into();
+        status.mount_id = 7;
+
+        let opts = open_ufs_block_options_for_block_id(&status, 2).expect("block 2 present");
+        assert_eq!(opts.offset_in_file, Some(64 << 20));
+        assert_eq!(opts.block_size, Some(100));
+        assert!(open_ufs_block_options_for_block_id(&status, 99).is_none());
     }
 
     // ── Helper: fabricate a WorkerClient from a never-connected channel ────

@@ -158,7 +158,9 @@ async def main() -> None:
         # When you already know the ``block_id`` (e.g. cached from a
         # previous ``URIStatus`` lookup, custom routing experiments,
         # batched block prefetch), you can skip the master round-trip
-        # entirely on subsequent reads.
+        # entirely on subsequent reads. Pass ``path`` so the handle
+        # carries ``OpenUfsBlockOptions`` — PAGE workers reject a
+        # positioned read that has no ``mount_id``.
         block_id = status.block_ids[0]
         async with await fs.acquire_worker_for_block(block_id, path=path_file) as wc:
             assert isinstance(wc, AsyncWorkerClient)
