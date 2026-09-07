@@ -2,14 +2,22 @@
 
 ![Experimental](https://img.shields.io/badge/status-experimental-orange)
 ![Rust](https://img.shields.io/badge/rust-1.88%2B-blue)
-![Version](https://img.shields.io/badge/version-0.1.9-blue)
+![Version](https://img.shields.io/badge/version-0.2.1-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-green)
 
 A native Rust client library that communicates directly with [Goosefs](https://cloud.tencent.com/document/product/1424) Master/Worker via gRPC (tonic/protobuf).
 
 **Documentation:** [https://tencent.github.io/tencent-goosefs-rust-sdk/](https://tencent.github.io/tencent-goosefs-rust-sdk/)
 
-## What's New in v0.1.9
+## What's New in v0.2.1
+
+- **Java-aligned metadata and write defaults** — `get_status` / `list_status` send `loadMetadataType=ONCE` so COS/UFS files appear without a prior load; write-path RPCs send Java `commonDefaults`; `DeleteOptions.unchecked` defaults to `true`; the client metadata cache is **on by default**.
+- **Page cache rewrite** — metadata and eviction moved from `moka` to `foyer`; default eviction policy is `LRU` (was `LFU`); `S3FIFO` is available as an option.
+- **Correctness** — the second UFS read of a path no longer hangs (`maxUfsReadConcurrency`); `$GOOSEFS_CONF_DIR` is discovered again.
+- **Removed** — short-circuit (local mmap) read path. Reads always use the gRPC data plane.
+- **Python** — `write_file(..., recursive=False)` is now honoured (missing parents raise `NotFound`); sync `Goosefs.batch_open_file`; `positioned_read` rejects `length < -1`.
+
+### Also in recent releases (v0.1.9)
 
 - **Master connection pool P2C scheduling** — New `master_connection_pool_size` (default `1`) and `master_connection_pool_schedule` (`RoundRobin` / `P2C`). Opt into Power of Two Choices to spread concurrent metadata RPCs across multiple HTTP/2 channels under high concurrency / remote RTT. Configure via builder, `GOOSEFS_MASTER_*` env vars, properties, or storage options.
 - **Sync `pread` page-cache reads** — Opt-in `client_cache_sync_read_enabled` makes `UringPageStore` serve cache hits with synchronous `pread` instead of io_uring (Linux / local-NVMe analytical workloads). Write/delete paths stay on io_uring.
@@ -127,7 +135,7 @@ Add to your project's `Cargo.toml`:
 
 ```toml
 [dependencies]
-goosefs-sdk = "0.1"
+goosefs-sdk = "0.2"
 # Or, until the crate is published:
 # goosefs-sdk = { git = "https://github.com/Tencent/tencent-goosefs-rust-sdk" }
 tokio = { version = "1", features = ["full"] }

@@ -42,7 +42,7 @@ The Rust crate (`goosefs-sdk`) is Layer 3 in the **Lance → OpenDAL → GooseFS
 | **Async runtime** | Tokio                                                              | Sync (`Goosefs`) + Async (`AsyncGoosefs`)              |
 | **API style**     | `FileSystem` trait + high-level I/O helpers                        | Blocking + coroutine APIs over the Rust SDK            |
 | **Python bridge** | —                                                                  | PyO3 (abi3, CPython 3.9+)                              |
-| **Status**        | Experimental (v0.1.x)                                              | Alpha (tracks Rust SDK version)                        |
+| **Status**        | Experimental (v0.2.x)                                              | Alpha (tracks Rust SDK version)                        |
 
 ## Prerequisites
 
