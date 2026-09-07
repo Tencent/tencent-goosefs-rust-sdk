@@ -17,6 +17,15 @@ A native Rust client library that communicates directly with [Goosefs](https://c
 - **Removed** — short-circuit (local mmap) read path. Reads always use the gRPC data plane.
 - **Python** — `write_file(..., recursive=False)` is now honoured (missing parents raise `NotFound`); sync `Goosefs.batch_open_file`; `positioned_read` rejects `length < -1`.
 
+### Also in recent releases (v0.2.0)
+
+- **Java-aligned metadata and write defaults** — `get_status` / `list_status` send `loadMetadataType=ONCE` so COS/UFS files appear without a prior load; write-path RPCs send Java `commonDefaults`; `DeleteOptions.unchecked` defaults to `true`; the client metadata cache is **on by default**.
+- **Page cache rewrite** — metadata and eviction moved from `moka` to `foyer`; default eviction policy is `LRU` (was `LFU`); `S3FIFO` is available as an option.
+- **GooseFS 2.0 alignment** — client protos synced (recursive `list_status` is a client-side BFS); worker selection matches Java (`murmur3_128`, locations-first reads); consistent-hash virtual-node fallback `200` → `5000`; `ASYNC_THROUGH` multi-replica fan-out.
+- **Correctness** — the second UFS read of a path no longer hangs (`maxUfsReadConcurrency`); `$GOOSEFS_CONF_DIR` is discovered again.
+- **Removed short-circuit reads** — the local mmap path is gone (`goosefs_sdk::block::short_circuit`, `OpenLocalBlock`, all `short_circuit_*` config / `GOOSEFS_SHORT_CIRCUIT_*` env vars / `Client.ShortCircuit*` metrics). Reads always use the gRPC data plane.
+- **Python** — `write_file(..., recursive=False)` is now honoured (missing parents raise `NotFound`); sync `Goosefs.batch_open_file`; `positioned_read` rejects `length < -1`. PyPI `0.2.0` was an interrupted, incomplete upload and cannot be overwritten — install `goosefs==0.2.1`.
+
 ### Also in recent releases (v0.1.9)
 
 - **Master connection pool P2C scheduling** — New `master_connection_pool_size` (default `1`) and `master_connection_pool_schedule` (`RoundRobin` / `P2C`). Opt into Power of Two Choices to spread concurrent metadata RPCs across multiple HTTP/2 channels under high concurrency / remote RTT. Configure via builder, `GOOSEFS_MASTER_*` env vars, properties, or storage options.
