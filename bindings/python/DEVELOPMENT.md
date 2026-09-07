@@ -150,19 +150,16 @@ uv run --with ziglang maturin build --release \
 uv run maturin publish
 ```
 
-Preferred release path (version check, manylinux zig build, optional upload):
+Preferred release path is the **Publish Python SDK** GitHub Actions workflow
+(`.github/workflows/publish-python-sdk.yml`): it builds manylinux + macOS +
+Windows wheels and uploads to PyPI via Trusted Publishing (OIDC) or
+`MATURIN_PYPI_TOKEN`. Trigger it from the Actions UI or by pushing `py-v*`
+tags. See [`../../docs/release/PYTHON_RELEASE.md`](../../docs/release/PYTHON_RELEASE.md).
+
+Local helper (Linux manylinux wheels only):
 
 ```bash
 # from repo root
 bash scripts/release/python.sh
 bash scripts/release/python.sh --publish
 ```
-
-See [`../../docs/release/PYTHON_RELEASE.md`](../../docs/release/PYTHON_RELEASE.md).
-
-> **Release automation:** GitHub Actions (`ci_bindings_python.yml`) builds a
-> native wheel **and** manylinux_2_28 wheels via zig (`x86_64` + `aarch64`) to
-> verify release artifacts. Tag-triggered PyPI Trusted Publisher (OIDC) publish
-> may be added later; until then, release manually via the scripts above and
-> confirm version alignment between `goosefs-sdk` and the Python binding
-> `Cargo.toml` before publishing.

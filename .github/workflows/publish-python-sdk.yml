@@ -1,0 +1,209 @@
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Publish the Python package `goosefs` to PyPI.
+#
+# Triggers:
+#   - workflow_dispatch (Actions → Publish Python SDK → Run workflow)
+#   - push of tags matching py-v* (e.g. py-v0.2.1)
+#
+# Auth (pick one):
+#   1. PyPI Trusted Publisher (OIDC) — preferred.
+#      On https://pypi.org/manage/project/goosefs/settings/publishing :
+#        Owner:      Tencent
+#        Repository: tencent-goosefs-rust-sdk
+#        Workflow:   publish-python-sdk.yml
+#        Environment: pypi
+#   2. Repo / environment secret MATURIN_PYPI_TOKEN (PyPI API token).
+#
+# After the first successful run, add required reviewers on the `pypi`
+# GitHub Environment if you want a human gate before upload.
+
+name: Publish Python SDK
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build wheels only; do not upload to PyPI"
+        type: boolean
+        default: false
+  push:
+    tags:
+      - "py-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-python-sdk
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: wheel (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Same zig manylinux path as scripts/release/python.sh.
+          - os: ubuntu-latest
+            name: manylinux
+            artifact: goosefs-sdk-wheel-manylinux
+          # macos-14 is Apple Silicon; matches ci_bindings_python.yml.
+          - os: macos-14
+            name: macos-arm64
+            artifact: goosefs-sdk-wheel-macos-arm64
+          # windows-latest is MSVC win_amd64.
+          - os: windows-latest
+            name: windows-amd64
+            artifact: goosefs-sdk-wheel-windows-amd64
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          version_of() {
+            awk '
+              /^\[package\]/ { in_pkg=1; next }
+              /^\[/ { in_pkg=0 }
+              in_pkg && /^version[[:space:]]*=/ {
+                gsub(/"/, "", $3); print $3; exit
+              }
+            ' "$1"
+          }
+          sdk_ver="$(version_of Cargo.toml)"
+          py_ver="$(version_of bindings/python/Cargo.toml)"
+          echo "goosefs-sdk=${sdk_ver} goosefs-python=${py_ver}"
+          if [[ "${sdk_ver}" != "${py_ver}" ]]; then
+            echo "error: version mismatch — keep Cargo.toml and bindings/python/Cargo.toml aligned" >&2
+            exit 1
+          fi
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            expected="py-v${py_ver}"
+            actual="${GITHUB_REF_NAME}"
+            if [[ "${actual}" != "${expected}" ]]; then
+              echo "tag ${actual} does not match bindings/python/Cargo.toml (${expected})" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Sync deps
+        shell: bash
+        working-directory: bindings/python
+        run: uv sync --all-extras --group dev --group test
+
+      - name: Build manylinux wheels (zig)
+        if: matrix.name == 'manylinux'
+        shell: bash
+        run: bash scripts/release/python.sh
+
+      - name: Build sdist
+        if: matrix.name == 'manylinux'
+        shell: bash
+        working-directory: bindings/python
+        run: uv run maturin sdist --out dist
+
+      - name: Build native wheel
+        if: matrix.name != 'manylinux'
+        shell: bash
+        working-directory: bindings/python
+        run: uv run maturin build --release --out dist
+
+      - name: Install native wheel + import smoke
+        if: matrix.name != 'manylinux'
+        shell: bash
+        working-directory: bindings/python
+        run: |
+          uv pip install dist/*.whl
+          uv run python -c "import goosefs; print(getattr(goosefs, '__version__', 'ok'))"
+
+      - name: List artifacts
+        shell: bash
+        run: ls -la bindings/python/dist
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: bindings/python/dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: pypi
+      url: https://pypi.org/project/goosefs/
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      HAS_PYPI_TOKEN: ${{ secrets.MATURIN_PYPI_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download wheels
+        uses: actions/download-artifact@v7
+        with:
+          pattern: goosefs-sdk-wheel-*
+          path: bindings/python/dist
+          merge-multiple: true
+
+      - name: Show dist
+        shell: bash
+        run: ls -la bindings/python/dist
+
+      # Trusted publishing requires omitting username/password. A set
+      # MATURIN_PYPI_TOKEN secret takes precedence for token auth.
+      - name: Publish to PyPI (OIDC)
+        if: >-
+          github.repository == 'Tencent/tencent-goosefs-rust-sdk' &&
+          env.HAS_PYPI_TOKEN != 'true' &&
+          (github.event_name != 'workflow_dispatch' || inputs.dry_run == false)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: bindings/python/dist
+          skip-existing: false
+
+      - name: Publish to PyPI (token)
+        if: >-
+          github.repository == 'Tencent/tencent-goosefs-rust-sdk' &&
+          env.HAS_PYPI_TOKEN == 'true' &&
+          (github.event_name != 'workflow_dispatch' || inputs.dry_run == false)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: bindings/python/dist
+          user: __token__
+          password: ${{ secrets.MATURIN_PYPI_TOKEN }}
+          skip-existing: false
