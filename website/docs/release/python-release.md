@@ -33,6 +33,12 @@ bash scripts/release/python.sh --publish
 | `--publish`                   | Upload `bindings/python/dist/*.whl` to PyPI |
 | `--skip-build`                | Do not rebuild; only upload                 |
 
+A fresh build first deletes leftover `*.whl` / `*.tar.gz` under
+`bindings/python/dist/`. `--skip-build` keeps existing wheels, but still
+drops files whose version does not match the current `Cargo.toml` before
+upload. Copy extra platform wheels (Windows) into `dist/` after the Linux
+build, then `--publish --skip-build`.
+
 ## Checklist
 
 1. Bump `version` in root `Cargo.toml` **and** `bindings/python/Cargo.toml` (keep identical).
@@ -42,8 +48,8 @@ bash scripts/release/python.sh --publish
 5. Tag and push:
 
 ```bash
-git tag py-v0.1.9
-git push origin py-v0.1.9
+git tag py-v0.2.1
+git push origin py-v0.2.1
 ```
 
 The wheel is `abi3-py39`: one wheel per platform covers CPython 3.9+. Prefer

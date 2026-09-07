@@ -19,7 +19,7 @@
 #   bash scripts/release/python.sh                 # build linux x86_64 + aarch64 (zig)
 #   bash scripts/release/python.sh --arch x86_64   # only one arch
 #   bash scripts/release/python.sh --native        # build on current Linux host (no zig)
-#   bash scripts/release/python.sh --publish       # build (if needed) + upload to PyPI
+#   bash scripts/release/python.sh --publish       # clean dist, build, upload to PyPI
 #   bash scripts/release/python.sh --publish --skip-build  # upload existing dist/*
 #
 # Auth for --publish (pick one):
@@ -49,7 +49,7 @@ Usage (from repo root):
   bash scripts/release/python.sh                 # build linux x86_64 + aarch64 (zig)
   bash scripts/release/python.sh --arch x86_64   # only one arch
   bash scripts/release/python.sh --native        # build on current Linux host
-  bash scripts/release/python.sh --publish       # build + upload to PyPI
+  bash scripts/release/python.sh --publish       # clean dist, build, upload
   bash scripts/release/python.sh --publish --skip-build
 
 Auth for --publish:
@@ -121,8 +121,17 @@ if [[ "${SDK_VER}" != "${PY_VER}" ]]; then
   exit 1
 fi
 
+clean_python_dist() {
+  local dist="${PY_DIR}/dist"
+  mkdir -p "${dist}"
+  echo "==> cleaning leftover wheels/sdists in ${dist}"
+  find "${dist}" -maxdepth 1 \( -name '*.whl' -o -name '*.tar.gz' \) -print -delete
+}
+
 if [[ "${SKIP_BUILD}" -eq 0 ]]; then
-  mkdir -p "${PY_DIR}/dist"
+  # Drop leftover wheels / sdists so a previous (possibly already-on-PyPI)
+  # version cannot be picked up by `maturin upload dist/*.whl`.
+  clean_python_dist
   if [[ "${NATIVE}" -eq 1 ]]; then
     echo "==> maturin build --native (manylinux ${MANYLINUX})"
     (
@@ -174,7 +183,28 @@ if [[ ${#wheels[@]} -eq 0 ]]; then
   exit 1
 fi
 
-echo "==> maturin upload (${#wheels[@]} wheel(s))"
+# PyPI rejects re-uploads of a filename that already exists. Drop leftover
+# wheels from other versions (e.g. a previous interrupted 0.2.0) so they
+# cannot abort the whole `maturin upload dist/*.whl` batch.
+current_wheels=()
+for w in "${wheels[@]}"; do
+  base="$(basename "${w}")"
+  case "${base}" in
+    "goosefs-${PY_VER}-"*.whl)
+      current_wheels+=("${w}")
+      ;;
+    *)
+      echo "==> removing leftover wheel (not ${PY_VER}): ${base}"
+      rm -f "${w}"
+      ;;
+  esac
+done
+if [[ ${#current_wheels[@]} -eq 0 ]]; then
+  echo "error: no goosefs-${PY_VER}-*.whl in ${PY_DIR}/dist after cleanup" >&2
+  exit 1
+fi
+
+echo "==> maturin upload (${#current_wheels[@]} wheel(s))"
 (
   cd "${PY_DIR}"
   # maturin reads the token from env when --password is omitted in newer

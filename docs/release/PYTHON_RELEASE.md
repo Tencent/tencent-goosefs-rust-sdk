@@ -39,7 +39,11 @@ Useful flags:
 | `--skip-build` | Do not rebuild; only upload |
 
 The script always checks that root `Cargo.toml` and `bindings/python/Cargo.toml`
-versions match.
+versions match. A fresh build first deletes leftover `*.whl` / `*.tar.gz` under
+`bindings/python/dist/` so a previous version cannot be uploaded. `--skip-build`
+keeps existing wheels, but still removes files whose version does not match the
+current `Cargo.toml` before calling `maturin upload`. Copy extra platform wheels
+(Windows) into `dist/` after the Linux build, then `--publish --skip-build`.
 
 CI (`ci_bindings_python.yml`) builds and uploads native wheels on Linux,
 macOS, and Windows, and also runs the zig manylinux path (`x86_64` +
@@ -55,8 +59,8 @@ relevant push/PR.
 5. Tag and push:
 
 ```bash
-git tag py-v0.1.9
-git push origin py-v0.1.9
+git tag py-v0.2.1
+git push origin py-v0.2.1
 ```
 
 ## Notes

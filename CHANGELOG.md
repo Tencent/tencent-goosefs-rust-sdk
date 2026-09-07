@@ -11,6 +11,8 @@ kept aligned. Python-specific notes also appear in
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-09-07
+
 ### Removed
 
 - **Short-circuit (local mmap) read path.** The `goosefs_sdk::block::short_circuit`
@@ -273,6 +275,12 @@ kept aligned. Python-specific notes also appear in
   metadata-cache metrics in both Metrics pages, recursive-listing semantics on
   the FileSystem API pages, and consistent-hash worker-selection notes on the
   Rust Worker Block Direct Read page.
+
+### Changed
+
+- Version bump: `goosefs-sdk` / `goosefs` `0.1.9` → `0.2.1`.
+  Python `0.2.0` on PyPI was an interrupted, incomplete upload and cannot
+  be overwritten; this is the first complete 0.2 line.
 
 ## [0.1.9] — 2026-08-04
 

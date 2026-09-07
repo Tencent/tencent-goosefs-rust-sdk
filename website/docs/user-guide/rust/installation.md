@@ -8,7 +8,7 @@ The GooseFS Rust client is published to [crates.io](https://crates.io/crates/goo
 
 ```toml
 [dependencies]
-goosefs-sdk = "0.1"
+goosefs-sdk = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -25,13 +25,13 @@ tokio = { version = "1", features = ["full"] }
 ```toml
 [dependencies]
 # Default: includes metrics Pushgateway exporter (reqwest)
-goosefs-sdk = "0.1"
+goosefs-sdk = "0.2"
 
 # Smaller dependency graph when you only need the gRPC client
-goosefs-sdk = { version = "0.1", default-features = false }
+goosefs-sdk = { version = "0.2", default-features = false }
 
 # Opt-in protobuf regeneration (developers only)
-goosefs-sdk = { version = "0.1", features = ["regen-proto"] }
+goosefs-sdk = { version = "0.2", features = ["regen-proto"] }
 ```
 
 | Feature               | Default | Purpose                                                     |

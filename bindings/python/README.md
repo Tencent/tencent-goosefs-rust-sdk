@@ -16,6 +16,21 @@
 
 ## What's New
 
+- **v0.2.1** — aligned with `goosefs-sdk` 0.2.1.
+  - **Breaking:** `write_file` / `create_file` / `batch_create_file` now honour
+    `recursive=False` (the documented default). Missing parents raise
+    `NotFound`; pass `recursive=True` or `mkdir` the parent first to restore
+    the old implicit creation.
+  - **`Goosefs.batch_open_file`** — sync client now has the last missing
+    batch API, mirroring `AsyncGoosefs.batch_open_file`.
+  - **`positioned_read`** rejects `length < -1` instead of treating every
+    negative as "read the whole block".
+  - Inherits SDK hang fix (second UFS read of a path), `get_status` UFS
+    metadata load (`loadMetadataType=ONCE`), `delete` `unchecked=True`
+    default, metadata cache on by default, and short-circuit removal
+    (`GOOSEFS_SHORT_CIRCUIT_*` env/properties are ignored).
+  - See [`CHANGELOG.md`](./CHANGELOG.md).
+
 - **v0.1.9** — aligned with `goosefs-sdk` 0.1.9.
   - **Lazy `list_status`**: `list_status_grouped` /
     `batch_list_status_grouped` return a lazy `URIStatusList` that

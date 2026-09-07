@@ -34,8 +34,8 @@ bash scripts/release/rust.sh --publish
 5. Tag and push:
 
 ```bash
-git tag v0.1.9
-git push origin v0.1.9
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
 crates.io does **not** allow overwriting a published version. Never commit tokens; use `CARGO_REGISTRY_TOKEN` in the environment only.
