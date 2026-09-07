@@ -16,7 +16,7 @@
 #
 # Triggers:
 #   - workflow_dispatch (Actions → Publish Python SDK → Run workflow)
-#   - push of tags matching py-v* (e.g. py-v0.2.1)
+#   - push of tags matching py-v* (e.g. py-v0.2.0)
 #
 # Auth (pick one):
 #   1. PyPI Trusted Publisher (OIDC) — preferred.

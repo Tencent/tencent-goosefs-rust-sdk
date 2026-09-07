@@ -16,7 +16,7 @@
 
 ## What's New
 
-- **v0.2.1** — aligned with `goosefs-sdk` 0.2.1.
+- **v0.2.0** — aligned with `goosefs-sdk` 0.2.0.
   - **Breaking:** `write_file` / `create_file` / `batch_create_file` now honour
     `recursive=False` (the documented default). Missing parents raise
     `NotFound`; pass `recursive=True` or `mkdir` the parent first to restore

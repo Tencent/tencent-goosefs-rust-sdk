@@ -2,14 +2,14 @@
 
 ![Experimental](https://img.shields.io/badge/status-experimental-orange)
 ![Rust](https://img.shields.io/badge/rust-1.88%2B-blue)
-![Version](https://img.shields.io/badge/version-0.2.1-blue)
+![Version](https://img.shields.io/badge/version-0.2.0-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-green)
 
 A native Rust client library that communicates directly with [Goosefs](https://cloud.tencent.com/document/product/1424) Master/Worker via gRPC (tonic/protobuf).
 
 **Documentation:** [https://tencent.github.io/tencent-goosefs-rust-sdk/](https://tencent.github.io/tencent-goosefs-rust-sdk/)
 
-## What's New in v0.2.1
+## What's New in v0.2.0
 
 - **Java-aligned metadata and write defaults** — `get_status` / `list_status` send `loadMetadataType=ONCE` so COS/UFS files appear without a prior load; write-path RPCs send Java `commonDefaults`; `DeleteOptions.unchecked` defaults to `true`; the client metadata cache is **on by default**.
 - **Page cache rewrite** — metadata and eviction moved from `moka` to `foyer`; default eviction policy is `LRU` (was `LFU`); `S3FIFO` is available as an option.

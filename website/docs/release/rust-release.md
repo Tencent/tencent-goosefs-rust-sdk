@@ -14,7 +14,7 @@ Workflow: [Publish Rust SDK](https://github.com/Tencent/tencent-goosefs-rust-sdk
 2. Update [`CHANGELOG.md`](https://github.com/Tencent/tencent-goosefs-rust-sdk/blob/main/CHANGELOG.md).
 3. Merge the workflow file (and the version bump) to `main`. GitHub Actions only lists a `workflow_dispatch` workflow after it exists on the default branch.
 4. Ensure CI is green.
-5. Publish from the Actions UI (below) **or** push a matching tag: `git tag v0.2.1 && git push origin v0.2.1`.
+5. Publish from the Actions UI (below) **or** push a matching tag: `git tag v0.2.0 && git push origin v0.2.0`.
 
 ### Run from the Actions UI
 

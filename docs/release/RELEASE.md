@@ -15,7 +15,7 @@ Workflow: [Publish Rust SDK](https://github.com/Tencent/tencent-goosefs-rust-sdk
    lists a `workflow_dispatch` workflow after it exists on the default branch.
 4. Ensure CI is green.
 5. Publish from the Actions UI (below) **or** push a matching tag:
-   `git tag v0.2.1 && git push origin v0.2.1`.
+   `git tag v0.2.0 && git push origin v0.2.0`.
 6. Create the GitHub Release if you have not already.
 
 ### Run from the Actions UI

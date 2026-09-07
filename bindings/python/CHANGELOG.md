@@ -8,7 +8,7 @@ This document records all notable changes to the `goosefs` Python binding. The f
 
 ## [Unreleased]
 
-## [0.2.1] — 2026-09-07
+## [0.2.0] — 2026-09-07
 
 ### Removed
 
@@ -38,11 +38,9 @@ This document records all notable changes to the `goosefs` Python binding. The f
   Defaults to `false`"), and what `mkdir(path, recursive=False)` already did.
   Callers relying on the implicit creation should pass `recursive=True` or
   `mkdir` the parent first.
-- **Underlying SDK upgrade**: `goosefs-sdk` 0.1.9 → 0.2.1.
-- **`bindings/python/Cargo.toml`** version `0.1.9` → `0.2.1`, kept in
-  sync with the root crate; `goosefs.__version__` now reports `0.2.1`.
-- **PyPI**: `0.2.0` upload was interrupted (only a partial aarch64
-  manylinux wheel landed) and cannot be overwritten. Install `goosefs==0.2.1`.
+- **Underlying SDK upgrade**: `goosefs-sdk` 0.1.9 → 0.2.0.
+- **`bindings/python/Cargo.toml`** version `0.1.9` → `0.2.0`, kept in
+  sync with the root crate; `goosefs.__version__` now reports `0.2.0`.
 
 ### Added
 
@@ -218,7 +216,7 @@ improvements transparently — most require no API change.
   Python inherits this transparently — every `open_file` / `read_file`
   / `read_range` / `positioned_read` call automatically prefers the
   local mmap path when the target block resides on the co-located
-  worker.   (Removed again in a later release; see the `0.2.1`
+  worker.   (Removed again in a later release; see the `0.2.0`
   section above.)
 
 - **Batch metadata / lifecycle APIs.** `BaseFileSystem` gains a full

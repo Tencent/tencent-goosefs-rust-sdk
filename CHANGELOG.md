@@ -17,7 +17,7 @@ kept aligned. Python-specific notes also appear in
   (`workflow_dispatch` or tags `py-v*` / `v*`) upload to PyPI and crates.io via
   Trusted Publishing (OIDC) or API-token secrets.
 
-## [0.2.1] — 2026-09-07
+## [0.2.0] — 2026-09-07
 
 ### Removed
 
@@ -284,9 +284,7 @@ kept aligned. Python-specific notes also appear in
 
 ### Changed
 
-- Version bump: `goosefs-sdk` / `goosefs` `0.1.9` → `0.2.1`.
-  Python `0.2.0` on PyPI was an interrupted, incomplete upload and cannot
-  be overwritten; this is the first complete 0.2 line.
+- Version bump: `goosefs-sdk` / `goosefs` `0.1.9` → `0.2.0`.
 
 ## [0.1.9] — 2026-08-04
 

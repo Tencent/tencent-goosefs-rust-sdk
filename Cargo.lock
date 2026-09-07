@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "goosefs-python"
-version = "0.2.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "futures",
@@ -592,7 +592,7 @@ dependencies = [
 
 [[package]]
 name = "goosefs-sdk"
-version = "0.2.1"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "async-trait",
