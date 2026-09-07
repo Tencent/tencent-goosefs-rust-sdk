@@ -847,8 +847,8 @@ build/test/lint loop.
 
 | Artifact | Guide |
 |----------|-------|
-| Rust crate (`goosefs-sdk`) → crates.io | [`docs/release/RELEASE.md`](docs/release/RELEASE.md) |
-| Python package (`goosefs`) → PyPI (manylinux wheels) | [`docs/release/PYTHON_RELEASE.md`](docs/release/PYTHON_RELEASE.md) |
+| Rust crate (`goosefs-sdk`) → crates.io | Actions **Publish Rust SDK**, or [`docs/release/RELEASE.md`](docs/release/RELEASE.md) |
+| Python package (`goosefs`) → PyPI (manylinux wheels) | Actions **Publish Python SDK**, or [`docs/release/PYTHON_RELEASE.md`](docs/release/PYTHON_RELEASE.md) |
 
 ### Re-generate Proto Code
 

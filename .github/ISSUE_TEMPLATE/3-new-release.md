@@ -24,9 +24,9 @@ This issue tracks tasks for the GooseFS Rust / Python SDK `${version}` release.
 
 ### Publish
 
-- [ ] Tag the release (`vX.Y.Z`)
-- [ ] Publish Rust crate to crates.io
-- [ ] Publish Python wheels to PyPI
+- [ ] Publish Rust crate to crates.io (`Publish Rust SDK` workflow, or tag `vX.Y.Z`)
+- [ ] Publish Python wheels to PyPI (`Publish Python SDK` workflow, or tag `py-vX.Y.Z`)
+- [ ] Tag the release if you published from the Actions UI (`vX.Y.Z` / `py-vX.Y.Z`)
 - [ ] Create GitHub Release with notes and artifacts
 
 ### Announce
