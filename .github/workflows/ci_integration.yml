@@ -93,6 +93,12 @@ jobs:
             kind: python
             python-version: "3.11"
             store: PAGE
+          - os: ubuntu-latest
+            kind: java
+            store: FILE
+          - os: ubuntu-latest
+            kind: java
+            store: PAGE
     env:
       GOOSEFS_WORKER_BLOCK_STORE_TYPE: ${{ matrix.store }}
     steps:
@@ -112,6 +118,13 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
+
+      - name: Setup Java
+        if: matrix.kind == 'java'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
 
       - name: Sync + build binding
         if: matrix.kind == 'python'
@@ -163,6 +176,11 @@ jobs:
       - name: Python benchmarks
         if: matrix.kind == 'python'
         run: bash scripts/ci/run_python_benchmarks.sh
+
+      - name: Java behaviour tests
+        if: matrix.kind == 'java'
+        working-directory: bindings/java
+        run: ./mvnw -B test -Dtest=behavior.*Test,examples.Main
 
       - name: Tear down GooseFS
         if: always()

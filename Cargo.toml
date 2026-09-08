@@ -16,9 +16,10 @@
 members = [
     ".",
     "bindings/python",
+    "bindings/java",
 ]
 # Prevents cargo from auto-discovering unrelated directories as members.
-# Only the root SDK crate and its Python binding are members.
+# Only the root SDK crate and its language bindings are members.
 resolver = "2"
 
 [package]

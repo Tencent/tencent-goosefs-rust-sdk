@@ -1,0 +1,49 @@
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[package]
+name = "goosefs-java"
+version = "0.2.1"
+edition = "2021"
+license = "Apache-2.0"
+description = "JNI binding for the goosefs-sdk Rust crate (powers the `goosefs` Maven artifact)"
+publish = false
+# Keep aligned with the workspace root `Cargo.toml` so CI environments
+# never run with a different MSRV between the SDK and its Java binding.
+rust-version = "1.88"
+
+[lib]
+name = "goosefs_java"
+crate-type = ["cdylib", "staticlib"]
+doc = false
+
+[dependencies]
+# Path dependency to the workspace root SDK crate. Default features
+# (including `metrics-pushgateway`) match the Python binding.
+goosefs-sdk = { path = "../.." }
+
+# Pin exactly: EnvUnowned / ErrorPolicy live in this jni-rs release.
+# Do not write `jni = "0.22"` and silently float.
+jni = { version = "0.22.4" }
+
+# Tokio major/features stay aligned with the workspace SDK crate.
+tokio = { version = "1.23", features = ["rt-multi-thread", "macros", "sync", "time"] }
+futures = "0.3"
+bytes = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# Needed by #[cfg(test)] error exhaustiveness to construct GrpcError.
+tonic = "0.14"

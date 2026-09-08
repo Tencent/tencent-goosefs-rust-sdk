@@ -1,0 +1,181 @@
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Bindings Java
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "bindings/java/**"
+      - "src/**"
+      - "proto/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "bindings/python/Cargo.toml"
+      - "scripts/release/java.sh"
+      - ".github/workflows/ci_bindings_java.yml"
+      - ".github/actions/**"
+  pull_request:
+    paths:
+      - "bindings/java/**"
+      - "src/**"
+      - "proto/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "bindings/python/Cargo.toml"
+      - "scripts/release/java.sh"
+      - ".github/workflows/ci_bindings_java.yml"
+      - ".github/actions/**"
+  workflow_dispatch:
+
+concurrency:
+  group: java-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup
+        with:
+          components: clippy
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Version lockstep
+        run: bash scripts/release/java.sh --check
+
+      - name: Spotless
+        working-directory: bindings/java
+        run: ./mvnw -B spotless:check
+
+      - name: cargo clippy (java binding)
+        run: cargo clippy -p goosefs-java --all-targets --no-deps -- -D warnings
+
+  test:
+    name: test (jdk-${{ matrix.java }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ["11", "17", "21"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+
+      - name: Maven verify
+        working-directory: bindings/java
+        run: ./mvnw -B verify
+
+  test-macos:
+    name: test-macos
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Maven verify
+        working-directory: bindings/java
+        run: ./mvnw -B verify
+
+  package-linux:
+    name: package (${{ matrix.classifier }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        classifier:
+          - linux-x86_64
+          - linux-aarch_64
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Classified JAR dry-run
+        run: bash scripts/release/java.sh --classifier ${{ matrix.classifier }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: goosefs-java-${{ matrix.classifier }}
+          path: bindings/java/dist/*.jar
+
+  package-macos:
+    name: package (osx-aarch_64)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Classified JAR dry-run
+        run: bash scripts/release/java.sh --native
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: goosefs-java-osx-aarch_64
+          path: bindings/java/dist/*.jar

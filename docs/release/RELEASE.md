@@ -3,13 +3,14 @@
 Publish the Rust crate to [crates.io](https://crates.io/crates/goosefs-sdk).
 
 For the Python package, see [`PYTHON_RELEASE.md`](PYTHON_RELEASE.md).
+For the Java binding, see [`JAVA_RELEASE.md`](JAVA_RELEASE.md).
 
 ## GitHub Actions (preferred)
 
 Workflow: [Publish Rust SDK](https://github.com/Tencent/tencent-goosefs-rust-sdk/actions/workflows/publish-rust-sdk.yml)
 (`.github/workflows/publish-rust-sdk.yml`).
 
-1. Bump `version` in root `Cargo.toml` **and** `bindings/python/Cargo.toml` (keep identical).
+1. Bump `version` in root `Cargo.toml`, `bindings/python/Cargo.toml`, `bindings/java/Cargo.toml`, and `bindings/java/pom.xml` (keep identical).
 2. Update [`CHANGELOG.md`](../../CHANGELOG.md).
 3. Merge the workflow file (and the version bump) to `main`. GitHub Actions only
    lists a `workflow_dispatch` workflow after it exists on the default branch.

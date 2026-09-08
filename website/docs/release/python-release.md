@@ -4,7 +4,7 @@ sidebar_position: 2
 
 # Release Python Package
 
-Publish the PyO3 / maturin wheel to [PyPI](https://pypi.org/project/goosefs/). Linux releases must be **manylinux** wheels.
+Publish the PyO3 / maturin wheel to [PyPI](https://pypi.org/project/goosefs/). Linux releases must be **manylinux** wheels. For the Java binding, see [Release Java](./java-release).
 
 ## GitHub Actions (preferred)
 
@@ -12,7 +12,7 @@ Workflow: [Publish Python SDK](https://github.com/Tencent/tencent-goosefs-rust-s
 
 Builds and uploads Linux manylinux (`x86_64` + `aarch64`), macOS arm64, Windows `win_amd64`, and the sdist.
 
-1. Bump `version` in root `Cargo.toml` **and** `bindings/python/Cargo.toml` (keep identical).
+1. Bump `version` in root `Cargo.toml`, `bindings/python/Cargo.toml`, `bindings/java/Cargo.toml`, and `bindings/java/pom.xml` (keep identical).
 2. Update changelogs.
 3. Merge the workflow file (and the version bump) to `main`. GitHub Actions only lists a `workflow_dispatch` workflow after it exists on the default branch.
 4. Ensure CI is green (including **Bindings Python**).

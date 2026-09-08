@@ -8,7 +8,7 @@ title: Introduction
 
 [GooseFS](https://cloud.tencent.com/document/product/1424) is a high-performance distributed caching file system built on top of COS (Cloud Object Storage). It accelerates data access for big data and AI/ML workloads with a unified namespace and an intelligent caching layer between compute engines and cloud storage.
 
-This site documents the **GooseFS client libraries** for Rust and Python, developed in the [tencent-goosefs-rust-sdk](https://github.com/Tencent/tencent-goosefs-rust-sdk) repository. These clients talk directly to GooseFS Master/Worker over gRPC and let you:
+This site documents the **GooseFS client libraries** for Rust, Python, and Java, developed in the [tencent-goosefs-rust-sdk](https://github.com/Tencent/tencent-goosefs-rust-sdk) repository. These clients talk directly to GooseFS Master/Worker over gRPC and let you:
 
 - **Manage** files and directories (create, list, rename, delete, get status)
 - **Read and write** data with high-level streaming APIs
@@ -36,13 +36,13 @@ The Rust crate (`goosefs-sdk`) is Layer 3 in the **Lance → OpenDAL → GooseFS
 
 ## Client Overview
 
-|                   | Rust                                                               | Python                                                 |
-| ----------------- | ------------------------------------------------------------------ | ------------------------------------------------------ |
-| **Package**       | [`goosefs-sdk`](https://crates.io/crates/goosefs-sdk) on crates.io | [`goosefs`](https://pypi.org/project/goosefs/) on PyPI |
-| **Async runtime** | Tokio                                                              | Sync (`Goosefs`) + Async (`AsyncGoosefs`)              |
-| **API style**     | `FileSystem` trait + high-level I/O helpers                        | Blocking + coroutine APIs over the Rust SDK            |
-| **Python bridge** | —                                                                  | PyO3 (abi3, CPython 3.9+)                              |
-| **Status**        | Experimental (v0.2.x)                                              | Alpha (tracks Rust SDK version)                        |
+|                   | Rust                                                               | Python                                                 | Java                                                          |
+| ----------------- | ------------------------------------------------------------------ | ------------------------------------------------------ | ------------------------------------------------------------- |
+| **Package**       | [`goosefs-sdk`](https://crates.io/crates/goosefs-sdk) on crates.io | [`goosefs`](https://pypi.org/project/goosefs/) on PyPI | `com.tencent.goosefs:goosefs` (classified JARs; publish TBD) |
+| **Async runtime** | Tokio                                                              | Sync (`Goosefs`) + Async (`AsyncGoosefs`)              | Blocking (`Goosefs`) + `CompletableFuture` (`AsyncGoosefs`)   |
+| **API style**     | `FileSystem` trait + high-level I/O helpers                        | Blocking + coroutine APIs over the Rust SDK            | JNI over the same Rust SDK                                    |
+| **Bridge**        | —                                                                  | PyO3 (abi3, CPython 3.9+)                              | JNI (`jni` 0.22.4), JDK 11+                                   |
+| **Status**        | Experimental (v0.2.x)                                              | Alpha (tracks Rust SDK version)                        | Alpha (tracks Rust SDK version)                               |
 
 ## Prerequisites
 
@@ -60,5 +60,6 @@ export GOOSEFS_AUTH_TYPE=simple
 
 - **Rust** — installation, FileSystem API, configuration, page cache, metadata cache, metrics, and examples
 - **Python** — installation, sync/async quickstart, batch APIs, caching, and binding examples
+- **Java** — installation (dual JAR), quickstart, filesystem, streaming (`commit()` vs `close()`), errors, configuration
 - **Contributing** — build, test, and PR conventions
-- **Release** — publishing `goosefs-sdk` and the Python wheel
+- **Release** — publishing `goosefs-sdk`, the Python wheel, and the Java classified-JAR dry-run

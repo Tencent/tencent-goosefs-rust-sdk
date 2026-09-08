@@ -34,6 +34,15 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  version-lockstep:
+    name: version lockstep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rust / Python / Java versions
+        run: bash scripts/release/java.sh --check
+
   check:
     name: check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -67,6 +76,9 @@ jobs:
 
       - name: cargo clippy (python binding)
         run: cargo clippy -p goosefs-python --all-targets
+
+      - name: cargo clippy (java binding)
+        run: cargo clippy -p goosefs-java --all-targets
 
   unit-rust:
     name: unit-rust (${{ matrix.os }})

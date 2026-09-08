@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in contributing to the Tencent GooseFS Rust / Python SDK.
+Thanks for your interest in contributing to the Tencent GooseFS Rust / Python / Java SDK.
 
 ## Before you start
 
@@ -21,6 +21,7 @@ Requirements:
 - Rust **1.88+** ([rustup](https://rustup.rs/))
 - Optional: Docker (for integration tests / examples against a live GooseFS)
 - Optional: Python 3.9+ and [uv](https://docs.astral.sh/uv/) for the Python binding
+- Optional: JDK 11+ (17+ for Spotless) for the Java binding
 
 ```bash
 git clone https://github.com/Tencent/tencent-goosefs-rust-sdk.git
@@ -69,6 +70,15 @@ uv run pytest -v
 ```
 
 See [`bindings/python/DEVELOPMENT.md`](bindings/python/DEVELOPMENT.md).
+
+### Java binding
+
+```bash
+cd bindings/java
+./mvnw -B verify
+```
+
+See [`bindings/java/CONTRIBUTING.md`](bindings/java/CONTRIBUTING.md).
 
 ## Pull requests
 

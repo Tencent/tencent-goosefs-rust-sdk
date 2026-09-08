@@ -805,10 +805,13 @@ tencent-goosefs-rust-sdk/
 ├── tests/
 │   └── connection_reuse.rs      # Connection reuse integration test
 ├── bindings/
-│   └── python/              # ★ Python SDK (PyO3 + maturin)
-│       ├── python/goosefs/  #   Python package source
-│       ├── src/             #   Rust PyO3 bridge
-│       └── pyproject.toml   #   Build configuration
+│   ├── python/              # ★ Python SDK (PyO3 + maturin)
+│   │   ├── python/goosefs/  #   Python package source
+│   │   ├── src/             #   Rust PyO3 bridge
+│   │   └── pyproject.toml   #   Build configuration
+│   └── java/                # ★ Java SDK (JNI + Maven)
+│       ├── src/             #   Rust JNI crate + Java sources
+│       └── pom.xml          #   Dual JAR (classes + classified native lib)
 └── target/                 # build artifacts (git-ignored)
 ```
 
@@ -852,12 +855,26 @@ uv run maturin develop --uv                      # compile + install as editable
 See [`bindings/python/DEVELOPMENT.md`](bindings/python/DEVELOPMENT.md) for the full
 build/test/lint loop.
 
+### Build Java Bindings
+
+The `com.tencent.goosefs:goosefs` JNI package lives under [`bindings/java/`](bindings/java/).
+One `./mvnw package` compiles the Rust `cdylib` and two JARs (classes + classified native lib):
+
+```shell
+cd bindings/java
+./mvnw -B verify
+```
+
+See [`bindings/java/CONTRIBUTING.md`](bindings/java/CONTRIBUTING.md) for classified-library
+notes and the release dry-run.
+
 ### Release
 
 | Artifact | Guide |
 |----------|-------|
 | Rust crate (`goosefs-sdk`) → crates.io | Actions **Publish Rust SDK**, or [`docs/release/RELEASE.md`](docs/release/RELEASE.md) |
 | Python package (`goosefs`) → PyPI (manylinux wheels) | Actions **Publish Python SDK**, or [`docs/release/PYTHON_RELEASE.md`](docs/release/PYTHON_RELEASE.md) |
+| Java package (`com.tencent.goosefs:goosefs`) classified JARs | Bindings Java package jobs, or [`docs/release/JAVA_RELEASE.md`](docs/release/JAVA_RELEASE.md) |
 
 ### Re-generate Proto Code
 

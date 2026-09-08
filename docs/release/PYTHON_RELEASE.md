@@ -3,6 +3,7 @@
 Publish the PyO3 / maturin wheel to [PyPI](https://pypi.org/project/goosefs/).
 
 For the Rust crate, see [`RELEASE.md`](RELEASE.md).
+For the Java binding, see [`JAVA_RELEASE.md`](JAVA_RELEASE.md).
 
 `goosefs` is a native extension: Linux releases must be **manylinux** wheels so
 they are not tied to the build machine's glibc.
@@ -19,7 +20,7 @@ Builds and uploads:
 - Windows `win_amd64` (MSVC)
 - sdist
 
-1. Bump `version` in root `Cargo.toml` **and** `bindings/python/Cargo.toml` (keep identical).
+1. Bump `version` in root `Cargo.toml`, `bindings/python/Cargo.toml`, `bindings/java/Cargo.toml`, and `bindings/java/pom.xml` (keep identical).
 2. Update changelogs.
 3. Merge the workflow file (and the version bump) to `main`. GitHub Actions only
    lists a `workflow_dispatch` workflow after it exists on the default branch.

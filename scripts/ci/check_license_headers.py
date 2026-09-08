@@ -28,7 +28,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
-EXTS = {".rs", ".py", ".sh", ".proto", ".toml", ".yml", ".yaml"}
+EXTS = {".rs", ".py", ".sh", ".proto", ".toml", ".yml", ".yaml", ".java"}
 SKIP_DIRS = {
     ".git",
     "target",

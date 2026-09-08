@@ -24,6 +24,7 @@
 *.pem
 *.key
 bindings/python/.venv/
+bindings/java/target/
 .venv/
 **/__pycache__/
 *.py[cod]
