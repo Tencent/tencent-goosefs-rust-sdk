@@ -32,7 +32,9 @@ pub(crate) fn even_pairs(pairs: Vec<String>) -> Result<Vec<(String, String)>> {
         }));
     }
     Ok(pairs
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| (c[0].clone(), c[1].clone()))
         .collect())
 }
