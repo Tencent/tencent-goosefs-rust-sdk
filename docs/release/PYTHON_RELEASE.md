@@ -25,7 +25,7 @@ Builds and uploads:
    lists a `workflow_dispatch` workflow after it exists on the default branch.
 4. Ensure CI is green (including **Bindings Python**).
 5. Publish from the Actions UI (below) **or** push a matching tag:
-   `git tag py-v0.2.1 && git push origin py-v0.2.1`.
+   `git tag v0.2.1 && git push origin v0.2.1`.
 6. Create the GitHub Release if you have not already.
 
 ### Run from the Actions UI
