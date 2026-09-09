@@ -165,7 +165,7 @@ gRPC client. Enable optional capabilities explicitly:
 For example:
 
 ```toml
-goosefs-sdk = { version = "0.1", features = ["metadata-cache"] }
+goosefs-sdk = { version = "0.2", features = ["metadata-cache"] }
 ```
 
 Runtime configuration cannot enable a capability that was not compiled in;

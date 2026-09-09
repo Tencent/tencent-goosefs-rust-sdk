@@ -22,13 +22,15 @@ tokio = { version = "1", features = ["full"] }
 
 ## Feature Flags
 
+The default feature set is empty, so downstream crates only compile the core gRPC client. Enable optional capabilities explicitly:
+
 ```toml
 [dependencies]
-# Default: includes metrics Pushgateway exporter (reqwest)
+# Core gRPC client only
 goosefs-sdk = "0.2"
 
-# Smaller dependency graph when you only need the gRPC client
-goosefs-sdk = { version = "0.2", default-features = false }
+# Enable Pushgateway exporter (pulls in reqwest)
+goosefs-sdk = { version = "0.2", features = ["metrics-pushgateway"] }
 
 # Opt-in protobuf regeneration (developers only)
 goosefs-sdk = { version = "0.2", features = ["regen-proto"] }
@@ -36,7 +38,7 @@ goosefs-sdk = { version = "0.2", features = ["regen-proto"] }
 
 | Feature               | Default | Purpose                                                     |
 | --------------------- | ------- | ----------------------------------------------------------- |
-| `metrics-pushgateway` | yes     | HTTP Pushgateway exporter (`reqwest`)                       |
+| `metrics-pushgateway` | no      | HTTP Pushgateway exporter (`reqwest`)                       |
 | `regen-proto`         | no      | Rebuild stubs from `proto/` via `GOOSEFS_SDK_REGEN_PROTO=1` |
 
 ## Requirements

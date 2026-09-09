@@ -30,10 +30,10 @@
 //!
 //! ```bash
 //! # With GooseFS Master
-//! cargo run --example metrics_pushgateway
+//! cargo run --example metrics_pushgateway --features metrics-pushgateway
 //!
 //! # Without GooseFS Master (simulated data)
-//! cargo run --example metrics_pushgateway -- --no-master
+//! cargo run --example metrics_pushgateway --features metrics-pushgateway -- --no-master
 //! ```
 //!
 //! After running, check Pushgateway UI at <http://127.0.0.1:9091> to see the metrics.

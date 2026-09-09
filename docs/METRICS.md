@@ -244,7 +244,7 @@ export GOOSEFS_USER_METRICS_COLLECTION_ENABLED=false
 # Or enable pushgateway only:
 export GOOSEFS_METRICS_PUSHGATEWAY_ENABLED=true
 export GOOSEFS_METRICS_PUSHGATEWAY_ENDPOINT=http://10.0.0.2:9091
-cargo run --example metrics_pushgateway
+cargo run --example metrics_pushgateway --features metrics-pushgateway
 ```
 
 > Environment variables are overlaid on top of `goosefs-site.properties`
@@ -387,7 +387,7 @@ print(cfg.metrics_enabled)  # True — heartbeat reporting is enabled
 docker run -d -p 9091:9091 prom/pushgateway
 
 # Push all metrics (simulated data, no GooseFS Master required)
-cargo run --example metrics_pushgateway -- --no-master
+cargo run --example metrics_pushgateway --features metrics-pushgateway -- --no-master
 
 # Open Pushgateway UI
 open http://127.0.0.1:9091/#
@@ -397,14 +397,14 @@ open http://127.0.0.1:9091/#
 
 ```bash
 # Ensure GooseFS Master is running at 127.0.0.1:9200
-cargo run --example metrics_pushgateway
+cargo run --example metrics_pushgateway --features metrics-pushgateway
 ```
 
 ### Enable Pushgateway Push via Environment Variables
 
 ```bash
 # No code changes needed — environment variables are sufficient
-GOOSEFS_METRICS_PUSHGATEWAY_ENABLED=true cargo run --example metrics_pushgateway
+GOOSEFS_METRICS_PUSHGATEWAY_ENABLED=true cargo run --example metrics_pushgateway --features metrics-pushgateway
 ```
 
 ---
