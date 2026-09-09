@@ -48,10 +48,15 @@ cd "$ROOT"
 export GOOSEFS_MASTER_ADDR="${GOOSEFS_MASTER_ADDR:-127.0.0.1:9200}"
 export GOOSEFS_AUTH_TYPE="${GOOSEFS_AUTH_TYPE:-simple}"
 
-# Default features are empty; page-cache / metadata-cache tests declare
-# `required-features`. Keep one feature set so cargo does not rebuild
-# between targets.
-FEATURES=(--features full-client)
+# Default features are empty. Enable only the Cargo.toml `required-features`
+# of the suite under test — do not pull in `full-client` (reqwest, etc.).
+# Keep this map in sync with the `[[test]]` tables in Cargo.toml.
+features_for_test() {
+  case "$1" in
+    metadata_cache_e2e) printf '%s' 'metadata-cache' ;;
+    page_cache_e2e|page_cache_consistency) printf '%s' 'page-cache' ;;
+  esac
+}
 
 # Suites that cannot pass against the Docker fixture, e.g. because they need a
 # co-located worker block store on the host filesystem, which the containerised
@@ -98,7 +103,14 @@ fi
 failed=""
 for name in $targets; do
   echo "==> integration: $name"
-  if ! cargo test --test "$name" "${FEATURES[@]}" -- --ignored --nocapture --test-threads=1; then
+  feats="$(features_for_test "$name")"
+  args=(cargo test --test "$name")
+  if [[ -n "$feats" ]]; then
+    echo "    features: $feats"
+    args+=(--features "$feats")
+  fi
+  args+=(-- --ignored --nocapture --test-threads=1)
+  if ! "${args[@]}"; then
     # Keep going so one broken suite does not mask the state of the rest;
     # the script still exits non-zero below.
     echo "!!! integration suite failed: $name" >&2

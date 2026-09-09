@@ -21,26 +21,23 @@ cd "$ROOT"
 
 MODE="${1:-all}" # offline | cluster | all
 
-# Default features are empty; page-cache benches require the matching crate
-# features. Use full-client so Linux/macOS/Windows share one feature set
-# (`page-cache-io-uring` is a no-op backend off Linux).
-FEATURES=(--features full-client)
-
+# Default features are empty. Enable only what each target's Cargo.toml
+# `required-features` asks for — do not pull in `full-client` (reqwest, etc.).
 run_offline() {
   echo "==> offline: cache_evictor_bench"
   BENCH_NUM_PAGES="${BENCH_NUM_PAGES:-200}" \
   BENCH_CONCURRENCY="${BENCH_CONCURRENCY:-1,4}" \
   BENCH_ITERS_PER_TASK="${BENCH_ITERS_PER_TASK:-200}" \
   BENCH_USE_URING="${BENCH_USE_URING:-0}" \
-    cargo run --release --example cache_evictor_bench "${FEATURES[@]}"
+    cargo run --release --example cache_evictor_bench --features page-cache
 
   echo "==> offline: cache_uring_bench"
   BENCH_NUM_PAGES="${BENCH_NUM_PAGES:-200}" \
   BENCH_ITERS_PER_TASK="${BENCH_ITERS_PER_TASK:-200}" \
-    cargo run --release --example cache_uring_bench "${FEATURES[@]}"
+    cargo run --release --example cache_uring_bench --features page-cache-io-uring
 
   echo "==> offline: master_hotpath (criterion, short)"
-  cargo bench --bench master_hotpath "${FEATURES[@]}" -- \
+  cargo bench --bench master_hotpath -- \
     --warm-up-time 1 --measurement-time 2 --sample-size 10
 }
 
@@ -61,10 +58,10 @@ run_cluster() {
   export GFS_TAG="${GFS_TAG:-ci}"
 
   echo "==> cluster: partv_perf_verify (size=${GFS_SIZE_MB}MiB)"
-  cargo run --release --example partv_perf_verify "${FEATURES[@]}"
+  cargo run --release --example partv_perf_verify
 
   echo "==> cluster: repro_concurrent_write"
-  cargo run --release --example repro_concurrent_write "${FEATURES[@]}" -- 2 2
+  cargo run --release --example repro_concurrent_write -- 2 2
 }
 
 case "${MODE}" in

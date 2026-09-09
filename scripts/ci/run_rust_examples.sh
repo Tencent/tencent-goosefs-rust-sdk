@@ -45,26 +45,42 @@ EXAMPLES=(
   verify_checkblocks_locations
 )
 
-# Default features are empty; page-cache / pushgateway examples declare
-# `required-features`. Build and run against full-client so gated examples
-# are not skipped then failed at `cargo run`.
-FEATURES=(--features full-client)
+# Default features are empty. Enable only what each example's Cargo.toml
+# `required-features` asks for — do not pull in `full-client` (reqwest, etc.).
+# Keep this map in sync with the `[[example]]` tables in Cargo.toml.
+example_features() {
+  case "$1" in
+    page_cache_demo|reader_page_cache_demo) printf '%s' 'page-cache' ;;
+    metrics_pushgateway) printf '%s' 'metrics-pushgateway' ;;
+  esac
+}
+
+run_example() {
+  local name="$1"
+  shift
+  local feats
+  feats="$(example_features "$name")"
+  echo "==> example: ${name}"
+  if [[ -n "$feats" ]]; then
+    echo "    features: $feats"
+    cargo run --example "$name" --features "$feats" "$@"
+  else
+    cargo run --example "$name" "$@"
+  fi
+}
 
 echo "==> Building examples"
-cargo build --examples "${FEATURES[@]}"
+cargo build --examples
 
 for name in "${EXAMPLES[@]}"; do
-  echo "==> example: ${name}"
-  cargo run --example "${name}" "${FEATURES[@]}"
+  run_example "$name"
 done
 
-echo "==> example: ha_multi_master (single master)"
-cargo run --example ha_multi_master "${FEATURES[@]}" -- "${GOOSEFS_MASTER_ADDR}"
+run_example ha_multi_master -- "${GOOSEFS_MASTER_ADDR}"
 
 # metrics_pushgateway needs a Pushgateway on :9091; only run when present.
 if python3 -c 'import socket; socket.create_connection(("127.0.0.1", 9091), 1).close()'; then
-  echo "==> example: metrics_pushgateway"
-  cargo run --example metrics_pushgateway "${FEATURES[@]}"
+  run_example metrics_pushgateway
 else
   echo "==> skip metrics_pushgateway (no Pushgateway on 127.0.0.1:9091)"
 fi
