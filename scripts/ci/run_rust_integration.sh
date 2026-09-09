@@ -48,12 +48,15 @@ cd "$ROOT"
 export GOOSEFS_MASTER_ADDR="${GOOSEFS_MASTER_ADDR:-127.0.0.1:9200}"
 export GOOSEFS_AUTH_TYPE="${GOOSEFS_AUTH_TYPE:-simple}"
 
-# Default features are empty. Enable only the Cargo.toml `required-features`
-# of the suite under test — do not pull in `full-client` (reqwest, etc.).
-# Keep this map in sync with the `[[test]]` tables in Cargo.toml.
+# Default features are empty. Enable only the features each suite needs —
+# do not pull in `full-client` (reqwest, etc.).
+# Keep this map in sync with Cargo.toml `[[test]]` `required-features`, plus
+# suites that turn on an optional capability at runtime without declaring
+# required-features on the whole crate (so hermetic tests still compile
+# under the empty default).
 features_for_test() {
   case "$1" in
-    metadata_cache_e2e) printf '%s' 'metadata-cache' ;;
+    metadata_cache_e2e|opendal_sdk_api) printf '%s' 'metadata-cache' ;;
     page_cache_e2e|page_cache_consistency) printf '%s' 'page-cache' ;;
   esac
 }
