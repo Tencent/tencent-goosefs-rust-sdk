@@ -19,7 +19,7 @@
 //!
 //! ```bash
 //! # NOSASL dev cluster:
-//! GOOSEFS_AUTH_TYPE=nosasl cargo test --test page_cache_e2e -- --ignored --nocapture
+//! GOOSEFS_AUTH_TYPE=nosasl cargo test --test page_cache_e2e --features page-cache -- --ignored --nocapture
 //! ```
 //!
 //! Override the master address with `GOOSEFS_MASTER_ADDR`.

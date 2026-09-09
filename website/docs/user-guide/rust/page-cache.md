@@ -8,13 +8,15 @@ The SDK ships an optional **client-side local page cache** that mirrors the Goos
 
 ## Behavior
 
-- **Disabled by default** — existing behavior is unchanged unless you opt in
+- **Disabled by default** — compile with the `page-cache` crate feature, then set `client_cache_enabled`
 - **Best-effort** — misses/errors fall back to the worker; correctness is never affected
 - **Transparent** — `read_at` on `GoosefsFileInStream` routes through the cache; sequential `read` bypasses it unless `client_cache_sequential_read_enabled` is set
 - **Overwrite-safe** — on reopen, `(length, last_modification_time)` invalidates stale pages
 - **Survives restarts** — pages and identity metadata are restored from disk
 
 ## Example
+
+Enable the `page-cache` crate feature (`features = ["page-cache"]`; add `page-cache-io-uring` on Linux for the io_uring backend). Then:
 
 ```rust
 use std::sync::Arc;
@@ -53,7 +55,7 @@ Cache effectiveness is exposed via `Client.Cache*` metrics (`CacheBytesReadCache
 Try the bundled demo:
 
 ```bash
-cargo run --example page_cache_demo
+cargo run --example page_cache_demo --features page-cache
 ```
 
 ## Sync pread read mode (Linux only)

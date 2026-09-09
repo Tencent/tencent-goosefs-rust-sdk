@@ -31,8 +31,8 @@
 //! - warm read (fresh reader) → `CacheBytesReadCache` grows, external flat
 //!
 //! Usage:
-//!   cargo run --example reader_page_cache_demo
-//!   GOOSEFS_AUTH_TYPE=simple cargo run --example reader_page_cache_demo
+//!   cargo run --example reader_page_cache_demo --features page-cache
+//!   GOOSEFS_AUTH_TYPE=simple cargo run --example reader_page_cache_demo --features page-cache
 //!
 //! Requires a Goosefs master reachable at `127.0.0.1:9200` (override with
 //! `GOOSEFS_MASTER_ADDR`).

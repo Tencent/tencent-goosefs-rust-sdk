@@ -452,14 +452,14 @@ Cache effectiveness is observable via `Client.Cache*` metrics (e.g.
 `CacheBytesEvicted`), reported through the same heartbeat/Pushgateway pipeline
 as other client metrics.
 
-> **Tip:** Run `cargo run --example page_cache_demo` for an end-to-end demo that
+> **Tip:** Run `cargo run --example page_cache_demo --features page-cache` for an end-to-end demo that
 > writes a file, then proves cold-miss → back-fill → warm-hit using the
 > `Client.Cache*` metrics. (Set `GOOSEFS_AUTH_TYPE=nosasl` if your dev cluster
 > runs without SASL.)
 >
 > More cache coverage:
-> - Local page-store A/B: `cargo run --release --example cache_uring_bench` / `cache_evictor_bench`
-> - Integration tests (live cluster): `GOOSEFS_AUTH_TYPE=nosasl cargo test --test page_cache_e2e -- --ignored`
+> - Local page-store A/B: `cargo run --release --example cache_uring_bench --features page-cache-io-uring` / `cargo run --release --example cache_evictor_bench --features page-cache`
+> - Integration tests (live cluster): `GOOSEFS_AUTH_TYPE=nosasl cargo test --test page_cache_e2e --features page-cache -- --ignored`
 > - Python e2e: `GOOSEFS_MASTER_ADDR=127.0.0.1:9200 GOOSEFS_AUTH_TYPE=nosasl uv run --group test pytest tests/test_page_cache.py` (in `bindings/python`)
 
 ### Example: Client Metrics & Heartbeat

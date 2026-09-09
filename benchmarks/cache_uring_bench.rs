@@ -21,7 +21,7 @@
 //!
 //! ## Usage (Linux 5.1+)
 //! ```bash
-//! cargo run --release --example cache_uring_bench
+//! cargo run --release --example cache_uring_bench --features page-cache-io-uring
 //! ```
 //! On non-Linux platforms only the `LocalPageStore` (tokio::fs) path is
 //! benchmarked; `UringPageStore` is `#[cfg(target_os = "linux")]`-gated.

@@ -29,7 +29,13 @@ The default feature set is empty, so downstream crates only compile the core gRP
 # Core gRPC client only
 goosefs-sdk = "0.2"
 
-# Enable Pushgateway exporter (pulls in reqwest)
+# Process-local metadata cache (on by default once this feature is compiled in)
+goosefs-sdk = { version = "0.2", features = ["metadata-cache"] }
+
+# Portable page cache; add `page-cache-io-uring` on Linux for the io_uring backend
+goosefs-sdk = { version = "0.2", features = ["page-cache"] }
+
+# Pushgateway exporter (pulls in reqwest)
 goosefs-sdk = { version = "0.2", features = ["metrics-pushgateway"] }
 
 # Opt-in protobuf regeneration (developers only)
@@ -38,7 +44,11 @@ goosefs-sdk = { version = "0.2", features = ["regen-proto"] }
 
 | Feature               | Default | Purpose                                                     |
 | --------------------- | ------- | ----------------------------------------------------------- |
+| `metadata-cache`      | no      | Process-local status and listing cache (`lru`)              |
+| `page-cache`          | no      | Portable disk-backed page cache (`foyer-*`, `tokio/fs`)     |
+| `page-cache-io-uring` | no      | Linux io_uring page-cache backend (includes `page-cache`)   |
 | `metrics-pushgateway` | no      | HTTP Pushgateway exporter (`reqwest`)                       |
+| `full-client`         | no      | All runtime capabilities above                              |
 | `regen-proto`         | no      | Rebuild stubs from `proto/` via `GOOSEFS_SDK_REGEN_PROTO=1` |
 
 ## Requirements

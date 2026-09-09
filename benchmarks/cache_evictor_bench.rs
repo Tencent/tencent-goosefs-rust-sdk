@@ -24,7 +24,9 @@
 //!
 //! ## Usage
 //! ```bash
-//! cargo run --release --example cache_evictor_bench
+//! cargo run --release --example cache_evictor_bench --features page-cache
+//! # Linux io_uring comparison (BENCH_USE_URING defaults to 1):
+//! cargo run --release --example cache_evictor_bench --features page-cache-io-uring
 //! ```
 //!
 //! ## Env knobs
