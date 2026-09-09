@@ -51,9 +51,16 @@ exclude = [
 name = "goosefs_sdk"
 
 [features]
-# Default features keep backward-compatible behaviour: pushgateway HTTP exporter
-# and the original `tokio = "full"` feature set used by examples/tests.
-default = ["metrics-pushgateway"]
+# Keep the core gRPC client dependency graph minimal for downstream crates.
+default = []
+
+# Process-local metadata status/listing cache.
+metadata-cache = ["dep:lru"]
+
+# Disk-backed client page cache. The io_uring backend is a separate opt-in so
+# non-Linux consumers can use the portable tokio::fs implementation alone.
+page-cache = ["dep:foyer-common", "dep:foyer-memory", "tokio/fs"]
+page-cache-io-uring = ["page-cache", "dep:io-uring", "dep:libc"]
 
 # Pushgateway exporter pulls in `reqwest` (HTTP/TLS stack). Disabling this
 # feature significantly shrinks the dependency graph for downstream crates
@@ -66,6 +73,14 @@ metrics-pushgateway = ["dep:reqwest"]
 # `GOOSEFS_SDK_REGEN_PROTO=1` env var by build.rs.
 regen-proto = ["dep:tonic-prost-build"]
 
+# Preserve the complete runtime client for bindings and applications that want
+# every optional data-plane capability. Proto regeneration remains build-only.
+full-client = [
+    "metadata-cache",
+    "metrics-pushgateway",
+    "page-cache-io-uring",
+]
+
 [dependencies]
 # `default-features = false` removes the `router` feature (and its `axum`,
 # `matchit`, `axum-core`, `tower-http` chain) which is server-side only.
@@ -76,9 +91,10 @@ tonic = { version = "0.14", default-features = false, features = ["channel", "co
 tonic-prost = "0.14"
 prost = "0.14.1"
 # Trim `tokio = "full"` to the concrete features actually used by the SDK
-# (single-thread-capable runtime, macros, sync primitives, IO, time, and fs).
+# (single-thread-capable runtime, macros, sync primitives, IO, time).
 # Tonic's channel enables Tokio networking through hyper-util.
-tokio = { version = "1.23", features = ["rt", "macros", "sync", "time", "io-util", "fs"] }
+# `fs` is opt-in via the `page-cache` feature.
+tokio = { version = "1.23", features = ["rt", "macros", "sync", "time", "io-util"] }
 tokio-stream = "0.1.14"
 bytes = "1.11.1"
 thiserror = "2"
@@ -105,9 +121,9 @@ arc-swap = "1"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 serde = { version = "1", features = ["derive"] }
 async-trait = "0.1"
-# Bounded LRU used by the client metadata cache. Floor is 0.16.3 for
+# Bounded LRU backing the client metadata cache. Floor is 0.16.3 for
 # RUSTSEC-2026-0002 (IterMut Stacked Borrows).
-lru = "0.18.1"
+lru = { version = "0.18.1", optional = true }
 rand = "0.9.1"
 uuid = { version = "1.2", features = ["v4"] }
 hostname = "0.4"
@@ -130,8 +146,8 @@ reqwest = { version = "^0.12", features = ["rustls-tls"], default-features = fal
 # `Cache`/`CacheBuilder`/`*Config` live in foyer-memory, `Event`/`EventListener`
 # in foyer-common. Published MSRV is 1.85.0 for both (the 1.91 in foyer's
 # README is its dev-workspace toolchain, not a consumer constraint).
-foyer-memory = "0.22"
-foyer-common = "0.22"
+foyer-memory = { version = "0.22", optional = true }
+foyer-common = { version = "0.22", optional = true }
 # Drives variable-sized batches of cache page reads concurrently without
 # spawning per-page tasks; already used by benchmarks and now required on the
 # cache hit hot path.
@@ -147,14 +163,14 @@ fastrand = "2"
 # Already in the dependency graph transitively; declared directly so the
 # cache store can call into it.
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = { version = "0.2", optional = true }
 
 # Linux-only: io_uring page-cache backend (CLIENT_PAGE_CACHE_DESIGN.md).
 # The io-uring crate provides the raw syscall wrappers; `libc` is already
 # declared for unix targets above. Only pulled in on Linux so the crate
 # continues to build on macOS / Windows.
 [target.'cfg(target_os = "linux")'.dependencies]
-io-uring = "0.7"
+io-uring = { version = "0.7", optional = true }
 
 [build-dependencies]
 # Optional: only required when regenerating protobuf code in-tree.
@@ -198,8 +214,7 @@ path = "benchmarks/repro_concurrent_write.rs"
 [[example]]
 name = "cache_evictor_bench"
 path = "benchmarks/cache_evictor_bench.rs"
-
-
+required-features = ["page-cache"]
 
 # P3 benchmark: io_uring vs tokio::fs page-cache backend comparison.
 # Local-only (no GooseFS cluster needed). Runs on any platform; io_uring path
@@ -208,6 +223,31 @@ path = "benchmarks/cache_evictor_bench.rs"
 [[example]]
 name = "cache_uring_bench"
 path = "benchmarks/cache_uring_bench.rs"
+required-features = ["page-cache-io-uring"]
+
+[[example]]
+name = "metrics_pushgateway"
+required-features = ["metrics-pushgateway"]
+
+[[example]]
+name = "page_cache_demo"
+required-features = ["page-cache"]
+
+[[example]]
+name = "reader_page_cache_demo"
+required-features = ["page-cache"]
+
+[[test]]
+name = "metadata_cache_e2e"
+required-features = ["metadata-cache"]
+
+[[test]]
+name = "page_cache_consistency"
+required-features = ["page-cache"]
+
+[[test]]
+name = "page_cache_e2e"
+required-features = ["page-cache"]
 
 # Release profile tuning for the SDK hot paths.
 #

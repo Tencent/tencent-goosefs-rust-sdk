@@ -34,7 +34,7 @@
 //!   assertions deterministic.
 //!
 //! Usage:
-//!   cargo run --example page_cache_demo
+//!   cargo run --example page_cache_demo --features page-cache
 //!
 //! Requires a Goosefs master reachable at `127.0.0.1:9200`.
 

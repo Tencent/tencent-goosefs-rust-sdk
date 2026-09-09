@@ -32,7 +32,7 @@
 //!
 //! ```bash
 //! GOOSEFS_AUTH_TYPE=nosasl \
-//!   cargo test --test page_cache_consistency -- --ignored --nocapture --test-threads=1
+//!   cargo test --test page_cache_consistency --features page-cache -- --ignored --nocapture --test-threads=1
 //! ```
 //!
 //! `--test-threads=1` keeps the cache byte counters (used as light-weight

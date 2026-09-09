@@ -18,7 +18,7 @@ async fn main() -> goosefs_sdk::error::Result<()> {
     let mut config = GoosefsConfig::new("127.0.0.1:9200");
     config.metrics_enabled = true;
     config.metrics_heartbeat_interval = Duration::from_secs(10);
-    // Optional Pushgateway (requires default feature `metrics-pushgateway`)
+    // Optional Pushgateway (requires feature `metrics-pushgateway`)
     // config.metrics_pushgateway_endpoint = Some("http://127.0.0.1:9091".into());
 
     let ctx: Arc<FileSystemContext> = FileSystemContext::connect(config).await?;
@@ -49,5 +49,5 @@ Examples:
 
 ```bash
 cargo run --example metrics_heartbeat
-cargo run --example metrics_pushgateway
+cargo run --example metrics_pushgateway --features metrics-pushgateway
 ```

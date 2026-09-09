@@ -21,18 +21,20 @@ cd "$ROOT"
 
 MODE="${1:-all}" # offline | cluster | all
 
+# Default features are empty. Enable only what each target's Cargo.toml
+# `required-features` asks for — do not pull in `full-client` (reqwest, etc.).
 run_offline() {
   echo "==> offline: cache_evictor_bench"
   BENCH_NUM_PAGES="${BENCH_NUM_PAGES:-200}" \
   BENCH_CONCURRENCY="${BENCH_CONCURRENCY:-1,4}" \
   BENCH_ITERS_PER_TASK="${BENCH_ITERS_PER_TASK:-200}" \
   BENCH_USE_URING="${BENCH_USE_URING:-0}" \
-    cargo run --release --example cache_evictor_bench
+    cargo run --release --example cache_evictor_bench --features page-cache
 
   echo "==> offline: cache_uring_bench"
   BENCH_NUM_PAGES="${BENCH_NUM_PAGES:-200}" \
   BENCH_ITERS_PER_TASK="${BENCH_ITERS_PER_TASK:-200}" \
-    cargo run --release --example cache_uring_bench
+    cargo run --release --example cache_uring_bench --features page-cache-io-uring
 
   echo "==> offline: master_hotpath (criterion, short)"
   cargo bench --bench master_hotpath -- \

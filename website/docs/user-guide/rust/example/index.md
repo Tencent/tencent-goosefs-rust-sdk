@@ -14,7 +14,7 @@ export GOOSEFS_AUTH_TYPE=simple   # or nosasl
 cargo run --example metadata_crud
 cargo run --example context_file_rw
 cargo run --example highlevel_file_rw
-cargo run --example page_cache_demo
+cargo run --example page_cache_demo --features page-cache
 ```
 
 | Example               | Topic                                           |

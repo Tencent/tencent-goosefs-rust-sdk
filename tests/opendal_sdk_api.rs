@@ -29,7 +29,7 @@
 //! Cluster tests are `#[ignore]` (need GooseFS v2.1.0.1). Run:
 //! ```bash
 //! GOOSEFS_MASTER_ADDR=127.0.0.1:9200 GOOSEFS_AUTH_TYPE=simple \
-//!   cargo test --test opendal_sdk_api -- --ignored --nocapture --test-threads=1
+//!   cargo test --test opendal_sdk_api --features metadata-cache -- --ignored --nocapture --test-threads=1
 //! ```
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -630,6 +630,7 @@ async fn opendal_write_via_temp_rename_and_abort() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "metadata-cache")]
 #[tokio::test]
 #[ignore = "Requires GooseFS v2.1.0.1 (invalidate_file_info)"]
 async fn opendal_invalidate_file_info_after_mutation() -> Result<()> {

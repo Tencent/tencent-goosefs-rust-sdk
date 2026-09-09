@@ -150,6 +150,28 @@ goosefs-sdk = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
+The default feature set is empty, so downstream crates only compile the core
+gRPC client. Enable optional capabilities explicitly:
+
+| Feature | Capability | Additional dependency group |
+|---|---|---|
+| `metadata-cache` | Process-local status and listing cache | `lru` |
+| `page-cache` | Portable disk-backed page cache | `foyer-*`, `tokio/fs` |
+| `page-cache-io-uring` | Linux io_uring page-cache backend | `page-cache`, `io-uring`, `libc` |
+| `metrics-pushgateway` | Prometheus Pushgateway exporter | `reqwest` and HTTP/TLS stack |
+| `full-client` | All runtime capabilities above | all of the above |
+| `regen-proto` | Regenerate checked-in protobuf bindings | `tonic-prost-build` |
+
+For example:
+
+```toml
+goosefs-sdk = { version = "0.2", features = ["metadata-cache"] }
+```
+
+Runtime configuration cannot enable a capability that was not compiled in;
+`GoosefsConfig::validate` and `FileSystemContext::connect` return an actionable
+configuration error in that case.
+
 ### Example: File Metadata Operations
 
 ```rust
@@ -421,7 +443,7 @@ Configuration is also accepted via `goosefs-site.properties` keys,
 | `goosefs.user.client.cache.quota.enabled` | `client_cache_quota_enabled` | `false` |
 | `goosefs.user.client.cache.ttl.seconds` | `client_cache_ttl_secs` | `0` (no expiry) |
 | `goosefs.user.client.cache.sequential.read.enabled` | `client_cache_sequential_read_enabled` | `false` |
-| `goosefs.user.client.cache.uring.enabled` | `client_cache_uring_enabled` | `true` on Linux / `false` elsewhere |
+| `goosefs.user.client.cache.uring.enabled` | `client_cache_uring_enabled` | `true` with `page-cache-io-uring` on Linux / `false` otherwise |
 | `goosefs.user.client.cache.uring.queue.depth` | `client_cache_uring_queue_depth` | `32768` |
 | `goosefs.user.client.cache.uring.thread.count` | `client_cache_uring_thread_count` | `2` |
 
@@ -430,14 +452,14 @@ Cache effectiveness is observable via `Client.Cache*` metrics (e.g.
 `CacheBytesEvicted`), reported through the same heartbeat/Pushgateway pipeline
 as other client metrics.
 
-> **Tip:** Run `cargo run --example page_cache_demo` for an end-to-end demo that
+> **Tip:** Run `cargo run --example page_cache_demo --features page-cache` for an end-to-end demo that
 > writes a file, then proves cold-miss → back-fill → warm-hit using the
 > `Client.Cache*` metrics. (Set `GOOSEFS_AUTH_TYPE=nosasl` if your dev cluster
 > runs without SASL.)
 >
 > More cache coverage:
-> - Local page-store A/B: `cargo run --release --example cache_uring_bench` / `cache_evictor_bench`
-> - Integration tests (live cluster): `GOOSEFS_AUTH_TYPE=nosasl cargo test --test page_cache_e2e -- --ignored`
+> - Local page-store A/B: `cargo run --release --example cache_uring_bench --features page-cache-io-uring` / `cargo run --release --example cache_evictor_bench --features page-cache`
+> - Integration tests (live cluster): `GOOSEFS_AUTH_TYPE=nosasl cargo test --test page_cache_e2e --features page-cache -- --ignored`
 > - Python e2e: `GOOSEFS_MASTER_ADDR=127.0.0.1:9200 GOOSEFS_AUTH_TYPE=nosasl uv run --group test pytest tests/test_page_cache.py` (in `bindings/python`)
 
 ### Example: Client Metrics & Heartbeat
@@ -518,8 +540,8 @@ Every knob below can also be set without touching Rust code:
 |-------|---------|-------------|
 | `metrics_enabled` | `true` | Master switch — when `false` the heartbeat task is not spawned. |
 | `metrics_heartbeat_interval` | `10 s` | Period between heartbeat reports. Must be `>= 1 s`. |
-| `metrics_heartbeat_timeout` | `3 s` | Per-RPC timeout. Must be `>= 1 s` and `< metrics_heartbeat_interval`. |
-| `metrics_max_batch_size` | `512` | Max number of metric entries packed into a single heartbeat. |
+| `metrics_heartbeat_timeout` | `5 s` | Per-RPC timeout. Must be `>= 1 s` and `< metrics_heartbeat_interval`. |
+| `metrics_max_batch_size` | `1024` | Max number of metric entries packed into a single heartbeat. |
 | `app_id` | `None` | Optional client tag attached to every heartbeat (useful for grouping in Master logs). |
 
 **Built-in counter names** (re-exported from `goosefs_sdk::metrics::name`):
