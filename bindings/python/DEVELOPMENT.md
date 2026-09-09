@@ -153,7 +153,7 @@ uv run maturin publish
 Preferred release path is the **Publish Python SDK** GitHub Actions workflow
 (`.github/workflows/publish-python-sdk.yml`): it builds manylinux + macOS +
 Windows wheels and uploads to PyPI via Trusted Publishing (OIDC) or
-`MATURIN_PYPI_TOKEN`. Trigger it from the Actions UI or by pushing `py-v*`
+`MATURIN_PYPI_TOKEN`. Trigger it from the Actions UI or by pushing `v*`
 tags. See [`../../docs/release/PYTHON_RELEASE.md`](../../docs/release/PYTHON_RELEASE.md).
 
 Local helper (Linux manylinux wheels only):

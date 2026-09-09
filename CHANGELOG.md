@@ -14,7 +14,7 @@ kept aligned. Python-specific notes also appear in
 ### Added
 
 - **Publish workflows** — GitHub Actions `Publish Python SDK` and `Publish Rust SDK`
-  (`workflow_dispatch` or tags `py-v*` / `v*`) upload to PyPI and crates.io via
+  (`workflow_dispatch` or tags `v*`) upload to PyPI and crates.io via
   Trusted Publishing (OIDC) or API-token secrets.
 
 ## [0.2.1] — 2026-09-07

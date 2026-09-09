@@ -166,7 +166,7 @@ if [[ "${PUBLISH}" -eq 0 ]]; then
   echo "  export MATURIN_PYPI_TOKEN=..."
   echo "  bash scripts/release/python.sh --publish --skip-build"
   echo
-  echo "Then tag: git tag py-v${PY_VER} && git push origin py-v${PY_VER}"
+  echo "Then tag: git tag v${PY_VER} && git push origin v${PY_VER}"
   exit 0
 fi
 
@@ -214,4 +214,4 @@ echo "==> maturin upload (${#current_wheels[@]} wheel(s))"
 
 echo
 echo "Published goosefs ${PY_VER} to PyPI."
-echo "Tag when ready: git tag py-v${PY_VER} && git push origin py-v${PY_VER}"
+echo "Tag when ready: git tag v${PY_VER} && git push origin v${PY_VER}"

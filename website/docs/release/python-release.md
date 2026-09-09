@@ -16,7 +16,7 @@ Builds and uploads Linux manylinux (`x86_64` + `aarch64`), macOS arm64, Windows 
 2. Update changelogs.
 3. Merge the workflow file (and the version bump) to `main`. GitHub Actions only lists a `workflow_dispatch` workflow after it exists on the default branch.
 4. Ensure CI is green (including **Bindings Python**).
-5. Publish from the Actions UI (below) **or** push a matching tag: `git tag py-v0.2.1 && git push origin py-v0.2.1`.
+5. Publish from the Actions UI (below) **or** push a matching tag: `git tag v0.2.1 && git push origin v0.2.1`.
 
 ### Run from the Actions UI
 

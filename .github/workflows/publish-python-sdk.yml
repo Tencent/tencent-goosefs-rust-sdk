@@ -16,7 +16,7 @@
 #
 # Triggers:
 #   - workflow_dispatch (Actions → Publish Python SDK → Run workflow)
-#   - push of tags matching py-v* (e.g. py-v0.2.1)
+#   - push of tags matching v* (e.g. v0.2.1)
 #
 # Auth (pick one):
 #   1. PyPI Trusted Publisher (OIDC) — preferred.
@@ -41,7 +41,7 @@ on:
         default: false
   push:
     tags:
-      - "py-v*"
+      - "v*"
 
 permissions:
   contents: read
@@ -95,7 +95,7 @@ jobs:
             exit 1
           fi
           if [[ "${{ github.event_name }}" == "push" ]]; then
-            expected="py-v${py_ver}"
+            expected="v${py_ver}"
             actual="${GITHUB_REF_NAME}"
             if [[ "${actual}" != "${expected}" ]]; then
               echo "tag ${actual} does not match bindings/python/Cargo.toml (${expected})" >&2
