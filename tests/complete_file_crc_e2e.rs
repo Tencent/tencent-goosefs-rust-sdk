@@ -229,8 +229,9 @@ async fn multi_block_async_through_crc_on_file_store() -> Result<()> {
     fs.write_file(&path, &payload, opts).await?;
 
     let status = fs.get_status(&path).await?;
+    assert_eq!(status.block_size_bytes, block as i64);
     assert!(
-        status.block_ids.len() >= 2 || status.length > block as i64,
+        status.block_ids.len() >= 2,
         "expected more than one block, length={} blocks={:?}",
         status.length,
         status.block_ids
