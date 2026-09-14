@@ -126,6 +126,9 @@ async-trait = "0.1"
 lru = { version = "0.18.1", optional = true }
 rand = "0.9.1"
 uuid = { version = "1.2", features = ["v4"] }
+# Castagnoli CRC32C, matching Java `DataChecksum.Type.CRC32C` /
+# `PureJavaCrc32C` on `CompleteFilePOptions.crc_value`.
+crc32c = "0.6"
 hostname = "0.4"
 # Used only by the metrics pushgateway exporter; gated behind a feature so
 # downstream gRPC-only consumers can opt out.

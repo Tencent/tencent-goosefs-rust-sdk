@@ -142,6 +142,43 @@ pub struct CompleteFileOptions {
     /// Master then fetches the UFS fingerprint and stamps the inode
     /// `PERSISTED` instead of queueing a persist job.
     pub force_persisted: Option<bool>,
+    /// Inode id from `CreateFile` (`CompleteFilePRequest.inode_id`).
+    ///
+    /// Java `GooseFSFileOutStream.close()` always sends `mInodeId` so Master
+    /// can lock the inode if the path has already been renamed. `None` falls
+    /// back to path-only lookup.
+    pub inode_id: Option<i64>,
+    /// `CompleteFilePOptions.crc_type`. Java always sets this from
+    /// `DataChecksum.getChecksumType()` (default CRC32C).
+    pub crc_type: Option<i32>,
+    /// `CompleteFilePOptions.crc_value`. Running checksum of every byte
+    /// accepted by `write()`, matching Java `mOptions.getFileChecksum().getValue()`.
+    pub crc_value: Option<i64>,
+}
+
+/// Wire `CompleteFilePRequest` from [`CompleteFileOptions`].
+///
+/// Extracted so unit tests can assert CRC / inode_id reach the proto without
+/// a live Master.
+pub(crate) fn complete_file_request(
+    path: String,
+    opts: CompleteFileOptions,
+    sync_interval_ms: i64,
+) -> CompleteFilePRequest {
+    let common_options = Some(common_p_options(sync_interval_ms, opts.operation_id));
+    CompleteFilePRequest {
+        path: Some(path),
+        options: Some(CompleteFilePOptions {
+            ufs_length: opts.ufs_length,
+            common_options,
+            locations: opts.locations,
+            async_persist_options: opts.async_persist_options,
+            force_persisted: opts.force_persisted,
+            crc_type: opts.crc_type,
+            crc_value: opts.crc_value,
+        }),
+        inode_id: opts.inode_id,
+    }
 }
 
 /// Strip a trailing slash except for the filesystem root (`"/"`).
@@ -900,19 +937,7 @@ impl MasterClient {
             let path = path.clone();
             let opts = opts.clone();
             async move {
-                let common_options = Some(common_p_options(sync_interval_ms, opts.operation_id));
-                let req = CompleteFilePRequest {
-                    path: Some(path),
-                    options: Some(CompleteFilePOptions {
-                        ufs_length: opts.ufs_length,
-                        common_options,
-                        locations: opts.locations,
-                        async_persist_options: opts.async_persist_options,
-                        force_persisted: opts.force_persisted,
-                        ..Default::default()
-                    }),
-                    inode_id: None,
-                };
+                let req = complete_file_request(path, opts, sync_interval_ms);
                 client.complete_file(req).await?;
                 Ok(())
             }
@@ -1381,6 +1406,34 @@ mod tests {
         assert_eq!(super::list_status_path_key("/data"), "/data");
         assert_eq!(super::list_status_path_key("/data/"), "/data");
         assert_eq!(super::list_status_path_key("/data/nested/"), "/data/nested");
+    }
+
+    /// Java `GooseFSFileOutStream.close()` always sets `inodeId` plus
+    /// `crcType`/`crcValue` on `CompleteFile`. Omitting them is what produced
+    /// `inode crc missing, skip ufs check` on HybridPersistenceManager.
+    #[test]
+    fn complete_file_request_wires_inode_id_and_crc() {
+        use crate::proto::grpc::ChecksumTypeProto;
+        let req = super::complete_file_request(
+            "/tmp/a.bin".to_string(),
+            super::CompleteFileOptions {
+                ufs_length: Some(12),
+                inode_id: Some(42),
+                crc_type: Some(ChecksumTypeProto::ChecksumCrc32c as i32),
+                crc_value: Some(0xe3069283),
+                ..Default::default()
+            },
+            -1,
+        );
+        assert_eq!(req.path.as_deref(), Some("/tmp/a.bin"));
+        assert_eq!(req.inode_id, Some(42));
+        let opts = req.options.expect("CompleteFilePOptions");
+        assert_eq!(opts.ufs_length, Some(12));
+        assert_eq!(
+            opts.crc_type,
+            Some(ChecksumTypeProto::ChecksumCrc32c as i32)
+        );
+        assert_eq!(opts.crc_value, Some(0xe3069283));
     }
 
     #[test]
