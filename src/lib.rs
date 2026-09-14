@@ -94,6 +94,7 @@ pub(crate) mod metadata_cache;
 #[path = "metadata_cache_disabled.rs"]
 pub(crate) mod metadata_cache;
 pub mod metrics;
+pub mod probe;
 pub mod retry;
 
 // Re-export commonly used types for convenience.
@@ -124,6 +125,8 @@ pub use crate::config::{
     ENV_METADATA_CACHE_MAX_SIZE,
     ENV_METRICS_ENABLED,
     ENV_METRICS_HEARTBEAT_INTERVAL_MS,
+    ENV_PROBE_ENABLED,
+    ENV_PROBE_OUTPUT,
     ENV_PUSHGATEWAY_ENABLED,
     ENV_PUSHGATEWAY_ENDPOINT,
     ENV_PUSHGATEWAY_INSTANCE,
@@ -150,6 +153,8 @@ pub use crate::config::{
     STORAGE_OPT_METADATA_CACHE_ENABLED,
     STORAGE_OPT_METADATA_CACHE_EXPIRATION,
     STORAGE_OPT_METADATA_CACHE_MAX_SIZE,
+    STORAGE_OPT_PROBE_ENABLED,
+    STORAGE_OPT_PROBE_OUTPUT,
     STORAGE_OPT_TRANSPARENT_ACCELERATION_COSRANGER_ENABLED,
     STORAGE_OPT_TRANSPARENT_ACCELERATION_ENABLED,
     STORAGE_OPT_WORKER_CONNECTION_POOL_SIZE,

@@ -35,6 +35,7 @@ capability above.
    - [Authorization Settings](#27-authorization-settings)
    - [Client Local Page Cache Settings](#28-client-local-page-cache-settings)
    - [Miscellaneous Settings](#29-miscellaneous-settings)
+   - [Client Probe Trace Settings](#210-client-probe-trace-settings)
 3. [Environment Variables](#3-environment-variables)
 4. [Storage Option Keys](#4-storage-option-keys)
 5. [Properties File Keys](#5-properties-file-keys)
@@ -401,7 +402,6 @@ deployment with non-NVMe cache storage.
 > page cache.
 
 ### 2.9 Miscellaneous Settings
-
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `IMPERSONATION_NONE` | `"_NONE_"` | Sentinel value to disable impersonation. |
@@ -409,6 +409,52 @@ deployment with non-NVMe cache storage.
 | `DEFAULT_WORKER_PORT` | `9203` | Default Goosefs Worker data port. |
 | `DEFAULT_CONFIG_RPC_PORT` | `9214` | Default Config Manager RPC port. |
 | `DEFAULT_CONFIG_EXPIRE_MS` | `30000` (30s) | Config expiry time for `ConfigRefresher` hot-reload. |
+
+### 2.10 Client Probe Trace Settings
+
+When probe is on, every Master/Worker RPC carries the ASCII header
+`probe-enabled: true`. A Java GooseFS server with
+`ProbeTimingServerInterceptor` records sub-phase timings and returns them in
+the binary trailer `probe-timing-bin` (`ProbeTimingInfo`). The SDK collects
+those trailers, adds client-local phases (connect / pool acquire / write-read
+wall time), and prints a tree report matching `goosefs fs probe` /
+`copyFromLocal --probe`.
+
+**Off by default.** The interceptor hot path is one `AtomicBool` load; the
+client never sends `probe-enabled` unless the process-level flag is on.
+
+Lance / OpenDAL / DuckDB pick this up with **no upstream code changes**: set
+env vars or `goosefs-site.properties` in the same process. Must use the
+`gfs://` gRPC path (not a Hadoop filesystem shim).
+
+> **OR with env / properties at connect time.**
+> `FileSystemContext::connect()` calls `probe::apply_config()`, which **ORs**
+> `config.probe_enabled` with `GOOSEFS_PROBE_ENABLED` and
+> `goosefs.user.client.probe.enabled`. An integrator that builds a bare
+> `GoosefsConfig::new(addr)` therefore cannot mask an env/file enable.
+> `probe_output` uses the first non-empty of: struct field, env, properties.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `probe_enabled` | `bool` | `false` | Enable client-side probe trace. Also `with_probe_enabled(true)`. |
+| `probe_output` | `Option<String>` | `None` (print to stderr) | Report file path. Relative paths are created on demand. The writer is **append-only**; truncate or delete the file between runs if you only want the latest report. Also `with_probe_output(path)`. |
+
+**Programmatic example.**
+
+```rust
+use goosefs_sdk::config::GoosefsConfig;
+
+let config = GoosefsConfig::new("127.0.0.1:9200")
+    .with_probe_enabled(true)
+    .with_probe_output("/tmp/goosefs-probe.log");
+```
+
+See [`examples/probe.rs`](../examples/probe.rs) for a CACHE_THROUGH write +
+read that prints the report. If CreateFile **Client Total** is non-zero but
+the tree still says `(Server timing info not available)`, the cluster image
+does not run `ProbeTimingServerInterceptor`; client-local timings are still
+valid.
+
 
 ---
 
@@ -479,7 +525,8 @@ properties file values and built-in defaults.
 > that the next startup reclaims. Watch `Client.CacheReapQueueDepth` (should sit
 > near zero) and `Client.CacheReapDropped` (should stay at zero). If you need
 > disk usage strictly bounded, configure `dir_capacity` below the physical
-> volume size by that margin.
+> volume size by that margin.| `GOOSEFS_PROBE_ENABLED` | `probe_enabled` | `false` | Enable client probe trace (`true`/`false`/`1`/`0`). Injects `probe-enabled: true` on Master/Worker RPCs. See §2.10. |
+| `GOOSEFS_PROBE_OUTPUT` | `probe_output` | unset (stderr) | Probe report file path. Empty / unset → print to stderr. Append-only. |
 
 ---
 
@@ -520,7 +567,8 @@ These constants are used in `storage_options` maps (e.g. Lance's
 | `STORAGE_OPT_METADATA_CACHE_MAX_SIZE` | `goosefs_metadata_cache_max_size` | `100000` | Metadata cache LRU capacity. |
 | `STORAGE_OPT_METADATA_CACHE_EXPIRATION` | `goosefs_metadata_cache_expiration` | `10min` | TTL (`parseTimeSize` string). |
 | `STORAGE_OPT_FILE_METADATA_SYNC_INTERVAL` | `goosefs_file_metadata_sync_interval` | `-1` | Sync interval (`parseTimeSize`). `0` skips the cache on every get/list. |
-| `STORAGE_OPT_FILE_METADATA_LOAD_TYPE` | `goosefs_file_metadata_load_type` | `ONCE` | `ONCE` / `ALWAYS` / `NEVER`. Sent on `get_status` and `list_status`. See [`file_metadata_load_type` values](#file_metadata_load_type-values). |
+| `STORAGE_OPT_FILE_METADATA_LOAD_TYPE` | `goosefs_file_metadata_load_type` | `ONCE` | `ONCE` / `ALWAYS` / `NEVER`. Sent on `get_status` and `list_status`. See [`file_metadata_load_type` values](#file_metadata_load_type-values). || `STORAGE_OPT_PROBE_ENABLED` | `goosefs_probe_enabled` | `false` | Enable client probe trace. See §2.10. |
+| `STORAGE_OPT_PROBE_OUTPUT` | `goosefs_probe_output` | unset (stderr) | Probe report file path. Empty / unset → stderr. |
 > **Note**: `STORAGE_OPT_*` keys are string constants exposed by the SDK for
 > external consumers such as `opendal_service_goosefs` or Lance's
 > `DatasetBuilder::with_storage_option`. The mapping from a
@@ -590,7 +638,8 @@ These keys are used in `goosefs-site.properties` files (Java-style `key=value` f
 | `goosefs.user.metadata.cache.expiration.time` | `metadata_cache_expiration` | `parseTimeSize` | `10min` | TTL (`10min`, `30s`, `2day`, or raw milliseconds). |
 | `goosefs.user.file.metadata.sync.interval` | `file_metadata_sync_interval` | `parseTimeSize` | `-1` | `0` skips the cache on every get/list; `-1` does not. Positive values currently behave like `-1`. |
 | `goosefs.user.file.metadata.load.type` | `file_metadata_load_type` | `ONCE`/`ALWAYS`/`NEVER` | `ONCE` | Sent on `get_status` and `list_status`. `ALWAYS` skips the listing cache and makes the Master re-load from the UFS; `NEVER` never touches the UFS. See [`file_metadata_load_type` values](#file_metadata_load_type-values). |
-| `goosefs.user.file.persist.on.rename` | `file_persist_on_rename` | `true` / `false` | `false` | Async-persist the destination on rename. |
+| `goosefs.user.file.persist.on.rename` | `file_persist_on_rename` | `true` / `false` | `false` | Async-persist the destination on rename. || `goosefs.user.client.probe.enabled` | `probe_enabled` | `true` / `false` | `false` | Enable client probe trace. See §2.10. |
+| `goosefs.user.client.probe.output` | `probe_output` | path | unset (stderr) | Probe report file path. Empty / unset → stderr. Append-only. |
 ---
 
 ## 6. Operation Options
@@ -1148,3 +1197,35 @@ ds = lance.dataset(
 | `metadata_cache_enabled` | Repeated opens / get_status / list_status of the same paths | `true` | `true` with `metadata-cache` (set `false` when the file set mutates behind the client) | `GOOSEFS_METADATA_CACHE_ENABLED` | `goosefs.user.metadata.cache.enabled` | `goosefs_metadata_cache_enabled` |
 | `prefetch_window` | Sequential (SR) read throughput | `8` | `16` | *(programmatic only)* | *(programmatic only)* | *(programmatic only)* |
 | `ack_interval_bytes` | SR throughput, **only** on workers honouring prefetch | `0` (ACK every chunk) | `4MB`–`8MB` | *(programmatic only)* | *(programmatic only)* | *(programmatic only)* |
+| `probe_enabled` | Client probe trace (see §2.10) | `false` | `true` only while diagnosing latency | `GOOSEFS_PROBE_ENABLED` | `goosefs.user.client.probe.enabled` | `goosefs_probe_enabled` |
+| `probe_output` | Probe report path; unset prints to stderr | `None` | `/tmp/goosefs-probe.log` (truncate between runs) | `GOOSEFS_PROBE_OUTPUT` | `goosefs.user.client.probe.output` | `goosefs_probe_output` |
+
+### 9.7 Client Probe Trace
+
+Off by default. Enable only while diagnosing latency (see §2.10).
+
+```bash
+export GOOSEFS_PROBE_ENABLED=true
+export GOOSEFS_PROBE_OUTPUT=/tmp/goosefs-probe.log
+# then: cargo run --example probe
+```
+
+```properties
+goosefs.user.client.probe.enabled=true
+goosefs.user.client.probe.output=/tmp/goosefs-probe.log
+```
+
+```python
+ds = lance.dataset(
+    "gfs://…",
+    storage_options={
+        "goosefs_probe_enabled": "true",
+        "goosefs_probe_output": "/tmp/goosefs-probe.log",
+    },
+)
+```
+
+The report file is append-only. Truncate it between runs, or omit
+`probe_output` to print to stderr. Cluster images without
+`ProbeTimingServerInterceptor` still produce client-local timings; the
+server sub-tree may say `(Server timing info not available)`.

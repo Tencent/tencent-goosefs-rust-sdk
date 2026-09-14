@@ -106,7 +106,10 @@ pub async fn read_through_cache<R: ExternalRangeReader + ?Sized>(
             len: *want,
         })
         .collect();
-    let mut cached = cache.get_batch_bytes(&cache_requests).await;
+    let mut cached = {
+        let _probe = crate::probe::phase(crate::probe::phase::client::PAGE_CACHE_US);
+        cache.get_batch_bytes(&cache_requests).await
+    };
     if cached.len() != pages.len() {
         cached = vec![Bytes::new(); pages.len()];
     }

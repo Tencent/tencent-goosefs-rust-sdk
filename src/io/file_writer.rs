@@ -361,6 +361,8 @@ pub struct GoosefsFileWriter {
     /// test constructors (where the router starts empty). Once initialized via
     /// `ensure_router_init()`, this is set to `false` and subsequent calls are no-ops.
     _router_needs_init: AtomicBool,
+    /// Active probe session when `GOOSEFS_PROBE_ENABLED` (or config) is on.
+    probe: Option<std::sync::Arc<crate::probe::ProbeSession>>,
 }
 
 impl GoosefsFileWriter {
@@ -400,7 +402,22 @@ impl GoosefsFileWriter {
         // was told about.
         let write_type = create_options.write_type;
 
-        let file_info = master_arc.create_file(path, create_options).await?;
+        let probe = crate::probe::ProbeSession::begin_write_if(
+            crate::probe::is_enabled() || config.probe_enabled,
+            path,
+            config.master_addr.clone(),
+            config.block_size,
+            probe_write_type_label(create_options.write_type.or(config.write_type)),
+        );
+        let create_start = std::time::Instant::now();
+        let file_info = crate::probe::scoped(
+            probe.as_ref().map(|s| s.collector()),
+            master_arc.create_file(path, create_options.clone()),
+        )
+        .await?;
+        if let Some(s) = &probe {
+            s.record_create_or_open(create_start.elapsed().as_micros() as u64);
+        }
         debug!(
             path = %path,
             file_id = ?file_info.file_id,
@@ -455,6 +472,7 @@ impl GoosefsFileWriter {
             ufs_worker_addr: None,
             ufs_stream_completed: AtomicBool::new(false),
             _router_needs_init: AtomicBool::new(true),
+            probe,
         };
 
         // Java opens the UFS stream in the `GoosefsFileOutStream` constructor
@@ -546,6 +564,17 @@ impl GoosefsFileWriter {
     ///
     /// Can be called multiple times for streaming writes.
     pub async fn write(&mut self, data: &[u8]) -> Result<()> {
+        let Some(session) = self.probe.clone() else {
+            return self.write_inner(data).await;
+        };
+        let t0 = std::time::Instant::now();
+        let result = crate::probe::scoped(Some(session.collector()), self.write_inner(data)).await;
+        session.add_data(t0.elapsed().as_micros() as u64);
+        session.add_bytes(data.len() as u64);
+        result
+    }
+
+    async fn write_inner(&mut self, data: &[u8]) -> Result<()> {
         if self.cancelled.load(Ordering::SeqCst) || self.closed.load(Ordering::SeqCst) {
             return Err(Error::BlockIoError {
                 message: "cannot write to a completed or cancelled file".to_string(),
@@ -778,6 +807,10 @@ impl GoosefsFileWriter {
             self.close_current_block(true).await?;
         }
 
+        if let Some(s) = &self.probe {
+            s.begin_block();
+        }
+
         let file_id = self.file_info.file_id.unwrap_or(0);
         let block_index = self.committed_block_ids.len() as u64;
         let block_id = compute_block_id(file_id, block_index);
@@ -828,6 +861,7 @@ impl GoosefsFileWriter {
         let mut pool = if use_all_workers {
             (*self.router.all_workers()).clone()
         } else {
+            let _probe = crate::probe::phase(crate::probe::phase::client::SELECT_WORKER_US);
             self.router
                 .select_workers(block_id, plan.max_retry_node)
                 .await?
@@ -1001,6 +1035,9 @@ impl GoosefsFileWriter {
             if !pending_chunk.is_empty() {
                 if let Err(e) = active.write_chunk(pending_chunk).await {
                     active.cancel_replicas().await;
+                    if let Some(s) = &self.probe {
+                        s.capture_block_local();
+                    }
                     return Err(e);
                 }
             }
@@ -1017,6 +1054,9 @@ impl GoosefsFileWriter {
                         "flush failed during close_current_block; cancelling replica streams"
                     );
                     active.cancel_replicas().await;
+                    if let Some(s) = &self.probe {
+                        s.capture_block_local();
+                    }
                     return Err(e);
                 }
                 debug!(
@@ -1043,6 +1083,9 @@ impl GoosefsFileWriter {
                      recording block_id for cancel-cleanup remove_blocks"
                 );
                 self.committed_block_ids.push(block_id);
+                if let Some(s) = &self.probe {
+                    s.capture_block_local();
+                }
                 return Err(e);
             }
 
@@ -1069,9 +1112,15 @@ impl GoosefsFileWriter {
             }
 
             self.committed_block_ids.push(block_id);
+            if let Some(s) = &self.probe {
+                s.capture_block_local();
+            }
             Ok(loc)
         } else {
             active.cancel_replicas().await;
+            if let Some(s) = &self.probe {
+                s.capture_block_local();
+            }
             Ok(None)
         }
     }
@@ -1488,6 +1537,21 @@ impl GoosefsFileWriter {
     /// `closed` is set via `compare_exchange(false, true)` so only the first
     /// concurrent `close()` call proceeds; subsequent calls are no-ops.
     pub async fn close(&mut self) -> Result<()> {
+        let Some(session) = self.probe.clone() else {
+            return self.close_inner().await;
+        };
+        let t0 = std::time::Instant::now();
+        let result = crate::probe::scoped(Some(session.collector()), self.close_inner()).await;
+        let total = t0.elapsed().as_micros() as u64;
+        session.record_close(total.saturating_sub(session.complete_micros()));
+        session.finish(
+            self.total_bytes_written,
+            self.committed_block_ids.len().max(1),
+        );
+        result
+    }
+
+    async fn close_inner(&mut self) -> Result<()> {
         // CAS: only the first close() wins.
         if self
             .closed
@@ -1506,25 +1570,47 @@ impl GoosefsFileWriter {
         //    Dropping the request channel signals Worker-side onCompleted,
         //    which in turn flushes and closes the UFS OutputStream.
         if let Some(mut ufs) = self.ufs_stream.take() {
+            let flush_start = std::time::Instant::now();
             if let Err(e) = ufs.flush().await {
                 warn!(
                     path = %self.path,
                     error = %e,
                     "failed to flush UFS stream during close, cancelling"
                 );
+                add_close_phase(
+                    &self.probe,
+                    crate::probe::phase::client::UFS_FLUSH_US,
+                    flush_start,
+                );
                 ufs.cancel().await;
                 self.do_cancel_cleanup().await;
                 return Err(e);
             }
+            add_close_phase(
+                &self.probe,
+                crate::probe::phase::client::UFS_FLUSH_US,
+                flush_start,
+            );
+            let close_start = std::time::Instant::now();
             if let Err(e) = ufs.close().await {
                 warn!(
                     path = %self.path,
                     error = %e,
                     "failed to close UFS stream during close, cancelling"
                 );
+                add_close_phase(
+                    &self.probe,
+                    crate::probe::phase::client::UFS_CLOSE_US,
+                    close_start,
+                );
                 self.do_cancel_cleanup().await;
                 return Err(e);
             }
+            add_close_phase(
+                &self.probe,
+                crate::probe::phase::client::UFS_CLOSE_US,
+                close_start,
+            );
             // UFS stream closed successfully — record this for error recovery.
             self.ufs_stream_completed.store(true, Ordering::SeqCst);
             self.ufs_worker_addr = None;
@@ -1533,9 +1619,15 @@ impl GoosefsFileWriter {
         // 2) Close the current in-progress cache block (last block: close
         //    only, no flush:true). Last-block locations travel with
         //    completeFile (Java close()).
+        let last_block_start = std::time::Instant::now();
         let last_location = match self.close_current_block(false).await {
             Ok(loc) => loc,
             Err(e) => {
+                add_close_phase(
+                    &self.probe,
+                    crate::probe::phase::client::LAST_BLOCK_CLOSE_US,
+                    last_block_start,
+                );
                 warn!(
                     path = %self.path,
                     error = %e,
@@ -1545,6 +1637,16 @@ impl GoosefsFileWriter {
                 return Err(e);
             }
         };
+        add_close_phase(
+            &self.probe,
+            crate::probe::phase::client::LAST_BLOCK_CLOSE_US,
+            last_block_start,
+        );
+
+        if let Some(s) = &self.probe {
+            // THROUGH / leftover UFS locals that were not tied to a cache block close.
+            s.capture_data_local();
+        }
 
         // 3) Complete the file on Master with the idempotency operation ID.
         //    Java sets `ufsLength` unconditionally — even under MUST_CACHE it
@@ -1566,6 +1668,7 @@ impl GoosefsFileWriter {
             self.config.file_persistence_initial_wait_time_ms,
         );
         let (crc_type, crc_value) = complete_file_crc(self.crc32c);
+        let complete_start = std::time::Instant::now();
         if let Err(e) = self
             .master
             .complete_file_with_options(
@@ -1587,6 +1690,9 @@ impl GoosefsFileWriter {
             // it from the UFS makes this a successful write after all.
             self.handle_complete_file_error(e).await?;
         }
+        if let Some(s) = &self.probe {
+            s.record_complete(complete_start.elapsed().as_micros() as u64);
+        }
 
         info!(
             path = %self.path,
@@ -1602,7 +1708,13 @@ impl GoosefsFileWriter {
         // FileInfo so subsequent readers observe the fresh metadata. No-op
         // when the opt-in cache is disabled.
         if let Some(ctx) = &self._context {
+            let inv_start = std::time::Instant::now();
             ctx.invalidate_file_info(&self.path);
+            add_close_phase(
+                &self.probe,
+                crate::probe::phase::client::INVALIDATE_META_US,
+                inv_start,
+            );
         }
 
         Ok(())
@@ -1695,17 +1807,30 @@ impl GoosefsFileWriter {
     }
 }
 
-/// Compute a deterministic block ID from file ID (inode ID) and block index.
-///
-/// Goosefs uses a scheme where block IDs are derived from the file's inode ID:
-///
-/// ```text
-/// Block ID layout (64 bits):
-///   [container ID: 40 bits][sequence number: 24 bits]
-///
-/// container ID = inode_id >> 24   (extract upper 40 bits)
-/// block ID     = (container_id << 24) | block_index
-/// ```
+/// Map a `WritePType` proto integer to the Java probe-report label.
+fn probe_write_type_label(write_type: Option<i32>) -> Option<String> {
+    match write_type {
+        Some(1) => Some("MUST_CACHE".into()),
+        Some(2) => Some("TRY_CACHE".into()),
+        Some(3) => Some("CACHE_THROUGH".into()),
+        Some(4) => Some("THROUGH".into()),
+        Some(5) => Some("ASYNC_THROUGH".into()),
+        _ => None,
+    }
+}
+
+/// Record a Close-section client-local phase (bypasses WriteBlock attribution).
+fn add_close_phase(
+    probe: &Option<std::sync::Arc<crate::probe::ProbeSession>>,
+    name: &'static str,
+    start: std::time::Instant,
+) {
+    if let Some(s) = probe {
+        s.add_close_local(name, start.elapsed().as_micros() as i64);
+    }
+}
+
+/// Compute the Goosefs block ID from a file ID (inode ID) and block index.
 ///
 /// This matches the Java implementation in `com.qcloud.cos.goosefs.master.block.BlockId`:
 ///   - `CONTAINER_ID_BITS = 40`
@@ -1740,11 +1865,15 @@ fn take_completed_pending<'a>(
     }
     let need = chunk_size - pending.len();
     if incoming.len() < need {
+        let _probe = crate::probe::phase(crate::probe::phase::client::PENDING_CHUNK_US);
         pending.extend_from_slice(incoming);
         *incoming = &[];
         return None;
     }
-    pending.extend_from_slice(&incoming[..need]);
+    {
+        let _probe = crate::probe::phase(crate::probe::phase::client::PENDING_CHUNK_US);
+        pending.extend_from_slice(&incoming[..need]);
+    }
     *incoming = &incoming[need..];
     let full = std::mem::take(pending);
     pending.reserve(chunk_size);
@@ -1768,6 +1897,7 @@ fn take_full_chunks(pending: &mut Vec<u8>, incoming: &[u8], chunk_size: usize) -
     }
     let rem = src.len() % chunk_size;
     if rem > 0 {
+        let _probe = crate::probe::phase(crate::probe::phase::client::PENDING_CHUNK_US);
         pending.extend_from_slice(&src[src.len() - rem..]);
     }
     debug_assert!(pending.len() < chunk_size);
@@ -1798,6 +1928,7 @@ async fn emit_aligned_chunks(
         offset += chunk_size;
     }
     if offset < src.len() {
+        let _probe = crate::probe::phase(crate::probe::phase::client::PENDING_CHUNK_US);
         active.pending_chunk.extend_from_slice(&src[offset..]);
     }
     debug_assert!(active.pending_chunk.len() < chunk_size);
@@ -2289,6 +2420,10 @@ impl GoosefsFileWriter {
 
 impl Drop for GoosefsFileWriter {
     fn drop(&mut self) {
+        // Do not emit from Drop: a vacuous finish() used to occupy the
+        // report slot before close() recorded CreateFile/Data/CompleteFile.
+        // close() is the only publisher; unfinished writers are cleaned up
+        // below without a probe report.
         self.perform_drop_cleanup();
     }
 }
@@ -2855,6 +2990,7 @@ mod tests {
             ufs_worker_addr: None,
             ufs_stream_completed: AtomicBool::new(false),
             _router_needs_init: AtomicBool::new(false),
+            probe: None,
         }
     }
 
