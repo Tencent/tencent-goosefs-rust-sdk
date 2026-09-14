@@ -27,6 +27,15 @@ export GOOSEFS_AUTH_TYPE="${GOOSEFS_AUTH_TYPE:-simple}"
 export GOOSEFS_USER_FILE_REPLICATION_DURABLE="${GOOSEFS_USER_FILE_REPLICATION_DURABLE:-1}"
 export GOOSEFS_USER_FILE_REPLICATION_DURABLE_MIN="${GOOSEFS_USER_FILE_REPLICATION_DURABLE_MIN:-1}"
 
+# PAGE `PagedBlockWriter.flush()` throws on a mid-file `getNextBlock()`.
+# The probe example's default 3 × 1 MiB payload is sized to print Block #0/#1/#2
+# on FILE workers; that layout is fatal for ASYNC_THROUGH on PAGE (CACHE_THROUGH
+# degrades to UFS-only). Single-block close does not send flush:true.
+if [[ "${GOOSEFS_WORKER_BLOCK_STORE_TYPE:-}" == "PAGE" ]]; then
+  export PROBE_BLOCKS="${PROBE_BLOCKS:-1}"
+  echo "==> PAGE store: PROBE_BLOCKS=${PROBE_BLOCKS} (skip mid-file flush)"
+fi
+
 EXAMPLES=(
   highlevel_file_rw
   context_file_rw

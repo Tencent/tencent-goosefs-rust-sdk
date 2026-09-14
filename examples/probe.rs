@@ -27,6 +27,11 @@
 //! Default payload is 3 × 1 MiB so Data Write prints Block #0/#1/#2. Raise
 //! `PROBE_BLOCK_SIZE` (e.g. 67108864) to match the cluster 64 MiB block.
 //!
+//! Mid-file block switches send gRPC `flush:true` (Java `getNextBlock()`).
+//! PAGE workers throw `PagedBlockWriter does not support flush`, and
+//! ASYNC_THROUGH cannot degrade to UFS after the first cache block is open.
+//! CI therefore sets `PROBE_BLOCKS=1` when `GOOSEFS_WORKER_BLOCK_STORE_TYPE=PAGE`.
+//!
 //! The log file is truncated at start so leftover reports from earlier runs
 //! are not mixed in. Expect standalone GetStatus / Remove / CreateDirectory /
 //! Rename RPC reports around the write/read session reports.
