@@ -30,6 +30,10 @@ kept aligned. Python-specific notes also appear in
   `file_persistence_initial_wait_time_ms`.** Mode was already 0644 (Java umask
   022). Matches `FileSystemOptions.createFileDefaults`.
 
+- **Docker integration tests assert inode CRC32C xattr** after `ASYNC_THROUGH`
+  / `MUST_CACHE` writes (`tests/complete_file_crc_e2e.rs`, Python
+  `test_complete_file_crc.py`). Runs on both FILE and PAGE workers.
+
 ## [0.2.1] — 2026-09-07
 
 ### Removed

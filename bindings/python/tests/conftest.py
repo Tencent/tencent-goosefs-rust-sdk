@@ -73,6 +73,7 @@ collect_ignore_glob = (
         "test_page_cache.py",
         "test_write_degrade.py",
         "test_block_boundary_write_types.py",
+        "test_complete_file_crc.py",
     ]
 )
 
