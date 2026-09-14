@@ -17,6 +17,19 @@ kept aligned. Python-specific notes also appear in
   (`workflow_dispatch` or tags `v*`) upload to PyPI and crates.io via
   Trusted Publishing (OIDC) or API-token secrets.
 
+### Fixed
+
+- **`CompleteFile` now sends CRC32C and `inode_id`**, matching Java
+  `GooseFSFileOutStream.close()`. The writer previously left `crc_type` /
+  `crc_value` unset, so Master logged `inode crc missing, skip ufs check` and
+  skipped HybridPersistenceManager UFS verification. Writes now keep a running
+  Castagnoli CRC32C and always send it plus the `CreateFile` inode id, so a
+  complete retry after rename still locks the right inode.
+
+- **`CreateFile` now fills `persistence_wait_time` from
+  `file_persistence_initial_wait_time_ms`.** Mode was already 0644 (Java umask
+  022). Matches `FileSystemOptions.createFileDefaults`.
+
 ## [0.2.1] — 2026-09-07
 
 ### Removed

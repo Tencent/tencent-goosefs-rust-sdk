@@ -81,6 +81,7 @@ use crate::proto::grpc::block::{RequestType, WorkerInfo};
 use crate::proto::grpc::file::{
     CreateFilePOptions, FileInfo, FsOpPId, LoadMetadataPType, ScheduleAsyncPersistencePOptions,
 };
+use crate::proto::grpc::ChecksumTypeProto;
 use crate::proto::grpc::WorkerNetAddress;
 use crate::proto::proto::dataserver::CreateUfsFileOptions;
 use crate::proto::proto::shared::FileLocation;
@@ -281,6 +282,12 @@ pub struct GoosefsFileWriter {
     /// reports the true file length. This is what `CompleteFile` sends as
     /// `ufs_length` — Java `GoosefsFileOutStream.mBytesWritten`.
     total_bytes_written: u64,
+    /// Running Castagnoli CRC32C of every byte accepted by `write()`.
+    ///
+    /// Java `OutStreamOptions.mFileChecksum` (`DataChecksum.Type.CRC32C`).
+    /// Sent on `CompleteFile` as `crc_type` / `crc_value` so Master can stamp
+    /// inode xattr and HybridPersistenceManager can verify UFS.
+    crc32c: u32,
     /// Idempotency token for `CompleteFile`.
     ///
     /// Generated at construction time; reused on every retry of `complete_file`.
@@ -387,18 +394,11 @@ impl GoosefsFileWriter {
         // Master, and dropping write_type makes the Master pick its own
         // persistence semantics while `write_strategy` below still follows
         // `config.write_type` — the two then disagree about the same file.
-        if create_options.recursive.is_none() {
-            create_options.recursive = Some(true);
-        }
-        if create_options.block_size_bytes.is_none() || create_options.block_size_bytes == Some(0) {
-            create_options.block_size_bytes = Some(config.block_size as i64);
-        }
-        if create_options.mode.is_none() {
-            create_options.mode = Some(default_file_mode());
-        }
-        if create_options.write_type.is_none() {
-            create_options.write_type = config.write_type;
-        }
+        apply_create_file_defaults(&mut create_options, &config);
+        // Copy before `create_file` consumes the options. Already backfilled
+        // from `config.write_type` above, so this is the same value the Master
+        // was told about.
+        let write_type = create_options.write_type;
 
         let file_info = master_arc.create_file(path, create_options).await?;
         debug!(
@@ -415,9 +415,7 @@ impl GoosefsFileWriter {
         // opt-in cache is disabled.
         ctx.invalidate_file_info(path);
 
-        // Already backfilled from `config.write_type` above, so this is the
-        // same value the Master was told about.
-        let write_strategy = resolve_write_strategy(create_options.write_type, &file_info);
+        let write_strategy = resolve_write_strategy(write_type, &file_info);
 
         // Reuse shared router and pool from context (zero additional RPCs).
         // For cache-only write types the worker list is NOT snapshotted here —
@@ -443,6 +441,7 @@ impl GoosefsFileWriter {
             _context: Some(ctx), // keep ctx alive for pool/router lifetime
             file_info,
             total_bytes_written: 0,
+            crc32c: 0,
             operation_id,
             cancelled: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -585,12 +584,13 @@ impl GoosefsFileWriter {
             self.write_to_ufs_stream(data).await?;
         }
 
-        // 3) Single accounting point for `CompleteFilePOptions.ufs_length`,
-        //    matching Java `GoosefsFileOutStream.writeInternal`'s trailing
-        //    `mBytesWritten += len`. Keeping this out of the per-stream
-        //    helpers means the counter stays correct when a writer switches
-        //    branches at runtime (cache → UFS degrade).
+        // 3) Single accounting point for `CompleteFilePOptions.ufs_length`
+        //    and `crc_value`, matching Java `GoosefsFileOutStream.writeInternal`'s
+        //    trailing `mBytesWritten += len` / `mOptions.getFileChecksum().update`.
+        //    Keeping this out of the per-stream helpers means both stay correct
+        //    when a writer switches branches at runtime (cache → UFS degrade).
         self.total_bytes_written += data.len() as u64;
+        self.crc32c = crc32c::crc32c_append(self.crc32c, data);
 
         Ok(())
     }
@@ -1565,6 +1565,7 @@ impl GoosefsFileWriter {
             self.ufs_stream_completed.load(Ordering::SeqCst),
             self.config.file_persistence_initial_wait_time_ms,
         );
+        let (crc_type, crc_value) = complete_file_crc(self.crc32c);
         if let Err(e) = self
             .master
             .complete_file_with_options(
@@ -1575,6 +1576,9 @@ impl GoosefsFileWriter {
                     locations,
                     async_persist_options,
                     force_persisted,
+                    inode_id: self.file_info.file_id,
+                    crc_type,
+                    crc_value,
                 },
             )
             .await
@@ -2134,6 +2138,45 @@ fn resolve_persist_options(
     )
 }
 
+/// Fill unset `CreateFilePOptions` from client config.
+///
+/// # Java authority
+///
+/// `FileSystemOptions.createFileDefaults` sets umask-derived mode and
+/// `persistenceWaitTime`. Rust already used 0644 (`default_file_mode`) as the
+/// umask-022 equivalent; `persistence_wait_time` was left unset so Master
+/// fell back to its own default. Recursive stays `true` (Java is `false`)
+/// because OpenDAL nested `.opendal.tmp.*` paths need parent mkdir.
+fn apply_create_file_defaults(create_options: &mut CreateFilePOptions, config: &GoosefsConfig) {
+    if create_options.recursive.is_none() {
+        create_options.recursive = Some(true);
+    }
+    if create_options.block_size_bytes.is_none() || create_options.block_size_bytes == Some(0) {
+        create_options.block_size_bytes = Some(config.block_size as i64);
+    }
+    if create_options.mode.is_none() {
+        create_options.mode = Some(default_file_mode());
+    }
+    if create_options.write_type.is_none() {
+        create_options.write_type = config.write_type;
+    }
+    if create_options.persistence_wait_time.is_none() {
+        create_options.persistence_wait_time = Some(config.file_persistence_initial_wait_time_ms);
+    }
+}
+
+/// Java `DataChecksum.Type.CRC32C` + `getValue()` for `CompleteFilePOptions`.
+///
+/// Always populated, including empty files (Java sends CRC32C `0`). Both
+/// fields must be present or Master skips inode xattr and logs
+/// `inode crc missing, skip ufs check`.
+fn complete_file_crc(crc32c: u32) -> (Option<i32>, Option<i64>) {
+    (
+        Some(ChecksumTypeProto::ChecksumCrc32c as i32),
+        Some(i64::from(crc32c)),
+    )
+}
+
 /// Last-block locations for `CompleteFile`, matching Java
 /// `GoosefsFileOutStream.close()`: only ASYNC_THROUGH attaches them.
 fn complete_file_locations(
@@ -2652,6 +2695,59 @@ mod tests {
         }
     }
 
+    /// ITU-T V.42 / Castagnoli check vector. Java `PureJavaCrc32C` of
+    /// `"123456789"` is the same `0xe3069283` sent as `crc_value`.
+    #[test]
+    fn crc32c_matches_java_castagnoli_check_vector() {
+        assert_eq!(crc32c::crc32c(b"123456789"), 0xe3069283);
+        assert_eq!(crc32c::crc32c(b""), 0);
+        let incremental = crc32c::crc32c_append(crc32c::crc32c(b"12345"), b"6789");
+        assert_eq!(incremental, 0xe3069283);
+    }
+
+    #[test]
+    fn complete_file_crc_always_sends_both_fields() {
+        let (crc_type, crc_value) = complete_file_crc(0xe3069283);
+        assert_eq!(crc_type, Some(ChecksumTypeProto::ChecksumCrc32c as i32));
+        assert_eq!(crc_value, Some(0xe3069283));
+
+        let (empty_type, empty_value) = complete_file_crc(0);
+        assert_eq!(empty_type, Some(ChecksumTypeProto::ChecksumCrc32c as i32));
+        assert_eq!(empty_value, Some(0));
+    }
+
+    /// Java `FileSystemOptions.createFileDefaults`: umask mode 0644 and
+    /// `persistenceWaitTime` from `USER_FILE_PERSISTENCE_INITIAL_WAIT_TIME`.
+    #[test]
+    fn create_file_defaults_fill_mode_and_persistence_wait_time() {
+        let config =
+            GoosefsConfig::new("127.0.0.1:9200").with_file_persistence_initial_wait_time_ms(5_000);
+        let mut opts = CreateFilePOptions::default();
+        apply_create_file_defaults(&mut opts, &config);
+        assert_eq!(opts.mode, Some(default_file_mode()));
+        assert_eq!(opts.persistence_wait_time, Some(5_000));
+        assert_eq!(opts.recursive, Some(true));
+        assert_eq!(opts.block_size_bytes, Some(config.block_size as i64));
+        assert_eq!(opts.write_type, config.write_type);
+    }
+
+    #[test]
+    fn create_file_defaults_preserve_caller_overrides() {
+        let config =
+            GoosefsConfig::new("127.0.0.1:9200").with_file_persistence_initial_wait_time_ms(5_000);
+        let mut opts = CreateFilePOptions {
+            recursive: Some(false),
+            persistence_wait_time: Some(0),
+            mode: Some(default_file_mode()),
+            ..Default::default()
+        };
+        apply_create_file_defaults(&mut opts, &config);
+        assert_eq!(opts.recursive, Some(false));
+        assert_eq!(opts.persistence_wait_time, Some(0));
+        assert_eq!(opts.mode, Some(default_file_mode()));
+        assert_eq!(opts.block_size_bytes, Some(config.block_size as i64));
+    }
+
     #[test]
     fn complete_file_locations_only_for_async_through() {
         let loc = FileLocation {
@@ -2745,6 +2841,7 @@ mod tests {
             _context: None,
             file_info,
             total_bytes_written: 0,
+            crc32c: 0,
             operation_id: Uuid::nil(),
             cancelled: AtomicBool::new(false),
             closed: AtomicBool::new(false),
