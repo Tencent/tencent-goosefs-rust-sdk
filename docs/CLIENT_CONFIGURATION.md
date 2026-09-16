@@ -50,6 +50,7 @@ capability above.
    - [WriteTypeXAttr](#74-writetypexattr)
    - [CacheEvictorType](#75-cacheevictortype)
    - [MasterPoolSchedule](#76-masterpoolschedule)
+   - [WriterChecksumType](#77-writerchecksumtype)
 8. [Configuration File Format](#8-configuration-file-format)
 9. [Configuration Examples](#9-configuration-examples)
 
@@ -187,6 +188,7 @@ properties-file, and env-var callers keep working unchanged.
 | `block_size` | `u64` | `67108864` (64 MiB) | Default block size in bytes for new files. Matches Goosefs server default. |
 | `chunk_size` | `u64` | `1048576` (1 MiB) | Chunk size for streaming read/write RPCs. Each gRPC message carries one chunk. |
 | `write_type` | `Option<i32>` | `None` | Default write type for newly created files. `None` = use server default (typically `MustCache`). See [WriteType](#71-writetype) for values. |
+| `writer_checksum_type` | `WriterChecksumType` | `Crc32c` | Checksum sent on `CompleteFile` (`crc_type` / `crc_value`). Matches Java `goosefs.user.streaming.writer.checksum.type`. See [WriterChecksumType](#77-writerchecksumtype). |
 | `file_replication_number` | `i32` | `1` | Target replication for block-worker selection (`goosefs.user.file.replication.number`). Writes use this as the selection count (MUST_CACHE / CACHE_THROUGH); reads use it as the lower bound for their candidate width (`max` with `file_read_max_node_retry`). |
 | `file_replication_durable` | `i32` | `2` | ASYNC_THROUGH replica target before persist (`goosefs.user.file.replication.durable`). Used as `initialReplicas` when greater than `file_replication_number`. |
 | `file_replication_durable_min` | `i32` | `2` | ASYNC_THROUGH minimum successful replica writes (`goosefs.user.file.replication.durable.min`). Hard floor: fewer successes fail the write. On a 1-worker cluster set this (and `durable`) to `1`. |
@@ -421,6 +423,7 @@ properties file values and built-in defaults.
 |---------------------|---------------------|---------|-------------|
 | `GOOSEFS_MASTER_ADDR` | `master_addr` / `master_addrs` | `"127.0.0.1:9200"` (single) / `[]` (HA list) | Master address(es). Three accepted forms: single `host:port`; comma-separated list `addr1:port,addr2:port` for HA; or a Hadoop-style URI `gfs://addr1:port,addr2:port/root-path` (URI form also seeds `root`). |
 | `GOOSEFS_WRITE_TYPE` | `write_type` | `None` (server default, typically `MustCache`) | Default write type. Accepted: `must_cache`, `try_cache`, `cache_through`, `through`, `async_through` (case-insensitive). |
+| `GOOSEFS_USER_STREAMING_WRITER_CHECKSUM_TYPE` | `writer_checksum_type` | `CRC32C` | CompleteFile checksum. Accepted: `CRC32C`, `CRC32`, `NULL` (case-insensitive). Invalid values keep `CRC32C`. |
 | `GOOSEFS_USER_FILE_REPLICATION_NUMBER` | `file_replication_number` | `1` | Write selection count / read candidate lower bound (`goosefs.user.file.replication.number`). Values `<= 0` ignored. |
 | `GOOSEFS_USER_FILE_REPLICATION_DURABLE` | `file_replication_durable` | `2` | ASYNC_THROUGH replica target before persist. Values `<= 0` ignored. |
 | `GOOSEFS_USER_FILE_REPLICATION_DURABLE_MIN` | `file_replication_durable_min` | `2` | ASYNC_THROUGH minimum successful replicas. Values `<= 0` ignored. |
@@ -492,6 +495,7 @@ These constants are used in `storage_options` maps (e.g. Lance's
 |----------|-----------|---------|-------------|
 | `STORAGE_OPT_MASTER_ADDR` | `goosefs_master_addr` | `"127.0.0.1:9200"` | Master address(es). Supports HA: `"addr1:port,addr2:port"`. |
 | `STORAGE_OPT_WRITE_TYPE` | `goosefs_write_type` | `None` (server default, typically `MustCache`) | Default write type (case-insensitive). |
+| `STORAGE_OPT_WRITER_CHECKSUM_TYPE` | `goosefs_streaming_writer_checksum_type` | `CRC32C` | CompleteFile checksum (`CRC32C` / `CRC32` / `NULL`). |
 | `STORAGE_OPT_BLOCK_SIZE` | `goosefs_block_size` | `67108864` (64 MiB) | Block size in bytes. |
 | `STORAGE_OPT_CHUNK_SIZE` | `goosefs_chunk_size` | `1048576` (1 MiB) | Chunk size in bytes. |
 | `STORAGE_OPT_CONNECT_TIMEOUT` | `goosefs_connect_timeout` | `30s` | gRPC connect timeout (`parseTimeSize`). |
@@ -551,6 +555,7 @@ These keys are used in `goosefs-site.properties` files (Java-style `key=value` f
 | `goosefs.security.authorization.permission.enabled` | `authorization_permission_enabled` | `true` / `false` | `false` | Permission-based access control. |
 | `goosefs.security.login.impersonation.username` | `login_impersonation_username` | string | `"_HDFS_USER_"` | Impersonation username. |
 | `goosefs.user.file.writetype.default` | `write_type` | `MUST_CACHE` / `TRY_CACHE` / `CACHE_THROUGH` / `THROUGH` / `ASYNC_THROUGH` | unset (server default, typically `MUST_CACHE`) | Default write type. |
+| `goosefs.user.streaming.writer.checksum.type` | `writer_checksum_type` | `CRC32C` / `CRC32` / `NULL` | `CRC32C` | CompleteFile checksum (Java `OutStreamOptions` / `DataChecksum.Type`). Invalid values keep `CRC32C`. |
 | `goosefs.user.file.replication.number` | `file_replication_number` | integer `>= 1` | `1` | Write-path worker selection count (`getBlockWorkers(blockId, count)`). On reads, used as the lower bound of the candidate pool width (`max` with `goosefs.user.file.read.max.node.retry`). Values `<= 0` are ignored. |
 | `goosefs.user.file.replication.durable` | `file_replication_durable` | integer `>= 1` | `2` | ASYNC_THROUGH replica target before persist. Used as `initialReplicas` when greater than `replication.number`. |
 | `goosefs.user.file.replication.durable.min` | `file_replication_durable_min` | integer `>= 1` | `2` | ASYNC_THROUGH minimum successful replica writes. Hard floor after `min(replication, alive)` degrade. |
@@ -788,6 +793,37 @@ See §3 (`GOOSEFS_MASTER_POOL_SCHEDULE`), §4 (`goosefs_master_pool_schedule`),
 and §5 (`goosefs.user.master.pool.schedule`) for the three configuration
 entry points that use this parser.
 
+### 7.7 WriterChecksumType
+
+Checksum algorithm sent on `CompleteFile` (`crc_type` / `crc_value`), matching
+Java `goosefs.user.streaming.writer.checksum.type` / `OutStreamOptions`.
+
+| Variant | Proto Value (`i32`) | Strings | Description |
+|---------|---------------------|---------|-------------|
+| `Null` | `0` | `NULL` | Do not checksum. Still sends both fields (`crc_value=0`). |
+| `Crc32` | `1` | `CRC32` | IEEE CRC32 (`java.util.zip.CRC32`). |
+| `Crc32c` (default) | `2` | `CRC32C` | Castagnoli CRC32C (`java.util.zip.CRC32C` / Hadoop `PureJavaCrc32C`). |
+
+**String parsing** is case-insensitive. Invalid env / properties / storage-option
+values are ignored so a typo cannot silently disable checksums — the previous
+value (default `CRC32C`) is kept, matching Java `OutStreamOptions`.
+
+**Conversions:**
+
+```rust
+use goosefs_sdk::config::{GoosefsConfig, WriterChecksumType};
+
+let ty: WriterChecksumType = "CRC32".parse().unwrap();
+assert_eq!(ty.as_i32(), 1);
+
+let config = GoosefsConfig::new("127.0.0.1:9200")
+    .with_writer_checksum_type(WriterChecksumType::Crc32);
+```
+
+See §3 (`GOOSEFS_USER_STREAMING_WRITER_CHECKSUM_TYPE`),
+§4 (`goosefs_streaming_writer_checksum_type`), and
+§5 (`goosefs.user.streaming.writer.checksum.type`).
+
 ---
 
 ## 8. Configuration File Format
@@ -812,6 +848,7 @@ goosefs.security.login.username=myuser
 
 # Write strategy
 goosefs.user.file.writetype.default=CACHE_THROUGH
+# goosefs.user.streaming.writer.checksum.type=CRC32C
 
 # Data transfer
 goosefs.user.block.size.bytes.default=64MB

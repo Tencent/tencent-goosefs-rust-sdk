@@ -91,6 +91,7 @@ fn _goosefs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // metadata API surface.
     m.add_class::<types::PyWriteType>()?;
     m.add_class::<types::PyReadType>()?;
+    m.add_class::<types::PyWriterChecksumType>()?;
     m.add_class::<status::PyURIStatus>()?;
     m.add_class::<status::PyURIStatusList>()?;
     m.add_class::<status::PyURIStatusListIter>()?;

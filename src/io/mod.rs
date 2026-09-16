@@ -43,6 +43,8 @@
 //!   the future opendal `goosefs` adapter, JNI / C bindings).
 
 pub mod async_reader;
+pub(crate) mod crc32;
+pub(crate) mod crc32c;
 pub mod file_in_stream;
 pub mod file_reader;
 pub mod file_writer;

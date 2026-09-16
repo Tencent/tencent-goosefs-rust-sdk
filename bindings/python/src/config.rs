@@ -272,6 +272,13 @@ impl PyConfig {
         self.inner.write_type
     }
 
+    /// CompleteFile checksum algorithm
+    /// (`goosefs.user.streaming.writer.checksum.type`, default CRC32C).
+    #[getter]
+    fn writer_checksum_type(&self) -> crate::types::PyWriterChecksumType {
+        self.inner.writer_checksum_type.into()
+    }
+
     /// Target replication used when selecting block workers
     /// (`goosefs.user.file.replication.number`, default `1`).
     #[getter]

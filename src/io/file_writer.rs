@@ -68,7 +68,7 @@ use crate::block::router::{rpc_endpoint, WorkerRouterView};
 use crate::client::master::default_file_mode;
 use crate::client::worker::{WorkerClientPool, WriteBlockOptions};
 use crate::client::{CompleteFileOptions, MasterClient};
-use crate::config::{GoosefsConfig, NO_AUTO_PERSIST};
+use crate::config::{GoosefsConfig, WriterChecksumType, NO_AUTO_PERSIST};
 use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
 use crate::fs::options::DeleteOptions;
@@ -81,7 +81,6 @@ use crate::proto::grpc::block::{RequestType, WorkerInfo};
 use crate::proto::grpc::file::{
     CreateFilePOptions, FileInfo, FsOpPId, LoadMetadataPType, ScheduleAsyncPersistencePOptions,
 };
-use crate::proto::grpc::ChecksumTypeProto;
 use crate::proto::grpc::WorkerNetAddress;
 use crate::proto::proto::dataserver::CreateUfsFileOptions;
 use crate::proto::proto::shared::FileLocation;
@@ -282,12 +281,13 @@ pub struct GoosefsFileWriter {
     /// reports the true file length. This is what `CompleteFile` sends as
     /// `ufs_length` — Java `GoosefsFileOutStream.mBytesWritten`.
     total_bytes_written: u64,
-    /// Running Castagnoli CRC32C of every byte accepted by `write()`.
+    /// Running checksum of every byte accepted by `write()`.
     ///
-    /// Java `OutStreamOptions.mFileChecksum` (`DataChecksum.Type.CRC32C`).
-    /// Sent on `CompleteFile` as `crc_type` / `crc_value` so Master can stamp
-    /// inode xattr and HybridPersistenceManager can verify UFS.
-    crc32c: u32,
+    /// Algorithm is [`GoosefsConfig::writer_checksum_type`] (Java
+    /// `OutStreamOptions.mFileChecksum` / `goosefs.user.streaming.writer.checksum.type`,
+    /// default CRC32C). Sent on `CompleteFile` as `crc_type` / `crc_value` so
+    /// Master can stamp inode xattr and HybridPersistenceManager can verify UFS.
+    checksum: u32,
     /// Idempotency token for `CompleteFile`.
     ///
     /// Generated at construction time; reused on every retry of `complete_file`.
@@ -441,7 +441,7 @@ impl GoosefsFileWriter {
             _context: Some(ctx), // keep ctx alive for pool/router lifetime
             file_info,
             total_bytes_written: 0,
-            crc32c: 0,
+            checksum: 0,
             operation_id,
             cancelled: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -590,7 +590,11 @@ impl GoosefsFileWriter {
         //    Keeping this out of the per-stream helpers means both stay correct
         //    when a writer switches branches at runtime (cache → UFS degrade).
         self.total_bytes_written += data.len() as u64;
-        self.crc32c = crc32c::crc32c_append(self.crc32c, data);
+        self.checksum = match self.config.writer_checksum_type {
+            WriterChecksumType::Crc32c => super::crc32c::crc32c_append(self.checksum, data),
+            WriterChecksumType::Crc32 => super::crc32::crc32_append(self.checksum, data),
+            WriterChecksumType::Null => self.checksum,
+        };
 
         Ok(())
     }
@@ -1565,7 +1569,8 @@ impl GoosefsFileWriter {
             self.ufs_stream_completed.load(Ordering::SeqCst),
             self.config.file_persistence_initial_wait_time_ms,
         );
-        let (crc_type, crc_value) = complete_file_crc(self.crc32c);
+        let (crc_type, crc_value) =
+            complete_file_crc(self.config.writer_checksum_type, self.checksum);
         if let Err(e) = self
             .master
             .complete_file_with_options(
@@ -2165,16 +2170,14 @@ fn apply_create_file_defaults(create_options: &mut CreateFilePOptions, config: &
     }
 }
 
-/// Java `DataChecksum.Type.CRC32C` + `getValue()` for `CompleteFilePOptions`.
+/// Java `OutStreamOptions.getCrcType()` / `getCrcValue()` for
+/// `CompleteFilePOptions`.
 ///
-/// Always populated, including empty files (Java sends CRC32C `0`). Both
-/// fields must be present or Master skips inode xattr and logs
-/// `inode crc missing, skip ufs check`.
-fn complete_file_crc(crc32c: u32) -> (Option<i32>, Option<i64>) {
-    (
-        Some(ChecksumTypeProto::ChecksumCrc32c as i32),
-        Some(i64::from(crc32c)),
-    )
+/// Always populated, including empty files and `NULL` (Java still sends
+/// type + value `0`). Both fields must be present or Master skips inode
+/// xattr and logs `inode crc missing, skip ufs check`.
+fn complete_file_crc(ty: WriterChecksumType, crc: u32) -> (Option<i32>, Option<i64>) {
+    (Some(ty.as_i32()), Some(i64::from(crc)))
 }
 
 /// Last-block locations for `CompleteFile`, matching Java
@@ -2296,6 +2299,7 @@ impl Drop for GoosefsFileWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::grpc::ChecksumTypeProto;
 
     #[test]
     fn test_compute_block_id() {
@@ -2695,25 +2699,23 @@ mod tests {
         }
     }
 
-    /// ITU-T V.42 / Castagnoli check vector. Java `PureJavaCrc32C` of
-    /// `"123456789"` is the same `0xe3069283` sent as `crc_value`.
-    #[test]
-    fn crc32c_matches_java_castagnoli_check_vector() {
-        assert_eq!(crc32c::crc32c(b"123456789"), 0xe3069283);
-        assert_eq!(crc32c::crc32c(b""), 0);
-        let incremental = crc32c::crc32c_append(crc32c::crc32c(b"12345"), b"6789");
-        assert_eq!(incremental, 0xe3069283);
-    }
-
     #[test]
     fn complete_file_crc_always_sends_both_fields() {
-        let (crc_type, crc_value) = complete_file_crc(0xe3069283);
+        let (crc_type, crc_value) = complete_file_crc(WriterChecksumType::Crc32c, 0xe3069283);
         assert_eq!(crc_type, Some(ChecksumTypeProto::ChecksumCrc32c as i32));
         assert_eq!(crc_value, Some(0xe3069283));
 
-        let (empty_type, empty_value) = complete_file_crc(0);
+        let (empty_type, empty_value) = complete_file_crc(WriterChecksumType::Crc32c, 0);
         assert_eq!(empty_type, Some(ChecksumTypeProto::ChecksumCrc32c as i32));
         assert_eq!(empty_value, Some(0));
+
+        let (ieee_type, ieee_value) = complete_file_crc(WriterChecksumType::Crc32, 0xcbf43926);
+        assert_eq!(ieee_type, Some(ChecksumTypeProto::ChecksumCrc32 as i32));
+        assert_eq!(ieee_value, Some(0xcbf43926));
+
+        let (null_type, null_value) = complete_file_crc(WriterChecksumType::Null, 0);
+        assert_eq!(null_type, Some(ChecksumTypeProto::ChecksumNull as i32));
+        assert_eq!(null_value, Some(0));
     }
 
     /// Java `FileSystemOptions.createFileDefaults`: umask mode 0644 and
@@ -2841,7 +2843,7 @@ mod tests {
             _context: None,
             file_info,
             total_bytes_written: 0,
-            crc32c: 0,
+            checksum: 0,
             operation_id: Uuid::nil(),
             cancelled: AtomicBool::new(false),
             closed: AtomicBool::new(false),
