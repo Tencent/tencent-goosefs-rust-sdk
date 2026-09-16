@@ -161,11 +161,11 @@ def setup_paths(fs: Goosefs, root: str, n: int) -> list[str]:
     ``write_file`` — even of one byte — reserves a full block (64 MiB by
     default) on the worker, which exhausts a small dev cluster's block store.
     """
-    fs.mkdir(root, recursive=True)
+    fs.mkdir(root, recursive=True, allow_exists=True)
     paths = [f"{root}/f{i:05d}" for i in range(n)]
     # Create concurrently via a thread pool to keep setup fast.
     with ThreadPoolExecutor(max_workers=32) as pool:
-        list(pool.map(lambda p: fs.mkdir(p, recursive=True), paths))
+        list(pool.map(lambda p: fs.mkdir(p, recursive=True, allow_exists=True), paths))
     return paths
 
 

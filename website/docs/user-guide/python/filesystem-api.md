@@ -95,6 +95,8 @@ See [Streaming](./streaming) for the full `AsyncFileReader` / `AsyncFileWriter` 
 
 ```python
 await fs.mkdir("/data/subdir", recursive=True)
+# Existing directory → AlreadyExists (Java mkdir). POSIX mkdir -p:
+await fs.mkdir("/data/subdir", recursive=True, allow_exists=True)
 await fs.rename("/data/old.txt", "/data/new.txt")
 await fs.delete("/data/new.txt")
 await fs.delete("/data/tree", recursive=True)

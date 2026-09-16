@@ -22,7 +22,8 @@
 //! - `remove_blocks` — clean up block metadata for in-flight or failed writes
 //! - `delete` / `delete_with_options` — delete file or directory
 //! - `rename` — rename / move
-//! - `create_directory` — mkdir -p
+//! - `create_directory` — mkdir (Java `allowExists=false`; use
+//!   `create_directory_with_options` for POSIX `mkdir -p`)
 //!
 //! ## HA / Multi-Master Support
 //!
@@ -45,7 +46,7 @@ use crate::auth::{ChannelAuthenticator, ChannelIdInterceptor, SaslStreamGuard};
 use crate::client::master_inquire::{create_master_inquire_client, MasterInquireClient};
 use crate::config::GoosefsConfig;
 use crate::error::{Error, Result};
-use crate::fs::options::DeleteOptions;
+use crate::fs::options::{CreateDirectoryOptions, DeleteOptions};
 use crate::metrics::registry::Counter;
 use crate::proto::grpc::file::{
     file_system_master_client_service_client::FileSystemMasterClientServiceClient,
@@ -251,6 +252,25 @@ pub(crate) fn rename_p_options(sync_interval_ms: i64, persist: bool) -> RenamePO
     RenamePOptions {
         common_options: Some(write_common_p_options(sync_interval_ms)),
         persist: Some(persist),
+    }
+}
+
+/// Java `FileSystemOptions.createDirectoryDefaults` wire shape.
+///
+/// `allow_exists` defaults to `false` at the options-struct layer (matching
+/// Java `allowExists=false` / CLI `mkdir`). `operation_id` is generated once
+/// so Master exactly-once semantics survive `with_retry`.
+pub(crate) fn create_directory_p_options(
+    recursive: bool,
+    allow_exists: bool,
+    sync_interval_ms: i64,
+) -> CreateDirectoryPOptions {
+    CreateDirectoryPOptions {
+        recursive: Some(recursive),
+        allow_exists: Some(allow_exists),
+        mode: Some(default_dir_mode()),
+        common_options: Some(write_common_p_options(sync_interval_ms)),
+        ..Default::default()
     }
 }
 
@@ -1098,32 +1118,54 @@ impl MasterClient {
         result
     }
 
-    /// Create a directory (recursive by default).
+    /// Create a directory.
+    ///
+    /// Matches Java `createDirectoryDefaults`: `allowExists=false`, so an
+    /// existing directory returns [`Error::AlreadyExists`]. `recursive`
+    /// creates missing parents only; it does not make the call idempotent.
     ///
     /// Sets a default mode of `0755` (rwxr-xr-x) so that the corresponding
     /// UFS directory created by Goosefs has usable permissions.
+    ///
+    /// For POSIX `mkdir -p` / OpenDAL `create_dir`, use
+    /// [`Self::create_directory_with_options`] with
+    /// [`CreateDirectoryOptions::mkdir_p`].
     #[instrument(skip(self), fields(path = %path))]
     pub async fn create_directory(&self, path: &str, recursive: bool) -> Result<()> {
+        self.create_directory_with_options(
+            path,
+            CreateDirectoryOptions {
+                recursive,
+                allow_exists: false,
+            },
+        )
+        .await
+    }
+
+    /// Create a directory with explicit [`CreateDirectoryOptions`].
+    ///
+    /// `commonOptions` still match Java: `syncIntervalMs` from config plus a
+    /// fresh operation id generated once and reused across retries.
+    #[instrument(skip(self, opts), fields(path = %path, recursive = opts.recursive, allow_exists = opts.allow_exists))]
+    pub async fn create_directory_with_options(
+        &self,
+        path: &str,
+        opts: CreateDirectoryOptions,
+    ) -> Result<()> {
         let path = path.to_string();
-        // `allow_exists=true` is an intentional OpenDAL mkdir -p divergence
-        // from Java `createDirectoryDefaults` (`allowExists=false`). commonOptions
-        // still match Java: syncIntervalMs from config + a fresh operation id.
-        let common_options = Some(write_common_p_options(
+        // Generated once so retries keep the same FsOpPId (exactly-once).
+        let options = create_directory_p_options(
+            opts.recursive,
+            opts.allow_exists,
             self.config.file_metadata_sync_interval,
-        ));
+        );
         let result = self
             .with_retry("create_directory", |mut client| {
                 let path = path.clone();
                 async move {
                     let req = CreateDirectoryPRequest {
                         path: Some(path),
-                        options: Some(CreateDirectoryPOptions {
-                            recursive: Some(recursive),
-                            allow_exists: Some(true),
-                            mode: Some(default_dir_mode()),
-                            common_options,
-                            ..Default::default()
-                        }),
+                        options: Some(options),
                     };
                     client.create_directory(req).await?;
                     Ok(())
@@ -2009,5 +2051,34 @@ mod tests {
 
         let opts = super::rename_p_options(-1, true);
         assert_eq!(opts.persist, Some(true));
+    }
+
+    /// Java `createDirectoryDefaults`: allowExists=false, recursive is the
+    /// caller's choice, mode 0755, write-path commonOptions.
+    #[test]
+    fn create_directory_p_options_match_java_defaults() {
+        let opts = super::create_directory_p_options(false, false, -1);
+        assert_eq!(opts.recursive, Some(false));
+        assert_eq!(
+            opts.allow_exists,
+            Some(false),
+            "Java createDirectoryDefaults.allowExists=false"
+        );
+        assert!(opts.mode.is_some());
+        assert_eq!(
+            opts.common_options
+                .as_ref()
+                .and_then(|c| c.sync_interval_ms),
+            Some(-1)
+        );
+        assert!(opts
+            .common_options
+            .as_ref()
+            .and_then(|c| c.operation_id)
+            .is_some());
+
+        let mkdir_p = super::create_directory_p_options(true, true, -1);
+        assert_eq!(mkdir_p.recursive, Some(true));
+        assert_eq!(mkdir_p.allow_exists, Some(true));
     }
 }

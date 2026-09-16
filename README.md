@@ -193,7 +193,8 @@ async fn main() -> goosefs_sdk::error::Result<()> {
     let config = GoosefsConfig::new("127.0.0.1:9200");
     let master = MasterClient::connect(&config).await?;
 
-    // 2. Create a directory
+    // 2. Create a directory (fails with AlreadyExists if it already exists;
+    //    use CreateDirectoryOptions::mkdir_p() for POSIX mkdir -p)
     master.create_directory("/data/my-dataset", true).await?;
 
     // 3. Stat a file
