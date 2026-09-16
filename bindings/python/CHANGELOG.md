@@ -8,6 +8,13 @@ This document records all notable changes to the `goosefs` Python binding. The f
 
 ## [Unreleased]
 
+### Changed
+
+- **`GOOSEFS_METADATA_CACHE_ENABLED` now defaults to `false`**, matching Java
+  `goosefs.user.metadata.cache.enabled`. The cache is still compiled into the
+  wheel; set the switch to `true` (env / properties / storage option) to opt
+  in. TTL and capacity are unchanged.
+
 ## [0.2.1] — 2026-09-07
 
 ### Removed

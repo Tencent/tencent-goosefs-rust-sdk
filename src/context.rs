@@ -886,16 +886,13 @@ mod tests {
 
     // ── Metadata cache construction gate ────────────────────────────────
 
-    /// Cache is **on** by default (diverges from Java, whose
-    /// `USER_METADATA_CACHE_ENABLED` default is `false`) so that a workload
-    /// opening one reader per small ranged read does not pay a Master
-    /// `get_status` RPC per read — that RPC otherwise dwarfs a page-cache hit
-    /// served over io_uring. TTL / size stay Java-aligned.
+    /// Cache is **off** by default even with `cfg!(feature = "metadata-cache")`
+    /// (Java `USER_METADATA_CACHE_ENABLED`). TTL / size stay Java-aligned.
     #[cfg(feature = "metadata-cache")]
     #[test]
-    fn metadata_cache_enabled_by_default() {
+    fn metadata_cache_disabled_by_default() {
         let cfg = GoosefsConfig::default();
-        assert!(cfg.metadata_cache_enabled);
+        assert!(!cfg.metadata_cache_enabled);
         assert_eq!(
             cfg.metadata_cache_expiration,
             Duration::from_secs(600),
@@ -914,8 +911,8 @@ mod tests {
             None
         };
         assert!(
-            constructed.is_some(),
-            "default enabled=true plus a positive TTL must construct a cache"
+            constructed.is_none(),
+            "default enabled=false must skip cache construction"
         );
     }
 

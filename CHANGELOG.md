@@ -11,6 +11,15 @@ kept aligned. Python-specific notes also appear in
 
 ## [Unreleased]
 
+### Changed
+
+- **`metadata_cache_enabled` now defaults to `false`**, matching Java
+  `goosefs.user.metadata.cache.enabled`. The `metadata-cache` crate feature is
+  unchanged (`cfg!(feature = "metadata-cache")` still compiles the cache in
+  and is still required to turn the switch on). Set the switch to `true`
+  (env / properties / builder) to opt in. TTL (`10min`) and capacity
+  (`100000`) are unchanged.
+
 ### Added
 
 - **Publish workflows** — GitHub Actions `Publish Python SDK` and `Publish Rust SDK`

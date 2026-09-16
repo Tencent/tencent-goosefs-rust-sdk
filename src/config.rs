@@ -2127,27 +2127,21 @@ pub struct GoosefsConfig {
     // ── Metadata cache (Java `goosefs.user.metadata.cache.*`) ──
     /// Whether the Java-aligned client metadata cache is constructed.
     ///
-    /// Default `true` when the `metadata-cache` crate feature is enabled and
-    /// `false` otherwise. The feature-enabled default **diverges from Java's
-    /// `goosefs.user.metadata.cache.enabled=false`**. When true, `get_status` /
-    /// `list_status` / `exists` / open share one process-local LRU. Writes
-    /// invalidate path + parent after a successful RPC.
+    /// Requires the `metadata-cache` crate feature (`cfg!(feature =
+    /// "metadata-cache")`). The runtime switch itself defaults to `false`
+    /// (Java `goosefs.user.metadata.cache.enabled`), even when that feature
+    /// is compiled in. Turning the switch on without the feature is rejected
+    /// by [`GoosefsConfig::validate`].
     ///
-    /// The default was flipped because every reader open resolves its
-    /// `FileInfo` through `FileSystemContext::get_file_info_cached`, so with
-    /// the cache off a workload of many small ranged reads (one
-    /// `GoosefsFileReader` per read, as OpenDAL does) pays one Master
-    /// `get_status` RPC per read.
+    /// When true, `get_status` / `list_status` / `exists` / open share one
+    /// process-local LRU. Writes invalidate path + parent after a successful
+    /// RPC.
     ///
-    /// That RPC is also what hides the local page cache: a page-cache hit
-    /// served over io_uring costs tens of microseconds, so a per-open Master
-    /// round-trip on the same read dwarfs it and the read ends up waiting on
-    /// metadata rather than on disk. Leaving this on is a prerequisite for
-    /// `client_cache_enabled` + `client_cache_uring_enabled` to show up in
-    /// end-to-end throughput.
-    ///
-    /// Set it back to `false` when the file set mutates behind the client
-    /// faster than `metadata_cache_expiration`.
+    /// Enable it for workloads that open one reader per small ranged read
+    /// (OpenDAL does this): with the cache off each open pays a Master
+    /// `get_status` RPC, which also hides local page-cache hits. Leave it
+    /// off when the file set mutates behind the client faster than
+    /// `metadata_cache_expiration`.
     #[serde(default = "default_metadata_cache_enabled")]
     pub metadata_cache_enabled: bool,
 
@@ -2288,8 +2282,13 @@ fn default_true_bool() -> bool {
     true
 }
 
+/// Java `goosefs.user.metadata.cache.enabled` runtime default.
+///
+/// Compiling the `metadata-cache` feature does **not** flip this to `true`.
+const DEFAULT_METADATA_CACHE_ENABLE: bool = false;
+
 fn default_metadata_cache_enabled() -> bool {
-    cfg!(feature = "metadata-cache")
+    cfg!(feature = "metadata-cache") && DEFAULT_METADATA_CACHE_ENABLE
 }
 
 fn default_metadata_cache_max_size() -> usize {
@@ -5382,11 +5381,14 @@ goosefs.user.metadata.cache.max.size=1000000
     }
 
     /// TTL / size / sync-interval / load-type stay Java-aligned. The enabled
-    /// default follows whether metadata-cache support was compiled in.
+    /// default is `false` even when `cfg!(feature = "metadata-cache")`.
     #[test]
     fn test_metadata_cache_defaults() {
         let cfg = GoosefsConfig::default();
-        assert_eq!(cfg.metadata_cache_enabled, cfg!(feature = "metadata-cache"));
+        assert_eq!(
+            cfg.metadata_cache_enabled,
+            cfg!(feature = "metadata-cache") && super::DEFAULT_METADATA_CACHE_ENABLE
+        );
         assert_eq!(cfg.metadata_cache_expiration, Duration::from_secs(600));
         assert_eq!(cfg.metadata_cache_max_size, 100_000);
         assert_eq!(cfg.file_metadata_sync_interval, -1);
@@ -5400,7 +5402,10 @@ goosefs.user.metadata.cache.max.size=1000000
     #[test]
     fn optional_runtime_defaults_follow_compiled_features() {
         let cfg = GoosefsConfig::default();
-        assert_eq!(cfg.metadata_cache_enabled, cfg!(feature = "metadata-cache"));
+        assert_eq!(
+            cfg.metadata_cache_enabled,
+            cfg!(feature = "metadata-cache") && super::DEFAULT_METADATA_CACHE_ENABLE
+        );
         assert!(!cfg.client_cache_enabled);
         assert_eq!(
             cfg.client_cache_uring_enabled,
@@ -5482,8 +5487,8 @@ goosefs.user.file.info.cache.capacity=2048
         let cfg = GoosefsConfig::from_properties_str(props);
         assert_eq!(
             cfg.metadata_cache_enabled,
-            cfg!(feature = "metadata-cache"),
-            "left at the feature-dependent default"
+            cfg!(feature = "metadata-cache") && super::DEFAULT_METADATA_CACHE_ENABLE,
+            "left at the feature-gated enable default (false)"
         );
         assert_eq!(cfg.metadata_cache_expiration, Duration::from_secs(600));
         assert_eq!(cfg.metadata_cache_max_size, 100_000);
