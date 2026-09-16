@@ -24,9 +24,9 @@ covers persist polling and multi-block FILE writes; this file proves the PyO3
 from __future__ import annotations
 
 import uuid
-
 from collections.abc import Mapping
-from goosefs import Config, Goosefs, WriteType, WriterChecksumType
+
+from goosefs import Config, Goosefs, WriterChecksumType, WriteType
 
 # ITU-T V.42 / Castagnoli. Java CRC32C of b"123456789".
 _CHECK_VECTOR = b"123456789"
