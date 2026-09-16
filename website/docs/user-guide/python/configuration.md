@@ -45,7 +45,7 @@ cfg = Config.from_uri("gfs://127.0.0.1:9200/data")
 | `GOOSEFS_USER_NETWORK_RPC_CONNECT_TIMEOUT` | gRPC connect timeout (`5sec` / `5000ms` / `5000`) |
 | `GOOSEFS_USER_NETWORK_RPC_TIMEOUT`     | Per-RPC request timeout (same time format)  |
 | `GOOSEFS_USER_NETWORK_VPC_MAPPING_ENABLED` | Use VPC mapping addresses (`true`/`false`) |
-| `GOOSEFS_METADATA_CACHE_ENABLED`      | Client metadata cache switch (default `true`) |
+| `GOOSEFS_METADATA_CACHE_ENABLED`      | Client metadata cache switch (default `false`) |
 | `GOOSEFS_METADATA_CACHE_EXPIRATION`   | Metadata cache TTL (`10min`, `30s`, raw ms)    |
 | `GOOSEFS_METADATA_CACHE_MAX_SIZE`     | Metadata cache LRU capacity (default `100000`) |
 | `GOOSEFS_FILE_METADATA_SYNC_INTERVAL` | Metadata sync interval (`parseTimeSize`; default `-1`. `0` skips cache on every get/list) |
@@ -124,13 +124,13 @@ Disabled by default. Enable via env or properties:
 
 See [Page Cache](./page-cache) for a full walkthrough.
 
-## Client Metadata Cache (on by default)
+## Client Metadata Cache (off by default)
 
-Enabled by default (the Java client defaults it to `false`). `get_status` / `exists` / `open_file` / non-recursive `list_status` share one process-local TTL-bounded LRU (status + listing + negative cache); `mkdir` / `delete` / `rename` invalidate the path and its parent.
+Off by default, matching Java `goosefs.user.metadata.cache.enabled=false`. `get_status` / `exists` / `open_file` / non-recursive `list_status` share one process-local TTL-bounded LRU (status + listing + negative cache); `mkdir` / `delete` / `rename` invalidate the path and its parent.
 
 | Property key | Env var | Default |
 | --- | --- | --- |
-| `goosefs.user.metadata.cache.enabled` | `GOOSEFS_METADATA_CACHE_ENABLED` | `true` |
+| `goosefs.user.metadata.cache.enabled` | `GOOSEFS_METADATA_CACHE_ENABLED` | `false` |
 | `goosefs.user.metadata.cache.max.size` | `GOOSEFS_METADATA_CACHE_MAX_SIZE` | `100000` |
 | `goosefs.user.metadata.cache.expiration.time` | `GOOSEFS_METADATA_CACHE_EXPIRATION` | `10min` |
 | `goosefs.user.file.metadata.sync.interval` | `GOOSEFS_FILE_METADATA_SYNC_INTERVAL` | `-1` |

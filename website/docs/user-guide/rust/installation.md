@@ -29,7 +29,7 @@ The default feature set is empty, so downstream crates only compile the core gRP
 # Core gRPC client only
 goosefs-sdk = "0.2"
 
-# Process-local metadata cache (on by default once this feature is compiled in)
+# Process-local metadata cache (feature; runtime enable defaults to false)
 goosefs-sdk = { version = "0.2", features = ["metadata-cache"] }
 
 # Portable page cache; add `page-cache-io-uring` on Linux for the io_uring backend

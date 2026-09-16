@@ -42,7 +42,7 @@ Common environment variables:
 | `GOOSEFS_USER_FILE_READ_MAX_NODE_RETRY` | Read candidate pool width / Java `maxRetryNode` (default `3`) |
 | `GOOSEFS_USER_FILE_READ_MAX_NODE_RETRY` | Read candidate pool width / Java `maxRetryNode` (default `3`) |
 | `GOOSEFS_USER_FILE_CHECK_BLOCK_REPLICAS` | CheckBlocks probe count; `0` disables (default) |
-| `GOOSEFS_METADATA_CACHE_ENABLED` | Client metadata cache switch (default `true` with `metadata-cache`, else `false`) |
+| `GOOSEFS_METADATA_CACHE_ENABLED` | Client metadata cache switch (default `false`; requires `metadata-cache`) |
 | `GOOSEFS_METADATA_CACHE_EXPIRATION` | Metadata cache TTL (`10min`, `30s`, or raw ms) |
 | `GOOSEFS_METADATA_CACHE_MAX_SIZE` | Metadata cache LRU capacity (default `100000`) |
 | `GOOSEFS_FILE_METADATA_SYNC_INTERVAL` | Metadata sync interval (`parseTimeSize`; default `-1`. `0` skips cache on every get/list) |
@@ -75,13 +75,13 @@ Disabled by default. Compile with the `page-cache` crate feature, then enable vi
 
 See [Page Cache](./page-cache) for a full walkthrough.
 
-## Client Metadata Cache (requires `metadata-cache`)
+## Client Metadata Cache (requires `metadata-cache`; off by default)
 
-On by default **once the `metadata-cache` crate feature is compiled in** (the Java client defaults it to `false`). Without that feature the switch defaults to `false` and turning it on at runtime is a configuration error. `get_status` / `exists` / `open_file` / non-recursive `list_status` share one process-local TTL-bounded LRU:
+Off by default, matching Java `goosefs.user.metadata.cache.enabled=false`. The `metadata-cache` crate feature is still required to turn the switch on; without it, enabling at runtime is a configuration error. `get_status` / `exists` / `open_file` / non-recursive `list_status` share one process-local TTL-bounded LRU:
 
 | Property key | Field | Default |
 | --- | --- | --- |
-| `goosefs.user.metadata.cache.enabled` | `metadata_cache_enabled` | `true` with `metadata-cache` / `false` otherwise |
+| `goosefs.user.metadata.cache.enabled` | `metadata_cache_enabled` | `false` |
 | `goosefs.user.metadata.cache.max.size` | `metadata_cache_max_size` | `100000` |
 | `goosefs.user.metadata.cache.expiration.time` | `metadata_cache_expiration` | `10min` |
 | `goosefs.user.file.metadata.sync.interval` | `file_metadata_sync_interval` | `-1` |
