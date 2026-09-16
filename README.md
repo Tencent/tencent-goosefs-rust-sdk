@@ -12,8 +12,10 @@ A native Rust client library that communicates directly with [Goosefs](https://c
 ## What's New in v0.2.2
 
 - **Metadata cache defaults to off** — `metadata_cache_enabled` now defaults to `false`, matching Java `goosefs.user.metadata.cache.enabled`. The `metadata-cache` crate feature is unchanged; set the switch to `true` (env / properties / builder) to opt in.
-- **CompleteFile CRC32C** — writes send Castagnoli CRC32C and the `CreateFile` inode id on complete, so Master UFS verification no longer skips the inode.
+- **Writer checksum type** — `goosefs.user.streaming.writer.checksum.type` (`CRC32C` default, `CRC32`, `NULL`) matches Java `OutStreamOptions`. Castagnoli CRC32C and IEEE CRC32 are in-tree (`src/io/crc32c.rs` / `crc32.rs`); the `crc32c` crate is gone.
+- **CompleteFile CRC** — writes send the chosen checksum and the `CreateFile` inode id on complete, so Master UFS verification no longer skips the inode.
 - **CreateFile persistence wait** — `persistence_wait_time` is filled from `file_persistence_initial_wait_time_ms`, matching Java `createFileDefaults`.
+- **Optional Cargo features** — default feature set is empty. Enable `metadata-cache`, `page-cache` / `page-cache-io-uring`, `metrics-pushgateway`, or `full-client`.
 - **Publish workflows** — GitHub Actions publish the Python SDK (PyPI) and Rust crate (crates.io) on `workflow_dispatch` or `v*` tags.
 
 ### Also in recent releases (v0.2.1)

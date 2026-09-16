@@ -20,7 +20,10 @@
   - **Default change:** `GOOSEFS_METADATA_CACHE_ENABLED` now defaults to
     `false`, matching Java. The cache is still compiled into the wheel; set
     the switch to `true` (env / properties / storage option) to opt in.
-  - Inherits SDK CompleteFile CRC32C + `inode_id`, and CreateFile
+  - **Writer checksum type:** `goosefs.user.streaming.writer.checksum.type`
+    (`CRC32C` default, `CRC32`, `NULL`). `Config.writer_checksum_type` and
+    `WriterChecksumType` expose the resolved value.
+  - Inherits SDK CompleteFile CRC + `inode_id`, and CreateFile
     `persistence_wait_time`.
   - See [`CHANGELOG.md`](./CHANGELOG.md).
 
