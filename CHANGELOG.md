@@ -11,6 +11,8 @@ kept aligned. Python-specific notes also appear in
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-09-16
+
 ### Changed
 
 - **`metadata_cache_enabled` now defaults to `false`**, matching Java
@@ -23,6 +25,7 @@ kept aligned. Python-specific notes also appear in
   crate, same pattern as Guava-compatible murmur3. `CompleteFile` checksum
   values are unchanged; embedding the SDK no longer adds a CRC crate that
   Lance does not already carry.
+- Version bump: `goosefs-sdk` / `goosefs` `0.2.1` → `0.2.2`.
 
 ### Added
 

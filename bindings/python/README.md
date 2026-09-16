@@ -16,6 +16,14 @@
 
 ## What's New
 
+- **v0.2.2** — aligned with `goosefs-sdk` 0.2.2.
+  - **Default change:** `GOOSEFS_METADATA_CACHE_ENABLED` now defaults to
+    `false`, matching Java. The cache is still compiled into the wheel; set
+    the switch to `true` (env / properties / storage option) to opt in.
+  - Inherits SDK CompleteFile CRC32C + `inode_id`, and CreateFile
+    `persistence_wait_time`.
+  - See [`CHANGELOG.md`](./CHANGELOG.md).
+
 - **v0.2.1** — aligned with `goosefs-sdk` 0.2.1.
   - **Breaking:** `write_file` / `create_file` / `batch_create_file` now honour
     `recursive=False` (the documented default). Missing parents raise
