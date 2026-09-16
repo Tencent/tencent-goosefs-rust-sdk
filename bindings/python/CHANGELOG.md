@@ -8,12 +8,30 @@ This document records all notable changes to the `goosefs` Python binding. The f
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-09-16
+
 ### Changed
 
 - **`GOOSEFS_METADATA_CACHE_ENABLED` now defaults to `false`**, matching Java
   `goosefs.user.metadata.cache.enabled`. The cache is still compiled into the
   wheel; set the switch to `true` (env / properties / storage option) to opt
   in. TTL and capacity are unchanged.
+- **Underlying SDK upgrade**: `goosefs-sdk` 0.2.1 → 0.2.2. The crate's
+  default feature set is now empty; Python wheels still depend on
+  `full-client`, so metadata cache, page cache, and Pushgateway stay in
+  the wheel.
+- **`bindings/python/Cargo.toml`** version `0.2.1` → `0.2.2`, kept in
+  sync with the root crate; `goosefs.__version__` now reports `0.2.2`.
+
+### Fixed
+
+- **`CompleteFile` now sends CRC32C and `inode_id`**, inherited from the
+  SDK. Writes no longer leave inode CRC unset, so Master HybridPersistenceManager
+  UFS verification is no longer skipped. Python `test_complete_file_crc.py`
+  covers `ASYNC_THROUGH` / `MUST_CACHE` on FILE and PAGE workers.
+- **`CreateFile` now fills `persistence_wait_time`**, inherited from the
+  SDK (`file_persistence_initial_wait_time_ms`), matching Java
+  `createFileDefaults`.
 
 ### Added
 

@@ -11,6 +11,8 @@ kept aligned. Python-specific notes also appear in
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-09-16
+
 ### Changed
 
 - **`metadata_cache_enabled` now defaults to `false`**, matching Java
@@ -19,10 +21,18 @@ kept aligned. Python-specific notes also appear in
   and is still required to turn the switch on). Set the switch to `true`
   (env / properties / builder) to opt in. TTL (`10min`) and capacity
   (`100000`) are unchanged.
+- **Optional capabilities are now Cargo features with an empty default set.**
+  `goosefs-sdk = "0.2"` compiles only the core gRPC client. Enable
+  `metadata-cache`, `page-cache` (add `page-cache-io-uring` on Linux),
+  `metrics-pushgateway`, or `full-client`. Runtime switches still parse in
+  every build; `FileSystemContext::connect` errors if a switch is on without
+  its feature. Python wheels keep `full-client`. 0.2.1 defaulted
+  `metrics-pushgateway` and always compiled the metadata / page caches.
 - **In-tree Castagnoli CRC32C** (`src/io/crc32c.rs`) replaces the `crc32c`
   crate, same pattern as Guava-compatible murmur3. `CompleteFile` checksum
   values are unchanged; embedding the SDK no longer adds a CRC crate that
   Lance does not already carry.
+- Version bump: `goosefs-sdk` / `goosefs` `0.2.1` → `0.2.2`.
 
 ### Added
 

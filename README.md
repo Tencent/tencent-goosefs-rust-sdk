@@ -2,16 +2,25 @@
 
 ![Experimental](https://img.shields.io/badge/status-experimental-orange)
 ![Rust](https://img.shields.io/badge/rust-1.88%2B-blue)
-![Version](https://img.shields.io/badge/version-0.2.1-blue)
+![Version](https://img.shields.io/badge/version-0.2.2-blue)
 ![License](https://img.shields.io/badge/license-Apache--2.0-green)
 
 A native Rust client library that communicates directly with [Goosefs](https://cloud.tencent.com/document/product/1424) Master/Worker via gRPC (tonic/protobuf).
 
 **Documentation:** [https://tencent.github.io/tencent-goosefs-rust-sdk/](https://tencent.github.io/tencent-goosefs-rust-sdk/)
 
-## What's New in v0.2.1
+## What's New in v0.2.2
 
-- **Java-aligned metadata and write defaults** — `get_status` / `list_status` send `loadMetadataType=ONCE` so COS/UFS files appear without a prior load; write-path RPCs send Java `commonDefaults`; `DeleteOptions.unchecked` defaults to `true`; the client metadata cache is **on by default**.
+- **Metadata cache defaults to off** — `metadata_cache_enabled` now defaults to `false`, matching Java `goosefs.user.metadata.cache.enabled`. The `metadata-cache` crate feature is unchanged; set the switch to `true` (env / properties / builder) to opt in.
+- **Writer checksum type** — `goosefs.user.streaming.writer.checksum.type` (`CRC32C` default, `CRC32`, `NULL`) matches Java `OutStreamOptions`. Castagnoli CRC32C and IEEE CRC32 are in-tree (`src/io/crc32c.rs` / `crc32.rs`); the `crc32c` crate is gone.
+- **CompleteFile CRC** — writes send the chosen checksum and the `CreateFile` inode id on complete, so Master UFS verification no longer skips the inode.
+- **CreateFile persistence wait** — `persistence_wait_time` is filled from `file_persistence_initial_wait_time_ms`, matching Java `createFileDefaults`.
+- **Optional Cargo features** — default feature set is empty. Enable `metadata-cache`, `page-cache` / `page-cache-io-uring`, `metrics-pushgateway`, or `full-client`.
+- **Publish workflows** — GitHub Actions publish the Python SDK (PyPI) and Rust crate (crates.io) on `workflow_dispatch` or `v*` tags.
+
+### Also in recent releases (v0.2.1)
+
+- **Java-aligned metadata and write defaults** — `get_status` / `list_status` send `loadMetadataType=ONCE` so COS/UFS files appear without a prior load; write-path RPCs send Java `commonDefaults`; `DeleteOptions.unchecked` defaults to `true`; the client metadata cache was **on by default** in 0.2.1 (0.2.2 turns it off to match Java).
 - **Page cache rewrite** — metadata and eviction moved from `moka` to `foyer`; default eviction policy is `LRU` (was `LFU`); `S3FIFO` is available as an option.
 - **Correctness** — the second UFS read of a path no longer hangs (`maxUfsReadConcurrency`); `$GOOSEFS_CONF_DIR` is discovered again.
 - **Removed** — short-circuit (local mmap) read path. Reads always use the gRPC data plane.
