@@ -1092,6 +1092,7 @@ __all__ = [
     "URIStatusList",
     "WorkerClient",
     "WriteType",
+    "WriterChecksumType",
     "__version__",
     "enable_tracing",
     "exceptions",
