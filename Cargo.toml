@@ -122,8 +122,9 @@ xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 serde = { version = "1", features = ["derive"] }
 async-trait = "0.1"
 # Bounded LRU backing the client metadata cache. Floor is 0.16.3 for
-# RUSTSEC-2026-0002 (IterMut Stacked Borrows).
-lru = { version = "0.18.1", optional = true }
+# RUSTSEC-2026-0002 (IterMut Stacked Borrows). Pin 0.16.4 to match Lance's
+# lockfile (`aws-sdk-s3` pulls the same version).
+lru = { version = "0.16.4", optional = true }
 rand = "0.9.1"
 uuid = { version = "1.2", features = ["v4"] }
 # Castagnoli CRC32C, matching Java `DataChecksum.Type.CRC32C` /
