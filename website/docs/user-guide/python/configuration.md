@@ -37,6 +37,7 @@ cfg = Config.from_uri("gfs://127.0.0.1:9200/data")
 | `GOOSEFS_AUTH_TYPE`                   | `nosasl` / `simple` / `custom`                |
 | `GOOSEFS_AUTH_USERNAME`               | Username for SIMPLE auth                      |
 | `GOOSEFS_USER_FILE_REPLICATION_NUMBER` | Block-worker selection count (default `1`)   |
+| `GOOSEFS_USER_STREAMING_WRITER_CHECKSUM_TYPE` | CompleteFile checksum: `CRC32C` (default) / `CRC32` / `NULL` |
 | `GOOSEFS_USER_FILE_READ_MAX_NODE_RETRY` | Read candidate pool / Java `maxRetryNode` (default `3`) |
 | `GOOSEFS_USER_FILE_CHECK_BLOCK_REPLICAS` | CheckBlocks probe count; `0` disables (default) |
 | `GOOSEFS_MASTER_CONNECTION_POOL_SIZE` | Master gRPC channel pool size (default 1)     |
@@ -69,6 +70,26 @@ cfg = Config("127.0.0.1:9200")
 fs = Goosefs(cfg)  # sync; use AsyncGoosefs for async
 fs.write_file("/data/file.bin", b"payload", write_type=WriteType.CacheThrough)
 ```
+
+## Writer checksum
+
+Matches Java `goosefs.user.streaming.writer.checksum.type`. Default **CRC32C**. Invalid values keep CRC32C.
+
+```python
+from goosefs import Config, WriterChecksumType
+
+cfg = Config(
+    "127.0.0.1:9200",
+    properties={"goosefs.user.streaming.writer.checksum.type": "CRC32"},
+)
+assert cfg.writer_checksum_type == WriterChecksumType.Crc32
+```
+
+| Value    | Meaning                         |
+| -------- | ------------------------------- |
+| `CRC32C` | Castagnoli (Java default)       |
+| `CRC32`  | IEEE `java.util.zip.CRC32`      |
+| `NULL`   | No checksum (`crc_value=0`)     |
 
 ## Master Connection Pool
 

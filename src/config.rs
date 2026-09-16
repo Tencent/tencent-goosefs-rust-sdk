@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use crate::auth::AuthType;
 use crate::proto::grpc::file::{LoadMetadataPType, WritePType};
+use crate::proto::grpc::ChecksumTypeProto;
 
 // ── Config load error ─────────────────────────────────────────
 
@@ -371,6 +372,18 @@ impl PropertiesMap {
         if let Some(wt_str) = self.get("goosefs.user.file.writetype.default") {
             if let Ok(wt) = wt_str.parse::<WriteType>() {
                 cfg.write_type = Some(wt.as_i32());
+            }
+        }
+
+        // Writer checksum: goosefs.user.streaming.writer.checksum.type
+        // (Java `OutStreamOptions` / `DataChecksum.Type`). Invalid values
+        // keep CRC32C, matching Java's catch-and-keep-default.
+        if let Some(ty_str) = self
+            .get("goosefs.user.streaming.writer.checksum.type")
+            .or_else(|| self.get(STORAGE_OPT_WRITER_CHECKSUM_TYPE))
+        {
+            if let Ok(ty) = ty_str.parse::<WriterChecksumType>() {
+                cfg.writer_checksum_type = ty;
             }
         }
 
@@ -1009,6 +1022,14 @@ pub const STORAGE_OPT_MASTER_ADDR: &str = "goosefs_master_addr";
 /// Corresponding environment variable: `GOOSEFS_WRITE_TYPE`.
 pub const STORAGE_OPT_WRITE_TYPE: &str = "goosefs_write_type";
 
+/// Storage option key for the CompleteFile checksum algorithm.
+///
+/// Accepted values: `"CRC32C"`, `"CRC32"`, `"NULL"` (case-insensitive),
+/// matching Java `goosefs.user.streaming.writer.checksum.type`.
+///
+/// Corresponding environment variable: [`ENV_WRITER_CHECKSUM_TYPE`].
+pub const STORAGE_OPT_WRITER_CHECKSUM_TYPE: &str = "goosefs_streaming_writer_checksum_type";
+
 /// Storage option key for block size (in bytes).
 ///
 /// Corresponding environment variable: `GOOSEFS_BLOCK_SIZE`.
@@ -1053,6 +1074,14 @@ pub const ENV_MASTER_ADDR: &str = "GOOSEFS_MASTER_ADDR";
 
 /// Environment variable: default write type.
 pub const ENV_WRITE_TYPE: &str = "GOOSEFS_WRITE_TYPE";
+
+/// Environment variable: `goosefs.user.streaming.writer.checksum.type`.
+///
+/// Mirrors [`GoosefsConfig::writer_checksum_type`]. Default is `CRC32C`.
+/// Invalid values are ignored (Java `OutStreamOptions` keeps CRC32C).
+///
+/// Example: `export GOOSEFS_USER_STREAMING_WRITER_CHECKSUM_TYPE=CRC32`.
+pub const ENV_WRITER_CHECKSUM_TYPE: &str = "GOOSEFS_USER_STREAMING_WRITER_CHECKSUM_TYPE";
 
 /// Environment variable: `goosefs.user.file.replication.number`.
 ///
@@ -1580,6 +1609,96 @@ impl WriteType {
 // a `Result<WriteType, String>` and lets the caller pick a sensible
 // fallback (typically `WriteType::CacheThrough`).
 
+/// CompleteFile checksum algorithm, matching Java
+/// `goosefs.user.streaming.writer.checksum.type`.
+///
+/// Sent on `CompleteFile` as `crc_type` / `crc_value`. Default is
+/// [`WriterChecksumType::Crc32c`] (Castagnoli), same as Java
+/// `OutStreamOptions`.
+///
+/// # String representation (case-insensitive)
+///
+/// | Variant | Strings | Proto (`ChecksumTypeProto`) |
+/// |---------|---------|-----------------------------|
+/// | `Null` | `NULL` | `CHECKSUM_NULL` (`0`) |
+/// | `Crc32` | `CRC32` | `CHECKSUM_CRC32` (`1`) |
+/// | `Crc32c` (default) | `CRC32C` | `CHECKSUM_CRC32C` (`2`) |
+///
+/// Invalid parse input is ignored by env / properties loaders so a typo
+/// cannot silently disable checksums — the previous value (default
+/// CRC32C) is kept, matching Java `OutStreamOptions`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum WriterChecksumType {
+    /// Do not checksum. `CompleteFile` still sends `crc_type=NULL` and
+    /// `crc_value=0` (Java `DataChecksum.newDataChecksum(NULL)`).
+    Null,
+    /// IEEE CRC32 (`java.util.zip.CRC32`, polynomial `0xEDB88320`).
+    Crc32,
+    /// Castagnoli CRC32C (`java.util.zip.CRC32C` / Hadoop `PureJavaCrc32C`).
+    #[default]
+    Crc32c,
+}
+
+impl WriterChecksumType {
+    /// All recognised variants, in proto-id order.
+    pub const ALL: [WriterChecksumType; 3] = [
+        WriterChecksumType::Null,
+        WriterChecksumType::Crc32,
+        WriterChecksumType::Crc32c,
+    ];
+
+    /// Java / properties string (`NULL`, `CRC32`, `CRC32C`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WriterChecksumType::Null => "NULL",
+            WriterChecksumType::Crc32 => "CRC32",
+            WriterChecksumType::Crc32c => "CRC32C",
+        }
+    }
+
+    /// Protobuf `ChecksumTypeProto` as `i32`.
+    pub fn as_i32(&self) -> i32 {
+        self.as_proto() as i32
+    }
+
+    /// Protobuf `ChecksumTypeProto` variant.
+    pub fn as_proto(&self) -> ChecksumTypeProto {
+        match self {
+            WriterChecksumType::Null => ChecksumTypeProto::ChecksumNull,
+            WriterChecksumType::Crc32 => ChecksumTypeProto::ChecksumCrc32,
+            WriterChecksumType::Crc32c => ChecksumTypeProto::ChecksumCrc32c,
+        }
+    }
+}
+
+impl fmt::Display for WriterChecksumType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for WriterChecksumType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "NULL" | "CHECKSUM_NULL" => Ok(WriterChecksumType::Null),
+            "CRC32" | "CHECKSUM_CRC32" => Ok(WriterChecksumType::Crc32),
+            "CRC32C" | "CHECKSUM_CRC32C" => Ok(WriterChecksumType::Crc32c),
+            _ => Err(format!(
+                "unknown writer checksum type '{}'. Expected one of: {}",
+                s,
+                WriterChecksumType::ALL
+                    .iter()
+                    .map(|ty| ty.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
+    }
+}
+
 /// Configuration for the Goosefs Rust gRPC client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoosefsConfig {
@@ -1642,6 +1761,14 @@ pub struct GoosefsConfig {
     /// If not set (`None`), the server-side default is used (typically `MustCache`).
     /// Use [`GoosefsConfig::with_write_type`] for a type-safe builder.
     pub write_type: Option<i32>,
+
+    /// Checksum algorithm sent on `CompleteFile` (`crc_type` / `crc_value`).
+    ///
+    /// Mirrors Java `goosefs.user.streaming.writer.checksum.type`
+    /// (`CRC32C` default, or `CRC32` / `NULL`). Invalid env / properties
+    /// values are ignored and this field keeps its current value.
+    #[serde(default)]
+    pub writer_checksum_type: WriterChecksumType,
 
     /// Target replication level used when selecting block workers.
     ///
@@ -2436,6 +2563,7 @@ impl Default for GoosefsConfig {
             use_vpc_mapping: false,
             root: String::new(),
             write_type: None,
+            writer_checksum_type: WriterChecksumType::Crc32c,
             file_replication_number: default_file_replication_number(),
             file_replication_durable: default_file_replication_durable(),
             file_replication_durable_min: default_file_replication_durable_min(),
@@ -2800,6 +2928,22 @@ impl GoosefsConfig {
         Ok(self.with_write_type_enum(write_type))
     }
 
+    /// Set [`writer_checksum_type`](Self::writer_checksum_type).
+    ///
+    /// Default is [`WriterChecksumType::Crc32c`], matching Java
+    /// `goosefs.user.streaming.writer.checksum.type`.
+    pub fn with_writer_checksum_type(mut self, ty: WriterChecksumType) -> Self {
+        self.writer_checksum_type = ty;
+        self
+    }
+
+    /// Set the CompleteFile checksum type from a string (case-insensitive).
+    ///
+    /// Accepted values: `"CRC32C"`, `"CRC32"`, `"NULL"`.
+    pub fn with_writer_checksum_type_str(self, ty: &str) -> Result<Self, String> {
+        Ok(self.with_writer_checksum_type(ty.parse()?))
+    }
+
     /// Set the sequential-read prefetch window (in chunks). See
     /// [`GoosefsConfig::prefetch_window`]().
     pub fn with_prefetch_window(mut self, window: i32) -> Self {
@@ -3041,6 +3185,7 @@ impl GoosefsConfig {
     /// |-----------------------|-----------------|
     /// | `GOOSEFS_MASTER_ADDR` | `master_addr` / `master_addrs` |
     /// | `GOOSEFS_WRITE_TYPE` | `write_type` |
+    /// | `GOOSEFS_USER_STREAMING_WRITER_CHECKSUM_TYPE` | `writer_checksum_type` |
     /// | `GOOSEFS_BLOCK_SIZE` | `block_size` |
     /// | `GOOSEFS_CHUNK_SIZE` | `chunk_size` |
     /// | `GOOSEFS_USER_NETWORK_RPC_CONNECT_TIMEOUT` | `connect_timeout` |
@@ -3123,6 +3268,13 @@ impl GoosefsConfig {
         if let Ok(wt_str) = env::var(ENV_WRITE_TYPE) {
             if let Ok(wt) = wt_str.parse::<WriteType>() {
                 self.write_type = Some(wt.as_i32());
+            }
+        }
+
+        // Writer checksum type (goosefs.user.streaming.writer.checksum.type)
+        if let Ok(ty_str) = env::var(ENV_WRITER_CHECKSUM_TYPE) {
+            if let Ok(ty) = ty_str.parse::<WriterChecksumType>() {
+                self.writer_checksum_type = ty;
             }
         }
 
@@ -3881,6 +4033,7 @@ mod tests {
         assert_eq!(config.check_block_replicas, 0);
         assert_eq!(config.file_read_max_node_retry, 3);
         assert!(!config.is_multi_master());
+        assert_eq!(config.writer_checksum_type, WriterChecksumType::Crc32c);
         assert!(config.validate().is_ok());
     }
 
@@ -4468,12 +4621,97 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn test_writer_checksum_type_from_str() {
+        assert_eq!(
+            "CRC32C".parse::<WriterChecksumType>().unwrap(),
+            WriterChecksumType::Crc32c
+        );
+        assert_eq!(
+            "crc32c".parse::<WriterChecksumType>().unwrap(),
+            WriterChecksumType::Crc32c
+        );
+        assert_eq!(
+            "CRC32".parse::<WriterChecksumType>().unwrap(),
+            WriterChecksumType::Crc32
+        );
+        assert_eq!(
+            "NULL".parse::<WriterChecksumType>().unwrap(),
+            WriterChecksumType::Null
+        );
+        assert_eq!(
+            "CHECKSUM_CRC32C".parse::<WriterChecksumType>().unwrap(),
+            WriterChecksumType::Crc32c
+        );
+        assert!("MD5".parse::<WriterChecksumType>().is_err());
+        assert!("".parse::<WriterChecksumType>().is_err());
+    }
+
+    #[test]
+    fn test_writer_checksum_type_proto_ids() {
+        assert_eq!(WriterChecksumType::Null.as_i32(), 0);
+        assert_eq!(WriterChecksumType::Crc32.as_i32(), 1);
+        assert_eq!(WriterChecksumType::Crc32c.as_i32(), 2);
+        assert_eq!(WriterChecksumType::default(), WriterChecksumType::Crc32c);
+    }
+
+    #[test]
+    fn test_config_writer_checksum_type_properties() {
+        let crc32 = GoosefsConfig::from_properties_str(
+            "goosefs.user.streaming.writer.checksum.type=CRC32\n\
+             goosefs.master.rpc.addresses=127.0.0.1:9200\n",
+        );
+        assert_eq!(crc32.writer_checksum_type, WriterChecksumType::Crc32);
+
+        let null = GoosefsConfig::from_properties_str(
+            "goosefs.user.streaming.writer.checksum.type=NULL\n\
+             goosefs.master.rpc.addresses=127.0.0.1:9200\n",
+        );
+        assert_eq!(null.writer_checksum_type, WriterChecksumType::Null);
+
+        let alias = GoosefsConfig::from_properties_str(
+            "goosefs_streaming_writer_checksum_type=CRC32\n\
+             goosefs.master.rpc.addresses=127.0.0.1:9200\n",
+        );
+        assert_eq!(alias.writer_checksum_type, WriterChecksumType::Crc32);
+
+        let invalid = GoosefsConfig::from_properties_str(
+            "goosefs.user.streaming.writer.checksum.type=MD5\n\
+             goosefs.master.rpc.addresses=127.0.0.1:9200\n",
+        );
+        assert_eq!(
+            invalid.writer_checksum_type,
+            WriterChecksumType::Crc32c,
+            "invalid checksum type must keep Java default CRC32C"
+        );
+    }
+
+    #[test]
+    fn test_config_with_writer_checksum_type() {
+        let config = GoosefsConfig::new("127.0.0.1:9200")
+            .with_writer_checksum_type(WriterChecksumType::Crc32);
+        assert_eq!(config.writer_checksum_type, WriterChecksumType::Crc32);
+
+        let config = GoosefsConfig::new("127.0.0.1:9200")
+            .with_writer_checksum_type_str("null")
+            .unwrap();
+        assert_eq!(config.writer_checksum_type, WriterChecksumType::Null);
+
+        assert!(GoosefsConfig::new("127.0.0.1:9200")
+            .with_writer_checksum_type_str("md5")
+            .is_err());
+    }
+
     // ── Storage option constant tests ────────────────────────
 
     #[test]
     fn test_storage_option_constants() {
         assert_eq!(STORAGE_OPT_MASTER_ADDR, "goosefs_master_addr");
         assert_eq!(STORAGE_OPT_WRITE_TYPE, "goosefs_write_type");
+        assert_eq!(
+            STORAGE_OPT_WRITER_CHECKSUM_TYPE,
+            "goosefs_streaming_writer_checksum_type"
+        );
         assert_eq!(STORAGE_OPT_BLOCK_SIZE, "goosefs_block_size");
         assert_eq!(STORAGE_OPT_CHUNK_SIZE, "goosefs_chunk_size");
     }
@@ -4482,6 +4720,10 @@ mod tests {
     fn test_env_var_constants() {
         assert_eq!(ENV_MASTER_ADDR, "GOOSEFS_MASTER_ADDR");
         assert_eq!(ENV_WRITE_TYPE, "GOOSEFS_WRITE_TYPE");
+        assert_eq!(
+            ENV_WRITER_CHECKSUM_TYPE,
+            "GOOSEFS_USER_STREAMING_WRITER_CHECKSUM_TYPE"
+        );
         assert_eq!(
             ENV_FILE_REPLICATION_NUMBER,
             "GOOSEFS_USER_FILE_REPLICATION_NUMBER"
@@ -4782,6 +5024,15 @@ goosefs.master.rpc.port=9200
         let cfg = GoosefsConfig::default().apply_env();
         std::env::remove_var("GOOSEFS_WRITE_TYPE");
         assert_eq!(cfg.get_write_type(), Some(WritePType::Through));
+    }
+
+    #[test]
+    fn test_apply_env_writer_checksum_type() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(ENV_WRITER_CHECKSUM_TYPE, "CRC32");
+        let cfg = GoosefsConfig::default().apply_env();
+        std::env::remove_var(ENV_WRITER_CHECKSUM_TYPE);
+        assert_eq!(cfg.writer_checksum_type, WriterChecksumType::Crc32);
     }
 
     /// `GOOSEFS_USER_FILE_REPLICATION_NUMBER` must be honoured by `apply_env`

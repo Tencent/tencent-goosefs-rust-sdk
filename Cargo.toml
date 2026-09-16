@@ -117,7 +117,8 @@ arc-swap = "1"
 # in-process fingerprints (dir allocation, page-lock striping, worker-list
 # fingerprint) and on-disk page-store bucket selection. **Not** used for
 # block→worker consistent hashing (that is the in-tree Guava-compatible
-# murmur3_128 in `src/block/murmur3.rs`).
+# murmur3_128 in `src/block/murmur3.rs`) or CompleteFile CRC32C (in-tree
+# Castagnoli in `src/io/crc32c.rs`).
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 serde = { version = "1", features = ["derive"] }
 async-trait = "0.1"
@@ -127,9 +128,6 @@ async-trait = "0.1"
 lru = { version = "0.16.4", optional = true }
 rand = "0.9.1"
 uuid = { version = "1.2", features = ["v4"] }
-# Castagnoli CRC32C, matching Java `DataChecksum.Type.CRC32C` /
-# `PureJavaCrc32C` on `CompleteFilePOptions.crc_value`.
-crc32c = "0.6"
 hostname = "0.4"
 # Used only by the metrics pushgateway exporter; gated behind a feature so
 # downstream gRPC-only consumers can opt out.

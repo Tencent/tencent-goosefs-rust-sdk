@@ -37,6 +37,7 @@ Common environment variables:
 | `GOOSEFS_USER`                   | Username for SIMPLE auth                      |
 | `GOOSEFS_CONF` / properties path | Location of `goosefs-site.properties`         |
 | `GOOSEFS_USER_FILE_REPLICATION_NUMBER` | Block-worker selection count (default `1`) |
+| `GOOSEFS_USER_STREAMING_WRITER_CHECKSUM_TYPE` | CompleteFile checksum: `CRC32C` (default) / `CRC32` / `NULL` |
 | `GOOSEFS_USER_FILE_REPLICATION_DURABLE` | ASYNC_THROUGH replica target before persist (default `2`) |
 | `GOOSEFS_USER_FILE_REPLICATION_DURABLE_MIN` | ASYNC_THROUGH minimum successful replicas (default `2`) |
 | `GOOSEFS_USER_FILE_READ_MAX_NODE_RETRY` | Read candidate pool width / Java `maxRetryNode` (default `3`) |
@@ -59,6 +60,25 @@ Common environment variables:
 | `WriteType::AsyncThrough` | Write cache, persist UFS asynchronously         |
 | `ReadType::Cache`         | Populate worker cache on miss                   |
 | `ReadType::NoCache`       | Do not back-fill worker/client cache write path |
+
+## Writer checksum
+
+Matches Java `goosefs.user.streaming.writer.checksum.type`. Default **CRC32C** (Castagnoli). Invalid values keep CRC32C.
+
+| Value    | Proto | Algorithm                                      |
+| -------- | ----- | ---------------------------------------------- |
+| `CRC32C` | `2`   | Castagnoli (`java.util.zip.CRC32C`) — default  |
+| `CRC32`  | `1`   | IEEE (`java.util.zip.CRC32`)                   |
+| `NULL`   | `0`   | No checksum (`crc_value=0`)                    |
+
+```rust
+use goosefs_sdk::config::{GoosefsConfig, WriterChecksumType};
+
+let config = GoosefsConfig::new("127.0.0.1:9200")
+    .with_writer_checksum_type(WriterChecksumType::Crc32);
+```
+
+Property key: `goosefs.user.streaming.writer.checksum.type`. Env: `GOOSEFS_USER_STREAMING_WRITER_CHECKSUM_TYPE`.
 
 ## Client Local Page Cache (opt-in)
 

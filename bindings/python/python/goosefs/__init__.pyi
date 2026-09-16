@@ -120,6 +120,32 @@ class ReadType:
     @property
     def value(self) -> int: ...
 
+@final
+class WriterChecksumType:
+    """CompleteFile checksum algorithm.
+
+    Mirrors ``goosefs_sdk::config::WriterChecksumType`` and proto
+    ``ChecksumTypeProto`` (0..=2). Default is ``Crc32c``, matching Java
+    ``goosefs.user.streaming.writer.checksum.type``.
+
+    Java names (``CRC32C`` / ``CRC32`` / ``NULL``) are accepted by
+    :meth:`from_str`.
+    """
+
+    Null: WriterChecksumType
+    Crc32: WriterChecksumType
+    Crc32c: WriterChecksumType
+
+    @property
+    def value(self) -> int: ...
+    def as_str(self) -> str:
+        """Java property name (``"CRC32C"``, ``"CRC32"``, ``"NULL"``)."""
+        ...
+    @staticmethod
+    def from_str(s: str) -> WriterChecksumType:
+        """Parse from the Java names (case-insensitive)."""
+        ...
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Options
 # ─────────────────────────────────────────────────────────────────────────────
@@ -314,6 +340,13 @@ class Config:
     def write_type(self) -> int | None:
         """Default ``WriteType`` as the proto integer (1..=5), or
         ``None`` if no explicit default was configured."""
+        ...
+    @property
+    def writer_checksum_type(self) -> WriterChecksumType:
+        """CompleteFile checksum (``CRC32C`` default, or ``CRC32`` / ``NULL``).
+
+        Set via ``goosefs.user.streaming.writer.checksum.type``.
+        """
         ...
     @property
     def file_replication_number(self) -> int:
@@ -1059,6 +1092,7 @@ __all__ = [
     "URIStatusList",
     "WorkerClient",
     "WriteType",
+    "WriterChecksumType",
     "__version__",
     "enable_tracing",
     "exceptions",

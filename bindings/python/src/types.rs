@@ -30,6 +30,7 @@
 use pyo3::prelude::*;
 
 use goosefs_sdk::config::WriteType as SdkWriteType;
+use goosefs_sdk::config::WriterChecksumType as SdkWriterChecksumType;
 use goosefs_sdk::fs::ReadType as SdkReadType;
 
 /// Mirrors `goosefs_sdk::config::WriteType` (proto `WritePType`).
@@ -165,6 +166,76 @@ impl From<SdkReadType> for PyReadType {
     }
 }
 
+/// Mirrors `goosefs_sdk::config::WriterChecksumType` (proto `ChecksumTypeProto`).
+///
+/// Integer values match the protobuf wire format (0..=2). Default is
+/// `Crc32c`, matching Java `goosefs.user.streaming.writer.checksum.type`.
+#[pyclass(
+    module = "goosefs._goosefs",
+    name = "WriterChecksumType",
+    eq,
+    eq_int,
+    frozen,
+    hash,
+    from_py_object
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(i32)]
+pub enum PyWriterChecksumType {
+    Null = 0,
+    Crc32 = 1,
+    Crc32c = 2,
+}
+
+#[pymethods]
+impl PyWriterChecksumType {
+    /// Java property name (`"CRC32C"`, `"CRC32"`, `"NULL"`).
+    fn as_str(&self) -> &'static str {
+        SdkWriterChecksumType::from(*self).as_str()
+    }
+
+    #[getter]
+    fn value(&self) -> i32 {
+        *self as i32
+    }
+
+    fn __repr__(&self) -> String {
+        format!("WriterChecksumType.{:?}", self)
+    }
+
+    fn __str__(&self) -> String {
+        self.as_str().to_string()
+    }
+
+    /// Parse from the Java names (`CRC32C` / `CRC32` / `NULL`, case-insensitive).
+    #[staticmethod]
+    fn from_str(s: &str) -> PyResult<Self> {
+        s.parse::<SdkWriterChecksumType>()
+            .map(Self::from)
+            .map_err(pyo3::exceptions::PyValueError::new_err)
+    }
+}
+
+impl From<SdkWriterChecksumType> for PyWriterChecksumType {
+    fn from(ty: SdkWriterChecksumType) -> Self {
+        match ty {
+            SdkWriterChecksumType::Null => Self::Null,
+            SdkWriterChecksumType::Crc32 => Self::Crc32,
+            SdkWriterChecksumType::Crc32c => Self::Crc32c,
+        }
+    }
+}
+
+impl From<PyWriterChecksumType> for SdkWriterChecksumType {
+    fn from(ty: PyWriterChecksumType) -> Self {
+        match ty {
+            PyWriterChecksumType::Null => Self::Null,
+            PyWriterChecksumType::Crc32 => Self::Crc32,
+            PyWriterChecksumType::Crc32c => Self::Crc32c,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +265,17 @@ mod tests {
             let back: SdkReadType = py.into();
             assert_eq!(rt, back);
         }
+    }
+
+    #[test]
+    fn writer_checksum_type_round_trips_through_sdk() {
+        for ty in SdkWriterChecksumType::ALL {
+            let py: PyWriterChecksumType = ty.into();
+            let back: SdkWriterChecksumType = py.into();
+            assert_eq!(ty, back);
+        }
+        assert_eq!(PyWriterChecksumType::Null as i32, 0);
+        assert_eq!(PyWriterChecksumType::Crc32 as i32, 1);
+        assert_eq!(PyWriterChecksumType::Crc32c as i32, 2);
     }
 }

@@ -15,6 +15,13 @@ This document records all notable changes to the `goosefs` Python binding. The f
   wheel; set the switch to `true` (env / properties / storage option) to opt
   in. TTL and capacity are unchanged.
 
+### Added
+
+- **`goosefs.user.streaming.writer.checksum.type`** (`CRC32C` default,
+  `CRC32`, `NULL`), matching Java. Set via `Config(properties=...)` or
+  `GOOSEFS_USER_STREAMING_WRITER_CHECKSUM_TYPE`. `Config.writer_checksum_type`
+  and `WriterChecksumType` expose the resolved value.
+
 ## [0.2.1] — 2026-09-07
 
 ### Removed

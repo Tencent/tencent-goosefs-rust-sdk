@@ -19,8 +19,19 @@ kept aligned. Python-specific notes also appear in
   and is still required to turn the switch on). Set the switch to `true`
   (env / properties / builder) to opt in. TTL (`10min`) and capacity
   (`100000`) are unchanged.
+- **In-tree Castagnoli CRC32C** (`src/io/crc32c.rs`) replaces the `crc32c`
+  crate, same pattern as Guava-compatible murmur3. `CompleteFile` checksum
+  values are unchanged; embedding the SDK no longer adds a CRC crate that
+  Lance does not already carry.
 
 ### Added
+
+- **`goosefs.user.streaming.writer.checksum.type`** (`CRC32C` default,
+  `CRC32`, `NULL`), matching Java `OutStreamOptions`. Env
+  `GOOSEFS_USER_STREAMING_WRITER_CHECKSUM_TYPE`, storage option
+  `goosefs_streaming_writer_checksum_type`, builder
+  `with_writer_checksum_type`. IEEE CRC32 is in-tree (`src/io/crc32.rs`);
+  invalid values keep CRC32C.
 
 - **Publish workflows** — GitHub Actions `Publish Python SDK` and `Publish Rust SDK`
   (`workflow_dispatch` or tags `v*`) upload to PyPI and crates.io via

@@ -97,7 +97,9 @@ pub mod metrics;
 pub mod retry;
 
 // Re-export commonly used types for convenience.
-pub use crate::config::{ConfigRefresher, TransparentAccelerationSwitch, WriteType};
+pub use crate::config::{
+    ConfigRefresher, TransparentAccelerationSwitch, WriteType, WriterChecksumType,
+};
 pub use crate::config::{
     ENV_APP_ID,
     ENV_AUTHORIZATION_PERMISSION_ENABLED,
@@ -132,6 +134,7 @@ pub use crate::config::{
     ENV_TRANSPARENT_ACCELERATION_COSRANGER_ENABLED,
     ENV_TRANSPARENT_ACCELERATION_ENABLED,
     ENV_WORKER_CONNECTION_POOL_SIZE,
+    ENV_WRITER_CHECKSUM_TYPE,
     ENV_WRITE_TYPE,
     IMPERSONATION_NONE,
     STORAGE_OPT_AUTHORIZATION_PERMISSION_ENABLED,
@@ -153,6 +156,7 @@ pub use crate::config::{
     STORAGE_OPT_TRANSPARENT_ACCELERATION_COSRANGER_ENABLED,
     STORAGE_OPT_TRANSPARENT_ACCELERATION_ENABLED,
     STORAGE_OPT_WORKER_CONNECTION_POOL_SIZE,
+    STORAGE_OPT_WRITER_CHECKSUM_TYPE,
     STORAGE_OPT_WRITE_TYPE,
 };
 pub use crate::context::FileSystemContext;
