@@ -11,6 +11,18 @@ kept aligned. Python-specific notes also appear in
 
 ## [Unreleased]
 
+### Changed
+
+- **`create_directory` / `mkdir` now match Java `allowExists=false`.** Creating
+  an existing directory returns `Error::AlreadyExists` (gRPC `ALREADY_EXISTS`,
+  Java `FileAlreadyExistsException`). The previous hard-wired `allow_exists=true`
+  was an OpenDAL `mkdir -p` divergence. `recursive` still only creates missing
+  parents. POSIX `mkdir -p` is
+  [`CreateDirectoryOptions::mkdir_p`] (`allow_exists=true`) via
+  `MasterClient::create_directory_with_options` /
+  `FileSystem::mkdir_with_options`. OpenDAL `GoosefsCore::create_dir` should
+  switch to `mkdir_p()` (or treat `AlreadyExists` as success).
+
 ## [0.2.2] — 2026-09-16
 
 ### Changed

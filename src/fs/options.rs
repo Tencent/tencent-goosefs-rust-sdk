@@ -25,6 +25,7 @@
 //! - [`OpenFileOptions`]  — T9
 //! - [`InStreamOptions`]  — T9
 //! - [`CreateFileOptions`] — xattr inheritance
+//! - [`CreateDirectoryOptions`] — Java `createDirectoryDefaults` (`allowExists=false`)
 
 use crate::fs::write_type::WriteTypeXAttr;
 
@@ -376,6 +377,63 @@ impl DeleteOptions {
 }
 
 // ---------------------------------------------------------------------------
+// CreateDirectoryOptions
+// ---------------------------------------------------------------------------
+
+/// Options for creating a directory.
+///
+/// # Java authority
+///
+/// Matches `FileSystemOptions.createDirectoryDefaults`:
+/// - `allowExists = false` — an existing directory raises
+///   `FileAlreadyExistsException` (gRPC `ALREADY_EXISTS`)
+/// - `recursive = false`
+///
+/// The SDK previously hard-wired `allow_exists=true` so OpenDAL `create_dir`
+/// could act as POSIX `mkdir -p`. That diverged from Java CLI `mkdir`, which
+/// fails when the path already exists. Callers that still want `mkdir -p`
+/// should pass [`CreateDirectoryOptions::mkdir_p`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreateDirectoryOptions {
+    /// Create missing parent directories. Java default is `false`.
+    pub recursive: bool,
+
+    /// Succeed if `path` already exists as a directory. Java default is
+    /// `false` (`FileAlreadyExistsException`). Set `true` for POSIX
+    /// `mkdir -p` / OpenDAL `create_dir`.
+    pub allow_exists: bool,
+}
+
+impl Default for CreateDirectoryOptions {
+    /// Matches Java `createDirectoryDefaults`: non-recursive, exclusive.
+    fn default() -> Self {
+        Self {
+            recursive: false,
+            allow_exists: false,
+        }
+    }
+}
+
+impl CreateDirectoryOptions {
+    /// Create missing parents, but still fail if `path` itself exists.
+    pub fn recursive() -> Self {
+        Self {
+            recursive: true,
+            ..Default::default()
+        }
+    }
+
+    /// POSIX `mkdir -p`: create parents and treat an existing directory as
+    /// success. This is what OpenDAL `GoosefsCore::create_dir` needs.
+    pub fn mkdir_p() -> Self {
+        Self {
+            recursive: true,
+            allow_exists: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GetStatusOptions / ListStatusOptions
 // ---------------------------------------------------------------------------
 
@@ -490,6 +548,38 @@ mod tests {
         assert!(!opts.recursive);
         assert!(opts.unchecked);
         assert!(opts.goosefs_only);
+    }
+
+    // ── CreateDirectoryOptions ─────────────────────────────────────────────
+
+    #[test]
+    fn create_directory_options_match_java_defaults() {
+        let opts = CreateDirectoryOptions::default();
+        assert!(
+            !opts.recursive,
+            "Java createDirectoryDefaults.recursive=false"
+        );
+        assert!(
+            !opts.allow_exists,
+            "Java createDirectoryDefaults.allowExists=false"
+        );
+    }
+
+    #[test]
+    fn create_directory_options_recursive_still_exclusive() {
+        let opts = CreateDirectoryOptions::recursive();
+        assert!(opts.recursive);
+        assert!(
+            !opts.allow_exists,
+            "recursive() must not silently become mkdir -p"
+        );
+    }
+
+    #[test]
+    fn create_directory_options_mkdir_p() {
+        let opts = CreateDirectoryOptions::mkdir_p();
+        assert!(opts.recursive);
+        assert!(opts.allow_exists);
     }
 
     // ── ReadType ───────────────────────────────────────────────────────────

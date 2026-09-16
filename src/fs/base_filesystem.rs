@@ -60,7 +60,8 @@ use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
 use crate::fs::filesystem::FileSystem;
 use crate::fs::options::{
-    CreateFileOptions, DeleteOptions, GetStatusOptions, ListStatusOptions, OpenFileOptions,
+    CreateDirectoryOptions, CreateFileOptions, DeleteOptions, GetStatusOptions, ListStatusOptions,
+    OpenFileOptions,
 };
 use crate::fs::uri_status::URIStatus;
 use crate::fs::write_type::{get_write_type_from_xattr, WriteTypeXAttr};
@@ -400,11 +401,22 @@ impl FileSystem for BaseFileSystem {
     // ── Directory ─────────────────────────────────────────────────────────────
 
     async fn mkdir(&self, path: &str, recursive: bool) -> Result<()> {
+        self.mkdir_with_options(
+            path,
+            CreateDirectoryOptions {
+                recursive,
+                allow_exists: false,
+            },
+        )
+        .await
+    }
+
+    async fn mkdir_with_options(&self, path: &str, options: CreateDirectoryOptions) -> Result<()> {
         let master = self.master();
         crate::metadata_cache::invalidate_on_success(
             self.ctx.acquire_metadata_cache().as_deref(),
             path,
-            master.create_directory(path, recursive).await,
+            master.create_directory_with_options(path, options).await,
         )
     }
 
