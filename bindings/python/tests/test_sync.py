@@ -123,12 +123,13 @@ def test_sync_mkdir_recursive(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
     assert sync_fs.exists(deep)
 
 
-def test_sync_mkdir_is_idempotent(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
-    """Same idempotent semantics as the async wrapper (SDK hard-wires
-    ``allow_exists=true``)."""
-    p = f"{sync_tmp_dir}/idempotent"
+def test_sync_mkdir_existing_raises_already_exists(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
+    """Matches Java CLI ``mkdir``: existing directory raises ``AlreadyExists``."""
+    p = f"{sync_tmp_dir}/exclusive"
     sync_fs.mkdir(p)
-    sync_fs.mkdir(p)  # must not raise
+    with pytest.raises(AlreadyExists):
+        sync_fs.mkdir(p)
+    sync_fs.mkdir(p, allow_exists=True)
     assert sync_fs.exists(p)
 
 

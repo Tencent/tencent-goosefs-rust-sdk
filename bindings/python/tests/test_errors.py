@@ -116,12 +116,21 @@ async def test_notfound_is_catchable_as_goosefs_error(async_fs: AsyncGoosefs, tm
         await async_fs.get_status(f"{tmp_dir}/missing")
 
 
+async def test_already_exists_on_mkdir_existing(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
+    """``AlreadyExists`` is reachable through ``mkdir`` of an existing
+    directory, matching Java ``createDirectoryDefaults.allowExists=false``.
+    """
+    path = f"{tmp_dir}/mkdir-exists"
+    await async_fs.mkdir(path)
+    with pytest.raises(AlreadyExists):
+        await async_fs.mkdir(path)
+
+
 async def test_already_exists_on_rename_to_existing_target(
     async_fs: AsyncGoosefs, tmp_dir: str
 ) -> None:
-    """``AlreadyExists`` is reachable through ``rename``: the destination path
-    must not pre-exist. (``mkdir`` is idempotent because the SDK hard-wires
-    ``allow_exists=true``, so it is *not* a vehicle for ``AlreadyExists``.)
+    """``AlreadyExists`` is also reachable through ``rename``: the destination
+    path must not pre-exist.
     """
     src = f"{tmp_dir}/rename-src"
     dst = f"{tmp_dir}/rename-dst"

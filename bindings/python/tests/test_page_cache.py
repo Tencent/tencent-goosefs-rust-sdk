@@ -106,7 +106,7 @@ def test_cache_enabled_reads_and_persists_pages() -> None:
     fs = Goosefs(_cache_config(cache_dir, enabled=True))
     path = _scratch_path()
     try:
-        fs.mkdir("/tmp/pygoosefs-cache-tests", recursive=True)
+        fs.mkdir("/tmp/pygoosefs-cache-tests", recursive=True, allow_exists=True)
         payload = _make_payload(256 * 1024)  # 4 pages of 64 KiB
         fs.write_file(path, payload, write_type=WriteType.CacheThrough)
 
@@ -136,7 +136,7 @@ def test_cache_overwrite_does_not_serve_stale() -> None:
     fs = Goosefs(_cache_config(cache_dir, enabled=True))
     path = _scratch_path()
     try:
-        fs.mkdir("/tmp/pygoosefs-cache-tests", recursive=True)
+        fs.mkdir("/tmp/pygoosefs-cache-tests", recursive=True, allow_exists=True)
 
         v1 = b"\xaa" * (128 * 1024)
         fs.write_file(path, v1, write_type=WriteType.CacheThrough)
@@ -164,7 +164,7 @@ def test_cache_disabled_still_reads() -> None:
     fs = Goosefs(_cache_config(cache_dir, enabled=False))
     path = _scratch_path()
     try:
-        fs.mkdir("/tmp/pygoosefs-cache-tests", recursive=True)
+        fs.mkdir("/tmp/pygoosefs-cache-tests", recursive=True, allow_exists=True)
         payload = _make_payload(64 * 1024)
         fs.write_file(path, payload, write_type=WriteType.CacheThrough)
         assert _read_all_via_stream(fs, path) == payload
@@ -187,7 +187,7 @@ def test_sequential_read_bypasses_cache_by_default() -> None:
     fs = Goosefs(_cache_config(cache_dir, enabled=True, sequential_read=False))
     path = _scratch_path()
     try:
-        fs.mkdir("/tmp/pygoosefs-cache-tests", recursive=True)
+        fs.mkdir("/tmp/pygoosefs-cache-tests", recursive=True, allow_exists=True)
         payload = _make_payload(256 * 1024)  # 4 pages of 64 KiB
         fs.write_file(path, payload, write_type=WriteType.CacheThrough)
 
@@ -221,7 +221,7 @@ def test_read_file_bypasses_page_cache_and_does_not_hang() -> None:
     fs = Goosefs(_cache_config(cache_dir, enabled=True))
     path = _scratch_path()
     try:
-        fs.mkdir("/tmp/pygoosefs-cache-tests", recursive=True)
+        fs.mkdir("/tmp/pygoosefs-cache-tests", recursive=True, allow_exists=True)
         # 4 × 64 KiB pages — the size that used to hang on the 2nd page too.
         payload = _make_payload(4 * PAGE_SIZE)
         fs.write_file(path, payload, write_type=WriteType.Through)
