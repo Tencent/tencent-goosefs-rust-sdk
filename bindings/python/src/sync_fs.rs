@@ -418,6 +418,7 @@ impl PyGoosefs {
             recursive,
             unchecked,
             goosefs_only,
+            ..Default::default()
         };
         Self::guarded_block_on(py, async move {
             use futures::stream::{self, StreamExt};
@@ -534,6 +535,7 @@ impl PyGoosefs {
             recursive,
             unchecked,
             goosefs_only,
+            ..Default::default()
         };
         Self::guarded_block_on(py, async move {
             h.fs.delete(&path, opts).await.map_err(map_err)
@@ -555,13 +557,82 @@ impl PyGoosefs {
         })
     }
 
-    /// `fs.rename(src, dst)`.
-    fn rename(&self, py: Python<'_>, src: String, dst: String) -> PyResult<()> {
+    /// `fs.rename(src, dst, *, persist=None)`.
+    #[pyo3(signature = (src, dst, *, persist=None))]
+    fn rename(
+        &self,
+        py: Python<'_>,
+        src: String,
+        dst: String,
+        persist: Option<bool>,
+    ) -> PyResult<()> {
         let h = self.handle()?;
-        Self::guarded_block_on(
-            py,
-            async move { h.fs.rename(&src, &dst).await.map_err(map_err) },
-        )
+        Self::guarded_block_on(py, async move {
+            match persist {
+                None => h.fs.rename(&src, &dst).await.map_err(map_err),
+                Some(p) => {
+                    h.fs.rename_with_options(
+                        &src,
+                        &dst,
+                        goosefs_sdk::fs::options::RenameOptions { persist: Some(p) },
+                    )
+                    .await
+                    .map_err(map_err)
+                }
+            }
+        })
+    }
+
+    /// `fs.persist(path, *, persistence_wait_time=None)`.
+    #[pyo3(signature = (path, *, persistence_wait_time=None))]
+    fn persist(
+        &self,
+        py: Python<'_>,
+        path: String,
+        persistence_wait_time: Option<i64>,
+    ) -> PyResult<()> {
+        let h = self.handle()?;
+        Self::guarded_block_on(py, async move {
+            h.fs.persist(
+                &path,
+                goosefs_sdk::fs::options::PersistOptions {
+                    persistence_wait_time,
+                },
+            )
+            .await
+            .map_err(map_err)
+        })
+    }
+
+    /// `fs.set_attribute(path, *, owner=None, group=None, mode=None, ...)`.
+    #[pyo3(signature = (path, *, owner=None, group=None, mode=None, recursive=false, persisted=None, read_type=None, write_type=None, direct_children_load=None))]
+    fn set_attribute(
+        &self,
+        py: Python<'_>,
+        path: String,
+        owner: Option<String>,
+        group: Option<String>,
+        mode: Option<u32>,
+        recursive: bool,
+        persisted: Option<bool>,
+        read_type: Option<crate::types::PyReadType>,
+        write_type: Option<crate::types::PyWriteType>,
+        direct_children_load: Option<bool>,
+    ) -> PyResult<()> {
+        let h = self.handle()?;
+        let opts = goosefs_sdk::fs::options::SetAttributeOptions {
+            persisted,
+            owner,
+            group,
+            mode,
+            recursive,
+            read_type: read_type.map(Into::into),
+            write_type: write_type.map(Into::into),
+            direct_children_load,
+        };
+        Self::guarded_block_on(py, async move {
+            h.fs.set_attribute(&path, opts).await.map_err(map_err)
+        })
     }
 
     // ── High-level read / write ─────────────────────────────────────────────

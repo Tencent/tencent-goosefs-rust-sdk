@@ -643,8 +643,9 @@ async fn opendal_invalidate_file_info_after_mutation() -> Result<()> {
     let path = format!("{root}/cached.bin");
     write_via_sdk(&ctx, &path, b"v1").await?;
 
-    // Warm the context metadata cache (OpenDAL readers go through
-    // `open_with_context` → `get_file_info_cached`).
+    // Warm the context metadata cache. OpenDAL readers now RPC GetStatus on
+    // `open_with_context` (Java `openFile` parity); the cache is still used by
+    // `stat` / exists and must be invalidated before delete.
     let warm = read_streaming(&ctx, &path).await?;
     assert_eq!(warm, b"v1");
 

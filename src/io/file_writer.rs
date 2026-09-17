@@ -328,6 +328,11 @@ pub struct GoosefsFileWriter {
     /// is already cached), and authentication is proven to work. Java
     /// `openBlock`.
     block_opened: bool,
+    /// Per-file replica target (Java `OutStreamOptions.replicationNum`).
+    ///
+    /// Defaults to [`GoosefsConfig::file_replication_number`];
+    /// [`CreateFileOptions::replication_max`] overrides it.
+    replication_number: i32,
     /// Block IDs that have been successfully committed to workers.
     /// Used for cancel/rollback — matches Java's `mPreviousCommittedBlockIds`.
     committed_block_ids: Vec<i64>,
@@ -431,6 +436,7 @@ impl GoosefsFileWriter {
         // SAFETY: We clone the MasterClient from Arc<MasterClient>.
         // The file_writer holds it by value; the Arc in ctx keeps the channel alive.
         let master = (*master_arc).clone();
+        let replication_number = config.file_replication_number;
 
         let mut writer = Self {
             config,
@@ -448,6 +454,7 @@ impl GoosefsFileWriter {
             should_cache: write_strategy.cache_stream,
             ufs_write_enabled: write_strategy.ufs_stream,
             block_opened: false,
+            replication_number,
             write_strategy,
             committed_block_ids: Vec::new(),
             current_block_writer: None,
@@ -490,6 +497,13 @@ impl GoosefsFileWriter {
         }
 
         Ok(writer)
+    }
+
+    /// Override the per-file replica count (Java `OutStreamOptions.replicationNum`).
+    ///
+    /// Must be called before the first `write()`. Values `< 1` are clamped to 1.
+    pub fn set_replication_number(&mut self, n: i32) {
+        self.replication_number = n.max(1);
     }
 
     /// Lazily populate the local worker router from the shared context.
@@ -788,7 +802,7 @@ impl GoosefsFileWriter {
         let async_through = self.write_strategy.need_async_persist;
         let plan = replica_write_plan(
             async_through,
-            self.config.file_replication_number,
+            self.replication_number,
             self.config.file_replication_durable,
             self.config.file_replication_durable_min,
             self.config.file_write_max_node_retry,
@@ -2168,6 +2182,11 @@ fn apply_create_file_defaults(create_options: &mut CreateFilePOptions, config: &
     if create_options.persistence_wait_time.is_none() {
         create_options.persistence_wait_time = Some(config.file_persistence_initial_wait_time_ms);
     }
+    if create_options.default_write_type.is_none() {
+        create_options.default_write_type = config
+            .write_type
+            .or(Some(crate::proto::grpc::file::WritePType::MustCache as i32));
+    }
 }
 
 /// Java `OutStreamOptions.getCrcType()` / `getCrcValue()` for
@@ -2731,6 +2750,12 @@ mod tests {
         assert_eq!(opts.recursive, Some(true));
         assert_eq!(opts.block_size_bytes, Some(config.block_size as i64));
         assert_eq!(opts.write_type, config.write_type);
+        assert_eq!(
+            opts.default_write_type,
+            config
+                .write_type
+                .or(Some(crate::proto::grpc::file::WritePType::MustCache as i32))
+        );
     }
 
     #[test]
@@ -2748,6 +2773,44 @@ mod tests {
         assert_eq!(opts.persistence_wait_time, Some(0));
         assert_eq!(opts.mode, Some(default_file_mode()));
         assert_eq!(opts.block_size_bytes, Some(config.block_size as i64));
+    }
+
+    #[test]
+    fn create_file_defaults_fill_must_cache_when_config_write_type_unset() {
+        let mut config = GoosefsConfig::new("127.0.0.1:9200");
+        config.write_type = None;
+        let mut opts = CreateFilePOptions::default();
+        apply_create_file_defaults(&mut opts, &config);
+        assert_eq!(
+            opts.default_write_type,
+            Some(crate::proto::grpc::file::WritePType::MustCache as i32)
+        );
+        assert!(opts.write_type.is_none());
+    }
+
+    #[test]
+    fn create_file_defaults_preserve_caller_default_write_type() {
+        let config = GoosefsConfig::new("127.0.0.1:9200");
+        let mut opts = CreateFilePOptions {
+            default_write_type: Some(crate::proto::grpc::file::WritePType::CacheThrough as i32),
+            ..Default::default()
+        };
+        apply_create_file_defaults(&mut opts, &config);
+        assert_eq!(
+            opts.default_write_type,
+            Some(crate::proto::grpc::file::WritePType::CacheThrough as i32)
+        );
+    }
+
+    #[tokio::test]
+    async fn set_replication_number_clamps_below_one() {
+        let mut writer = make_drop_test_writer();
+        writer.set_replication_number(0);
+        assert_eq!(writer.replication_number, 1);
+        writer.set_replication_number(-4);
+        assert_eq!(writer.replication_number, 1);
+        writer.set_replication_number(3);
+        assert_eq!(writer.replication_number, 3);
     }
 
     #[test]
@@ -2850,6 +2913,7 @@ mod tests {
             should_cache: strategy.cache_stream,
             ufs_write_enabled: strategy.ufs_stream,
             block_opened: false,
+            replication_number: 1,
             write_strategy: strategy,
             committed_block_ids: Vec::new(),
             current_block_writer: None,

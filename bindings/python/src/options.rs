@@ -81,12 +81,15 @@ impl PyOpenFileOptions {
     // Allowed because the first call site lands in P5 (`open_file`).
     #[allow(dead_code)]
     pub(crate) fn into_sdk(self) -> SdkOpenFileOptions {
+        let inherit = self.read_type == PyReadType::Cache;
         let in_stream = SdkInStreamOptions {
             read_type: self.read_type.into(),
             ..Default::default()
         };
         SdkOpenFileOptions {
             in_stream_options: in_stream,
+            update_last_access_time: true,
+            inherit_read_type: inherit,
         }
     }
 }
@@ -240,6 +243,7 @@ impl PyDeleteOptions {
             recursive: self.recursive,
             unchecked: self.unchecked,
             goosefs_only: self.goosefs_only,
+            ..Default::default()
         }
     }
 }
