@@ -139,9 +139,7 @@ async def test_mkdir_recursive_creates_intermediate_dirs(
     assert await async_fs.exists(deep)
 
 
-async def test_mkdir_existing_raises_already_exists(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_mkdir_existing_raises_already_exists(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     """``mkdir`` matches Java CLI: an existing directory raises ``AlreadyExists``.
 
     ``recursive=True`` only creates missing parents; it does not make the
