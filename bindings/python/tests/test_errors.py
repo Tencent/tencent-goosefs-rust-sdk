@@ -116,9 +116,7 @@ async def test_notfound_is_catchable_as_goosefs_error(async_fs: AsyncGoosefs, tm
         await async_fs.get_status(f"{tmp_dir}/missing")
 
 
-async def test_already_exists_on_mkdir_existing(
-    async_fs: AsyncGoosefs, tmp_dir: str
-) -> None:
+async def test_already_exists_on_mkdir_existing(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
     """``AlreadyExists`` is reachable through ``mkdir`` of an existing
     directory, matching Java ``createDirectoryDefaults.allowExists=false``.
     """

@@ -123,9 +123,7 @@ def test_sync_mkdir_recursive(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
     assert sync_fs.exists(deep)
 
 
-def test_sync_mkdir_existing_raises_already_exists(
-    sync_fs: Goosefs, sync_tmp_dir: str
-) -> None:
+def test_sync_mkdir_existing_raises_already_exists(sync_fs: Goosefs, sync_tmp_dir: str) -> None:
     """Matches Java CLI ``mkdir``: existing directory raises ``AlreadyExists``."""
     p = f"{sync_tmp_dir}/exclusive"
     sync_fs.mkdir(p)
