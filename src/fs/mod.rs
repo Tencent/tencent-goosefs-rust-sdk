@@ -30,8 +30,9 @@ pub mod write_type;
 pub use base_filesystem::BaseFileSystem;
 pub use filesystem::FileSystem;
 pub use options::{
-    ufs_block_length, CreateFileOptions, DeleteOptions, GetStatusOptions, InStreamOptions,
-    ListStatusOptions, OpenFileOptions, ReadType,
+    get_read_type_from_xattr, ufs_block_length, CreateFileOptions, DeleteOptions, GetStatusOptions,
+    InStreamOptions, ListStatusOptions, OpenFileOptions, PersistOptions, ReadType, RenameOptions,
+    SetAttributeOptions, READ_TYPE_XATTR_KEY,
 };
 pub use uri_status::URIStatus;
 pub use write_type::{get_write_type_from_xattr, WriteTypeXAttr, WRITE_TYPE_XATTR_KEY};

@@ -395,8 +395,10 @@ impl FileSystemContext {
 
     /// Fetch `FileInfo` for `path`, consulting the metadata cache when present.
     ///
-    /// Open paths share this with `BaseFileSystem::get_status` so a prior
-    /// `get_status` hit means open issues zero extra getStatus RPCs.
+    /// Used by `BaseFileSystem::get_status` / `exists` and by
+    /// [`crate::io::GoosefsFileReader`]. `FileSystem::open_file` /
+    /// [`crate::io::GoosefsFileInStream`] RPC GetStatus instead (Java
+    /// `BaseFileSystem.openFile`).
     /// CheckBlocks enrichment must clone the result (INV-MC-D1).
     pub(crate) async fn get_file_info_cached(
         &self,

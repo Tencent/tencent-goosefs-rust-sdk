@@ -25,7 +25,13 @@
 //! - [`OpenFileOptions`]  — T9
 //! - [`InStreamOptions`]  — T9
 //! - [`CreateFileOptions`] — xattr inheritance
+//!
+//! Java-client parity (open / mkdir / persist / setAttribute / per-call options):
+//! - [`RenameOptions`], [`SetAttributeOptions`], [`PersistOptions`]
+//! - GetStatus `access_mode` / `resolve_link` / `update_timestamps` / `check_block_replicas`
+//! - OpenFile `update_last_access_time` / `no_ufs_fallback` / `local_first` / `innerReadType`
 
+use crate::config::WriteType;
 use crate::fs::write_type::WriteTypeXAttr;
 
 // ---------------------------------------------------------------------------
@@ -74,6 +80,25 @@ impl ReadType {
     }
 }
 
+/// xattr key for a directory/file read policy (Java `ReadType.FIELD_NAME`).
+pub const READ_TYPE_XATTR_KEY: &str = "innerReadType";
+
+/// Parse `innerReadType` from a `URIStatus.xattr` map.
+///
+/// Java `BaseFileSystem.getReadTypeFromStatus` uses `ReadType.valueOf` on the
+/// UTF-8 value (`NO_CACHE` / `CACHE`). Unknown or missing values return `None`.
+pub fn get_read_type_from_xattr(
+    xattr: &std::collections::HashMap<String, Vec<u8>>,
+) -> Option<ReadType> {
+    let raw = xattr.get(READ_TYPE_XATTR_KEY)?;
+    let s = std::str::from_utf8(raw).ok()?;
+    match s.to_ascii_uppercase().as_str() {
+        "NO_CACHE" | "NOCACHE" => Some(ReadType::NoCache),
+        "CACHE" => Some(ReadType::Cache),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // InStreamOptions
 // ---------------------------------------------------------------------------
@@ -89,6 +114,8 @@ impl ReadType {
 /// - `position_short` — `false`
 /// - `max_ufs_read_concurrency` — `8`
 /// - `prefetch_window` — `1`
+/// - `no_ufs_fallback` — `false` (Java `OpenFilePOptions.noUfsFallback`)
+/// - `local_first` — `false` (Java `OpenFilePOptions.localFirst`)
 #[derive(Debug, Clone)]
 pub struct InStreamOptions {
     /// Cache strategy for this read.
@@ -113,6 +140,14 @@ pub struct InStreamOptions {
     /// `1` = no prefetch beyond current chunk.  The stream may adapt this
     /// value dynamically based on observed access pattern.
     pub prefetch_window: i32,
+
+    /// When `true`, omit `OpenUfsBlockOptions` so the Worker cannot fall
+    /// back to UFS (Java persist-job / local-block-only reads).
+    pub no_ufs_fallback: bool,
+
+    /// Prefer a co-located worker from the read candidate pool (Java
+    /// `GooseFSBlockStore` `localFirst=true`).
+    pub local_first: bool,
 }
 
 impl Default for InStreamOptions {
@@ -122,6 +157,8 @@ impl Default for InStreamOptions {
             position_short: false,
             max_ufs_read_concurrency: 8,
             prefetch_window: 1,
+            no_ufs_fallback: false,
+            local_first: false,
         }
     }
 }
@@ -214,14 +251,35 @@ pub fn ufs_block_length(file_length: i64, block_size_bytes: i64, block_index: u6
 /// let opts = OpenFileOptions::default();
 ///
 /// // Explicitly disable caching for a scan
-/// let no_cache = OpenFileOptions {
-///     in_stream_options: goosefs_sdk::fs::options::InStreamOptions::no_cache(),
-/// };
+/// let no_cache = OpenFileOptions::no_cache();
+/// assert_eq!(no_cache.in_stream_options.read_type, ReadType::NoCache);
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct OpenFileOptions {
     /// Options forwarded to the underlying file input stream.
     pub in_stream_options: InStreamOptions,
+
+    /// Java `OpenFilePOptions.updateLastAccessTime` (proto default `true`).
+    ///
+    /// Forwarded to the open-path `GetStatus` as `update_timestamps`.
+    pub update_last_access_time: bool,
+
+    /// When `true` (default), `open_file` prefers the file inode's
+    /// `innerReadType` xattr over [`InStreamOptions::read_type`], matching
+    /// Java `openFile` when the caller did not set `ReadPType`.
+    ///
+    /// [`OpenFileOptions::no_cache`] sets this to `false`.
+    pub inherit_read_type: bool,
+}
+
+impl Default for OpenFileOptions {
+    fn default() -> Self {
+        Self {
+            in_stream_options: InStreamOptions::default(),
+            update_last_access_time: true,
+            inherit_read_type: true,
+        }
+    }
 }
 
 impl OpenFileOptions {
@@ -234,6 +292,8 @@ impl OpenFileOptions {
     pub fn no_cache() -> Self {
         Self {
             in_stream_options: InStreamOptions::no_cache(),
+            update_last_access_time: true,
+            inherit_read_type: false,
         }
     }
 }
@@ -262,7 +322,11 @@ pub struct CreateFileOptions {
     /// Block size in bytes.  `None` → use server/config default.
     pub block_size_bytes: Option<i64>,
 
-    /// Replication factor.  `None` → use server default.
+    /// Per-file override of [`crate::config::GoosefsConfig::file_replication_number`].
+    ///
+    /// Not a CreateFile proto field (Java keeps this on `OutStreamOptions`).
+    /// `None` → use config. `Some(n)` → `GoosefsFileWriter` opens that many
+    /// cache replicas for this file.
     pub replication_max: Option<i32>,
 
     /// Whether to create intermediate directories.  Defaults to `false`.
@@ -326,6 +390,13 @@ pub struct DeleteOptions {
     /// Restrict deletion to the Goosefs namespace only; do not propagate to
     /// the underlying storage (UFS).  Used during CACHE_THROUGH error recovery.
     pub goosefs_only: bool,
+
+    /// Java `DeletePOptions.ttl` (default false). Marks a TTL-driven delete.
+    pub ttl: bool,
+
+    /// Java `DeletePOptions.ttlExpectMtime`. When non-zero, Master requires
+    /// the inode mtime to match this value.
+    pub ttl_expect_mtime: i64,
 }
 
 impl Default for DeleteOptions {
@@ -336,6 +407,8 @@ impl Default for DeleteOptions {
             recursive: false,
             unchecked: true,
             goosefs_only: false,
+            ttl: false,
+            ttl_expect_mtime: 0,
         }
     }
 }
@@ -358,6 +431,8 @@ impl DeleteOptions {
             recursive: false,
             unchecked: true,
             goosefs_only: false,
+            ttl: false,
+            ttl_expect_mtime: 0,
         }
     }
 
@@ -371,6 +446,8 @@ impl DeleteOptions {
             recursive: false,
             unchecked: true,
             goosefs_only: true,
+            ttl: false,
+            ttl_expect_mtime: 0,
         }
     }
 }
@@ -390,6 +467,17 @@ pub struct GetStatusOptions {
     /// `None` = `GoosefsConfig::file_metadata_load_type` (default `ONCE`).
     /// Sent on the Master `GetStatus` RPC (Java `getStatusDefaults`).
     pub load_metadata_type: Option<crate::proto::grpc::file::LoadMetadataPType>,
+    /// Java `GetStatusPOptions.accessMode`. `None` = unset (plain getStatus).
+    /// Open path sets `Bits::Read`.
+    pub access_mode: Option<i32>,
+    /// Java `GetStatusPOptions.updateTimestamps` (proto default true).
+    /// `None` = leave unset so Master uses proto default.
+    pub update_timestamps: Option<bool>,
+    /// Java `GetStatusPOptions.resolveLink` (proto default false).
+    pub resolve_link: Option<bool>,
+    /// Java `GetStatusPOptions.checkBlockReplicas`. `None` = fall back to
+    /// [`crate::config::GoosefsConfig::check_block_replicas`].
+    pub check_block_replicas: Option<i32>,
 }
 
 impl GetStatusOptions {
@@ -397,7 +485,7 @@ impl GetStatusOptions {
     pub fn always_sync() -> Self {
         Self {
             sync_interval_ms: Some(0),
-            load_metadata_type: None,
+            ..Self::default()
         }
     }
 }
@@ -446,6 +534,48 @@ impl ListStatusOptions {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Rename / persist / setAttribute
+// ---------------------------------------------------------------------------
+
+/// Per-call options for [`crate::fs::FileSystem::rename_with_options`].
+///
+/// `persist = None` falls back to [`crate::config::GoosefsConfig::file_persist_on_rename`].
+#[derive(Debug, Clone, Default)]
+pub struct RenameOptions {
+    /// Java `RenamePOptions.persist`. `None` → config `file_persist_on_rename`.
+    pub persist: Option<bool>,
+}
+
+/// Options for [`crate::fs::FileSystem::persist`].
+///
+/// Maps to `ScheduleAsyncPersistencePOptions`. Java
+/// `scheduleAsyncPersistenceDefaults` sets `persistenceWaitTime = 0`.
+#[derive(Debug, Clone, Default)]
+pub struct PersistOptions {
+    /// Delay in milliseconds before the Master schedules the persist job.
+    /// `None` → `0` (Java default).
+    pub persistence_wait_time: Option<i64>,
+}
+
+/// Options for [`crate::fs::FileSystem::set_attribute`].
+///
+/// Maps to `SetAttributePOptions`. Unset optional fields are omitted on the
+/// wire so the Master does not treat them as intentional overwrites (Java
+/// `setAttributeClientDefaults` only sends `syncIntervalMs` by default).
+#[derive(Debug, Clone, Default)]
+pub struct SetAttributeOptions {
+    pub persisted: Option<bool>,
+    pub owner: Option<String>,
+    pub group: Option<String>,
+    /// Unix mode bits (e.g. `0o644`). Converted to proto `PMode` on the wire.
+    pub mode: Option<u32>,
+    pub recursive: bool,
+    pub read_type: Option<ReadType>,
+    pub write_type: Option<WriteType>,
+    pub direct_children_load: Option<bool>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,6 +593,8 @@ mod tests {
             "Java USER_FILE_DELETE_UNCHECKED default is true"
         );
         assert!(!opts.goosefs_only);
+        assert!(!opts.ttl);
+        assert_eq!(opts.ttl_expect_mtime, 0);
     }
 
     #[test]
@@ -520,6 +652,8 @@ mod tests {
     fn test_in_stream_no_cache() {
         let opts = InStreamOptions::no_cache();
         assert_eq!(opts.read_type, ReadType::NoCache);
+        assert!(!opts.no_ufs_fallback);
+        assert!(!opts.local_first);
     }
 
     #[test]
@@ -578,6 +712,10 @@ mod tests {
     fn test_open_file_default() {
         let opts = OpenFileOptions::default();
         assert_eq!(opts.in_stream_options.read_type, ReadType::Cache);
+        assert!(opts.update_last_access_time);
+        assert!(opts.inherit_read_type);
+        assert!(!opts.in_stream_options.no_ufs_fallback);
+        assert!(!opts.in_stream_options.local_first);
     }
 
     #[test]
@@ -610,6 +748,23 @@ mod tests {
         let opts = GetStatusOptions::always_sync();
         assert_eq!(opts.sync_interval_ms, Some(0));
         assert!(opts.load_metadata_type.is_none());
+        assert!(opts.access_mode.is_none());
+        assert!(opts.update_timestamps.is_none());
+        assert!(opts.resolve_link.is_none());
+        assert!(opts.check_block_replicas.is_none());
+    }
+
+    #[test]
+    fn test_rename_persist_set_attribute_defaults() {
+        assert!(RenameOptions::default().persist.is_none());
+        assert!(PersistOptions::default().persistence_wait_time.is_none());
+        let attr = SetAttributeOptions::default();
+        assert!(attr.owner.is_none());
+        assert!(attr.group.is_none());
+        assert!(attr.mode.is_none());
+        assert!(!attr.recursive);
+        assert!(attr.read_type.is_none());
+        assert!(attr.write_type.is_none());
     }
 
     #[test]
@@ -618,5 +773,26 @@ mod tests {
         assert!(opts.recursive);
         assert!(opts.sync_interval_ms.is_none());
         assert!(!opts.load_metadata_only);
+    }
+
+    #[test]
+    fn test_read_type_xattr() {
+        let mut x = std::collections::HashMap::new();
+        x.insert(READ_TYPE_XATTR_KEY.to_string(), b"NO_CACHE".to_vec());
+        assert_eq!(get_read_type_from_xattr(&x), Some(ReadType::NoCache));
+        x.insert(READ_TYPE_XATTR_KEY.to_string(), b"CACHE".to_vec());
+        assert_eq!(get_read_type_from_xattr(&x), Some(ReadType::Cache));
+        assert_eq!(
+            get_read_type_from_xattr(&std::collections::HashMap::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn test_open_file_no_cache_does_not_inherit() {
+        let opts = OpenFileOptions::no_cache();
+        assert_eq!(opts.in_stream_options.read_type, ReadType::NoCache);
+        assert!(!opts.inherit_read_type);
+        assert!(opts.update_last_access_time);
     }
 }

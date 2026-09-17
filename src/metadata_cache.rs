@@ -423,7 +423,7 @@ pub fn invalidate_rename_on_success<T>(
     Ok(value)
 }
 
-/// Resolve a getStatus/open from the cache, or fetch from Master.
+/// Resolve a getStatus from the cache, or fetch from Master.
 ///
 /// When `sync_interval_ms == 0` the cache is not consulted, but a successful
 /// (or NotFound) RPC is still written back. Incomplete cached entries fall

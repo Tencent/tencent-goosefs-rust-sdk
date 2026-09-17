@@ -54,6 +54,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::client::master::{get_status_p_options_full, GetStatusWireOpts};
 use crate::client::MasterClient;
 use crate::config::{GoosefsConfig, WriteType};
 use crate::context::FileSystemContext;
@@ -61,6 +62,7 @@ use crate::error::{Error, Result};
 use crate::fs::filesystem::FileSystem;
 use crate::fs::options::{
     CreateFileOptions, DeleteOptions, GetStatusOptions, ListStatusOptions, OpenFileOptions,
+    PersistOptions, RenameOptions, SetAttributeOptions,
 };
 use crate::fs::uri_status::URIStatus;
 use crate::fs::write_type::{get_write_type_from_xattr, WriteTypeXAttr};
@@ -232,13 +234,15 @@ impl BaseFileSystem {
             ..Default::default()
         };
 
-        GoosefsFileWriter::write_file_with_context_and_options(
-            self.ctx.clone(),
-            path,
-            data,
-            Some(proto_opts),
-        )
-        .await
+        let mut writer =
+            GoosefsFileWriter::create_with_context(self.ctx.clone(), path, Some(proto_opts))
+                .await?;
+        if let Some(n) = options.replication_max {
+            writer.set_replication_number(n);
+        }
+        writer.write(data).await?;
+        writer.close().await?;
+        Ok(writer.bytes_written())
     }
 }
 
@@ -264,9 +268,17 @@ impl FileSystem for BaseFileSystem {
             .unwrap_or(self.config.file_metadata_load_type);
         let master = self.master();
         let cache = self.ctx.acquire_metadata_cache();
+        let p_opts = get_status_p_options_full(GetStatusWireOpts {
+            load_metadata_type: Some(load),
+            sync_interval_ms: Some(sync),
+            access_mode: opts.access_mode,
+            update_timestamps: opts.update_timestamps,
+            resolve_link: opts.resolve_link,
+            check_block_replicas: opts.check_block_replicas.filter(|n| *n > 0),
+        });
         let mut fi =
             crate::metadata_cache::get_status_through_cache(cache.as_deref(), path, sync, || {
-                master.get_status_with_load_type(path, Some(load), Some(sync))
+                master.get_status_with_p_options(path, p_opts.clone())
             })
             .await?;
         // Mirror Java getStatus when checkBlockReplicas > 0: probe workers and
@@ -279,7 +291,9 @@ impl FileSystem for BaseFileSystem {
         // argument, so without a cheap fill MustCache writes always report 0.
         // CheckBlocks, when enabled, stays authoritative — do not overlay the
         // MustCache heuristic after a probe that found 0 cached bytes.
-        let check = self.ctx.config().check_block_replicas;
+        let check = opts
+            .check_block_replicas
+            .unwrap_or(self.ctx.config().check_block_replicas);
         if check > 0 {
             let router = self.ctx.acquire_router();
             let view = crate::block::router::WorkerRouterView::from_shared(&router);
@@ -331,7 +345,13 @@ impl FileSystem for BaseFileSystem {
             // at every BFS level — Java recursive listStatus does not force Always;
             // the default is goosefs.user.file.metadata.load.type (ONCE).
             let items = master
-                .list_status_with_options(path, true, Some(load), Some(sync))
+                .list_status_with_options(
+                    path,
+                    true,
+                    Some(load),
+                    Some(sync),
+                    opts.load_metadata_only,
+                )
                 .await?;
             return Ok(items.into_iter().map(URIStatus::from_proto).collect());
         }
@@ -347,7 +367,13 @@ impl FileSystem for BaseFileSystem {
             crate::metadata_cache::list_status_through_cache(cache.as_deref(), path, skip, || {
                 // Java `listStatusDefaults()` always sets loadMetadataType
                 // (default ONCE), including non-recursive listings.
-                master.list_status_with_options(path, false, Some(load), Some(sync))
+                master.list_status_with_options(
+                    path,
+                    false,
+                    Some(load),
+                    Some(sync),
+                    opts.load_metadata_only,
+                )
             })
             .await?;
         Ok(items.into_iter().map(URIStatus::from_proto).collect())
@@ -394,7 +420,13 @@ impl FileSystem for BaseFileSystem {
             ..Default::default()
         };
 
-        GoosefsFileWriter::create_with_context(self.ctx.clone(), path, Some(proto_opts)).await
+        let mut writer =
+            GoosefsFileWriter::create_with_context(self.ctx.clone(), path, Some(proto_opts))
+                .await?;
+        if let Some(n) = options.replication_max {
+            writer.set_replication_number(n);
+        }
+        Ok(writer)
     }
 
     // ── Directory ─────────────────────────────────────────────────────────────
@@ -422,12 +454,41 @@ impl FileSystem for BaseFileSystem {
     // ── Rename ────────────────────────────────────────────────────────────────
 
     async fn rename(&self, src: &str, dst: &str) -> Result<()> {
+        self.rename_with_options(src, dst, RenameOptions::default())
+            .await
+    }
+
+    async fn rename_with_options(
+        &self,
+        src: &str,
+        dst: &str,
+        options: RenameOptions,
+    ) -> Result<()> {
+        let persist = options
+            .persist
+            .unwrap_or(self.config.file_persist_on_rename);
         let master = self.master();
         crate::metadata_cache::invalidate_rename_on_success(
             self.ctx.acquire_metadata_cache().as_deref(),
             src,
             dst,
-            master.rename(src, dst).await,
+            master.rename_with_persist(src, dst, persist).await,
+        )
+    }
+
+    async fn persist(&self, path: &str, options: PersistOptions) -> Result<()> {
+        let wait = options.persistence_wait_time.unwrap_or(0);
+        self.master()
+            .schedule_async_persistence(path, Some(wait))
+            .await
+    }
+
+    async fn set_attribute(&self, path: &str, options: SetAttributeOptions) -> Result<()> {
+        let master = self.master();
+        crate::metadata_cache::invalidate_on_success(
+            self.ctx.acquire_metadata_cache().as_deref(),
+            path,
+            master.set_attribute(path, options).await,
         )
     }
 }
