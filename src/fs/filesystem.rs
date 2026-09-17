@@ -154,5 +154,25 @@ pub trait FileSystem: Send + Sync + 'static {
     // ── Rename ───────────────────────────────────────────────────────────────
 
     /// Rename / move a file or directory.
+    ///
+    /// `RenamePOptions.persist` follows [`crate::config::GoosefsConfig::file_persist_on_rename`].
     async fn rename(&self, src: &str, dst: &str) -> Result<()>;
+
+    /// Rename with per-call [`crate::fs::options::RenameOptions`].
+    async fn rename_with_options(
+        &self,
+        src: &str,
+        dst: &str,
+        options: crate::fs::options::RenameOptions,
+    ) -> Result<()>;
+
+    /// Schedule asynchronous persistence (Java `FileSystem.persist`).
+    async fn persist(&self, path: &str, options: crate::fs::options::PersistOptions) -> Result<()>;
+
+    /// Set owner / group / mode / read-write policy (Java `FileSystem.setAttribute`).
+    async fn set_attribute(
+        &self,
+        path: &str,
+        options: crate::fs::options::SetAttributeOptions,
+    ) -> Result<()>;
 }

@@ -64,13 +64,17 @@ use tracing::{debug, warn};
 
 use crate::block::router::{rpc_endpoint, WorkerRouterView};
 use crate::cache::{page_cache_eligible, CacheManager, ExternalRangeReader};
+use crate::client::master::{get_status_p_options_full, GetStatusWireOpts};
 use crate::client::{WorkerClient, WorkerClientPool, WorkerManagerClient};
 use crate::config::GoosefsConfig;
 use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
-use crate::fs::options::{ufs_block_length, InStreamOptions};
+use crate::fs::options::{
+    get_read_type_from_xattr, ufs_block_length, InStreamOptions, OpenFileOptions,
+};
 use crate::fs::uri_status::URIStatus;
 use crate::io::reader::{GrpcBlockReader, ReadTuning};
+use crate::proto::grpc::Bits;
 use crate::proto::proto::dataserver::OpenUfsBlockOptions;
 
 /// Threshold in bytes above which a seek switches from the sequential
@@ -216,7 +220,10 @@ impl GoosefsFileInStream {
             .map_err(|e| Error::ConfigError { message: e })?;
 
         let master = MasterClient::connect(config).await?;
-        let mut file_info = master.get_status(path).await?;
+        let mut options = options;
+        let mut file_info = master
+            .get_status_with_p_options(path, open_get_status_options(config, &options))
+            .await?;
 
         // Discover workers before CheckBlocks enrichment (needs the router).
         let inquire_client = master.inquire_client().clone();
@@ -253,6 +260,7 @@ impl GoosefsFileInStream {
         .await;
 
         let status = URIStatus::from_proto(file_info);
+        apply_inherited_read_type(&mut options, &status);
 
         // Reject INCOMPLETE non-folder files
         if status.is_folder() {
@@ -318,8 +326,11 @@ impl GoosefsFileInStream {
             .validate()
             .map_err(|e| Error::ConfigError { message: e })?;
 
-        // Shared Master + metadata cache (status / NotFound / incomplete fall-through).
-        let mut file_info = ctx.get_file_info_cached(path).await?;
+        let mut options = options;
+        let master = ctx.acquire_master();
+        let mut file_info = master
+            .get_status_with_p_options(path, open_get_status_options(&config, &options))
+            .await?;
 
         // Reuse shared router — already populated and TTL-refreshed.
         // A1: clone the workers +
@@ -344,6 +355,7 @@ impl GoosefsFileInStream {
         .await;
 
         let status = URIStatus::from_proto(file_info);
+        apply_inherited_read_type(&mut options, &status);
 
         // Reject INCOMPLETE non-folder files
         if status.is_folder() {
@@ -1012,11 +1024,12 @@ impl GoosefsFileInStream {
         let locations = self.block_locations(block_id);
         let worker_info = self
             .router
-            .select_worker_for_read(
+            .select_worker_for_read_local_first(
                 block_id,
                 locations,
                 self.config.file_replication_number,
                 self.config.file_read_max_node_retry,
+                self.options.local_first,
             )
             .await?;
         let addr = worker_info
@@ -1068,11 +1081,12 @@ impl GoosefsFileInStream {
                 // location workers are skipped, then hash fallback).
                 let retry_info = self
                     .router
-                    .select_worker_for_read(
+                    .select_worker_for_read_local_first(
                         block_id,
                         self.block_locations(block_id),
                         self.config.file_replication_number,
                         self.config.file_read_max_node_retry,
+                        self.options.local_first,
                     )
                     .await?;
                 let retry_addr_info =
@@ -1107,11 +1121,12 @@ impl GoosefsFileInStream {
     ) -> Result<WorkerClient> {
         let worker_info = self
             .router
-            .select_worker_for_read(
+            .select_worker_for_read_local_first(
                 block_id,
                 self.block_locations(block_id),
                 self.config.file_replication_number,
                 self.config.file_read_max_node_retry,
+                self.options.local_first,
             )
             .await?;
         let addr = worker_info
@@ -1136,12 +1151,17 @@ impl GoosefsFileInStream {
 
     /// Build `OpenUfsBlockOptions` for block at `block_idx`.
     fn build_ufs_opts(&self, block_idx: usize) -> Option<OpenUfsBlockOptions> {
+        if self.options.no_ufs_fallback {
+            return None;
+        }
         let ufs_path = self.status.ufs_path.as_str();
         if ufs_path.is_empty() {
             return None;
         }
         let block_size = self.status.block_size_bytes;
         let offset_in_file = block_idx as i64 * block_size;
+        let no_cache = !self.status.cacheable
+            || self.options.read_type == crate::fs::options::ReadType::NoCache;
 
         Some(OpenUfsBlockOptions {
             ufs_path: Some(ufs_path.to_string()),
@@ -1155,7 +1175,7 @@ impl GoosefsFileInStream {
             )),
             max_ufs_read_concurrency: Some(self.options.max_ufs_read_concurrency),
             mount_id: Some(self.status.mount_id),
-            no_cache: Some(!self.status.cacheable),
+            no_cache: Some(no_cache),
             user: None,
             caller_type: None,
             file_length: Some(self.status.length),
@@ -1254,6 +1274,28 @@ impl GoosefsFileInStream {
                 self.block_in_stream_block_id = -1;
                 Ok(0)
             }
+        }
+    }
+}
+
+fn open_get_status_options(
+    config: &GoosefsConfig,
+    options: &OpenFileOptions,
+) -> crate::proto::grpc::file::GetStatusPOptions {
+    get_status_p_options_full(GetStatusWireOpts {
+        load_metadata_type: Some(config.file_metadata_load_type),
+        sync_interval_ms: Some(config.file_metadata_sync_interval),
+        access_mode: Some(Bits::Read as i32),
+        update_timestamps: Some(options.update_last_access_time),
+        resolve_link: Some(true),
+        check_block_replicas: None,
+    })
+}
+
+fn apply_inherited_read_type(options: &mut OpenFileOptions, status: &URIStatus) {
+    if options.inherit_read_type {
+        if let Some(rt) = get_read_type_from_xattr(&status.xattr) {
+            options.in_stream_options.read_type = rt;
         }
     }
 }
@@ -1522,5 +1564,85 @@ mod tests {
             stream.worker_pool.is_none(),
             "legacy mode should have no pool"
         );
+    }
+
+    /// Java `BaseFileSystem.openFile` forces GetStatus `accessMode=READ`,
+    /// `resolveLink=true`, and `updateTimestamps` from OpenFilePOptions.
+    #[test]
+    fn open_get_status_options_match_java_open_file() {
+        let config = GoosefsConfig::new("127.0.0.1:9200");
+        let opts = OpenFileOptions::default();
+        let p = open_get_status_options(&config, &opts);
+        assert_eq!(p.access_mode, Some(Bits::Read as i32));
+        assert_eq!(p.resolve_link, Some(true));
+        assert_eq!(p.update_timestamps, Some(true));
+
+        let skip_atime = OpenFileOptions {
+            update_last_access_time: false,
+            ..OpenFileOptions::default()
+        };
+        let p = open_get_status_options(&config, &skip_atime);
+        assert_eq!(p.update_timestamps, Some(false));
+    }
+
+    #[test]
+    fn inherit_read_type_from_xattr_unless_no_cache() {
+        use crate::fs::options::{ReadType, READ_TYPE_XATTR_KEY};
+
+        let mut status = make_status(13, 1 << 20);
+        status
+            .xattr
+            .insert(READ_TYPE_XATTR_KEY.to_string(), b"NO_CACHE".to_vec());
+
+        let mut inherit = OpenFileOptions::default();
+        apply_inherited_read_type(&mut inherit, &status);
+        assert_eq!(inherit.in_stream_options.read_type, ReadType::NoCache);
+
+        status
+            .xattr
+            .insert(READ_TYPE_XATTR_KEY.to_string(), b"CACHE".to_vec());
+        let mut no_cache = OpenFileOptions::no_cache();
+        apply_inherited_read_type(&mut no_cache, &status);
+        assert_eq!(
+            no_cache.in_stream_options.read_type,
+            ReadType::NoCache,
+            "no_cache() must not inherit parent innerReadType"
+        );
+    }
+
+    #[test]
+    fn no_ufs_fallback_omits_open_ufs_block_options() {
+        let status = URIStatus::from_proto(FileInfo {
+            length: Some(13),
+            block_size_bytes: Some(1 << 20),
+            block_ids: vec![1001],
+            completed: Some(true),
+            folder: Some(false),
+            ufs_path: Some("cosn://bucket/x.bin".to_string()),
+            mount_id: Some(7),
+            ..Default::default()
+        });
+        let mut stream = make_stream(status);
+        stream.options.no_ufs_fallback = true;
+        assert!(stream.build_ufs_opts(0).is_none());
+    }
+
+    #[test]
+    fn ufs_opts_no_cache_when_read_type_is_no_cache() {
+        let status = URIStatus::from_proto(FileInfo {
+            length: Some(13),
+            block_size_bytes: Some(1 << 20),
+            block_ids: vec![1001],
+            completed: Some(true),
+            folder: Some(false),
+            cacheable: Some(true),
+            ufs_path: Some("cosn://bucket/x.bin".to_string()),
+            mount_id: Some(7),
+            ..Default::default()
+        });
+        let mut stream = make_stream(status);
+        stream.options = InStreamOptions::no_cache();
+        let opts = stream.build_ufs_opts(0).expect("ufs path present");
+        assert_eq!(opts.no_cache, Some(true));
     }
 }

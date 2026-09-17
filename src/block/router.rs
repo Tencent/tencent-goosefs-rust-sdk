@@ -1465,6 +1465,39 @@ impl WorkerRouterView {
             })
     }
 
+    /// Like [`Self::select_worker_for_read`], then prefer a co-located worker
+    /// when `local_first` is set and that worker is already in the candidate
+    /// pool (Java `GooseFSBlockStore` `localFirst=true`).
+    pub async fn select_worker_for_read_local_first(
+        &self,
+        block_id: i64,
+        locations: &[BlockLocation],
+        replication: i32,
+        max_retry_node: i32,
+        local_first: bool,
+    ) -> Result<WorkerInfo> {
+        if !local_first {
+            return self
+                .select_worker_for_read(block_id, locations, replication, max_retry_node)
+                .await;
+        }
+        let count = read_worker_candidate_count(replication, max_retry_node);
+        let mut workers = self
+            .select_workers_for_read(block_id, locations, count)
+            .await?;
+        if let Some(local_id) = self.local_worker_id {
+            if let Some(idx) = workers.iter().position(|w| w.id == Some(local_id)) {
+                workers.swap(0, idx);
+            }
+        }
+        workers
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::NoWorkerAvailable {
+                message: format!("no suitable worker for block_id={}", block_id),
+            })
+    }
+
     /// Pick any eligible worker at random. Mirrors
     /// [`WorkerRouter::pick_any_worker`] step-for-step (same random
     /// source, same eligible/pool fallback logic).
@@ -3234,6 +3267,38 @@ mod tests {
             WorkerRouterView::default_failure_ttl(),
             DEFAULT_FAILURE_TTL,
             "public default TTL must equal the shared router's private DEFAULT_FAILURE_TTL"
+        );
+    }
+
+    /// Java `GooseFSBlockStore` `localFirst=true` promotes a co-located
+    /// worker already in the candidate pool to the front.
+    #[tokio::test]
+    async fn select_worker_for_read_local_first_promotes_local_worker() {
+        let mut view = WorkerRouterView::from_workers(
+            vec![make_worker(1, "w1", 9203), make_worker(2, "w2", 9203)],
+            Duration::from_secs(60),
+        );
+        view.local_worker_id = Some(2);
+        let locations = vec![make_location(1), make_location(2)];
+
+        let without = view
+            .select_worker_for_read_local_first(7, &locations, 2, 2, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            without.id,
+            Some(1),
+            "locations order wins when local_first=false"
+        );
+
+        let with = view
+            .select_worker_for_read_local_first(7, &locations, 2, 2, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            with.id,
+            Some(2),
+            "local worker must be swapped to the front"
         );
     }
 }
