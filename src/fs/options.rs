@@ -251,9 +251,8 @@ pub fn ufs_block_length(file_length: i64, block_size_bytes: i64, block_index: u6
 /// let opts = OpenFileOptions::default();
 ///
 /// // Explicitly disable caching for a scan
-/// let no_cache = OpenFileOptions {
-///     in_stream_options: goosefs_sdk::fs::options::InStreamOptions::no_cache(),
-/// };
+/// let no_cache = OpenFileOptions::no_cache();
+/// assert_eq!(no_cache.in_stream_options.read_type, ReadType::NoCache);
 /// ```
 #[derive(Debug, Clone)]
 pub struct OpenFileOptions {

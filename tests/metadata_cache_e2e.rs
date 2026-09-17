@@ -276,7 +276,7 @@ async fn mkdir_invalidates_parent_listing() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "Requires GooseFS master (metadata cache e2e)"]
-async fn open_reuses_get_status_cache() -> Result<()> {
+async fn open_always_rpcs_get_status() -> Result<()> {
     let fs = connect(true).await?;
     let root = unique_root();
     let path = format!("{root}/file.bin");
@@ -297,7 +297,13 @@ async fn open_reuses_get_status_cache() -> Result<()> {
         bytes.len()
     );
     assert_eq!(&bytes[..], b"open-cache");
-    assert_eq!(delta, 0, "open must reuse the cached get_status");
+    // Java `BaseFileSystem.openFile` always RPCs GetStatus with accessMode /
+    // resolveLink / updateTimestamps. The metadata cache is for get/list/exists,
+    // not open (MetadataCachingBaseFileSystem async atime is not implemented).
+    assert_eq!(
+        delta, 1,
+        "open must RPC GetStatus even after a cache-warm get_status"
+    );
 
     cleanup(&fs, &root).await;
     Ok(())
