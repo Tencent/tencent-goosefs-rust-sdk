@@ -103,6 +103,17 @@ pub fn get_read_type_from_xattr(
 // InStreamOptions
 // ---------------------------------------------------------------------------
 
+// TODO(semver): new fields on `InStreamOptions` (`no_ufs_fallback`,
+// `local_first`), `OpenFileOptions` (`update_last_access_time`,
+// `inherit_read_type`), `DeleteOptions` (`ttl`, `ttl_expect_mtime`), and
+// `GetStatusOptions` (`access_mode`, `update_timestamps`, `resolve_link`,
+// `check_block_replicas`) break downstream exhaustive struct literals,
+// including the 0.2.2 `OpenFileOptions { in_stream_options }` example.
+// `..Default::default()` still compiles. There is no way to add these public
+// fields and keep the old literals working; `#[non_exhaustive]` does not
+// restore them. Do not ship this in a 0.2.z release — release 0.3.0 and
+// document the break together with the new `FileSystem` methods.
+
 /// Options controlling how an open file stream reads data.
 ///
 /// Passed to [`crate::io::GoosefsFileInStream`] via

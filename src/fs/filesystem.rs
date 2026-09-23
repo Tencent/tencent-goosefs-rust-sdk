@@ -164,7 +164,9 @@ pub trait FileSystem: Send + Sync + 'static {
     // time, so they cannot ship in a 0.2.z release as-is. Before the next
     // release, either add backward-compatible defaults (`rename_with_options`
     // delegates to `rename`; `persist` and `set_attribute` return unsupported)
-    // or release 0.3.0 and document the break.
+    // or release 0.3.0 and document the break. The same release must cover the
+    // new fields on `InStreamOptions`, `OpenFileOptions`, `DeleteOptions`, and
+    // `GetStatusOptions` (see `src/fs/options.rs`).
 
     /// Rename with per-call [`crate::fs::options::RenameOptions`].
     async fn rename_with_options(
