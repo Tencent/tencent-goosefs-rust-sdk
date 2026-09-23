@@ -264,11 +264,15 @@ pub struct OpenFileOptions {
     /// Forwarded to the open-path `GetStatus` as `update_timestamps`.
     pub update_last_access_time: bool,
 
-    /// When `true` (default), `open_file` prefers the file inode's
-    /// `innerReadType` xattr over [`InStreamOptions::read_type`], matching
-    /// Java `openFile` when the caller did not set `ReadPType`.
+    /// When `true` (default) and the current read type is cacheable, `open_file`
+    /// prefers the file inode's `innerReadType` xattr over
+    /// [`InStreamOptions::read_type`], matching Java `openFile` when the caller
+    /// did not set `ReadPType`.
     ///
-    /// [`OpenFileOptions::no_cache`] sets this to `false`.
+    /// An explicit [`ReadType::NoCache`] is never overwritten, including a
+    /// struct update that only replaces `in_stream_options` and leaves this
+    /// flag at its default. [`OpenFileOptions::no_cache`] also sets this flag
+    /// to `false`.
     pub inherit_read_type: bool,
 }
 
@@ -459,6 +463,11 @@ impl DeleteOptions {
 /// Per-call options for [`crate::fs::FileSystem::get_status_with_options`].
 ///
 /// `None` fields fall back to [`crate::config::GoosefsConfig`].
+///
+/// `access_mode`, `update_timestamps`, `resolve_link`, and a positive
+/// `check_block_replicas` bypass the path-only metadata cache. Those flags
+/// change the RPC or its side effects, and a cached answer would ignore them
+/// or contaminate a later plain `get_status`.
 #[derive(Debug, Clone, Default)]
 pub struct GetStatusOptions {
     /// `None` = `GoosefsConfig::file_metadata_sync_interval`.
@@ -487,6 +496,18 @@ impl GetStatusOptions {
             sync_interval_ms: Some(0),
             ..Self::default()
         }
+    }
+
+    /// Whether this call must skip both metadata-cache lookup and insertion.
+    ///
+    /// `check_block_replicas: Some(0)` is not shaping: the wire flag is omitted
+    /// (`filter(|n| *n > 0)`), so the Master response matches a plain get.
+    /// The client-side replica probe still runs on the returned clone.
+    pub(crate) fn bypasses_metadata_cache(&self) -> bool {
+        self.access_mode.is_some()
+            || self.update_timestamps.is_some()
+            || self.resolve_link.is_some()
+            || self.check_block_replicas.is_some_and(|n| n > 0)
     }
 }
 
@@ -752,6 +773,38 @@ mod tests {
         assert!(opts.update_timestamps.is_none());
         assert!(opts.resolve_link.is_none());
         assert!(opts.check_block_replicas.is_none());
+        assert!(!opts.bypasses_metadata_cache());
+    }
+
+    #[test]
+    fn test_get_status_shaping_options_bypass_metadata_cache() {
+        assert!(!GetStatusOptions::default().bypasses_metadata_cache());
+        assert!(GetStatusOptions {
+            access_mode: Some(1),
+            ..GetStatusOptions::default()
+        }
+        .bypasses_metadata_cache());
+        assert!(GetStatusOptions {
+            update_timestamps: Some(false),
+            ..GetStatusOptions::default()
+        }
+        .bypasses_metadata_cache());
+        assert!(GetStatusOptions {
+            resolve_link: Some(true),
+            ..GetStatusOptions::default()
+        }
+        .bypasses_metadata_cache());
+        assert!(GetStatusOptions {
+            check_block_replicas: Some(1),
+            ..GetStatusOptions::default()
+        }
+        .bypasses_metadata_cache());
+        // Some(0) is not sent on the wire, so it does not shape the response.
+        assert!(!GetStatusOptions {
+            check_block_replicas: Some(0),
+            ..GetStatusOptions::default()
+        }
+        .bypasses_metadata_cache());
     }
 
     #[test]

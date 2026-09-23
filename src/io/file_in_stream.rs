@@ -70,7 +70,7 @@ use crate::config::GoosefsConfig;
 use crate::context::FileSystemContext;
 use crate::error::{Error, Result};
 use crate::fs::options::{
-    get_read_type_from_xattr, ufs_block_length, InStreamOptions, OpenFileOptions,
+    get_read_type_from_xattr, ufs_block_length, InStreamOptions, OpenFileOptions, ReadType,
 };
 use crate::fs::uri_status::URIStatus;
 use crate::io::reader::{GrpcBlockReader, ReadTuning};
@@ -1293,7 +1293,11 @@ fn open_get_status_options(
 }
 
 fn apply_inherited_read_type(options: &mut OpenFileOptions, status: &URIStatus) {
-    if options.inherit_read_type {
+    // `..OpenFileOptions::default()` leaves `inherit_read_type` set even when
+    // the caller replaced `in_stream_options` with `InStreamOptions::no_cache()`.
+    // That struct update used to be the public way to opt out of caching.
+    // Do not let an xattr turn an explicit no-cache read back into a cached one.
+    if options.inherit_read_type && options.in_stream_options.read_type != ReadType::NoCache {
         if let Some(rt) = get_read_type_from_xattr(&status.xattr) {
             options.in_stream_options.read_type = rt;
         }
@@ -1607,6 +1611,17 @@ mod tests {
             no_cache.in_stream_options.read_type,
             ReadType::NoCache,
             "no_cache() must not inherit parent innerReadType"
+        );
+
+        let mut struct_update = OpenFileOptions {
+            in_stream_options: InStreamOptions::no_cache(),
+            ..OpenFileOptions::default()
+        };
+        apply_inherited_read_type(&mut struct_update, &status);
+        assert_eq!(
+            struct_update.in_stream_options.read_type,
+            ReadType::NoCache,
+            "struct-update NoCache must not inherit innerReadType"
         );
     }
 

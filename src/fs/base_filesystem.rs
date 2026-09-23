@@ -267,7 +267,6 @@ impl FileSystem for BaseFileSystem {
             .load_metadata_type
             .unwrap_or(self.config.file_metadata_load_type);
         let master = self.master();
-        let cache = self.ctx.acquire_metadata_cache();
         let p_opts = get_status_p_options_full(GetStatusWireOpts {
             load_metadata_type: Some(load),
             sync_interval_ms: Some(sync),
@@ -276,11 +275,18 @@ impl FileSystem for BaseFileSystem {
             resolve_link: opts.resolve_link,
             check_block_replicas: opts.check_block_replicas.filter(|n| *n > 0),
         });
-        let mut fi =
+        // Shaping flags are not part of the path-only cache key. A hit would
+        // drop them, and inserting the response would let a resolved link or
+        // a replica-checked status answer a later plain get_status.
+        let mut fi = if opts.bypasses_metadata_cache() {
+            master.get_status_with_p_options(path, p_opts).await?
+        } else {
+            let cache = self.ctx.acquire_metadata_cache();
             crate::metadata_cache::get_status_through_cache(cache.as_deref(), path, sync, || {
                 master.get_status_with_p_options(path, p_opts.clone())
             })
-            .await?;
+            .await?
+        };
         // Mirror Java getStatus when checkBlockReplicas > 0: probe workers and
         // overwrite BlockInfo.locations (same as `fs stat --check_replicas`).
         // Enrichment mutates this owned clone — never write locations back
@@ -478,18 +484,28 @@ impl FileSystem for BaseFileSystem {
 
     async fn persist(&self, path: &str, options: PersistOptions) -> Result<()> {
         let wait = options.persistence_wait_time.unwrap_or(0);
-        self.master()
-            .schedule_async_persistence(path, Some(wait))
-            .await
-    }
-
-    async fn set_attribute(&self, path: &str, options: SetAttributeOptions) -> Result<()> {
         let master = self.master();
+        // Scheduling persistence flips persistence_state immediately. Drop the
+        // cached FileInfo so the next get_status does not report the old one.
         crate::metadata_cache::invalidate_on_success(
             self.ctx.acquire_metadata_cache().as_deref(),
             path,
-            master.set_attribute(path, options).await,
+            master.schedule_async_persistence(path, Some(wait)).await,
         )
+    }
+
+    async fn set_attribute(&self, path: &str, options: SetAttributeOptions) -> Result<()> {
+        let recursive = options.recursive;
+        let master = self.master();
+        let cache = self.ctx.acquire_metadata_cache();
+        let result = master.set_attribute(path, options).await;
+        if recursive {
+            // Master updates every descendant. Path+parent invalidation would
+            // leave their cached owner/group/mode in place.
+            crate::metadata_cache::invalidate_subtree_on_success(cache.as_deref(), path, result)
+        } else {
+            crate::metadata_cache::invalidate_on_success(cache.as_deref(), path, result)
+        }
     }
 }
 

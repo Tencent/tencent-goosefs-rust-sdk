@@ -49,7 +49,9 @@ use crate::types::{PyReadType, PyWriteType};
 #[pyclass(module = "goosefs._goosefs", name = "OpenFileOptions", from_py_object)]
 #[derive(Clone)]
 pub struct PyOpenFileOptions {
-    pub(crate) read_type: PyReadType,
+    /// `None` means the caller omitted `read_type` and the SDK should inherit
+    /// `innerReadType`. `Some` is an explicit choice and must not be overridden.
+    explicit_read_type: Option<PyReadType>,
 }
 
 #[pymethods]
@@ -58,17 +60,17 @@ impl PyOpenFileOptions {
     #[pyo3(signature = (*, read_type=None))]
     fn new(read_type: Option<PyReadType>) -> Self {
         Self {
-            read_type: read_type.unwrap_or(PyReadType::Cache),
+            explicit_read_type: read_type,
         }
     }
 
     #[getter]
     fn read_type(&self) -> PyReadType {
-        self.read_type
+        self.explicit_read_type.unwrap_or(PyReadType::Cache)
     }
 
     fn __repr__(&self) -> String {
-        format!("OpenFileOptions(read_type={:?})", self.read_type)
+        format!("OpenFileOptions(read_type={:?})", self.read_type())
     }
 }
 
@@ -81,9 +83,12 @@ impl PyOpenFileOptions {
     // Allowed because the first call site lands in P5 (`open_file`).
     #[allow(dead_code)]
     pub(crate) fn into_sdk(self) -> SdkOpenFileOptions {
-        let inherit = self.read_type == PyReadType::Cache;
+        // Java inherits `innerReadType` only when ReadPType was unset.
+        // Omitted and explicit `ReadType.Cache` must not collapse into one value.
+        let inherit = self.explicit_read_type.is_none();
+        let read_type = self.explicit_read_type.unwrap_or(PyReadType::Cache);
         let in_stream = SdkInStreamOptions {
-            read_type: self.read_type.into(),
+            read_type: read_type.into(),
             ..Default::default()
         };
         SdkOpenFileOptions {
@@ -281,12 +286,36 @@ mod tests {
     }
 
     #[test]
-    fn open_file_default_uses_cache() {
+    fn open_file_omitted_read_type_inherits_cache() {
         let py = PyOpenFileOptions::new(None);
+        assert_eq!(py.read_type(), PyReadType::Cache);
         let sdk = py.into_sdk();
         assert_eq!(
             sdk.in_stream_options.read_type,
             goosefs_sdk::fs::ReadType::Cache
         );
+        assert!(sdk.inherit_read_type);
+    }
+
+    #[test]
+    fn open_file_explicit_cache_does_not_inherit() {
+        let py = PyOpenFileOptions::new(Some(PyReadType::Cache));
+        let sdk = py.into_sdk();
+        assert_eq!(
+            sdk.in_stream_options.read_type,
+            goosefs_sdk::fs::ReadType::Cache
+        );
+        assert!(!sdk.inherit_read_type);
+    }
+
+    #[test]
+    fn open_file_explicit_no_cache_does_not_inherit() {
+        let py = PyOpenFileOptions::new(Some(PyReadType::NoCache));
+        let sdk = py.into_sdk();
+        assert_eq!(
+            sdk.in_stream_options.read_type,
+            goosefs_sdk::fs::ReadType::NoCache
+        );
+        assert!(!sdk.inherit_read_type);
     }
 }

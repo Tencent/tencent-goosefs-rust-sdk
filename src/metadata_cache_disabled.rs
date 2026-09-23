@@ -32,6 +32,8 @@ impl MetadataCache {
 
     pub fn invalidate_with_parent(&self, _path: &str) {}
 
+    pub fn invalidate_subtree_with_parent(&self, _path: &str) {}
+
     pub fn ttl(&self) -> Duration {
         Duration::ZERO
     }
@@ -79,6 +81,14 @@ pub fn should_skip_listing_cache(
 }
 
 pub fn invalidate_on_success<T>(
+    _cache: Option<&MetadataCache>,
+    _path: &str,
+    result: Result<T>,
+) -> Result<T> {
+    result
+}
+
+pub fn invalidate_subtree_on_success<T>(
     _cache: Option<&MetadataCache>,
     _path: &str,
     result: Result<T>,

@@ -234,6 +234,44 @@ impl MetadataCache {
         self.invalidate(path);
     }
 
+    /// Drop `path`, its parent, and every cached descendant.
+    ///
+    /// Recursive `setAttribute` rewrites owner/group/mode on the whole subtree.
+    /// A prefix match on the normalized path keeps a sibling such as `/data2`
+    /// when the updated directory is `/data`. Root clears every entry.
+    pub fn invalidate_subtree_with_parent(&self, path: &str) {
+        let root = normalize_path(path);
+        self.invalidate_with_parent(&root);
+        let prefix = if &*root == "/" {
+            None
+        } else {
+            Some(format!("{root}/"))
+        };
+        let mut inner = self.lock();
+        let keys: Vec<Arc<str>> = inner
+            .lru
+            .iter()
+            .map(|(key, _)| Arc::clone(key))
+            .filter(|key| match &prefix {
+                None => true,
+                Some(prefix) => key.starts_with(prefix.as_str()),
+            })
+            .collect();
+        let mut dropped = 0u64;
+        for key in keys {
+            if inner.lru.pop(&key).is_some() {
+                dropped += 1;
+            }
+        }
+        if dropped > 0 {
+            inner.invalidations += dropped;
+            metrics::counter(metrics::name::CLIENT_METADATA_CACHE_INVALIDATIONS)
+                .inc(dropped as i64);
+            debug!(path = %root, dropped, "MetadataCache: invalidated subtree");
+            self.sync_size_gauge(&inner);
+        }
+    }
+
     /// Clear every entry. Used by tests.
     pub fn clear(&self) {
         let mut inner = self.lock();
@@ -403,6 +441,22 @@ pub fn invalidate_on_success<T>(
     let value = result?;
     if let Some(cache) = cache {
         cache.invalidate_with_parent(path);
+    }
+    Ok(value)
+}
+
+/// Drop `path`, its parent, and every cached descendant after success.
+///
+/// On error the cache is left unchanged, same as [`invalidate_on_success`].
+#[inline]
+pub fn invalidate_subtree_on_success<T>(
+    cache: Option<&MetadataCache>,
+    path: &str,
+    result: Result<T>,
+) -> Result<T> {
+    let value = result?;
+    if let Some(cache) = cache {
+        cache.invalidate_subtree_with_parent(path);
     }
     Ok(value)
 }
@@ -618,6 +672,65 @@ mod tests {
             StatusLookup::Miss
         ));
         assert!(cache.get_listing("/data").is_none());
+    }
+
+    #[test]
+    fn invalidate_subtree_drops_descendants_and_keeps_siblings() {
+        let cache = enabled_cache();
+        cache.insert("/data", info_of_length(1));
+        cache.insert("/data/file", info_of_length(2));
+        cache.insert("/data/nested/file", info_of_length(3));
+        cache.insert_listing("/data", Arc::new(vec![info_of_length(2)]));
+        cache.insert_listing("/", Arc::new(vec![info_of_length(1)]));
+        cache.insert("/data2/file", info_of_length(4));
+        cache.insert("/other", info_of_length(5));
+
+        cache.invalidate_subtree_with_parent("/data");
+
+        assert!(matches!(cache.lookup_status("/data"), StatusLookup::Miss));
+        assert!(matches!(
+            cache.lookup_status("/data/file"),
+            StatusLookup::Miss
+        ));
+        assert!(matches!(
+            cache.lookup_status("/data/nested/file"),
+            StatusLookup::Miss
+        ));
+        assert!(cache.get_listing("/data").is_none());
+        assert!(cache.get_listing("/").is_none(), "parent listing must drop");
+        assert!(matches!(
+            cache.lookup_status("/data2/file"),
+            StatusLookup::Present(_)
+        ));
+        assert!(matches!(
+            cache.lookup_status("/other"),
+            StatusLookup::Present(_)
+        ));
+    }
+
+    #[test]
+    fn invalidate_subtree_of_root_clears_the_cache() {
+        let cache = enabled_cache();
+        cache.insert("/a", info_of_length(1));
+        cache.insert("/b/c", info_of_length(2));
+        cache.invalidate_subtree_with_parent("/");
+        assert!(matches!(cache.lookup_status("/a"), StatusLookup::Miss));
+        assert!(matches!(cache.lookup_status("/b/c"), StatusLookup::Miss));
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn subtree_invalidate_on_error_keeps_descendants() {
+        let cache = enabled_cache();
+        cache.insert("/data/file", info_of_length(1));
+        let err =
+            invalidate_subtree_on_success(Some(&cache), "/data", Err::<(), _>(permission_denied()))
+                .unwrap_err();
+        assert!(err.is_access_denied());
+        assert!(matches!(
+            cache.lookup_status("/data/file"),
+            StatusLookup::Present(_)
+        ));
     }
 
     #[test]
