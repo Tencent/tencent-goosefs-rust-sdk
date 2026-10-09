@@ -54,7 +54,8 @@ use crate::proto::grpc::file::{
     DeletePOptions, DeletePRequest, FileInfo, FileSystemMasterCommonPOptions, FsOpPId,
     GetStatusPOptions, GetStatusPRequest, ListStatusPOptions, ListStatusPRequest,
     LoadMetadataPType, RemoveBlocksPRequest, RenamePOptions, RenamePRequest,
-    ScheduleAsyncPersistencePOptions, ScheduleAsyncPersistencePRequest,
+    ScheduleAsyncPersistencePOptions, ScheduleAsyncPersistencePRequest, SetAttributePOptions,
+    SetAttributePRequest, WritePType,
 };
 use crate::proto::grpc::{Bits, PMode};
 use crate::proto::proto::shared::FileLocation;
@@ -110,6 +111,30 @@ pub fn default_file_mode() -> PMode {
         owner_bits: Bits::ReadWrite as i32, // rw-
         group_bits: Bits::Read as i32,      // r--
         other_bits: Bits::Read as i32,      // r--
+    }
+}
+
+/// Convert Unix permission bits (e.g. `0o644`) to proto `PMode`.
+///
+/// Each rwx triplet maps onto [`Bits`] (`NONE=1` … `ALL=8` = unix 0..=7 + 1).
+pub fn unix_mode_to_pmode(mode: u32) -> PMode {
+    fn rwx(bits: u32) -> i32 {
+        match bits & 7 {
+            0 => Bits::None as i32,
+            1 => Bits::Execute as i32,
+            2 => Bits::Write as i32,
+            3 => Bits::WriteExecute as i32,
+            4 => Bits::Read as i32,
+            5 => Bits::ReadExecute as i32,
+            6 => Bits::ReadWrite as i32,
+            7 => Bits::All as i32,
+            _ => Bits::None as i32,
+        }
+    }
+    PMode {
+        owner_bits: rwx(mode >> 6),
+        group_bits: rwx(mode >> 3),
+        other_bits: rwx(mode),
     }
 }
 
@@ -274,6 +299,20 @@ fn fill_write_common_options(
     }
 }
 
+/// Extra GetStatus flags beyond load-type / sync interval.
+///
+/// Used by the open path (Java `BaseFileSystem.openFile` sets `accessMode=READ`,
+/// `resolveLink=true`, `updateTimestamps` from `OpenFilePOptions`).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct GetStatusWireOpts {
+    pub load_metadata_type: Option<LoadMetadataPType>,
+    pub sync_interval_ms: Option<i64>,
+    pub access_mode: Option<i32>,
+    pub update_timestamps: Option<bool>,
+    pub resolve_link: Option<bool>,
+    pub check_block_replicas: Option<i32>,
+}
+
 /// Java `FileSystemOptions.getStatusDefaults` wire shape.
 ///
 /// Master `GetStatusContext.create` does **not** merge server defaults. An
@@ -285,9 +324,21 @@ pub(crate) fn get_status_p_options(
     load_metadata_type: Option<LoadMetadataPType>,
     sync_interval_ms: Option<i64>,
 ) -> GetStatusPOptions {
+    get_status_p_options_full(GetStatusWireOpts {
+        load_metadata_type,
+        sync_interval_ms,
+        ..Default::default()
+    })
+}
+
+pub(crate) fn get_status_p_options_full(opts: GetStatusWireOpts) -> GetStatusPOptions {
     GetStatusPOptions {
-        load_metadata_type: load_metadata_type.map(|t| t as i32),
-        common_options: sync_interval_ms.map(|ms| common_p_options(ms, None)),
+        load_metadata_type: opts.load_metadata_type.map(|t| t as i32),
+        common_options: opts.sync_interval_ms.map(|ms| common_p_options(ms, None)),
+        access_mode: opts.access_mode,
+        update_timestamps: opts.update_timestamps,
+        resolve_link: opts.resolve_link,
+        check_block_replicas: opts.check_block_replicas,
         ..Default::default()
     }
 }
@@ -304,10 +355,13 @@ pub(crate) fn get_status_p_options(
 pub(crate) fn list_status_p_options(
     load_metadata_type: Option<LoadMetadataPType>,
     sync_interval_ms: Option<i64>,
+    load_metadata_only: bool,
 ) -> ListStatusPOptions {
     ListStatusPOptions {
         load_metadata_type: load_metadata_type.map(|t| t as i32),
         common_options: sync_interval_ms.map(|ms| common_p_options(ms, None)),
+        // Java `listStatusDefaults` always sets this (default false).
+        load_metadata_only: Some(load_metadata_only),
         ..Default::default()
     }
 }
@@ -677,15 +731,18 @@ impl MasterClient {
         load_metadata_type: Option<LoadMetadataPType>,
         sync_interval_ms: Option<i64>,
     ) -> Result<FileInfo> {
-        let start = std::time::Instant::now();
-        // Allocate the owned path exactly once.
-        //
-        // The closure captures `path_owned: Option<String>` by `&mut`. On
-        // the first attempt we `take()` (move) into the request — zero
-        // additional allocation. On a retry attempt (rare) the `Option` is
-        // empty, so we re-allocate from `path` (`&str`) one more time. Since
-        // `with_retry` accepts `FnMut`, this pattern is sound.
         let options = get_status_p_options(load_metadata_type, sync_interval_ms);
+        self.get_status_with_p_options(path, options).await
+    }
+
+    /// `GetStatus` with a fully populated [`GetStatusPOptions`].
+    #[instrument(skip(self, options), fields(path = %path))]
+    pub async fn get_status_with_p_options(
+        &self,
+        path: &str,
+        options: GetStatusPOptions,
+    ) -> Result<FileInfo> {
+        let start = std::time::Instant::now();
         let mut path_owned: Option<String> = Some(path.to_string());
         let result = self
             .with_retry("get_status", |mut client| {
@@ -754,6 +811,7 @@ impl MasterClient {
             recursive,
             load_metadata_type,
             Some(self.config.file_metadata_sync_interval),
+            false,
         )
         .await
     }
@@ -773,9 +831,10 @@ impl MasterClient {
         recursive: bool,
         load_metadata_type: Option<LoadMetadataPType>,
         sync_interval_ms: Option<i64>,
+        load_metadata_only: bool,
     ) -> Result<Vec<FileInfo>> {
         let load = load_metadata_type.unwrap_or(self.config.file_metadata_load_type);
-        let options = list_status_p_options(Some(load), sync_interval_ms);
+        let options = list_status_p_options(Some(load), sync_interval_ms, load_metadata_only);
         if !recursive {
             return self.list_status_one_level(path, options).await;
         }
@@ -1041,7 +1100,8 @@ impl MasterClient {
                         unchecked: Some(opts.unchecked),
                         goosefs_only: Some(opts.goosefs_only),
                         common_options,
-                        ..Default::default()
+                        ttl: Some(opts.ttl),
+                        ttl_expect_mtime: Some(opts.ttl_expect_mtime),
                     }),
                 };
                 client.remove(req).await?;
@@ -1073,12 +1133,16 @@ impl MasterClient {
     /// Rename (move) a file or directory.
     #[instrument(skip(self), fields(src = %src, dst = %dst))]
     pub async fn rename(&self, src: &str, dst: &str) -> Result<()> {
+        self.rename_with_persist(src, dst, self.config.file_persist_on_rename)
+            .await
+    }
+
+    /// Rename with an explicit `RenamePOptions.persist` flag.
+    #[instrument(skip(self), fields(src = %src, dst = %dst, persist))]
+    pub async fn rename_with_persist(&self, src: &str, dst: &str, persist: bool) -> Result<()> {
         let src = src.to_string();
         let dst = dst.to_string();
-        let options = rename_p_options(
-            self.config.file_metadata_sync_interval,
-            self.config.file_persist_on_rename,
-        );
+        let options = rename_p_options(self.config.file_metadata_sync_interval, persist);
         let result = self
             .with_retry("rename", |mut client| {
                 let src = src.clone();
@@ -1111,6 +1175,10 @@ impl MasterClient {
         let common_options = Some(write_common_p_options(
             self.config.file_metadata_sync_interval,
         ));
+        let default_write_type = self
+            .config
+            .write_type
+            .unwrap_or(WritePType::MustCache as i32);
         let result = self
             .with_retry("create_directory", |mut client| {
                 let path = path.clone();
@@ -1121,6 +1189,8 @@ impl MasterClient {
                             recursive: Some(recursive),
                             allow_exists: Some(true),
                             mode: Some(default_dir_mode()),
+                            // Java `createDirectoryDefaults.setDefaultWriteType`.
+                            default_write_type: Some(default_write_type),
                             common_options,
                             ..Default::default()
                         }),
@@ -1160,6 +1230,48 @@ impl MasterClient {
                     }),
                 };
                 client.schedule_async_persistence(req).await?;
+                Ok(())
+            }
+        })
+        .await
+    }
+
+    /// Set inode attributes (Java `FileSystem.setAttribute`).
+    ///
+    /// Only fields set on `options` are sent, matching Java
+    /// `setAttributeClientDefaults` (sync interval only) merged with caller
+    /// fields.
+    #[instrument(skip(self, options), fields(path = %path))]
+    pub async fn set_attribute(
+        &self,
+        path: &str,
+        options: crate::fs::options::SetAttributeOptions,
+    ) -> Result<()> {
+        let path = path.to_string();
+        let common_options = Some(common_p_options(
+            self.config.file_metadata_sync_interval,
+            None,
+        ));
+        let proto = SetAttributePOptions {
+            persisted: options.persisted,
+            owner: options.owner,
+            group: options.group,
+            mode: options.mode.map(unix_mode_to_pmode),
+            recursive: Some(options.recursive),
+            common_options,
+            read_p_type: options.read_type.map(|t| t.to_proto()),
+            write_p_type: options.write_type.map(|t| t.as_i32()),
+            direct_children_load: options.direct_children_load,
+        };
+        self.with_retry("set_attribute", |mut client| {
+            let path = path.clone();
+            let proto = proto.clone();
+            async move {
+                let req = SetAttributePRequest {
+                    path: Some(path),
+                    options: Some(proto),
+                };
+                client.set_attribute(req).await?;
                 Ok(())
             }
         })
@@ -1853,6 +1965,56 @@ mod tests {
                 .and_then(|c| c.sync_interval_ms),
             Some(-1)
         );
+        assert!(opts.access_mode.is_none());
+        assert!(opts.resolve_link.is_none());
+        assert!(opts.update_timestamps.is_none());
+    }
+
+    #[test]
+    fn get_status_p_options_open_path_matches_java_open_file() {
+        use crate::proto::grpc::file::LoadMetadataPType;
+        use crate::proto::grpc::Bits;
+
+        let opts = super::get_status_p_options_full(super::GetStatusWireOpts {
+            load_metadata_type: Some(LoadMetadataPType::Once),
+            sync_interval_ms: Some(-1),
+            access_mode: Some(Bits::Read as i32),
+            update_timestamps: Some(true),
+            resolve_link: Some(true),
+            check_block_replicas: None,
+        });
+        assert_eq!(opts.access_mode, Some(Bits::Read as i32));
+        assert_eq!(opts.resolve_link, Some(true));
+        assert_eq!(opts.update_timestamps, Some(true));
+        assert!(opts.check_block_replicas.is_none());
+    }
+
+    #[test]
+    fn get_status_p_options_full_sends_check_block_replicas() {
+        let opts = super::get_status_p_options_full(super::GetStatusWireOpts {
+            check_block_replicas: Some(2),
+            ..Default::default()
+        });
+        assert_eq!(opts.check_block_replicas, Some(2));
+    }
+
+    #[test]
+    fn unix_mode_to_pmode_maps_644() {
+        use crate::proto::grpc::Bits;
+        let mode = super::unix_mode_to_pmode(0o644);
+        assert_eq!(mode.owner_bits, Bits::ReadWrite as i32);
+        assert_eq!(mode.group_bits, Bits::Read as i32);
+        assert_eq!(mode.other_bits, Bits::Read as i32);
+    }
+
+    #[test]
+    fn unix_mode_to_pmode_maps_755_like_default_dir_mode() {
+        use crate::proto::grpc::Bits;
+        let mode = super::unix_mode_to_pmode(0o755);
+        assert_eq!(mode, super::default_dir_mode());
+        assert_eq!(mode.owner_bits, Bits::All as i32);
+        assert_eq!(mode.group_bits, Bits::ReadExecute as i32);
+        assert_eq!(mode.other_bits, Bits::ReadExecute as i32);
     }
 
     #[test]
@@ -1891,7 +2053,7 @@ mod tests {
     fn list_status_p_options_matches_java_defaults() {
         use crate::proto::grpc::file::LoadMetadataPType;
 
-        let opts = super::list_status_p_options(Some(LoadMetadataPType::Once), Some(-1));
+        let opts = super::list_status_p_options(Some(LoadMetadataPType::Once), Some(-1), false);
         assert_eq!(
             opts.load_metadata_type,
             Some(LoadMetadataPType::Once as i32)
@@ -1902,14 +2064,24 @@ mod tests {
                 .and_then(|c| c.sync_interval_ms),
             Some(-1)
         );
+        assert_eq!(opts.load_metadata_only, Some(false));
     }
 
-    /// A non-recursive `list_status` used to send no `loadMetadataType` at
+    #[test]
+    fn list_status_p_options_sends_load_metadata_only_true() {
+        use crate::proto::grpc::file::LoadMetadataPType;
+        let opts = super::list_status_p_options(Some(LoadMetadataPType::Always), Some(0), true);
+        assert_eq!(opts.load_metadata_only, Some(true));
+        assert_eq!(
+            opts.load_metadata_type,
+            Some(LoadMetadataPType::Always as i32)
+        );
+    }
     /// all, which the Master reads as `NEVER` — OpenDAL `list` then missed
     /// UFS-only entries. Pin the resolved default instead.
     #[test]
     fn list_status_p_options_unset_is_never_on_the_wire() {
-        let opts = super::list_status_p_options(None, None);
+        let opts = super::list_status_p_options(None, None, false);
         assert_eq!(
             opts.load_metadata_type, None,
             "unset load_metadata_type is proto NEVER (0) on the Master"
@@ -1925,6 +2097,7 @@ mod tests {
         let opts = super::list_status_p_options(
             Some(cfg.file_metadata_load_type),
             Some(cfg.file_metadata_sync_interval),
+            false,
         );
         assert_eq!(
             opts.load_metadata_type,

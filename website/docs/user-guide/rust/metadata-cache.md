@@ -4,16 +4,16 @@ sidebar_position: 5
 
 # Metadata Cache
 
-Besides the [page cache](./page-cache) for file *data*, the SDK ships a **client-side metadata cache** aligned with the GooseFS Java client's `goosefs.user.metadata.cache.*` semantics. `get_status` / `exists` / `open_file` / non-recursive `list_status` share one process-local TTL-bounded LRU, so repeated metadata lookups of the same paths no longer hit the Master. Enable the `metadata-cache` crate feature, then turn the cache on at runtime (see below). It is **off by default**, matching Java.
+Besides the [page cache](./page-cache) for file *data*, the SDK ships a **client-side metadata cache** aligned with the GooseFS Java client's `goosefs.user.metadata.cache.*` semantics. `get_status` / `exists` / non-recursive `list_status` share one process-local TTL-bounded LRU, so repeated metadata lookups of the same paths no longer hit the Master. Enable the `metadata-cache` crate feature, then turn the cache on at runtime (see below). It is **off by default**, matching Java.
 
 It replaces the earlier `FileInfo` open cache (`goosefs.user.file.info.cache.*`), which has been removed.
 
 ## Behavior
 
-- **Off by default** — matches the Java client (`goosefs.user.metadata.cache.enabled=false`). Add `features = ["metadata-cache"]` in Cargo.toml, then set the switch to `true`. Every reader open resolves its `FileInfo` through this cache, so with it off a workload of many small ranged reads pays one Master `get_status` RPC per read. That RPC also hides the [page cache](./page-cache): a page-cache hit over io_uring costs tens of microseconds, so a per-open Master round-trip dwarfs it and the read waits on metadata rather than on disk. Without the crate feature, enabling the switch at runtime is a configuration error.
+- **Off by default** — matches the Java client (`goosefs.user.metadata.cache.enabled=false`). Add `features = ["metadata-cache"]` in Cargo.toml, then set the switch to `true`. With it off, `get_status` / `exists` / `list_status` pay a Master RPC every time. Without the crate feature, enabling the switch at runtime is a configuration error.
 - **Three entry kinds per path** — a `get_status` slot, a directory listing, and a negative (`NotFound`) marker. One LRU key may hold both a status slot and a listing.
 - **Write-time TTL** — entries expire `expiration` after insertion (Java Guava `expireAfterWrite`); status and listing under the same key share the insertion timestamp. Expired entries are dropped lazily on lookup.
-- **`open` reuses the cached status** — a prior `get_status` hit means `open_file` issues **zero** extra `getStatus` RPCs.
+- **`open_file` always RPCs GetStatus** — matches Java `BaseFileSystem.openFile` (`accessMode=READ`, `resolveLink`, `updateTimestamps`). A prior `get_status` cache hit does **not** skip that RPC. `GoosefsFileReader` one-shot reads still go through the status cache.
 - **Write paths self-invalidate** — `mkdir` / `delete` / `rename` invalidate the path **and its parent** after the RPC succeeds.
 - **Incomplete files never count as hits** — a cached `INCOMPLETE` file falls through to the Master.
 - **Process-local** — writes from *other* clients are not observed until the TTL elapses. Keep the TTL short (or leave the cache off) when out-of-band writers must be visible immediately.
@@ -23,7 +23,7 @@ It replaces the earlier `FileInfo` open cache (`goosefs.user.file.info.cache.*`)
 | Situation | Effect |
 | --- | --- |
 | `ListStatusOptions.recursive = true` | Listing never cached (client-side BFS each time). |
-| `load_metadata_type = ALWAYS` (`file_metadata_load_type`) | **Listing** cache skipped (no read/write). Does **not** skip `get_status` / `exists` / `open` client cache. Master still re-loads from UFS on those RPCs. |
+| `load_metadata_type = ALWAYS` (`file_metadata_load_type`) | **Listing** cache skipped (no read/write). Does **not** skip `get_status` / `exists` client cache. Master still re-loads from UFS on those RPCs. |
 | `ListStatusOptions.load_metadata_only = true` | Listing cache skipped (no read/write). Per-call only. |
 | `sync_interval_ms == 0` (`file_metadata_sync_interval`) | `get_status`: skip read, still write back. `list_status`: skip read **and** write. Per-call: `GetStatusOptions::always_sync()` or `ListStatusOptions.sync_interval_ms = Some(0)`. |
 | `metadata_cache_expiration <= 0` | Cache is not constructed at all, even when enabled. |

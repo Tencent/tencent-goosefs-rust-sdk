@@ -565,6 +565,7 @@ impl PyAsyncGoosefs {
             recursive,
             unchecked,
             goosefs_only,
+            ..Default::default()
         };
         future_into_py(py, async move {
             use futures::stream::{self, StreamExt};
@@ -697,6 +698,7 @@ impl PyAsyncGoosefs {
             recursive,
             unchecked,
             goosefs_only,
+            ..Default::default()
         };
         future_into_py(py, async move {
             h.fs.delete(&path, opts).await.map_err(map_err)?;
@@ -720,16 +722,90 @@ impl PyAsyncGoosefs {
         })
     }
 
-    /// `await fs.rename(src, dst)`.
+    /// `await fs.rename(src, dst, *, persist=None)`.
+    ///
+    /// ``persist=None`` uses ``Config.file_persist_on_rename``. Pass
+    /// ``True``/``False`` to override per call (Java ``RenamePOptions.persist``).
+    #[pyo3(signature = (src, dst, *, persist=None))]
     fn rename<'py>(
         &self,
         py: Python<'py>,
         src: String,
         dst: String,
+        persist: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let h = self.handle()?;
         future_into_py(py, async move {
-            h.fs.rename(&src, &dst).await.map_err(map_err)?;
+            match persist {
+                None => h.fs.rename(&src, &dst).await.map_err(map_err)?,
+                Some(p) => {
+                    h.fs.rename_with_options(
+                        &src,
+                        &dst,
+                        goosefs_sdk::fs::options::RenameOptions { persist: Some(p) },
+                    )
+                    .await
+                    .map_err(map_err)?
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// `await fs.persist(path, *, persistence_wait_time=0)`.
+    ///
+    /// Java ``FileSystem.persist`` — schedule async UFS persistence.
+    #[pyo3(signature = (path, *, persistence_wait_time=None))]
+    fn persist<'py>(
+        &self,
+        py: Python<'py>,
+        path: String,
+        persistence_wait_time: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let h = self.handle()?;
+        future_into_py(py, async move {
+            h.fs.persist(
+                &path,
+                goosefs_sdk::fs::options::PersistOptions {
+                    persistence_wait_time,
+                },
+            )
+            .await
+            .map_err(map_err)?;
+            Ok(())
+        })
+    }
+
+    /// `await fs.set_attribute(path, *, owner=None, group=None, mode=None, ...)`.
+    ///
+    /// Java ``FileSystem.setAttribute``. Unset fields are omitted on the wire.
+    #[pyo3(signature = (path, *, owner=None, group=None, mode=None, recursive=false, persisted=None, read_type=None, write_type=None, direct_children_load=None))]
+    fn set_attribute<'py>(
+        &self,
+        py: Python<'py>,
+        path: String,
+        owner: Option<String>,
+        group: Option<String>,
+        mode: Option<u32>,
+        recursive: bool,
+        persisted: Option<bool>,
+        read_type: Option<crate::types::PyReadType>,
+        write_type: Option<crate::types::PyWriteType>,
+        direct_children_load: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let h = self.handle()?;
+        let opts = goosefs_sdk::fs::options::SetAttributeOptions {
+            persisted,
+            owner,
+            group,
+            mode,
+            recursive,
+            read_type: read_type.map(Into::into),
+            write_type: write_type.map(Into::into),
+            direct_children_load,
+        };
+        future_into_py(py, async move {
+            h.fs.set_attribute(&path, opts).await.map_err(map_err)?;
             Ok(())
         })
     }

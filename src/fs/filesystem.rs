@@ -154,5 +154,35 @@ pub trait FileSystem: Send + Sync + 'static {
     // ── Rename ───────────────────────────────────────────────────────────────
 
     /// Rename / move a file or directory.
+    ///
+    /// `RenamePOptions.persist` follows [`crate::config::GoosefsConfig::file_persist_on_rename`].
     async fn rename(&self, src: &str, dst: &str) -> Result<()>;
+
+    // TODO(semver): `rename_with_options`, `persist`, and `set_attribute` are
+    // required methods on this exported, unsealed trait. Adding them without
+    // default bodies breaks every downstream `FileSystem` impl at compile
+    // time, so they cannot ship in a 0.2.z release as-is. Before the next
+    // release, either add backward-compatible defaults (`rename_with_options`
+    // delegates to `rename`; `persist` and `set_attribute` return unsupported)
+    // or release 0.3.0 and document the break. The same release must cover the
+    // new fields on `InStreamOptions`, `OpenFileOptions`, `DeleteOptions`, and
+    // `GetStatusOptions` (see `src/fs/options.rs`).
+
+    /// Rename with per-call [`crate::fs::options::RenameOptions`].
+    async fn rename_with_options(
+        &self,
+        src: &str,
+        dst: &str,
+        options: crate::fs::options::RenameOptions,
+    ) -> Result<()>;
+
+    /// Schedule asynchronous persistence (Java `FileSystem.persist`).
+    async fn persist(&self, path: &str, options: crate::fs::options::PersistOptions) -> Result<()>;
+
+    /// Set owner / group / mode / read-write policy (Java `FileSystem.setAttribute`).
+    async fn set_attribute(
+        &self,
+        path: &str,
+        options: crate::fs::options::SetAttributeOptions,
+    ) -> Result<()>;
 }
