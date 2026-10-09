@@ -174,7 +174,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Download wheels
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: goosefs-sdk-wheel-*
           path: bindings/python/dist
