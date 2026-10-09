@@ -55,6 +55,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyType;
 
 use goosefs_sdk::context::FileSystemContext;
+use goosefs_sdk::fs::options::CreateDirectoryOptions;
 use goosefs_sdk::fs::FileSystem;
 
 use crate::config::PyConfig;
@@ -350,21 +351,26 @@ impl PyGoosefs {
         })
     }
 
-    /// `fs.batch_create_dir(paths, *, recursive=False)`.
-    #[pyo3(signature = (paths, *, recursive=false))]
+    /// `fs.batch_create_dir(paths, *, recursive=False, allow_exists=False)`.
+    #[pyo3(signature = (paths, *, recursive=false, allow_exists=false))]
     fn batch_create_dir(
         &self,
         py: Python<'_>,
         paths: Vec<String>,
         recursive: bool,
+        allow_exists: bool,
     ) -> PyResult<()> {
         let h = self.handle()?;
+        let opts = CreateDirectoryOptions {
+            recursive,
+            allow_exists,
+        };
         Self::guarded_block_on(py, async move {
             use futures::stream::{self, StreamExt};
             let fs = h.fs.clone();
             stream::iter(paths.into_iter().map(move |p| {
                 let fs = fs.clone();
-                async move { fs.mkdir(&p, recursive).await.map_err(map_err) }
+                async move { fs.mkdir_with_options(&p, opts).await.map_err(map_err) }
             }))
             .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
             .collect::<Vec<_>>()
@@ -507,15 +513,25 @@ impl PyGoosefs {
 
     // ── Mutations ───────────────────────────────────────────────────────────
 
-    /// `fs.mkdir(path, recursive=False)`.
+    /// `fs.mkdir(path, recursive=False, allow_exists=False)`.
     ///
-    /// Idempotent: creating an already-existing directory is a no-op
-    /// (the underlying SDK hard-wires `allow_exists=true`).
-    #[pyo3(signature = (path, *, recursive=false))]
-    fn mkdir(&self, py: Python<'_>, path: String, recursive: bool) -> PyResult<()> {
+    /// Matches Java `mkdir`: creating an already-existing directory raises
+    /// `AlreadyExists`. Pass `allow_exists=True` for POSIX `mkdir -p`.
+    #[pyo3(signature = (path, *, recursive=false, allow_exists=false))]
+    fn mkdir(
+        &self,
+        py: Python<'_>,
+        path: String,
+        recursive: bool,
+        allow_exists: bool,
+    ) -> PyResult<()> {
         let h = self.handle()?;
+        let opts = CreateDirectoryOptions {
+            recursive,
+            allow_exists,
+        };
         Self::guarded_block_on(py, async move {
-            h.fs.mkdir(&path, recursive).await.map_err(map_err)
+            h.fs.mkdir_with_options(&path, opts).await.map_err(map_err)
         })
     }
 

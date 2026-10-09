@@ -705,6 +705,7 @@ class AsyncGoosefs:
         paths: list[str],
         *,
         recursive: bool = ...,
+        allow_exists: bool = ...,
     ) -> Awaitable[None]:
         """Concurrent ``mkdir`` for every path (single PyO3 crossing).
 
@@ -754,7 +755,9 @@ class AsyncGoosefs:
         """Lazy batch variant — returns one ``URIStatusList`` per directory,
         deferring ``URIStatus`` materialisation to on-demand access."""
         ...
-    def mkdir(self, path: str, *, recursive: bool = ...) -> Awaitable[None]: ...
+    def mkdir(
+        self, path: str, *, recursive: bool = ..., allow_exists: bool = ...
+    ) -> Awaitable[None]: ...
     def delete(
         self,
         path: str,
@@ -936,7 +939,9 @@ class Goosefs:
         Returns bytes-written per file. Concurrency is bounded
         internally (at most 64 RPCs in flight)."""
         ...
-    def batch_create_dir(self, paths: list[str], *, recursive: bool = ...) -> None:
+    def batch_create_dir(
+        self, paths: list[str], *, recursive: bool = ..., allow_exists: bool = ...
+    ) -> None:
         """Concurrent ``mkdir`` for every path (single GIL release).
 
         Concurrency is bounded internally (at most 64 RPCs in flight)."""
@@ -977,7 +982,7 @@ class Goosefs:
     ) -> list[URIStatusList]:
         """Lazy batch variant — see ``AsyncGoosefs.batch_list_status_grouped``."""
         ...
-    def mkdir(self, path: str, *, recursive: bool = ...) -> None: ...
+    def mkdir(self, path: str, *, recursive: bool = ..., allow_exists: bool = ...) -> None: ...
     def delete(
         self,
         path: str,

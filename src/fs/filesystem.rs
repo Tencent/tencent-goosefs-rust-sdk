@@ -35,7 +35,8 @@ use async_trait::async_trait;
 
 use crate::error::Result;
 use crate::fs::options::{
-    CreateFileOptions, DeleteOptions, GetStatusOptions, ListStatusOptions, OpenFileOptions,
+    CreateDirectoryOptions, CreateFileOptions, DeleteOptions, GetStatusOptions, ListStatusOptions,
+    OpenFileOptions,
 };
 use crate::fs::uri_status::URIStatus;
 use crate::io::GoosefsFileInStream;
@@ -141,8 +142,17 @@ pub trait FileSystem: Send + Sync + 'static {
 
     // ── Directory operations ─────────────────────────────────────────────────
 
-    /// Create a directory (and any missing parent directories).
+    /// Create a directory.
+    ///
+    /// Matches Java `createDirectoryDefaults`: `allowExists=false`, so an
+    /// existing directory returns [`crate::error::Error::AlreadyExists`].
+    /// `recursive` only creates missing parents; it does **not** make the
+    /// call idempotent. For POSIX `mkdir -p` use
+    /// [`Self::mkdir_with_options`] with [`CreateDirectoryOptions::mkdir_p`].
     async fn mkdir(&self, path: &str, recursive: bool) -> Result<()>;
+
+    /// Create a directory with explicit [`CreateDirectoryOptions`].
+    async fn mkdir_with_options(&self, path: &str, options: CreateDirectoryOptions) -> Result<()>;
 
     // ── Delete ───────────────────────────────────────────────────────────────
 

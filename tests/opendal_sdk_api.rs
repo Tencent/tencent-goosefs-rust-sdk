@@ -21,7 +21,7 @@
 //! |-------|---------|
 //! | Config | `from_properties_auto`, `with_auth_type_str`, `with_auth_username`, `validate`, field overlay (`master_addr` / `master_addrs` / `block_size` / `chunk_size` / `write_type` / `root`) |
 //! | Context | `FileSystemContext::connect`, `acquire_master`, `invalidate_file_info` |
-//! | Master | `create_directory(path, true)`, `get_status`, `list_status(path, false)`, `delete(path, false)`, `rename` |
+//! | Master | `create_directory_with_options` (`mkdir_p` / exclusive), `get_status`, `list_status(path, false)`, `delete(path, false)`, `rename` |
 //! | Writer | `GoosefsFileWriter::create_with_context`, `write`, `close`, `cancel`, `file_info().file_id` |
 //! | Reader | `open_with_context`, `open_range_with_context`, `read_next_block`, `read_file_with_context`, `read_range_with_context` |
 //! | Error / FileInfo | `NotFound`, `AlreadyExists`, `is_authentication_failed`, `folder` / `length` / `last_modification_time_ms` / `file_id` / `path` |
@@ -39,6 +39,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use goosefs_sdk::config::GoosefsConfig;
 use goosefs_sdk::context::FileSystemContext;
 use goosefs_sdk::error::{Error, Result};
+use goosefs_sdk::fs::options::CreateDirectoryOptions;
 use goosefs_sdk::io::{GoosefsFileReader, GoosefsFileWriter};
 use goosefs_sdk::proto::grpc::file::{CreateFilePOptions, FileInfo};
 
@@ -110,7 +111,9 @@ async fn connect() -> Result<Arc<FileSystemContext>> {
 }
 
 async fn mkdir_p(ctx: &Arc<FileSystemContext>, path: &str) -> Result<()> {
-    ctx.acquire_master().create_directory(path, true).await
+    ctx.acquire_master()
+        .create_directory_with_options(path, CreateDirectoryOptions::mkdir_p())
+        .await
 }
 
 /// OpenDAL `GoosefsCore::delete`: NotFound is success (idempotent).
@@ -237,6 +240,15 @@ async fn opendal_connect_mkdir_stat_list_delete() -> Result<()> {
     let root = unique("meta");
     mkdir_p(&ctx, &root).await?;
     mkdir_p(&ctx, &root).await?; // OpenDAL create_dir_existing: allow_exists
+
+    let exclusive = master
+        .create_directory(&root, true)
+        .await
+        .expect_err("Java mkdir of an existing directory must fail");
+    assert!(
+        matches!(exclusive, Error::AlreadyExists { .. }),
+        "create_directory(allow_exists=false) → AlreadyExists, got {exclusive:?}"
+    );
 
     let dir_info = master.get_status(&root).await?;
     assert_file_info_fields(&dir_info, true);

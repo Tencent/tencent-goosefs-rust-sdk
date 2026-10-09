@@ -43,6 +43,7 @@ use pyo3::types::PyType;
 use pyo3_async_runtimes::tokio::future_into_py;
 
 use goosefs_sdk::context::FileSystemContext;
+use goosefs_sdk::fs::options::CreateDirectoryOptions;
 use goosefs_sdk::fs::FileSystem;
 
 use crate::config::PyConfig;
@@ -475,26 +476,31 @@ impl PyAsyncGoosefs {
         })
     }
 
-    /// `await fs.batch_create_dir(paths, *, recursive=False)` → `None`.
+    /// `await fs.batch_create_dir(paths, *, recursive=False, allow_exists=False)` → `None`.
     ///
     /// Creates a directory at every path with bounded concurrency (at most
     /// `BATCH_CONCURRENCY_LIMIT` RPCs in flight).
     ///
     /// The whole batch fails on the first error.
-    #[pyo3(signature = (paths, *, recursive=false))]
+    #[pyo3(signature = (paths, *, recursive=false, allow_exists=false))]
     fn batch_create_dir<'py>(
         &self,
         py: Python<'py>,
         paths: Vec<String>,
         recursive: bool,
+        allow_exists: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let h = self.handle()?;
+        let opts = CreateDirectoryOptions {
+            recursive,
+            allow_exists,
+        };
         future_into_py(py, async move {
             use futures::stream::{self, StreamExt};
             let fs = h.fs.clone();
             stream::iter(paths.into_iter().map(move |p| {
                 let fs = fs.clone();
-                async move { fs.mkdir(&p, recursive).await.map_err(map_err) }
+                async move { fs.mkdir_with_options(&p, opts).await.map_err(map_err) }
             }))
             .buffered(crate::context::BATCH_CONCURRENCY_LIMIT)
             .collect::<Vec<_>>()
@@ -660,21 +666,28 @@ impl PyAsyncGoosefs {
 
     // ── Mutations ───────────────────────────────────────────────────────────
 
-    /// `await fs.mkdir(path, recursive=False)`.
+    /// `await fs.mkdir(path, recursive=False, allow_exists=False)`.
     ///
-    /// Goosefs's `mkdir` is *not* idempotent: creating an existing directory
-    /// raises `AlreadyExists`. Pass `recursive=True` to silently create any
-    /// missing intermediate components.
-    #[pyo3(signature = (path, *, recursive=false))]
+    /// Matches Java `mkdir`: creating an existing directory raises
+    /// `AlreadyExists`. Pass `recursive=True` to create missing parents.
+    /// Pass `allow_exists=True` for POSIX `mkdir -p`.
+    #[pyo3(signature = (path, *, recursive=false, allow_exists=false))]
     fn mkdir<'py>(
         &self,
         py: Python<'py>,
         path: String,
         recursive: bool,
+        allow_exists: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let h = self.handle()?;
+        let opts = CreateDirectoryOptions {
+            recursive,
+            allow_exists,
+        };
         future_into_py(py, async move {
-            h.fs.mkdir(&path, recursive).await.map_err(map_err)?;
+            h.fs.mkdir_with_options(&path, opts)
+                .await
+                .map_err(map_err)?;
             Ok(())
         })
     }

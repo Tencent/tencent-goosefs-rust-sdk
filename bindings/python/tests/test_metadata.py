@@ -24,6 +24,7 @@ from __future__ import annotations
 import pytest
 from goosefs import AsyncGoosefs, DeleteOptions, URIStatus
 from goosefs.exceptions import (
+    AlreadyExists,
     DirectoryNotEmpty,
     GoosefsError,
     NotFound,
@@ -138,18 +139,17 @@ async def test_mkdir_recursive_creates_intermediate_dirs(
     assert await async_fs.exists(deep)
 
 
-async def test_mkdir_existing_is_idempotent(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
-    """``mkdir`` is idempotent (POSIX ``mkdir -p`` semantics).
+async def test_mkdir_existing_raises_already_exists(async_fs: AsyncGoosefs, tmp_dir: str) -> None:
+    """``mkdir`` matches Java CLI: an existing directory raises ``AlreadyExists``.
 
-    The underlying ``CreateDirectoryPOptions.allow_exists=true`` is hard-wired
-    by ``goosefs-sdk::client::master::create_directory``, so calling ``mkdir``
-    on an already-existing directory must succeed without raising.
-    Users who need an exclusive-create check should call ``exists()`` first.
+    ``recursive=True`` only creates missing parents; it does not make the
+    call idempotent. Pass ``allow_exists=True`` for POSIX ``mkdir -p``.
     """
     new_dir = f"{tmp_dir}/sub"
     await async_fs.mkdir(new_dir)
-    # Second call must be a no-op (no AlreadyExists).
-    await async_fs.mkdir(new_dir)
+    with pytest.raises(AlreadyExists):
+        await async_fs.mkdir(new_dir)
+    await async_fs.mkdir(new_dir, allow_exists=True)
     assert await async_fs.exists(new_dir)
 
 

@@ -8,6 +8,12 @@ This document records all notable changes to the `goosefs` Python binding. The f
 
 ## [Unreleased]
 
+### Changed
+
+- **`mkdir` / `batch_create_dir` now match Java `mkdir`.** Creating an existing
+  directory raises `AlreadyExists`. Pass `allow_exists=True` for POSIX
+  `mkdir -p`. `recursive=True` still only creates missing parents.
+
 ## [0.2.2] — 2026-09-16
 
 ### Changed
